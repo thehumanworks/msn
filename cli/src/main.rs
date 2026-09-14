@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 fn main() {
     let cli = Cli::parse();
-    let stop = if matches!(cli.command, Command::Follow { .. }) {
+    let stop = if matches!(cli.command, Command::Follow { .. } | Command::Wait { .. }) {
         install_stop_signals()
     } else {
         Arc::new(AtomicBool::new(false))

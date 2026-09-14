@@ -27,6 +27,39 @@ impl CursorBinding {
     }
 }
 
+/// `$XDG_STATE_HOME` (or `$HOME/.local/state`) `/msn/<origin-hash>/<tenant>/<channel>.json`.
+pub fn default_cursor_path(url: &Url, tenant: &str, channel: &str) -> Result<PathBuf, CliError> {
+    let state_home = match std::env::var_os("XDG_STATE_HOME") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(".local").join("state"),
+            _ => {
+                return Err(CliError::usage(
+                    "Set HOME (or XDG_STATE_HOME), or pass --cursor-file or --after.",
+                ));
+            }
+        },
+    };
+    Ok(state_home
+        .join("msn")
+        .join(origin_hash(url))
+        .join(tenant)
+        .join(format!("{channel}.json")))
+}
+
+/// FNV-1a 64 of the ASCII origin, as 16 lowercase hex digits. Stable across releases,
+/// unlike `std::hash::DefaultHasher`, so persisted paths keep resolving.
+pub fn origin_hash(url: &Url) -> String {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in origin_key(url).bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 pub fn load_cursor(path: &Path, expected: &CursorBinding) -> Result<u64, CliError> {
     let raw = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -158,6 +191,114 @@ mod tests {
         );
         assert_eq!(load_cursor(&path, &binding).unwrap(), 12);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn given_known_origin_when_origin_hash_then_fnv1a_vector() {
+        // FNV-1a 64 test vector for the exact bytes "https://a.test": computed once from
+        // the reference algorithm; also pins that hashing covers the whole origin.
+        let url = Url::parse("https://a.test").unwrap();
+        let hash = origin_hash(&url);
+        assert_eq!(hash.len(), 16);
+        assert!(
+            hash.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        assert_eq!(hash, fnv1a_reference(b"https://a.test"));
+        assert_ne!(
+            hash,
+            origin_hash(&Url::parse("https://a.test:8443").unwrap())
+        );
+    }
+
+    fn fnv1a_reference(bytes: &[u8]) -> String {
+        let mut h: u64 = 14_695_981_039_346_656_037;
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1_099_511_628_211);
+        }
+        format!("{h:016x}")
+    }
+
+    #[test]
+    fn given_xdg_state_home_when_default_path_then_under_it() {
+        let url = Url::parse("https://msn.test").unwrap();
+        let path = with_env(
+            &[("XDG_STATE_HOME", Some("/xdg")), ("HOME", Some("/home/u"))],
+            || default_cursor_path(&url, "team", "general").unwrap(),
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(format!("/xdg/msn/{}/team/general.json", origin_hash(&url)))
+        );
+    }
+
+    #[test]
+    fn given_home_only_when_default_path_then_local_state() {
+        let url = Url::parse("https://msn.test").unwrap();
+        let path = with_env(
+            &[("XDG_STATE_HOME", None), ("HOME", Some("/home/u"))],
+            || default_cursor_path(&url, "team", "general").unwrap(),
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(format!(
+                "/home/u/.local/state/msn/{}/team/general.json",
+                origin_hash(&url)
+            ))
+        );
+        let other_channel = with_env(
+            &[("XDG_STATE_HOME", None), ("HOME", Some("/home/u"))],
+            || default_cursor_path(&url, "team", "other").unwrap(),
+        );
+        let other_tenant = with_env(
+            &[("XDG_STATE_HOME", None), ("HOME", Some("/home/u"))],
+            || default_cursor_path(&url, "other", "general").unwrap(),
+        );
+        assert_ne!(path, other_channel);
+        assert_ne!(path, other_tenant);
+        assert_ne!(other_channel, other_tenant);
+    }
+
+    #[test]
+    fn given_no_home_when_default_path_then_usage() {
+        let url = Url::parse("https://msn.test").unwrap();
+        let err = with_env(&[("XDG_STATE_HOME", None), ("HOME", None)], || {
+            default_cursor_path(&url, "team", "general").unwrap_err()
+        });
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("--cursor-file"));
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved: Vec<(String, Option<std::ffi::OsString>)> = vars
+            .iter()
+            .map(|(name, _)| ((*name).to_string(), std::env::var_os(name)))
+            .collect();
+        for (name, value) in vars {
+            // SAFETY: serialized by ENV_LOCK; unit tests in this module are the only writers.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        let result = f();
+        for (name, value) in saved {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(&name, v),
+                    None => std::env::remove_var(&name),
+                }
+            }
+        }
+        result
     }
 
     #[test]

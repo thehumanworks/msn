@@ -15,6 +15,19 @@
 //! I12 help_lists_commands_and_env
 //!
 //! Edge: empty_response_body, non_json_error_body, send_text_from_stdin, follow_sigint_exits_0
+//!
+//! Addendum (2026-09-14): `msn wait` / `msn follow --once`
+//! W1 wait_prints_first_non_empty_page_then_exits
+//! W2 wait_default_cursor_file_resumes_after_previous_run
+//! W3 wait_after_flag_skips_cursor_file
+//! W4 wait_after_and_cursor_file_conflict
+//! W5 wait_rejects_foreign_cursor
+//! W6 wait_retries_503_then_exits
+//! W7 wait_fatal_404
+//! W8 wait_sigint_exits_0_and_keeps_cursor
+//! W9 wait_query_params / wait_rejects_zero_wait_or_limit
+//! F1 follow_once_exits_after_first_non_empty_page
+//! H1 help_lists_commands_and_env (adds `wait`)
 
 mod common;
 
@@ -558,6 +571,7 @@ fn help_lists_commands_and_env() {
         "create",
         "send",
         "poll",
+        "wait",
         "follow",
         "provision",
         "rotate",
@@ -825,6 +839,328 @@ fn flags_override_env_token() {
             .map(String::as_str),
         Some("Bearer from-flag")
     );
+}
+
+const EMPTY_PAGE: &str = r#"{"messages":[],"nextCursor":0,"hasMore":false}"#;
+const PAGE_7_8: &str = r#"{"messages":[{"id":7},{"id":8}],"nextCursor":8,"hasMore":false}"#;
+
+fn wait_args<'a>(url: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = tenant_args(url).to_vec();
+    args.extend(["wait", "general"]);
+    args.extend_from_slice(extra);
+    args
+}
+
+fn assert_mode_0600(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", path.display());
+    }
+}
+
+fn read_cursor(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn wait_prints_first_non_empty_page_then_exits() {
+    // Given an empty long-poll timeout followed by a page with new rows
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, EMPTY_PAGE),
+        Scripted::json(200, PAGE_7_8),
+    ]);
+    let url = server.url();
+    let file = tmp_file("msn-wait-cursor");
+    // When wait runs with an explicit cursor file
+    let out = output_of(&wait_args(
+        &url,
+        &["--cursor-file", file.to_str().unwrap(), "--wait", "1"],
+    ));
+    // Then it keeps polling through the empty page, prints the page verbatim and exits 0
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(stdout_str(&out).trim(), PAGE_7_8);
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 2, "{rec:?}");
+    assert_eq!(
+        rec[0].path,
+        "/api/tenants/team/channels/general/messages?after=0&wait=1&limit=100"
+    );
+    assert_eq!(rec[1].path, rec[0].path);
+    let saved = read_cursor(&file);
+    assert_eq!(saved["server"], url);
+    assert_eq!(saved["tenant"], "team");
+    assert_eq!(saved["channel"], "general");
+    assert_eq!(saved["after"], 8);
+    assert_mode_0600(&file);
+    let _ = fs::remove_file(&file);
+}
+
+#[test]
+fn wait_default_cursor_file_resumes_after_previous_run() {
+    // Given a fresh HOME and two consecutive pages on the same server
+    let first = r#"{"messages":[{"id":3}],"nextCursor":3,"hasMore":false}"#;
+    let second = r#"{"messages":[{"id":4}],"nextCursor":"4","hasMore":false}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, first),
+        Scripted::json(200, second),
+    ]);
+    let url = server.url();
+    let home = tmp_file("msn-wait-home");
+    fs::create_dir_all(&home).unwrap();
+    let run = || {
+        bin()
+            .env("HOME", &home)
+            .args(wait_args(&url, &["--wait", "1"]))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    // When wait runs twice with no cursor flags
+    let out1 = run();
+    assert_eq!(
+        out1.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out1.stdout).trim(), first);
+    // Then the cursor lives at ~/.local/state/msn/<origin-hash>/<tenant>/<channel>.json, mode 0600
+    let msn_dir = home.join(".local").join("state").join("msn");
+    let origins: Vec<_> = fs::read_dir(&msn_dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(origins.len(), 1, "{origins:?}");
+    let hash = origins[0].file_name().to_string_lossy().into_owned();
+    assert_eq!(hash.len(), 16, "{hash}");
+    assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{hash}");
+    let file = origins[0].path().join("team").join("general.json");
+    let saved = read_cursor(&file);
+    assert_eq!(saved["server"], url);
+    assert_eq!(saved["tenant"], "team");
+    assert_eq!(saved["channel"], "general");
+    assert_eq!(saved["after"], 3);
+    assert_mode_0600(&file);
+    // And the second run only asks for rows strictly after the first run's nextCursor
+    let out2 = run();
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out2.stdout).trim(), second);
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 2);
+    assert!(rec[0].path.contains("after=0&"), "{}", rec[0].path);
+    assert!(rec[1].path.contains("after=3&"), "{}", rec[1].path);
+    assert_eq!(read_cursor(&file)["after"], 4);
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn wait_after_flag_skips_cursor_file() {
+    // Given --after and a HOME with no state
+    let page = r#"{"messages":[{"id":6}],"nextCursor":6,"hasMore":false}"#;
+    let server = MockServer::spawn(vec![Scripted::json(200, page)]);
+    let url = server.url();
+    let home = tmp_file("msn-wait-home-after");
+    fs::create_dir_all(&home).unwrap();
+    // When
+    let out = bin()
+        .env("HOME", &home)
+        .args(wait_args(&url, &["--after", "5", "--wait", "1"]))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    // Then the explicit cursor is used and nothing is persisted
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), page);
+    assert!(server.recorded()[0].path.contains("after=5&"));
+    assert!(!home.join(".local").exists(), "state dir was created");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn wait_after_and_cursor_file_conflict() {
+    let server = MockServer::spawn(vec![Scripted::json(200, PAGE_7_8)]);
+    let url = server.url();
+    let file = tmp_file("msn-wait-both");
+    let out = output_of(&wait_args(
+        &url,
+        &["--after", "1", "--cursor-file", file.to_str().unwrap()],
+    ));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr_str(&out).contains("either"));
+    assert!(server.recorded().is_empty());
+    assert!(!file.exists());
+}
+
+#[test]
+fn wait_rejects_foreign_cursor() {
+    let server = MockServer::spawn(vec![Scripted::json(200, PAGE_7_8)]);
+    let url = server.url();
+    for foreign in [
+        r#"{"server":"https://other.test","tenant":"team","channel":"general","after":9}"#,
+        r#"{"server":"URL","tenant":"other","channel":"general","after":9}"#,
+        r#"{"server":"URL","tenant":"team","channel":"other","after":9}"#,
+    ] {
+        let file = tmp_file("msn-wait-foreign");
+        fs::write(&file, foreign.replace("URL", &url)).unwrap();
+        let out = output_of(&wait_args(&url, &["--cursor-file", file.to_str().unwrap()]));
+        assert_eq!(out.status.code(), Some(2), "{foreign}");
+        assert!(stderr_str(&out).contains("different"));
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            foreign.replace("URL", &url)
+        );
+        let _ = fs::remove_file(&file);
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn wait_retries_503_then_exits() {
+    // Given a transient 503 and then a page
+    let server = MockServer::spawn(vec![
+        Scripted::json(503, r#"{"error":{"code":"x","message":"busy"}}"#),
+        Scripted::json(200, PAGE_7_8),
+    ]);
+    let url = server.url();
+    // When
+    let out = output_of(&wait_args(&url, &["--after", "0", "--wait", "1"]));
+    // Then wait backs off, reconnects from the same cursor and still exits 0 with the page
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(stdout_str(&out).trim(), PAGE_7_8);
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 2);
+    assert!(rec[1].path.contains("after=0&"));
+    let gap = rec[1].at.duration_since(rec[0].at);
+    assert!(gap >= Duration::from_millis(900), "backoff was {gap:?}");
+    assert!(stderr_str(&out).contains("reconnecting from cursor 0"));
+}
+
+#[test]
+fn wait_fatal_404() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        404,
+        r#"{"error":{"code":"channel_not_found","message":"Channel not found."}}"#,
+    )]);
+    let url = server.url();
+    let file = tmp_file("msn-wait-404");
+    let out = output_of(&wait_args(
+        &url,
+        &["--cursor-file", file.to_str().unwrap(), "--wait", "1"],
+    ));
+    assert_eq!(out.status.code(), Some(4));
+    assert!(stdout_str(&out).is_empty());
+    assert!(stderr_str(&out).contains("Channel not found"));
+    assert_eq!(server.recorded().len(), 1);
+    assert!(!file.exists(), "cursor written on a fatal error");
+}
+
+#[test]
+fn wait_sigint_exits_0_and_keeps_cursor() {
+    // Given a saved cursor at 3 and a server that holds the long poll open
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, PAGE_7_8).delayed(Duration::from_secs(20)),
+    ]);
+    let url = server.url();
+    let file = tmp_file("msn-wait-sigint");
+    let before = format!(r#"{{"server":"{url}","tenant":"team","channel":"general","after":3}}"#);
+    fs::write(&file, &before).unwrap();
+    let child = bin()
+        .args(wait_args(
+            &url,
+            &["--cursor-file", file.to_str().unwrap(), "--wait", "1"],
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while server.recorded().is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(15));
+    }
+    // When interrupted mid-request
+    interrupt(child.id());
+    let out = child.wait_with_output().unwrap();
+    // Then it exits 0, printed nothing, and the cursor is untouched (no advance past undelivered ids)
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    assert!(server.recorded()[0].path.contains("after=3&"));
+    let _ = fs::remove_file(&file);
+}
+
+#[test]
+fn wait_query_params() {
+    let server = MockServer::spawn(vec![Scripted::json(200, PAGE_7_8)]);
+    let url = server.url();
+    let out = output_of(&wait_args(
+        &url,
+        &["--after", "5", "--wait", "3", "--limit", "10"],
+    ));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(
+        server.recorded()[0].path,
+        "/api/tenants/team/channels/general/messages?after=5&wait=3&limit=10"
+    );
+}
+
+#[test]
+fn wait_rejects_zero_wait_or_limit() {
+    let server = MockServer::spawn(vec![Scripted::json(200, PAGE_7_8)]);
+    let url = server.url();
+    for extra in [["--wait", "0"], ["--limit", "0"], ["--wait", "26"]] {
+        let out = output_of(&wait_args(&url, &extra));
+        assert_eq!(out.status.code(), Some(2), "{extra:?} {}", stderr_str(&out));
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn follow_once_exits_after_first_non_empty_page() {
+    // Given an empty page and then two rows
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, EMPTY_PAGE),
+        Scripted::json(200, PAGE_7_8),
+    ]);
+    let url = server.url();
+    let file = tmp_file("msn-follow-once");
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "follow",
+        "general",
+        "--cursor-file",
+        file.to_str().unwrap(),
+        "--wait",
+        "1",
+        "--once",
+    ]);
+    // When
+    let out = output_of(&args);
+    // Then follow prints one JSON line per message, persists the cursor and exits 0 on its own
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let lines: Vec<serde_json::Value> = stdout_str(&out)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["id"], 7);
+    assert_eq!(lines[1]["id"], 8);
+    assert_eq!(server.recorded().len(), 2);
+    assert_eq!(read_cursor(&file)["after"], 8);
+    assert_mode_0600(&file);
+    let _ = fs::remove_file(&file);
 }
 
 fn regex_uuid(value: &str) -> bool {
