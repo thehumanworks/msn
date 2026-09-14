@@ -3,6 +3,7 @@ import {
   admin,
   bearer,
   body,
+  correlationId,
   digest,
   equalHash,
   failure,
@@ -10,6 +11,7 @@ import {
   integer,
   json,
   newToken,
+  replyTarget,
   slug,
   text,
 } from "./http";
@@ -21,13 +23,49 @@ export type Message = {
   username: string;
   text: string;
   createdAt: string;
+  /** Opaque correlation fields; absent from JSON when unset. The server never matches on them. */
+  replyTo?: number;
+  correlationId?: string;
 };
-type MessageRow = { id: number; channel: string; username: string; text: string; createdAt: string };
+/** Optional correlation input on send; `undefined` means "not supplied". */
+export type Correlation = { replyTo?: number; correlationId?: string };
+type MessageRow = {
+  id: number;
+  channel: string;
+  username: string;
+  text: string;
+  createdAt: string;
+  replyTo: number | null;
+  correlationId: string | null;
+};
+const MESSAGE_COLUMNS = "id, channel, username, text, createdAt, replyTo, correlationId";
 type Waiter = { channel: string; wake: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
+const SCHEMA_VERSION = 2;
+
+/** Old clients must keep seeing today's shape: unset correlation fields are omitted, not null. */
+function toMessage(row: MessageRow, tenant: string): Message {
+  const { replyTo, correlationId, ...rest } = row;
+  return {
+    ...rest,
+    tenant,
+    ...(replyTo === null ? {} : { replyTo }),
+    ...(correlationId === null ? {} : { correlationId }),
+  };
+}
+
+/**
+ * Idempotency digest input. Sends without correlation fields hash exactly as before this
+ * feature, so retries of messages stored under schema version 1 still replay instead of 409.
+ */
+export function payload(username: string, text: string, correlation: Correlation): string {
+  const { replyTo, correlationId } = correlation;
+  if (replyTo === undefined && correlationId === undefined) return JSON.stringify([username, text]);
+  return JSON.stringify([username, text, replyTo ?? null, correlationId ?? null]);
+}
 
 /** One object per tenant. Channel indexes and message writes share one transaction boundary. */
 export class MsnDurableObject extends DurableObject<Env> {
@@ -44,14 +82,27 @@ export class MsnDurableObject extends DurableObject<Env> {
           id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL REFERENCES channels(name),
           username TEXT NOT NULL, text TEXT NOT NULL, createdAt TEXT NOT NULL,
           key TEXT, digest TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL,
+          replyTo INTEGER, correlationId TEXT,
           UNIQUE(channel, key)
         );
         CREATE INDEX IF NOT EXISTS channel_messages ON messages(channel, deleted, id);
         CREATE TABLE IF NOT EXISTS usage (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), messages INTEGER NOT NULL, bytes INTEGER NOT NULL);
         INSERT OR IGNORE INTO usage VALUES (1, 0, 0);
         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO schema_version VALUES (1);
       `);
+      // schema_version lists every applied version; the highest row is the current schema.
+      // A fresh database already has the current CREATE TABLE shape and only needs the marker.
+      const version = ctx.storage.sql
+        .exec<{ version: number | null }>("SELECT MAX(version) AS version FROM schema_version")
+        .one().version;
+      if (version === null) {
+        ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", SCHEMA_VERSION);
+      } else if (version < 2) {
+        // v1 → v2: opaque correlation fields (issue #4). Existing rows stay unset (NULL).
+        ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN replyTo INTEGER");
+        ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN correlationId TEXT");
+        ctx.storage.sql.exec("INSERT INTO schema_version VALUES (2)");
+      }
     });
   }
 
@@ -92,13 +143,13 @@ export class MsnDurableObject extends DurableObject<Env> {
   private page(tenant: string, channel: string, after: number, limit: number) {
     const rows = this.ctx.storage.sql
       .exec<MessageRow>(
-        "SELECT id, channel, username, text, createdAt FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?",
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
         channel,
         after,
         limit + 1,
       )
       .toArray();
-    const messages: Message[] = rows.slice(0, limit).map((row) => ({ ...row, tenant }));
+    const messages: Message[] = rows.slice(0, limit).map((row) => toMessage(row, tenant));
     return { messages, nextCursor: messages.at(-1)?.id ?? after, hasMore: rows.length > limit };
   }
 
@@ -165,6 +216,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     channel: string,
     username: string,
     content: string,
+    correlation: Correlation,
     key: string | null,
     hash: string,
   ): Response {
@@ -172,7 +224,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (key) {
         const old = this.ctx.storage.sql
           .exec<MessageRow & { digest: string; deleted: number }>(
-            "SELECT id, channel, username, text, createdAt, digest, deleted FROM messages WHERE channel = ? AND key = ?",
+            `SELECT ${MESSAGE_COLUMNS}, digest, deleted FROM messages WHERE channel = ? AND key = ?`,
             channel,
             key,
           )
@@ -191,8 +243,22 @@ export class MsnDurableObject extends DurableObject<Env> {
               "The original message was deleted; retries cannot resurrect it.",
             );
           const { digest: _digest, deleted: _deleted, ...message } = old;
-          return { message: { ...message, tenant }, replayed: true };
+          return { message: toMessage(message, tenant), replayed: true };
         }
+      }
+      // replyTo is only interpretable within one channel's log; a tombstoned id still counts as
+      // "existed here", so a reply racing an admin deletion is not rejected.
+      if (
+        correlation.replyTo !== undefined &&
+        !this.ctx.storage.sql
+          .exec("SELECT id FROM messages WHERE channel = ? AND id = ?", channel, correlation.replyTo)
+          .toArray().length
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_reply_to",
+          "replyTo must be the id of an existing message in this channel.",
+        );
       }
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
@@ -208,7 +274,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          "INSERT INTO messages(channel, username, text, createdAt, key, digest, bytes) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, channel, username, text, createdAt",
+          `INSERT INTO messages(channel, username, text, createdAt, key, digest, bytes, replyTo, correlationId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -216,13 +282,15 @@ export class MsnDurableObject extends DurableObject<Env> {
           key,
           hash,
           bytes,
+          correlation.replyTo ?? null,
+          correlation.correlationId ?? null,
         )
         .one();
       this.ctx.storage.sql.exec(
         "UPDATE usage SET messages = messages + 1, bytes = bytes + ? WHERE singleton = 1",
         bytes,
       );
-      return { message: { ...message, tenant }, replayed: false };
+      return { message: toMessage(message, tenant), replayed: false };
     });
     // transactionSync succeeded; output gates delay network replies until durable commit.
     if (!result.replayed) for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
@@ -290,7 +358,10 @@ export class MsnDurableObject extends DurableObject<Env> {
             : null;
         const username = input ? text(input.username, "username", 128) : "";
         const content = input ? text(input.text, "text", 16384) : "";
-        const payloadHash = input ? await digest(JSON.stringify([username, content])) : "";
+        const correlation: Correlation = input
+          ? { replyTo: replyTarget(input.replyTo), correlationId: correlationId(input.correlationId) }
+          : {};
+        const payloadHash = input ? await digest(payload(username, content, correlation)) : "";
         this.authorize(hash);
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
@@ -325,7 +396,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                   "invalid_key",
                   "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
                 );
-              return this.send(tenant, channel, username, content, key, payloadHash);
+              return this.send(tenant, channel, username, content, correlation, key, payloadHash);
             }
             if (request.method === "GET") {
               this.requireChannel(channel);

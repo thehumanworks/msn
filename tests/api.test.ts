@@ -36,11 +36,12 @@ async function send(
   channel = "general",
   key?: string,
   username = "human / agent",
+  extra: Record<string, unknown> = {},
 ) {
   return call(`${t.path}/channels/${channel}/messages`, t.token, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
-    body: JSON.stringify({ username, text: content }),
+    body: JSON.stringify({ username, text: content, ...extra }),
   });
 }
 async function page(t: Tenant, query = "", channel = "general"): Promise<Page> {
@@ -346,6 +347,171 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
       state.storage.sql.exec("SELECT messages, bytes FROM usage").one(),
     );
     expect(after).toEqual({ messages: 1, bytes: 0 });
+  });
+
+  // Verification contract for issue #4 (opaque correlation fields; fan-out semantics unchanged):
+  // I1 send without replyTo/correlationId yields exactly today's JSON keys -> "omits correlation fields"
+  // I2 fields round-trip through send, poll and long-poll follow -> "carries replyTo and correlationId"
+  // I3 replyTo to a missing or other-channel id is 400 and stores nothing -> "rejects replyTo"
+  // I4 same key + same payload including correlation replays 200 -> "carries replyTo and correlationId"
+  // I5 same key + different replyTo/correlationId is 409 -> "includes correlation fields in the digest"
+  // I6 key stored before v2 still replays with the same payload -> "includes correlation fields in the digest"
+  // I7 v1 databases gain the columns on restart -> "migrates a version 1 schema"
+  it("omits correlation fields from JSON when a send does not supply them", async () => {
+    const t = await tenant();
+    const created = await send(t, "plain", "general", "plain");
+    expect(created.status).toBe(201);
+    const { message } = await created.json<{ message: Message }>();
+    expect(Object.keys(message).sort()).toEqual(["channel", "createdAt", "id", "tenant", "text", "username"]);
+    // Explicit nulls mean "unset", so JSON clients that always serialize every field stay compatible.
+    const nulls = await send(t, "nulls", "general", undefined, "human / agent", {
+      replyTo: null,
+      correlationId: null,
+    });
+    expect(nulls.status).toBe(201);
+    const listed = (await page(t)).messages;
+    expect(listed.map((m) => Object.keys(m).sort())).toEqual([
+      ["channel", "createdAt", "id", "tenant", "text", "username"],
+      ["channel", "createdAt", "id", "tenant", "text", "username"],
+    ]);
+    const replay = await send(t, "plain", "general", "plain");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ message, replayed: true });
+  });
+
+  it("carries replyTo and correlationId through send, poll, long-poll wakeups and idempotent replay", async () => {
+    const t = await tenant();
+    const request = await send(t, "ping", "general", "req-1", "requester", { correlationId: "task-7" });
+    expect(request.status).toBe(201);
+    const { message: ping } = await request.json<{ message: Message }>();
+    expect(ping).toMatchObject({ correlationId: "task-7" });
+    expect(ping.replyTo).toBeUndefined();
+    const waiting = page(t, `?after=${ping.id}&wait=3`);
+    await expect.poll(() => pending(t)).toBe(1);
+    const reply = await send(t, "pong", "general", "res-1", "responder", {
+      replyTo: ping.id,
+      correlationId: "task-7",
+    });
+    expect(reply.status).toBe(201);
+    const { message: pong } = await reply.json<{ message: Message }>();
+    expect(pong).toMatchObject({ replyTo: ping.id, correlationId: "task-7", text: "pong" });
+    // Every reader receives the same copy, correlation fields included; reads never consume.
+    expect((await waiting).messages).toEqual([pong]);
+    expect((await page(t)).messages).toEqual([ping, pong]);
+    expect((await page(t)).messages).toEqual([ping, pong]);
+    const replay = await send(t, "pong", "general", "res-1", "responder", {
+      replyTo: ping.id,
+      correlationId: "task-7",
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ message: pong, replayed: true });
+    await abortAllDurableObjects();
+    expect((await page(t)).messages).toEqual([ping, pong]);
+  });
+
+  it("rejects replyTo that names a missing, other-channel or malformed id without storing anything", async () => {
+    const t = await tenant();
+    const elsewhere = await (await send(t, "elsewhere", "other")).json<{ message: Message }>();
+    await send(t, "root");
+    for (const replyTo of [elsewhere.message.id, 999999, 0, -1, 1.5, "1", true]) {
+      const response = await send(t, "orphan", "general", "orphan", "human / agent", { replyTo });
+      expect(response.status, String(replyTo)).toBe(400);
+      expect((await response.json<{ error: { code: string } }>()).error.code).toBe("invalid_reply_to");
+    }
+    expect((await send(t, "orphan", "general", "orphan", "human / agent", { replyTo: 1 })).status).toBe(400);
+    expect((await page(t)).messages.map((m) => m.text)).toEqual(["root"]);
+    // A rejected reply reserves nothing: the same key then stores a valid message.
+    const root = (await page(t)).messages[0];
+    expect((await send(t, "child", "general", "orphan", "human / agent", { replyTo: root.id })).status).toBe(
+      201,
+    );
+    // A reply cannot be the first message of a channel; nothing exists there to answer.
+    expect((await send(t, "first", "fresh", undefined, "human / agent", { replyTo: root.id })).status).toBe(
+      400,
+    );
+    expect(await (await call(`${t.path}/channels`, t.token)).json()).toMatchObject({
+      channels: [{ name: "general" }, { name: "other" }],
+    });
+    for (const correlationId of ["", " ", "x".repeat(129), 7, {}]) {
+      const response = await send(t, "bad", "general", undefined, "human / agent", { correlationId });
+      expect(response.status, JSON.stringify(correlationId)).toBe(400);
+    }
+    expect(
+      (await send(t, "ok", "general", undefined, "human / agent", { correlationId: "🙂".repeat(32) })).status,
+    ).toBe(201);
+  });
+
+  it("includes correlation fields in the idempotency digest and keeps pre-v2 keys replayable", async () => {
+    const t = await tenant();
+    const root = (await (await send(t, "root")).json<{ message: Message }>()).message;
+    expect((await send(t, "same", "general", "key", "human / agent", { replyTo: root.id })).status).toBe(201);
+    expect((await send(t, "same", "general", "key")).status).toBe(409);
+    expect((await send(t, "same", "general", "key", "human / agent", { replyTo: root.id + 1 })).status).toBe(
+      409,
+    );
+    expect(
+      (await send(t, "same", "general", "key", "human / agent", { replyTo: root.id, correlationId: "c" }))
+        .status,
+    ).toBe(409);
+    expect((await send(t, "same", "general", "key", "human / agent", { replyTo: root.id })).status).toBe(200);
+    expect((await send(t, "same", "general", "cid", "human / agent", { correlationId: "c" })).status).toBe(
+      201,
+    );
+    expect((await send(t, "same", "general", "cid", "human / agent", { correlationId: "d" })).status).toBe(
+      409,
+    );
+    expect((await send(t, "same", "general", "cid")).status).toBe(409);
+    // A row stored before schema v2 hashed only [username, text]; the same retry must still replay.
+    const legacy = await runInDurableObject(t.stub, async (_, state) => {
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(JSON.stringify(["human / agent", "legacy"])),
+      );
+      const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+      state.storage.sql.exec(
+        "INSERT INTO messages(channel, username, text, createdAt, key, digest, bytes) VALUES ('general', 'human / agent', 'legacy', '2026-01-01T00:00:00.000Z', 'legacy', ?, 6)",
+        hex,
+      );
+      return state.storage.sql.exec<{ id: number }>("SELECT id FROM messages WHERE key = 'legacy'").one().id;
+    });
+    const replay = await send(t, "legacy", "general", "legacy");
+    expect(replay.status).toBe(200);
+    expect((await replay.json<{ message: Message }>()).message).toMatchObject({ id: legacy, text: "legacy" });
+    expect(
+      (await send(t, "legacy", "general", "legacy", "human / agent", { correlationId: "c" })).status,
+    ).toBe(409);
+  });
+
+  it("migrates a version 1 schema to version 2 on restart without touching existing rows", async () => {
+    const t = await tenant();
+    await send(t, "before", "general", "old");
+    const before = (await page(t)).messages[0];
+    await runInDurableObject(t.stub, (_, state) => {
+      state.storage.transactionSync(() => {
+        state.storage.sql.exec("ALTER TABLE messages DROP COLUMN replyTo");
+        state.storage.sql.exec("ALTER TABLE messages DROP COLUMN correlationId");
+        // A real v1 database carries exactly the version-1 marker (see docs/design.md).
+        state.storage.sql.exec("DELETE FROM schema_version");
+        state.storage.sql.exec("INSERT INTO schema_version VALUES (1)");
+      });
+    });
+    await abortAllDurableObjects();
+    expect((await page(t)).messages).toEqual([before]);
+    // A forced abort invalidates the old stub; a fresh one addresses the restarted object.
+    const fresh = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name]));
+    const versions = await runInDurableObject(fresh, (_, state) =>
+      state.storage.sql
+        .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
+        .toArray(),
+    );
+    expect(versions).toEqual([{ version: 1 }, { version: 2 }]);
+    const reply = await send(t, "after", "general", undefined, "human / agent", {
+      replyTo: before.id,
+      correlationId: "migrated",
+    });
+    expect(reply.status).toBe(201);
+    expect((await page(t)).messages[1]).toMatchObject({ replyTo: before.id, correlationId: "migrated" });
+    expect((await send(t, "before", "general", "old")).status).toBe(200);
   });
 
   it("validates identifiers, methods, pagination, JSON, body sizes and idempotency keys", async () => {

@@ -125,6 +125,18 @@ pub fn require_username(value: Option<&str>) -> Result<String, CliError> {
     }
 }
 
+pub const MAX_CORRELATION_BYTES: usize = 128;
+
+/// Mirrors the Worker's rule: non-blank, at most 128 UTF-8 bytes. Fail before any network call.
+pub fn require_correlation_id(value: &str) -> Result<String, CliError> {
+    if value.trim().is_empty() || value.len() > MAX_CORRELATION_BYTES {
+        return Err(CliError::usage(
+            "--correlation-id must be non-blank text of at most 128 UTF-8 bytes.",
+        ));
+    }
+    Ok(value.to_string())
+}
+
 pub fn require_text(value: &str) -> Result<String, CliError> {
     if value.trim().is_empty() {
         return Err(CliError::usage("Set MSN_USERNAME and pass --text."));
@@ -193,6 +205,31 @@ mod tests {
         );
         assert_eq!(require_username(Some("   ")).unwrap_err().exit_code(), 2);
         assert_eq!(require_text("   ").unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn given_blank_or_long_correlation_id_then_usage() {
+        assert_eq!(require_correlation_id("").unwrap_err().exit_code(), 2);
+        assert_eq!(require_correlation_id("  ").unwrap_err().exit_code(), 2);
+        assert_eq!(
+            require_correlation_id(&"x".repeat(129))
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert_eq!(
+            require_correlation_id(&"x".repeat(128)).unwrap(),
+            "x".repeat(128)
+        );
+        // 33 four-byte characters is 132 bytes; 32 is exactly 128.
+        assert_eq!(
+            require_correlation_id(&"🙂".repeat(33))
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert!(require_correlation_id(&"🙂".repeat(32)).is_ok());
+        assert_eq!(require_correlation_id("task-7").unwrap(), "task-7");
     }
 
     #[test]

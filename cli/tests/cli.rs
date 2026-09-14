@@ -13,6 +13,8 @@
 //! I10 status_401_exits_3 / status_404_exits_4 / network_refusal_exits_6 / delete_204
 //! I11 invalid_slug_exits_2
 //! I12 help_lists_commands_and_env
+//! I13 send_omits_correlation_fields_by_default / send_forwards_reply_to_and_correlation_id
+//!     / send_rejects_invalid_reply_to_or_correlation_id_before_network (issue #4)
 //!
 //! Edge: empty_response_body, non_json_error_body, send_text_from_stdin, follow_sigint_exits_0
 
@@ -240,6 +242,137 @@ fn send_uses_explicit_key() {
         Some("same-key")
     );
     assert!(stderr_str(&out).contains("Idempotency-Key: same-key"));
+}
+
+#[test]
+fn send_omits_correlation_fields_by_default() {
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":1}}"#)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "u", "send", "general", "--text", "plain"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    let keys: Vec<&str> = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["text", "username"]);
+}
+
+#[test]
+fn send_forwards_reply_to_and_correlation_id() {
+    let body = r#"{"message":{"id":43,"replyTo":42,"correlationId":"task-7"},"replayed":false}"#;
+    let server = MockServer::spawn(vec![Scripted::json(201, body)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "responder",
+        "send",
+        "general",
+        "--text",
+        "pong",
+        "--reply-to",
+        "42",
+        "--correlation-id",
+        "task-7",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "username": "responder",
+            "text": "pong",
+            "replyTo": 42,
+            "correlationId": "task-7"
+        })
+    );
+    assert!(stdout_str(&out).contains("\"replyTo\":42"));
+    // Only the supplied field is sent; the other stays absent rather than null.
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":2}}"#)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "u",
+        "send",
+        "general",
+        "--text",
+        "x",
+        "--correlation-id",
+        "only",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({ "username": "u", "text": "x", "correlationId": "only" })
+    );
+}
+
+#[test]
+fn send_rejects_invalid_reply_to_or_correlation_id_before_network() {
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    for extra in [
+        ["--reply-to", "-1"],
+        ["--reply-to", "1.5"],
+        ["--reply-to", "07"],
+        ["--reply-to", "9007199254740992"],
+        ["--correlation-id", " "],
+    ] {
+        let mut args = tenant_args(&url).to_vec();
+        args.extend(["--username", "u", "send", "general", "--text", "x"]);
+        args.extend(extra);
+        let out = output_of(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{extra:?}: {}",
+            stderr_str(&out)
+        );
+    }
+    let long = "x".repeat(129);
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "u",
+        "send",
+        "general",
+        "--text",
+        "x",
+        "--correlation-id",
+        &long,
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+    assert!(server.recorded().is_empty());
+    // The Worker's same-channel check surfaces as a plain 400, exit 1, with its message.
+    let server = MockServer::spawn(vec![Scripted::json(
+        400,
+        r#"{"error":{"code":"invalid_reply_to","message":"replyTo must be the id of an existing message in this channel."}}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "u",
+        "send",
+        "general",
+        "--text",
+        "x",
+        "--reply-to",
+        "999",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_str(&out).contains("existing message in this channel"));
 }
 
 #[test]
@@ -568,6 +701,8 @@ fn help_lists_commands_and_env() {
         "MSN_ADMIN_TOKEN",
         "MSN_USERNAME",
         "EXAMPLES",
+        "--reply-to",
+        "--correlation-id",
     ] {
         assert!(text.contains(needle), "help missing {needle}\n{text}");
     }

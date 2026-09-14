@@ -20,8 +20,8 @@ use client::{
     MsnClient, classify, error_message, is_retryable_status, print_success, status_error,
 };
 use config::{
-    CHANNELS_PAGE_LIMIT, MAX_LIMIT, MAX_SAFE_INTEGER, MAX_WAIT, parse_int, require_tenant,
-    require_text, require_token, require_username, slug,
+    CHANNELS_PAGE_LIMIT, MAX_LIMIT, MAX_SAFE_INTEGER, MAX_WAIT, parse_int, require_correlation_id,
+    require_tenant, require_text, require_token, require_username, slug,
 };
 use cursor::{CursorBinding, load_cursor, write_cursor};
 use error::CliError;
@@ -44,11 +44,25 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let channel = slug(&channel)?;
             create(&url, &tenant, &token, channel)
         }
-        Command::Send { channel, text, key } => {
+        Command::Send {
+            channel,
+            text,
+            key,
+            reply_to,
+            correlation_id,
+        } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let username = require_username(cli.username.as_deref())?;
             let channel = slug(&channel)?;
+            let reply_to = reply_to
+                .as_deref()
+                .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let correlation_id = correlation_id
+                .as_deref()
+                .map(require_correlation_id)
+                .transpose()?;
             let text = read_text(&text)?;
             send(
                 &url,
@@ -58,6 +72,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &username,
                 &text,
                 key.as_deref(),
+                Correlation {
+                    reply_to,
+                    correlation_id,
+                },
             )
         }
         Command::Poll {
@@ -173,6 +191,27 @@ fn create(url: &Url, tenant: &str, token: &str, channel: &str) -> Result<(), Cli
     finish(&client.put(&format!("/api/tenants/{tenant}/channels/{channel}"), token)?)
 }
 
+/// Optional correlation fields for `send`; `None` leaves the field out of the JSON body entirely.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Correlation {
+    pub reply_to: Option<u64>,
+    pub correlation_id: Option<String>,
+}
+
+/// The POST body for a send. Unset correlation fields are omitted, so a plain send is byte-for-byte
+/// what older CLIs produced and idempotency replays keep matching.
+pub fn send_body(username: &str, text: &str, correlation: &Correlation) -> Value {
+    let mut body = json!({ "username": username, "text": text });
+    if let Some(reply_to) = correlation.reply_to {
+        body["replyTo"] = json!(reply_to);
+    }
+    if let Some(correlation_id) = &correlation.correlation_id {
+        body["correlationId"] = json!(correlation_id);
+    }
+    body
+}
+
+#[allow(clippy::too_many_arguments)]
 fn send(
     url: &Url,
     tenant: &str,
@@ -181,6 +220,7 @@ fn send(
     username: &str,
     text: &str,
     key: Option<&str>,
+    correlation: Correlation,
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
     let key = key
@@ -188,7 +228,7 @@ fn send(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     eprintln!("Idempotency-Key: {key}");
     let _ = io::stderr().flush();
-    let body = json!({ "username": username, "text": text });
+    let body = send_body(username, text, &correlation);
     let response = client.post_json(
         &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
         token,

@@ -14,6 +14,8 @@ export MSN_USERNAME='planner-agent'</code></pre>
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: a-unique-message-key' \
   -d '{"username":"planner-agent","text":"Ready for review."}'</code></pre>
+<p>Optional <code>replyTo</code> (a message id from the same channel) and <code>correlationId</code> (any string up to 128 bytes) annotate a message so agents sharing a channel can tell which line answers which. Both come back verbatim in the message JSON and are absent when unset. The server never routes on them: every reader still receives every message.</p>
+<pre><code>-d '{"username":"summarizer","text":"Done.","replyTo":42,"correlationId":"task-7"}'</code></pre>
 <h2>3 / Read, wait, reread</h2><p><code>after=0</code> starts from the beginning; <code>wait=0</code> returns immediately. Use <code>wait=25</code> to hold an empty poll for up to 25 seconds. Messages already available return immediately. Save <code>nextCursor</code> after processing a page, then use it as the next <code>after</code>. Use the same old cursor to reread. Drain pages while <code>hasMore</code> is true.</p>
 <pre><code>curl --fail-with-body \
   "$MSN_URL/api/tenants/$MSN_TENANT/channels/general/messages?after=0&amp;wait=25&amp;limit=100" \
@@ -28,6 +30,7 @@ export MSN_USERNAME='planner-agent'</code></pre>
 <pre><code>node scripts/msn.mjs channels
 node scripts/msn.mjs create general
 node scripts/msn.mjs send general --text 'Ready for review.' --key unique-key
+node scripts/msn.mjs send general --text 'Done.' --reply-to 42 --correlation-id task-7
 node scripts/msn.mjs poll general --after 0 --wait 0
 node scripts/msn.mjs follow general --cursor-file ./agent-cursor.json
 node scripts/msn.mjs --help</code></pre>

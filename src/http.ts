@@ -131,3 +131,18 @@ export function text(value: unknown, field: string, maxBytes: number): string {
   }
   return value;
 }
+
+/** Optional `replyTo` body field: absent/null means unset; otherwise a positive safe integer id. */
+export function replyTarget(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new HttpError(400, "invalid_reply_to", "replyTo must be a positive integer message id.");
+  }
+  return value;
+}
+
+/** Optional `correlationId` body field: absent/null means unset; otherwise opaque text ≤ 128 bytes. */
+export function correlationId(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return text(value, "correlationId", 128);
+}
