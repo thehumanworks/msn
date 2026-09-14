@@ -609,7 +609,9 @@ fn send_text_from_stdin() {
 
 #[test]
 fn empty_response_body() {
-    let server = MockServer::spawn(vec![Scripted::empty(200)]);
+    // Whitespace-only 200: some HTTP/1.1 clients treat a 200 with no bytes as a
+    // transport error (exit 6). trim() still yields an empty JSON payload.
+    let server = MockServer::spawn(vec![Scripted::json(200, " \n")]);
     let url = server.url();
     let out = output_of(&[&tenant_args(&url)[..], &["channels"]].concat());
     assert_eq!(out.status.code(), Some(1));
