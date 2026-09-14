@@ -5,7 +5,7 @@ Bidirectional channel messaging for humans and agents, backed by Cloudflare SQLi
 - **Workspace isolation:** one object per tenant, random tenant access keys, independent concurrent tenants.
 - **Channels, not queues:** all readers receive a copy. Reads never consume; any reader can send a reply.
 - **Durable history:** ordered cursors, pagination, single poll, bounded long poll, reread and safe send retries.
-- **No user login:** choose any display username. A workspace key controls access, not identity.
+- **No user login:** choose any display username. A workspace key controls access, not identity — unless the administrator **binds** the key to one display name (or a name prefix), in which case the server rejects sends under any other name.
 - **Restricted deletion:** a separate admin secret and `/api/admin/…` endpoints; no browser admin key.
 
 ## Run locally
@@ -56,12 +56,13 @@ Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes requi
 | Method | Endpoint | Behavior |
 | --- | --- | --- |
 | GET | `/api/health` | Public liveness, `{ok:true,service:"msn"}` |
+| GET | `/api/tenants/:tenant` | The key's bind: `{tenant,username,usernamePrefix}` (both `null` when unbound) |
 | GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
-| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text}`; creates channel automatically; 201 `{message,replayed:false}` |
+| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
-| PUT | `/api/admin/tenants/:tenant` | **Admin only.** Provision once; 201 `{tenant,token}`, existing tenant 409 |
-| POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Rotate and return a new key once; pending old-key polls reject |
+| PUT | `/api/admin/tenants/:tenant` | **Admin only.** Provision once; 201 `{tenant,token,username,usernamePrefix}`, existing tenant 409. Optional JSON body `{username}` or `{usernamePrefix}` binds the key |
+| POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Rotate and return a new key once; pending old-key polls reject. No body keeps the bind; `{username:null}` clears it; `{username}`/`{usernamePrefix}` rebinds |
 | DELETE | `/api/admin/tenants/:tenant/channels/:channel/messages/:id` | **Admin only.** Delete content; 204, absent/already deleted 404 |
 
 Message shape:
@@ -81,7 +82,7 @@ Creation timestamps are server-generated ISO UTC. IDs are monotonically increasi
 
 Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text returns 409. Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
 
-Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin, 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
+Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin or `username_bound` (a bound key sent as another name; permanent for that key, do not retry), 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
 
 ## Admin operations
 
@@ -93,7 +94,21 @@ node scripts/msn.mjs rotate team
 MSN_TENANT=team node scripts/msn.mjs delete general 123
 ```
 
-Every member key holder can read/write all channels and choose any username. Members are mutually trusted; this is not a public abuse-resistant network or verified identity service. Admin deletion clears username/text from subsequent reads, retaining a small idempotency tombstone. It cannot recall copies already delivered to readers; click **Reread** to refresh a browser. Cloudflare recovery/backups may retain historical content. No tenant/channel deletion/recreation route is exposed.
+Every member key holder can read/write all channels and, with an **unbound** key, choose any username. Members are mutually trusted; this is not a public abuse-resistant network or verified identity service.
+
+### Bind a key to a display name
+
+To stop spoofing without any client-side crypto, bind a key to one display name (or a name prefix) when you provision or rotate it. The server then rejects every send under another name with `403 username_bound`; nothing is stored and no waiting reader is woken. This only helps when each human or agent holds its own key: everyone sharing one workspace key shares its bind. (Several keys per tenant is a recorded follow-up.)
+
+```sh
+node scripts/msn.mjs provision thehuman --username thehuman      # prints the token once
+node scripts/msn.mjs provision agents --username-prefix agent-   # agent-1, agent-planner, …
+node scripts/msn.mjs rotate thehuman                             # new key, same bind
+node scripts/msn.mjs rotate thehuman --username someone-else     # new key, new bind
+node scripts/msn.mjs rotate thehuman --unbind                    # new key, any name again
+```
+
+`GET /api/tenants/:tenant` with the key returns its bind. The browser reads it on connect and locks the display name to an exact bind (or refuses a name outside a prefix bind). `send` still takes `--username`/`MSN_USERNAME`; the server, not the client, enforces the bind. Only the explicit `--username` flag binds on `provision`/`rotate`; `MSN_USERNAME` from the environment never does. Names are compared byte-for-byte (no trimming or case folding). Admin deletion clears username/text from subsequent reads, retaining a small idempotency tombstone. It cannot recall copies already delivered to readers; click **Reread** to refresh a browser. Cloudflare recovery/backups may retain historical content. No tenant/channel deletion/recreation route is exposed.
 
 ## Limits and operations
 
@@ -114,7 +129,7 @@ bun run cf-typegen              # required after binding changes
 bun run check                  # strict tsc, Biome recommended lint/format, API + CLI + browser tests
 ```
 
-`tests/api.test.ts` executes on real workerd SQLite DOs via current `@cloudflare/vitest-plugin`, not storage mocks. `tests/cli.test.mjs` tests command contracts and durable cursor files. Playwright launches `wrangler dev`, tests desktop/mobile UI against the real Worker, and invokes the actual CLI for bidirectional human/agent exchange. Tests use local-only fixture secrets, never production credentials. Negative rollback tests intentionally log one sanitized service error. Local workerd may log broken pipes when tests cancel long polls; browser assertions and explicit poll cleanup tests still must pass.
+`tests/api.test.ts` executes on real workerd SQLite DOs via current `@cloudflare/vitest-plugin`, not storage mocks; it includes the bound-key cases and a schema v1→v2 migration on a restarted object. `tests/cli.test.mjs` tests command contracts and durable cursor files. Playwright launches `wrangler dev`, tests desktop/mobile UI against the real Worker, and invokes the actual CLI for bidirectional human/agent exchange. Tests use local-only fixture secrets, never production credentials. Negative rollback tests intentionally log one sanitized service error. Local workerd may log broken pipes when tests cancel long polls; browser assertions and explicit poll cleanup tests still must pass.
 
 ## Deploy
 
