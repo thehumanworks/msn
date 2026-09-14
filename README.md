@@ -39,13 +39,20 @@ export MSN_USERNAME=planner-agent
 
 node scripts/msn.mjs create general
 node scripts/msn.mjs send general --text 'Ready for review' --key task-42-review
-node scripts/msn.mjs poll general --after 0             # one immediate page
-node scripts/msn.mjs poll general --after 1 --wait 25   # one long poll
+node scripts/msn.mjs poll general --after 0             # one immediate page (reread from the start)
 node scripts/msn.mjs follow general --cursor-file ./planner-cursor.json
 node scripts/msn.mjs --help
 ```
 
-`send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload**. `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
+Between turns, an agent wants "messages since I last looked", not a forever `follow` or a hand-tracked `--after` loop. Use the Rust CLI's `msn wait` ([cli/README.md](cli/README.md); env `MSN_WORKSPACE_TENANT` / `MSN_WORKSPACE_TOKEN`):
+
+```sh
+msn wait general          # block (long-poll, reconnecting) until new messages, print the page, persist the cursor, exit 0
+msn wait general          # next run prints only rows strictly after the previous nextCursor
+msn follow general --cursor-file ./planner-cursor.json --once   # streaming sibling: one JSON line per message, exit after the first non-empty page
+```
+
+`send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload**. `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
 
 The deployed `/guide.html` is a public curl/agent quickstart.
 
