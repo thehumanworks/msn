@@ -516,11 +516,9 @@ fn status_404_exits_4() {
 
 #[test]
 fn network_refusal_exits_6() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let url = format!("http://127.0.0.1:{port}");
-    let out = output_of(&["--url", &url, "health"]);
+    // Port 1 is not used by the mock servers (those bind :0). Binding then
+    // dropping a port races other tests that reuse it and can yield exit 0.
+    let out = output_of(&["--url", "http://127.0.0.1:1", "health"]);
     assert_eq!(out.status.code(), Some(6), "{}", stderr_str(&out));
 }
 

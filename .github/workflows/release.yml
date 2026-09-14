@@ -86,8 +86,25 @@ jobs:
       - name: Set package version
         working-directory: cli
         run: |
-          sed -i.bak "s/^version = \".*\"/version = \"${{ needs.version.outputs.version }}\"/" Cargo.toml
-          rm -f Cargo.toml.bak
+          set -euo pipefail
+          python3 - <<PY
+          from pathlib import Path
+          import re
+          ver = "${{ needs.version.outputs.version }}"
+          toml = Path("Cargo.toml")
+          text, n = re.subn(r'(?m)^version = "[^"]+"', f'version = "{ver}"', toml.read_text(), count=1)
+          assert n == 1, "Cargo.toml version line"
+          toml.write_text(text)
+          lock = Path("Cargo.lock")
+          text, n = re.subn(
+              r'(name = "msn-cli"\nversion = ")[^"]+(")',
+              rf"\g<1>{ver}\2",
+              lock.read_text(),
+              count=1,
+          )
+          assert n == 1, "Cargo.lock msn-cli version"
+          lock.write_text(text)
+          PY
       - name: Build
         working-directory: cli
         run: |

@@ -73,10 +73,9 @@ impl MockServer {
         let reqs = Arc::clone(&requests);
         let q = Arc::clone(&queue);
         let stop = Arc::clone(&shutdown);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("nonblocking accept so shutdown can finish");
+            let _ = ready_tx.send(());
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
@@ -85,13 +84,11 @@ impl MockServer {
                         }
                         handle_one(stream, &reqs, &q, &stop);
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
                     Err(_) => break,
                 }
             }
         });
+        ready_rx.recv().expect("mock thread started");
         Self {
             addr,
             requests,
@@ -112,7 +109,7 @@ impl Drop for MockServer {
     fn drop(&mut self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(50));
+        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(200));
     }
 }
 
@@ -122,6 +119,8 @@ fn handle_one(
     responses: &Arc<Mutex<VecDeque<Scripted>>>,
     stop: &Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // macOS inherits nonblocking from a nonblocking listener; always force blocking.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let mut buf = Vec::new();
@@ -131,18 +130,29 @@ fn handle_one(
             Ok(0) => return,
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
-                if let Some(pos) = find_header_end(&buf) {
+                if let Some(pos) = find_body_start(&buf) {
                     break pos;
                 }
                 if buf.len() > 64 * 1024 {
                     return;
                 }
             }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                continue;
+            }
             Err(_) => return,
         }
     };
-    let header_block = String::from_utf8_lossy(&buf[..header_end]).into_owned();
-    let mut lines = header_block.split("\r\n");
+    let header_block = String::from_utf8_lossy(&buf[..header_end]).replace("\r\n", "\n");
+    let mut lines = header_block.split('\n');
     let request_line = lines.next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
@@ -160,15 +170,17 @@ fn handle_one(
         .get("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let mut body = buf[header_end + 4..].to_vec();
-    while body.len() < content_len {
-        match stream.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&tmp[..n]),
-            Err(_) => break,
+    let mut body = buf[header_end..].to_vec();
+    if content_len > 0 {
+        while body.len() < content_len {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
         }
+        body.truncate(content_len);
     }
-    body.truncate(content_len);
     requests.lock().expect("lock").push(Recorded {
         method,
         path,
@@ -211,8 +223,10 @@ fn handle_one(
     let _ = stream.flush();
 }
 
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
+fn find_body_start(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|pos| pos + 4)
 }
 
 fn reason_phrase(status: u16) -> &'static str {
