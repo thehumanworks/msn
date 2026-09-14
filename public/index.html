@@ -20,7 +20,7 @@
     <section id="workspace" class="workspace" hidden>
       <aside><div class="workspace-title"><span class="eyebrow">WORKSPACE</span><h2 id="workspace-name">Workspace</h2></div><div class="section-label">CHANNELS <button type="button" id="refresh" class="quiet" aria-label="Refresh channels">↻</button></div><nav id="channels" aria-label="Channels"></nav>
         <form id="channel-form"><label for="new-channel" class="sr-only">New channel name</label><div class="inline"><input id="new-channel" placeholder="new-channel" pattern="[a-z0-9][a-z0-9_-]{0,63}" required><button type="submit" aria-label="Create channel">+</button></div></form>
-        <div class="identity"><span id="display-name"></span><small>Display name · not a verified identity</small><button type="button" id="disconnect" class="quiet">Disconnect</button></div>
+        <div class="identity"><span id="display-name"></span><small id="identity-note">Display name · not a verified identity</small><button type="button" id="disconnect" class="quiet">Disconnect</button></div>
       </aside>
       <div class="conversation"><div class="conversation-header"><div><h2 id="channel-title">Choose a channel</h2><small id="channel-note">Or create one in the sidebar.</small></div><div class="actions"><label class="live-toggle"><input type="checkbox" id="live" checked> Live</label><button type="button" id="poll" disabled>Poll once</button><button type="button" id="reread" disabled>Reread</button></div></div>
         <div id="messages" role="log" aria-label="Messages" aria-live="polite"><div class="empty">Your next conversation starts here.</div></div>

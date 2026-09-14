@@ -5,10 +5,11 @@ import { expect, test } from "@playwright/test";
 
 const ADMIN = "browser-test-admin-000000000000000000000";
 const cli = fileURLToPath(new URL("../scripts/msn.mjs", import.meta.url));
-async function provision(request) {
+async function provision(request, bind) {
   const tenant = `browser-${crypto.randomUUID()}`;
   const response = await request.put(`/api/admin/tenants/${tenant}`, {
     headers: { Authorization: `Bearer ${ADMIN}` },
+    ...(bind ? { data: bind } : {}),
   });
   expect(response.status()).toBe(201);
   const { token } = await response.json();
@@ -190,6 +191,39 @@ test("channel-scoped drafts and retry keys survive navigation; late sends cannot
   await expect(page.locator("#message")).toHaveValue("beta draft");
   const history = await request.get(`${t.path}/channels/alpha/messages`, { headers: t.headers });
   expect((await history.json()).messages).toHaveLength(1);
+});
+
+test("a bound access key locks the display name; a prefix key rejects other names before connecting", async ({
+  page,
+  request,
+}) => {
+  const bound = await provision(request, { username: "thehuman" });
+  await request.put(`${bound.path}/channels/general`, { headers: bound.headers });
+  await connect(page, bound, "impostor");
+  await expect(page.locator("#display-name")).toHaveText("thehuman");
+  await expect(page.locator("#identity-note")).toHaveText("Display name · bound to your access key");
+  await page.getByLabel("Message", { exact: true }).fill("sent under my bound name");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".message strong")).toHaveText(["thehuman"]);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(page.locator("#username")).toHaveValue("thehuman");
+  const prefixed = await provision(request, { usernamePrefix: "agent-" });
+  await page.getByLabel("Workspace", { exact: true }).fill(prefixed.tenant);
+  await page.getByLabel("Access key").fill(prefixed.token);
+  await page.getByLabel("Your display name").fill("human");
+  await page.getByRole("button", { name: "Connect", exact: false }).click();
+  await expect(page.locator("#status")).toContainText("starting with “agent-”");
+  await expect(page.locator("#welcome")).toBeVisible();
+  await page.getByLabel("Your display name").fill("agent-7");
+  await page.getByRole("button", { name: "Connect", exact: false }).click();
+  await expect(page.locator("#workspace")).toBeVisible();
+  await expect(page.locator("#identity-note")).toContainText("requires the prefix “agent-”");
+  const denied = await request.post(`${prefixed.path}/channels/general/messages`, {
+    headers: prefixed.headers,
+    data: { username: "human", text: "spoof" },
+  });
+  expect(denied.status()).toBe(403);
+  expect((await denied.json()).error.code).toBe("username_bound");
 });
 
 test("invalid credentials show actionable errors and public agent guide is available", async ({ page }) => {
