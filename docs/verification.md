@@ -58,3 +58,11 @@ Against `https://msn.rodat-human-ada.workers.dev`, tenant `main`, via `fnox run 
 | `provision` / `rotate` throwaway `cli-smoke-1789421600` | 201 then 200; each response had a token (≥32 chars); tokens differed. Live `main` was not rotated. |
 
 Follow (first attempt used `--after` and `--cursor-file` together and exited 2 before polling). Repeat on `cli-follow-1789421714` with `--cursor-file` only: send id 6 (`follow-arrives`) appeared as one JSON line; cursor file had `tenant=main`, `channel=cli-follow-1789421714`, `after=6`, mode `0600`; then `delete` id 6. No smoke message text remains on `main`. Empty uniquely named channels/tenants remain (no delete-channel API).
+
+## GitHub Release binary — 2026-09-14
+
+- Tag: `v0.1.1` — https://github.com/thehumanworks/msn/releases/tag/v0.1.1
+- Assets: four `msn-v0.1.1-<target>.tar.gz` plus matching `.sha256` for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`.
+- Downloaded `msn-v0.1.1-x86_64-unknown-linux-gnu.tar.gz` with `gh release download`, extracted under `/tmp` (not committed).
+- `/tmp/.../msn --version` printed `msn 0.1.1`.
+- `fnox run -- /tmp/.../msn channels` against the default Worker origin, tenant `main`, listed `general` plus leftover empty smoke channel names; exit 0. Tokens were not printed.
