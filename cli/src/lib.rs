@@ -118,15 +118,44 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 stop,
             )
         }
-        Command::Provision { tenant } => {
+        Command::Provision {
+            tenant,
+            username_prefix,
+        } => {
             let token = require_token(cli.admin_token.as_deref(), "MSN_ADMIN_TOKEN")?;
             let tenant = slug(&tenant)?;
-            provision(&url, tenant, &token)
+            let bound = cli
+                .username_from_flag
+                .then_some(cli.username.as_deref())
+                .flatten();
+            let bind = binding(bound, username_prefix.as_deref(), false)?;
+            admin_key(
+                &url,
+                "PUT",
+                &format!("/api/admin/tenants/{tenant}"),
+                &token,
+                bind,
+            )
         }
-        Command::Rotate { tenant } => {
+        Command::Rotate {
+            tenant,
+            username_prefix,
+            unbind,
+        } => {
             let token = require_token(cli.admin_token.as_deref(), "MSN_ADMIN_TOKEN")?;
             let tenant = slug(&tenant)?;
-            rotate(&url, tenant, &token)
+            let bound = cli
+                .username_from_flag
+                .then_some(cli.username.as_deref())
+                .flatten();
+            let bind = binding(bound, username_prefix.as_deref(), unbind)?;
+            admin_key(
+                &url,
+                "POST",
+                &format!("/api/admin/tenants/{tenant}/token"),
+                &token,
+                bind,
+            )
         }
         Command::Delete {
             channel,
@@ -214,14 +243,42 @@ fn poll(
     finish(&client.get(&path, Some(token))?)
 }
 
-fn provision(url: &Url, tenant: &str, token: &str) -> Result<(), CliError> {
-    let client = MsnClient::new(url)?;
-    finish(&client.put(&format!("/api/admin/tenants/{tenant}"), token)?)
+/// Body for provision/rotate: `None` leaves the bind alone (provision: unbound; rotate: kept).
+fn binding(
+    username: Option<&str>,
+    prefix: Option<&str>,
+    unbind: bool,
+) -> Result<Option<Value>, CliError> {
+    let chosen = [username.is_some(), prefix.is_some(), unbind]
+        .iter()
+        .filter(|set| **set)
+        .count();
+    if chosen > 1 {
+        return Err(CliError::usage(
+            "Use only one of --username, --username-prefix or --unbind.",
+        ));
+    }
+    if let Some(name) = username {
+        return Ok(Some(json!({ "username": name })));
+    }
+    if let Some(prefix) = prefix {
+        return Ok(Some(json!({ "usernamePrefix": prefix })));
+    }
+    if unbind {
+        return Ok(Some(json!({ "username": null })));
+    }
+    Ok(None)
 }
 
-fn rotate(url: &Url, tenant: &str, token: &str) -> Result<(), CliError> {
+fn admin_key(
+    url: &Url,
+    method: &str,
+    path: &str,
+    token: &str,
+    bind: Option<Value>,
+) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
-    finish(&client.post(&format!("/api/admin/tenants/{tenant}/token"), token)?)
+    finish(&client.send_optional_json(method, path, token, bind.as_ref())?)
 }
 
 fn delete(url: &Url, tenant: &str, token: &str, channel: &str, id: u64) -> Result<(), CliError> {

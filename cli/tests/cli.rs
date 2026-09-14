@@ -13,6 +13,8 @@
 //! I10 status_401_exits_3 / status_404_exits_4 / network_refusal_exits_6 / delete_204
 //! I11 invalid_slug_exits_2
 //! I12 help_lists_commands_and_env
+//! I13 provision_binds_username_flag_only / provision_binds_prefix / rotate_unbind_and_keep
+//! I14 bind_flags_are_exclusive / send_username_bound_exits_3
 //!
 //! Edge: empty_response_body, non_json_error_body, send_text_from_stdin, follow_sigint_exits_0
 
@@ -475,6 +477,199 @@ fn admin_routes_use_admin_token() {
             Some("Bearer admin-secret")
         );
     }
+}
+
+fn json_content_type(rec: &common::Recorded) -> bool {
+    rec.headers
+        .get("content-type")
+        .map(|value| value.split(';').next().unwrap_or("").trim() == "application/json")
+        .unwrap_or(false)
+}
+
+#[test]
+fn provision_binds_username_flag_only() {
+    let bound = r#"{"tenant":"team","token":"t","username":"thehuman","usernamePrefix":null}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(201, bound),
+        Scripted::json(201, bound),
+        Scripted::json(
+            201,
+            r#"{"tenant":"team","token":"t","username":null,"usernamePrefix":null}"#,
+        ),
+    ]);
+    let url = server.url();
+    // Flag after the subcommand, as documented in the issue.
+    let out = output_of(&[
+        "--url",
+        &url,
+        "--admin-token",
+        "admin-secret",
+        "provision",
+        "team",
+        "--username",
+        "thehuman",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(stdout_str(&out).trim(), bound);
+    // Flag before the subcommand (global) binds too.
+    let out = output_of(&[
+        "--url",
+        &url,
+        "--admin-token",
+        "admin-secret",
+        "--username",
+        "thehuman",
+        "provision",
+        "team",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    // MSN_USERNAME from the environment must not bind a token.
+    let out = bin()
+        .env("MSN_USERNAME", "agent-from-env")
+        .args([
+            "--url",
+            &url,
+            "--admin-token",
+            "admin-secret",
+            "provision",
+            "team",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 3);
+    for bound_call in &rec[..2] {
+        assert_eq!(bound_call.method, "PUT");
+        assert_eq!(bound_call.path, "/api/admin/tenants/team");
+        assert!(json_content_type(bound_call));
+        let payload: serde_json::Value = serde_json::from_slice(&bound_call.body).unwrap();
+        assert_eq!(payload, serde_json::json!({ "username": "thehuman" }));
+    }
+    assert!(
+        rec[2].body.is_empty(),
+        "env-only run sent {:?}",
+        rec[2].body
+    );
+    assert!(!json_content_type(&rec[2]));
+}
+
+#[test]
+fn provision_binds_prefix() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"tenant":"agents","token":"t","username":null,"usernamePrefix":"agent-"}"#,
+    )]);
+    let url = server.url();
+    let out = output_of(&[
+        "--url",
+        &url,
+        "--admin-token",
+        "admin-secret",
+        "provision",
+        "agents",
+        "--username-prefix",
+        "agent-",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let rec = server.recorded();
+    let payload: serde_json::Value = serde_json::from_slice(&rec[0].body).unwrap();
+    assert_eq!(payload, serde_json::json!({ "usernamePrefix": "agent-" }));
+}
+
+#[test]
+fn rotate_unbind_and_keep() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            200,
+            r#"{"tenant":"team","token":"n","username":null,"usernamePrefix":null}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"tenant":"team","token":"n","username":"thehuman","usernamePrefix":null}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"tenant":"team","token":"n","username":"other","usernamePrefix":null}"#,
+        ),
+    ]);
+    let url = server.url();
+    let base = [
+        "--url",
+        &url,
+        "--admin-token",
+        "admin-secret",
+        "rotate",
+        "team",
+    ];
+    let out = output_of(&[&base[..], &["--unbind"]].concat());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let out = output_of(&base);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let out = output_of(&[&base[..], &["--username", "other"]].concat());
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 3);
+    assert!(rec.iter().all(|r| r.method == "POST"));
+    assert!(
+        rec.iter()
+            .all(|r| r.path == "/api/admin/tenants/team/token")
+    );
+    let cleared: serde_json::Value = serde_json::from_slice(&rec[0].body).unwrap();
+    assert_eq!(cleared, serde_json::json!({ "username": null }));
+    assert!(rec[1].body.is_empty(), "plain rotate must send no body");
+    assert!(!json_content_type(&rec[1]));
+    let rebound: serde_json::Value = serde_json::from_slice(&rec[2].body).unwrap();
+    assert_eq!(rebound, serde_json::json!({ "username": "other" }));
+}
+
+#[test]
+fn bind_flags_are_exclusive() {
+    let server = MockServer::spawn(vec![Scripted::json(200, r#"{}"#)]);
+    let url = server.url();
+    let admin = ["--url", &url, "--admin-token", "admin-secret"];
+    for extra in [
+        &[
+            "provision",
+            "team",
+            "--username",
+            "a",
+            "--username-prefix",
+            "b",
+        ][..],
+        &["rotate", "team", "--unbind", "--username", "a"][..],
+        &["rotate", "team", "--unbind", "--username-prefix", "b"][..],
+    ] {
+        let out = output_of(&[&admin[..], extra].concat());
+        assert_eq!(out.status.code(), Some(2), "{extra:?} {}", stderr_str(&out));
+        assert!(
+            stderr_str(&out).contains("only one of"),
+            "{}",
+            stderr_str(&out)
+        );
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn send_username_bound_exits_3() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        403,
+        r#"{"error":{"code":"username_bound","message":"This access key may only send as \"thehuman\"."}}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "impostor", "send", "general", "--text", "hi"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr_str(&out));
+    assert!(stderr_str(&out).contains("only send as \"thehuman\""));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(payload["username"], "impostor");
 }
 
 #[test]

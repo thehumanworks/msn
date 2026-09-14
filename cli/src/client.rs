@@ -43,8 +43,15 @@ impl MsnClient {
         self.exchange("PUT", path, Some(token), &[], None::<&Value>)
     }
 
-    pub fn post(&self, path: &str, token: &str) -> Result<RawResponse, CliError> {
-        self.exchange("POST", path, Some(token), &[], None::<&Value>)
+    /// PUT/POST with an optional JSON body; `None` sends an empty body without a Content-Type.
+    pub fn send_optional_json(
+        &self,
+        method: &str,
+        path: &str,
+        token: &str,
+        body: Option<&Value>,
+    ) -> Result<RawResponse, CliError> {
+        self.exchange(method, path, Some(token), &[], body)
     }
 
     pub fn post_json<T: Serialize>(
@@ -73,7 +80,14 @@ impl MsnClient {
         let result = match method {
             "GET" => apply_headers(self.agent.get(&url), token, extra).call(),
             "DELETE" => apply_headers(self.agent.delete(&url), token, extra).call(),
-            "PUT" => apply_headers(self.agent.put(&url), token, extra).send_empty(),
+            "PUT" => {
+                let req = apply_headers(self.agent.put(&url), token, extra);
+                if let Some(payload) = body {
+                    req.send_json(payload)
+                } else {
+                    req.send_empty()
+                }
+            }
             "POST" => {
                 let req = apply_headers(self.agent.post(&url), token, extra);
                 if let Some(payload) = body {
