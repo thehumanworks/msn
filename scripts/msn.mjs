@@ -14,14 +14,17 @@ node scripts/msn.mjs create CHANNEL
 node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
-node scripts/msn.mjs provision TENANT
-node scripts/msn.mjs rotate TENANT
+node scripts/msn.mjs provision TENANT [--username NAME | --username-prefix PREFIX]
+node scripts/msn.mjs rotate TENANT [--username NAME | --username-prefix PREFIX | --unbind]
 node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
 follow prints one JSON message per line; cursor files are tenant/channel/server-bound.
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
+A token bound with --username (or --username-prefix) may only send as that name (prefix);
+the server answers 403 username_bound otherwise. rotate keeps the bind unless you pass
+a new one or --unbind. MSN_USERNAME never binds a token.
 `;
 
 function number(value, fallback, max) {
@@ -55,6 +58,9 @@ export async function run({
       wait: { type: "string" },
       limit: { type: "string" },
       "cursor-file": { type: "string" },
+      username: { type: "string" },
+      "username-prefix": { type: "string" },
+      unbind: { type: "boolean" },
     },
   });
   if (values.help || !positionals.length) {
@@ -95,10 +101,22 @@ export async function run({
     return data;
   }
   if (command === "provision" || command === "rotate") {
+    const chosen = [values.username, values["username-prefix"], values.unbind].filter(Boolean).length;
+    if (chosen > 1 || (values.unbind && command !== "rotate"))
+      throw new Error("Use only one of --username, --username-prefix or --unbind (rotate only).");
+    // No body: provision stays unbound and rotate keeps the current bind. Env MSN_USERNAME never binds.
+    const bind = values.username
+      ? { username: values.username }
+      : values["username-prefix"]
+        ? { usernamePrefix: values["username-prefix"] }
+        : values.unbind
+          ? { username: null }
+          : undefined;
     out(
       JSON.stringify(
         await request(command === "rotate" ? "/token" : "", {
           method: command === "rotate" ? "POST" : "PUT",
+          ...(bind ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(bind) } : {}),
         }),
       ),
     );
@@ -123,8 +141,8 @@ export async function run({
     return;
   }
   if (command === "send") {
-    if (!env.MSN_USERNAME?.trim() || !values.text?.trim())
-      throw new Error("Set MSN_USERNAME and pass --text.");
+    const username = values.username ?? env.MSN_USERNAME;
+    if (!username?.trim() || !values.text?.trim()) throw new Error("Set MSN_USERNAME and pass --text.");
     const key = values.key ?? randomUUID();
     err(`Idempotency-Key: ${key}`);
     out(
@@ -132,7 +150,7 @@ export async function run({
         await request(`${path}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Idempotency-Key": key },
-          body: JSON.stringify({ username: env.MSN_USERNAME, text: values.text }),
+          body: JSON.stringify({ username, text: values.text }),
         }),
       ),
     );

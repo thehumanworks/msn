@@ -100,6 +100,58 @@ test("CLI admin commands use only the admin capability and restricted route", as
   );
 });
 
+test("CLI binds a token only through explicit flags; rotate keeps, clears or replaces the bind", async () => {
+  const bound = harness(["provision", "thehuman", "--username", "thehuman"]);
+  await bound.execute();
+  assert.equal(bound.calls[0].method, "PUT");
+  assert.equal(bound.calls[0].url, "https://msn.test/api/admin/tenants/thehuman");
+  assert.equal(bound.calls[0].headers["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(bound.calls[0].body), { username: "thehuman" });
+  const prefixed = harness(["provision", "agents", "--username-prefix", "agent-"]);
+  await prefixed.execute();
+  assert.deepEqual(JSON.parse(prefixed.calls[0].body), { usernamePrefix: "agent-" });
+  // MSN_USERNAME is set in the shared env fixture and must not produce a body.
+  const plain = harness(["provision", "plain"]);
+  await plain.execute();
+  assert.equal(plain.calls[0].body, undefined);
+  assert.equal(plain.calls[0].headers["Content-Type"], undefined);
+  const kept = harness(["rotate", "team"]);
+  await kept.execute();
+  assert.equal(kept.calls[0].body, undefined);
+  const cleared = harness(["rotate", "team", "--unbind"]);
+  await cleared.execute();
+  assert.deepEqual(JSON.parse(cleared.calls[0].body), { username: null });
+  const rebound = harness(["rotate", "team", "--username", "other"]);
+  await rebound.execute();
+  assert.deepEqual(JSON.parse(rebound.calls[0].body), { username: "other" });
+  for (const argv of [
+    ["provision", "team", "--username", "a", "--username-prefix", "b"],
+    ["provision", "team", "--unbind"],
+    ["rotate", "team", "--unbind", "--username", "a"],
+  ]) {
+    const h = harness(argv);
+    await assert.rejects(h.execute(), /only one of/);
+    assert.equal(h.calls.length, 0);
+  }
+  const overridden = harness(["send", "general", "--text", "hi", "--username", "flag name"], [{}]);
+  await overridden.execute();
+  assert.equal(JSON.parse(overridden.calls[0].body).username, "flag name");
+  await assert.rejects(
+    run({
+      argv: ["send", "general", "--text", "hi"],
+      env,
+      out: noop,
+      err: noop,
+      fetcher: async () =>
+        Response.json(
+          { error: { code: "username_bound", message: 'This access key may only send as "thehuman".' } },
+          { status: 403 },
+        ),
+    }),
+    /403: This access key may only send as "thehuman"/,
+  );
+});
+
 test("CLI follows JSON lines and resumes an atomically written context-bound cursor", async () => {
   const dir = await mkdtemp(join(tmpdir(), "msn-cli-"));
   const file = join(dir, "cursor.json");
