@@ -13,6 +13,9 @@
       "!worker-configuration.d.ts",
       "!package-lock.json",
       "!.pi",
+      "!target",
+      "!cli/target",
+      "!**/target",
       "!!node_modules",
       "!!.wrangler"
     ]

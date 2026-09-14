@@ -7,3 +7,7 @@ scripts/.secrets/
 test-results/
 playwright-report/
 .pi/
+target/
+mutants.out/
+mutants.out*
+
