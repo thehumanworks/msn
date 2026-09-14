@@ -28,6 +28,9 @@
 //! W9 wait_query_params / wait_rejects_zero_wait_or_limit
 //! F1 follow_once_exits_after_first_non_empty_page
 //! H1 help_lists_commands_and_env (adds `wait`)
+//!
+//! Mutation run (cargo mutants -f src/lib.rs -f src/cursor.rs -f src/args.rs -f src/main.rs):
+//! 85/86 caught. Equivalent survivor: `interruptible_sleep` `<` → `<=` on the 50 ms sleep loop.
 
 mod common;
 
@@ -61,12 +64,15 @@ fn tenant_args(url: &str) -> [&str; 6] {
 }
 
 fn output_of(args: &[&str]) -> std::process::Output {
-    output_capped(args, Duration::from_secs(8))
+    let mut cmd = bin();
+    cmd.args(args);
+    output_capped(cmd, Duration::from_secs(8))
 }
 
-fn output_capped(args: &[&str], cap: Duration) -> std::process::Output {
-    let mut child = bin()
-        .args(args)
+/// Runs `cmd` to completion, killing it after `cap` so a never-exiting CLI fails the test
+/// instead of hanging it.
+fn output_capped(mut cmd: Command, cap: Duration) -> std::process::Output {
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -910,12 +916,10 @@ fn wait_default_cursor_file_resumes_after_previous_run() {
     let home = tmp_file("msn-wait-home");
     fs::create_dir_all(&home).unwrap();
     let run = || {
-        bin()
-            .env("HOME", &home)
-            .args(wait_args(&url, &["--wait", "1"]))
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+        let mut cmd = bin();
+        cmd.env("HOME", &home)
+            .args(wait_args(&url, &["--wait", "1"]));
+        output_capped(cmd, Duration::from_secs(8))
     };
     // When wait runs twice with no cursor flags
     let out1 = run();
@@ -969,12 +973,10 @@ fn wait_after_flag_skips_cursor_file() {
     let home = tmp_file("msn-wait-home-after");
     fs::create_dir_all(&home).unwrap();
     // When
-    let out = bin()
-        .env("HOME", &home)
-        .args(wait_args(&url, &["--after", "5", "--wait", "1"]))
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let mut cmd = bin();
+    cmd.env("HOME", &home)
+        .args(wait_args(&url, &["--after", "5", "--wait", "1"]));
+    let out = output_capped(cmd, Duration::from_secs(8));
     // Then the explicit cursor is used and nothing is persisted
     assert_eq!(
         out.status.code(),

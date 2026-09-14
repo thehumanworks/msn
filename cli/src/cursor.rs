@@ -263,11 +263,30 @@ mod tests {
     #[test]
     fn given_no_home_when_default_path_then_usage() {
         let url = Url::parse("https://msn.test").unwrap();
-        let err = with_env(&[("XDG_STATE_HOME", None), ("HOME", None)], || {
-            default_cursor_path(&url, "team", "general").unwrap_err()
-        });
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.to_string().contains("--cursor-file"));
+        for vars in [
+            [("XDG_STATE_HOME", None), ("HOME", None)],
+            [("XDG_STATE_HOME", Some("")), ("HOME", Some(""))],
+        ] {
+            let err = with_env(&vars, || {
+                default_cursor_path(&url, "team", "general").unwrap_err()
+            });
+            assert_eq!(err.exit_code(), 2, "{vars:?}");
+            assert!(err.to_string().contains("--cursor-file"));
+        }
+    }
+
+    #[test]
+    fn given_empty_xdg_state_home_when_default_path_then_home_fallback() {
+        let url = Url::parse("https://msn.test").unwrap();
+        let path = with_env(
+            &[("XDG_STATE_HOME", Some("")), ("HOME", Some("/home/u"))],
+            || default_cursor_path(&url, "team", "general").unwrap(),
+        );
+        assert!(
+            path.starts_with("/home/u/.local/state/msn"),
+            "{}",
+            path.display()
+        );
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
