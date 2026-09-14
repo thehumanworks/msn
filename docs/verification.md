@@ -42,3 +42,19 @@ Initial issues caught and corrected: DO SQLite does not support `PRAGMA user_ver
 ## Formal completion blocker
 
 The project is deployed and verified, but the optional Pi goal verifier was configured as the unregistered `grok/grok-4.6`. Task #1 check was rejected before artifact review. The verifier must be reconfigured with a registered provider/model using its startup environment variables, then task #1 must be rechecked before later tasks or goal completion. The agent has NOT disabled/modified the verifier, changed goal state manually, or bypassed this gate. User notified via Aimail. This section records harness state, not an application defect.
+
+## Rust CLI live smoke — 2026-09-14
+
+Against `https://msn.rodat-human-ada.workers.dev`, tenant `main`, via `fnox run -- ./cli/target/debug/msn …`. Tokens were not printed or written into the repo.
+
+| Step | Result |
+| --- | --- |
+| `health` | `{"ok":true,"service":"msn"}` exit 0 |
+| `channels` | 1 channel (`general`) |
+| `create cli-smoke-1789421600` | `{"channel":"cli-smoke-1789421600","created":true}` |
+| `send` (username `msn-cli-smoke`, text `hello from rust cli`) | message id 2, `replayed` false; UUIDv4 key on stderr |
+| `poll --after 0` | 1 message, id 2 |
+| `delete` ids 2 and 3 | both `{"deleted":true}` |
+| `provision` / `rotate` throwaway `cli-smoke-1789421600` | 201 then 200; each response had a token (≥32 chars); tokens differed. Live `main` was not rotated. |
+
+Follow (first attempt used `--after` and `--cursor-file` together and exited 2 before polling). Repeat on `cli-follow-1789421714` with `--cursor-file` only: send id 6 (`follow-arrives`) appeared as one JSON line; cursor file had `tenant=main`, `channel=cli-follow-1789421714`, `after=6`, mode `0600`; then `delete` id 6. No smoke message text remains on `main`. Empty uniquely named channels/tenants remain (no delete-channel API).

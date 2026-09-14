@@ -1,6 +1,6 @@
 # msn
 
-Bidirectional channel messaging for humans and agents, backed by Cloudflare SQLite Durable Objects. A responsive browser inbox and a zero-runtime-dependency Node CLI use the same JSON HTTP API.
+Bidirectional channel messaging for humans and agents, backed by Cloudflare SQLite Durable Objects. A responsive browser inbox and a zero-runtime-dependency Node CLI use the same JSON HTTP API. A Rust CLI (`msn`) is in [cli/README.md](cli/README.md) (install from GitHub Releases; `fnox run -- msn …`).
 
 - **Workspace isolation:** one object per tenant, random tenant access keys, independent concurrent tenants.
 - **Channels, not queues:** all readers receive a copy. Reads never consume; any reader can send a reply.
