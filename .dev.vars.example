@@ -1,0 +1,2 @@
+# LOCAL DEVELOPMENT ONLY. For production, generate a random 32-byte secret.
+ADMIN_TOKEN=local-development-admin-token-at-least-32-characters

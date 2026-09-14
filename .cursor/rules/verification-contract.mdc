@@ -1,0 +1,41 @@
+---
+description: Start every task with a BDD + mutation-testing verification contract
+alwaysApply: true
+---
+
+# Verification contract first
+
+Before writing implementation, write a **verification contract**. Do not code until invariants, edge cases, and QA commands are listed. Do not call the work done until every invariant passes and scoped mutants are killed.
+
+## Contract (write this first)
+
+```
+Goal: <observable outcome; full requested scope>
+Invariants:
+  I1 <behavior> -> tests/<file>::<case>
+  I2 ...
+Edge cases: <empty, invalid, auth, concurrency, replay, limits — only valuable ones>
+Out of scope: <explicit non-goals>
+QA:
+  - bun run check
+  - <BDD tests for this change>
+  - <mutation run scoped to changed production files>
+```
+
+Every user-facing requirement maps to at least one invariant. If a requirement has no test name, the contract is incomplete.
+
+## Tests: BDD, then mutate
+
+Write tests as **Given / When / Then** on observable behavior (HTTP, CLI, UI, store effects). Cover the valuable edge cases in the contract. Do not test implementation details that a refactor would break without changing behavior.
+
+```
+# ❌ BAD — starts coding; asserts internals
+export function add(a, b) { return a + b }
+it("calls add", () => expect(add(1, 2)).toBe(3))
+
+# ✅ GOOD — contract + behavior + edges
+# I1 send is idempotent for the same key -> tests/api.test.ts::retries
+it("given the same Idempotency-Key, when send is retried, then the stored message is not duplicated")
+```
+
+Run a **mutation test** on the production files this task changes (StrykerJS / `@stryker-mutator/vitest-runner` unless the repo already has a mutator). Surviving mutants mean missing assertions: kill them or document an equivalent mutant. A green suite with live mutants is not done.

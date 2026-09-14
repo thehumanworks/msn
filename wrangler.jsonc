@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "msn",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-11",
+  "migrations": [{ "new_sqlite_classes": ["MsnDurableObject"], "tag": "v1" }],
+  "durable_objects": {
+    "bindings": [{ "class_name": "MsnDurableObject", "name": "MSN_DURABLE_OBJECT" }]
+  },
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
+  "secrets": { "required": ["ADMIN_TOKEN"] },
+  "observability": { "enabled": true },
+  "upload_source_maps": true
+}

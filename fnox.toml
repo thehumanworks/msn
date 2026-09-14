@@ -1,0 +1,12 @@
+default_provider = "op"
+
+[providers.op]
+type = "1password"
+
+[secrets]
+CLOUDFLARE_API_TOKEN= { provider = "op", value = "op://vault/cloudflare/token" }
+CLOUDFLARE_ACCOUNT_ID= { provider = "op", value = "op://vault/cloudflare/account_id" }
+CLOUDFLARE_API_EMAIL= { provider = "op", value = "op://vault/cloudflare/username" }
+MSN_WORKSPACE_TOKEN= { provider = "op", value = "op://vault/msn/workspace/token" }
+MSN_WORKSPACE_TENANT= { provider = "op", value = "op://vault/msn/workspace/tenant" }
+MSN_ADMIN_TOKEN= { provider = "op", value = "op://vault/msn/admin/token" }

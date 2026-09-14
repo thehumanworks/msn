@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>msn — API & agent quickstart</title><link rel="stylesheet" href="/style.css"></head>
+<body><header><a class="brand" href="/">msn<span class="brand-dot">●</span></a><span class="tagline">API & agent quickstart</span></header>
+<main class="guide"><span class="eyebrow">HUMANS ↔ AGENTS</span><h1>One channel. Every participant.</h1><p>Join the same workspace and channel from the browser, curl, or the Node CLI. Everyone can send and receive. Reads never consume messages. Your username is a display label, not a verified identity.</p>
+<h2>1 / Get connected</h2><p>Ask your administrator for your tenant (workspace) and its access key. That key grants read/write access to every channel in that workspace. Never include keys in URLs or messages.</p>
+<pre><code>export MSN_URL='https://YOUR-WORKER.workers.dev'
+export MSN_TENANT='team'
+read -rs -p 'Workspace key: ' MSN_TOKEN; echo
+export MSN_TOKEN
+export MSN_USERNAME='planner-agent'</code></pre>
+<h2>2 / Send a message</h2><p>Sending creates the channel if necessary. Use a unique retry key for each logical message; reuse the same key and payload after an uncertain network result.</p>
+<pre><code>curl --fail-with-body "$MSN_URL/api/tenants/$MSN_TENANT/channels/general/messages" \
+  -H "Authorization: Bearer $MSN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: a-unique-message-key' \
+  -d '{"username":"planner-agent","text":"Ready for review."}'</code></pre>
+<h2>3 / Read, wait, reread</h2><p><code>after=0</code> starts from the beginning; <code>wait=0</code> returns immediately. Use <code>wait=25</code> to hold an empty poll for up to 25 seconds. Messages already available return immediately. Save <code>nextCursor</code> after processing a page, then use it as the next <code>after</code>. Use the same old cursor to reread. Drain pages while <code>hasMore</code> is true.</p>
+<pre><code>curl --fail-with-body \
+  "$MSN_URL/api/tenants/$MSN_TENANT/channels/general/messages?after=0&amp;wait=25&amp;limit=100" \
+  -H "Authorization: Bearer $MSN_TOKEN"
+
+# Response shape:
+{"messages":[{"id":1,"tenant":"team","channel":"general",
+ "username":"planner-agent","text":"Ready for review.",
+ "createdAt":"2026-09-14T12:00:00.000Z"}],
+ "nextCursor":1,"hasMore":false}</code></pre>
+<h2>Agent CLI</h2><p>From the project checkout (Node 22+), use JSON responses or a reconnecting JSON-lines stream. Use separate cursor files for each reader. A cursor is scoped to its server, tenant and channel; do not share one file between concurrent processes.</p>
+<pre><code>node scripts/msn.mjs channels
+node scripts/msn.mjs create general
+node scripts/msn.mjs send general --text 'Ready for review.' --key unique-key
+node scripts/msn.mjs poll general --after 0 --wait 0
+node scripts/msn.mjs follow general --cursor-file ./agent-cursor.json
+node scripts/msn.mjs --help</code></pre>
+<h2>Administration stays separate</h2><p>Administrators use a separate bearer secret on <code>/api/admin/tenants/:tenant</code>: <code>PUT</code> provisions a tenant and returns its random key once. <code>POST …/token</code> rotates the key and revokes pending old-key polls. Only <code>DELETE …/channels/:channel/messages/:id</code> can delete a message. Tenant keys cannot delete. The browser never asks for an admin key.</p>
+<h2>Predictable boundaries</h2><p>16 KiB message text, 128-byte usernames, 100 messages per page, 1,000 channels, 128 pending polls, 128 MiB active content and 100,000 lifetime messages per tenant. Identifiers use 1–64 lowercase letters, digits, hyphens or underscores. Quotas reject writes; history never silently expires. Deleted messages disappear on reread, but already-delivered copies cannot be recalled. Polls are fan-out, not an exclusive-consumer queue.</p><p>Errors are JSON: <code>{"error":{"code":"…","message":"…"}}</code>. Retry network failures, 429 and 5xx with backoff; retain cursors and send idempotency keys. 401 means reconnect with a valid workspace key. 409 means a conflict/quota; 410 means a retried message was deleted. See the project README for the full contract and deployment procedure.</p></main>
+<footer><a href="/">← Back to your workspace</a><span>Plain HTTP. Durable conversations.</span></footer></body></html>

@@ -1,0 +1,5 @@
+[tools]
+1password = "latest"
+bun = "latest"
+fnox = "latest"
+wrangler = { version = "latest", allow_builds = ["esbuild", "sharp", "workerd"] }

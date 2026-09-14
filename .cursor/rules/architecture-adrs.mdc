@@ -1,0 +1,41 @@
+---
+description: Register every architectural decision as an immutable, time-stamped ADR
+alwaysApply: true
+---
+
+# Architecture Decision Records
+
+Every architectural decision (storage, tenancy, auth, APIs, limits, deployment topology, test/runtime contracts) is registered as an ADR **before or with** the change. Updating `docs/design.md` is not a substitute.
+
+## Immutable snapshots
+
+Each ADR is a **point-in-time** record of system state and rationale. Once written, **do not edit** it. A later choice is a new ADR that supersedes the old one. Fixing typos in an uncommitted draft is fine; changing the decision in a committed ADR is not.
+
+```
+docs/adr/0001-sqlite-durable-object-per-tenant.md   # frozen
+docs/adr/0002-capability-tokens-not-user-login.md  # frozen
+docs/adr/0003-supersede-0001-sharded-channels.md    # new snapshot; 0001 stays
+```
+
+```
+# ❌ BAD — rewrite history
+edit docs/adr/0001-...md to flip the decision
+patch docs/design.md and skip an ADR
+
+# ✅ GOOD — new document, old one untouched
+docs/adr/0004-yyyy-mm-dd-replace-long-poll-with-ws.md
+Status: Accepted
+Supersedes: 0001
+```
+
+## File format
+
+`docs/adr/NNNN-kebab-title.md`. Next number is max existing + 1. Include:
+
+- **Date** (the moment this was true)
+- **Status**: `Accepted` (frozen). Never mutate an Accepted ADR to `Superseded`; the successor names the predecessor.
+- **Context**: constraints and alternatives at that time
+- **Decision**: what was chosen
+- **Consequences**: what this snapshot implies, including rejected options
+
+Do not land architecture without the ADR. Read prior ADRs; do not contradict an Accepted ADR unless a successor records the new state.

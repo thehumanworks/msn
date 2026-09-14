@@ -1,0 +1,3 @@
+PASS deployed Chromium browser connects to main/general, displays durable history, fits desktop/mobile, and clears credentials on disconnect.
+PASS actual Node CLI reads the same deployed channel history.
+PASS zero browser JavaScript errors. Screenshots: docs/screenshots/{welcome,workspace,mobile}.png

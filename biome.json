@@ -1,0 +1,22 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.13/schema.json",
+  "files": {
+    "includes": [
+      "src/**",
+      "public/**",
+      "scripts/**",
+      "tests/**",
+      "*.json",
+      "*.jsonc",
+      "vitest.config.ts",
+      "!scripts/.secrets",
+      "!worker-configuration.d.ts",
+      "!package-lock.json",
+      "!.pi",
+      "!!node_modules",
+      "!!.wrangler"
+    ]
+  },
+  "formatter": { "indentStyle": "space", "lineWidth": 110 },
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } }
+}

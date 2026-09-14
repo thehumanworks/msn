@@ -1,0 +1,20 @@
+---
+description: Default subagent model is grok-4.6 xhigh fast unless the user picks another
+alwaysApply: true
+---
+
+# Default subagent model
+
+When launching a Task / subagent, set the model to **grok-4.6 xhigh fast** unless the user names a different model for that run.
+
+Pass the slug `cursor-grok-4.6-xhigh-fast`. Do not leave the model unset or use `inherit`.
+
+```
+# ❌ BAD — inherits parent / default
+Task({ subagent_type: "explore", prompt: "..." })
+
+# ✅ GOOD
+Task({ subagent_type: "explore", model: "cursor-grok-4.6-xhigh-fast", prompt: "..." })
+```
+
+If the user asks for another model (for example Claude, Composer, or GPT), use that model for that request only. The next subagent goes back to grok-4.6 xhigh fast.

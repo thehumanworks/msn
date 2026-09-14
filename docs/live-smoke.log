@@ -1,0 +1,7 @@
+PASS live assets, security headers and health
+PASS live multi-tenant and admin capability isolation
+PASS live bidirectional messaging, fan-out long-poll wake, timeout, single-poll, reread and pagination
+PASS live 20 concurrent writes and restricted admin deletion
+PASS live rotation revokes both old key and pending polls
+PASS live smoke content cleaned up (empty test tenants and retry tombstones retained)
+LIVE SMOKE PASSED

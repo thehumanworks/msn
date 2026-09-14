@@ -1,0 +1,33 @@
+---
+description: Research new dependencies with parallel subagents and persist current docs
+alwaysApply: true
+---
+
+# External library research
+
+If a task **depends on adding or replacing** an npm/package/runtime library, do not install or commit it until parallel research has picked one and current docs are in the workspace.
+
+Skip this only when the user names the exact package and version, or the dependency is already in `package.json`.
+
+## Parallel research (before the pick)
+
+In **one** turn, launch one Task subagent per serious candidate (or per axis: Workers/runtime fit, API surface, license/maintenance). Use `model: "cursor-grok-4.6-xhigh-fast"` and `subagent_type: "generalPurpose"`. Each prompt must fetch **current** official docs (not training memory) and return: fit for this repo, APIs/limits, license, maintenance, and reject reasons.
+
+```
+# ❌ BAD
+add zod from memory; npm install; start coding
+
+# ✅ GOOD — same message, multiple Tasks
+Task({ model: "cursor-grok-4.6-xhigh-fast", subagent_type: "generalPurpose", prompt: "Research library A from live docs..." })
+Task({ model: "cursor-grok-4.6-xhigh-fast", subagent_type: "generalPurpose", prompt: "Research library B from live docs..." })
+```
+
+The lead agent compares reports, picks the most appropriate option, and only then adds the dependency. Record an ADR if the choice is architectural.
+
+## Enrich the workspace
+
+After the pick, write a dated snapshot the lead agent **reads before implementing**:
+
+`docs/vendor/<package>/YYYY-MM-DD.md`
+
+Include retrieved APIs, install/usage, Workers/runtime constraints, limits, and source URLs. Do not paste entire vendor manuals. Prefer official docs and product MCP when available (Cloudflare: `AGENTS.md`). Stale training knowledge is not a substitute.
