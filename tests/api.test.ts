@@ -16,20 +16,41 @@ const call = (path: string, token?: string, init: RequestInit = {}) =>
     ...init,
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers },
   });
-async function tenant() {
+type Identity = { tenant: string; token?: string; username: string | null; usernamePrefix: string | null };
+const jsonBody = (data: unknown): RequestInit => ({
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(data),
+});
+async function tenant(bind?: Record<string, unknown>) {
   const name = `t-${crypto.randomUUID()}`;
-  const response = await call(`/api/admin/tenants/${name}`, ADMIN, { method: "PUT" });
+  const response = await call(`/api/admin/tenants/${name}`, ADMIN, {
+    method: "PUT",
+    ...(bind ? jsonBody(bind) : {}),
+  });
   expect(response.status).toBe(201);
-  const { token } = await response.json<{ token: string }>();
+  const identity = await response.json<Identity>();
   return {
     name,
-    token,
+    token: identity.token as string,
+    identity,
     path: `/api/tenants/${name}`,
     admin: `/api/admin/tenants/${name}`,
     stub: env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", name])),
   };
 }
 type Tenant = Awaited<ReturnType<typeof tenant>>;
+async function whoami(t: Tenant): Promise<Identity> {
+  const response = await call(t.path, t.token);
+  expect(response.status).toBe(200);
+  return response.json<Identity>();
+}
+async function rotate(t: Tenant, bind?: Record<string, unknown>): Promise<Identity> {
+  const response = await call(`${t.admin}/token`, ADMIN, { method: "POST", ...(bind ? jsonBody(bind) : {}) });
+  expect(response.status).toBe(200);
+  const identity = await response.json<Identity>();
+  t.token = identity.token as string;
+  return identity;
+}
 async function send(
   t: Tenant,
   content = "hello",
@@ -391,5 +412,167 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
       ).status,
     ).toBe(413);
     expect((await send(t, "x".repeat(16384))).status).toBe(201);
+  });
+
+  it("binds a token to one display name: mismatches are 403, store nothing and wake nobody", async () => {
+    const t = await tenant({ username: "thehuman" });
+    expect(t.identity).toEqual({
+      tenant: t.name,
+      token: expect.stringMatching(/^[a-f0-9]{64}$/),
+      username: "thehuman",
+      usernamePrefix: null,
+    });
+    expect(await whoami(t)).toEqual({ tenant: t.name, username: "thehuman", usernamePrefix: null });
+    await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
+    const poll = page(t, "?wait=3");
+    await expect.poll(() => pending(t)).toBe(1);
+    const denied = await send(t, "spoof", "general", "shared-key", "someone-else");
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({
+      error: { code: "username_bound", message: expect.stringContaining('"thehuman"') },
+    });
+    for (const name of ["THEHUMAN", " thehuman", "thehuman ", "thehuman2"])
+      expect((await send(t, "spoof", "general", undefined, name)).status, name).toBe(403);
+    expect(await pending(t)).toBe(1);
+    expect(await page(t)).toEqual({ messages: [], nextCursor: 0, hasMore: false });
+    const usage = await runInDurableObject(t.stub, (_, state) =>
+      state.storage.sql.exec("SELECT messages, bytes FROM usage").one(),
+    );
+    expect(usage).toEqual({ messages: 0, bytes: 0 });
+    // The rejected send did not reserve its idempotency key either.
+    const accepted = await send(t, "real", "general", "shared-key", "thehuman");
+    expect(accepted.status).toBe(201);
+    expect((await poll).messages.map((m) => [m.username, m.text])).toEqual([["thehuman", "real"]]);
+    expect((await send(t, "real", "general", "shared-key", "thehuman")).status).toBe(200);
+    expect((await page(t)).messages).toHaveLength(1);
+  });
+
+  it("binds a token to a display-name prefix", async () => {
+    const t = await tenant({ usernamePrefix: "agent-" });
+    expect(t.identity).toMatchObject({ username: null, usernamePrefix: "agent-" });
+    expect(await whoami(t)).toEqual({ tenant: t.name, username: null, usernamePrefix: "agent-" });
+    expect((await send(t, "seven", "general", undefined, "agent-7")).status).toBe(201);
+    expect((await send(t, "bare", "general", undefined, "agent-")).status).toBe(201);
+    for (const name of ["agent", "Agent-7", "human", " agent-7", "the agent-7"]) {
+      const denied = await send(t, "spoof", "general", undefined, name);
+      expect(denied.status, name).toBe(403);
+      expect((await denied.json<{ error: { code: string } }>()).error.code).toBe("username_bound");
+    }
+    expect((await page(t)).messages.map((m) => m.username)).toEqual(["agent-7", "agent-"]);
+  });
+
+  it("rotation keeps the bind by default, clears it with null and replaces it with a name or prefix", async () => {
+    const t = await tenant({ username: "thehuman" });
+    const first = t.token;
+    const kept = await rotate(t);
+    expect(kept).toEqual({
+      tenant: t.name,
+      token: expect.stringMatching(/^[a-f0-9]{64}$/),
+      username: "thehuman",
+      usernamePrefix: null,
+    });
+    expect(kept.token).not.toBe(first);
+    expect((await call(t.path, first)).status).toBe(401);
+    expect((await send(t, "x", "general", undefined, "other")).status).toBe(403);
+    expect((await send(t, "x", "general", undefined, "thehuman")).status).toBe(201);
+    expect(await rotate(t, { usernamePrefix: "agent-" })).toMatchObject({
+      username: null,
+      usernamePrefix: "agent-",
+    });
+    expect((await send(t, "x", "general", undefined, "thehuman")).status).toBe(403);
+    expect((await send(t, "x", "general", undefined, "agent-1")).status).toBe(201);
+    expect(await rotate(t, { username: null })).toMatchObject({ username: null, usernamePrefix: null });
+    expect((await send(t, "x", "general", undefined, "anyone at all")).status).toBe(201);
+    expect(await rotate(t, { usernamePrefix: null })).toMatchObject({ username: null, usernamePrefix: null });
+    expect(await rotate(t, { username: "late binder" })).toMatchObject({
+      username: "late binder",
+      usernamePrefix: null,
+    });
+    expect((await send(t, "x", "general", undefined, "anyone at all")).status).toBe(403);
+    expect((await send(t, "x", "general", undefined, "late binder")).status).toBe(201);
+    expect(await whoami(t)).toEqual({ tenant: t.name, username: "late binder", usernamePrefix: null });
+    expect((await page(t)).messages.map((m) => m.username)).toEqual([
+      "thehuman",
+      "agent-1",
+      "anyone at all",
+      "late binder",
+    ]);
+  });
+
+  it("unbound tenants keep the any-name behaviour, including rows migrated from schema v1", async () => {
+    const t = await tenant();
+    expect(t.identity).toEqual({
+      tenant: t.name,
+      token: expect.any(String),
+      username: null,
+      usernamePrefix: null,
+    });
+    expect(await whoami(t)).toEqual({ tenant: t.name, username: null, usernamePrefix: null });
+    expect((await send(t, "before", "general", undefined, "anyone")).status).toBe(201);
+    // Rewind the row to its v1 shape, then force a restart so the constructor migration runs again.
+    await runInDurableObject(t.stub, (_, state) => {
+      state.storage.sql.exec(`
+        ALTER TABLE tenant DROP COLUMN bound_username;
+        ALTER TABLE tenant DROP COLUMN bound_prefix;
+        DELETE FROM schema_version WHERE version = 2;
+      `);
+    });
+    await abortAllDurableObjects();
+    expect(await whoami(t)).toEqual({ tenant: t.name, username: null, usernamePrefix: null });
+    expect((await send(t, "after", "general", undefined, "someone else")).status).toBe(201);
+    expect((await page(t)).messages.map((m) => m.username)).toEqual(["anyone", "someone else"]);
+    const restarted = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name]));
+    const versions = await runInDurableObject(restarted, (_, state) =>
+      state.storage.sql
+        .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
+        .toArray(),
+    );
+    expect(versions).toEqual([{ version: 1 }, { version: 2 }]);
+    expect((await tenant({ username: null })).identity).toMatchObject({
+      username: null,
+      usernamePrefix: null,
+    });
+  });
+
+  it("rejects malformed bindings on provision and rotation without side effects", async () => {
+    const name = `t-${crypto.randomUUID()}`;
+    const path = `/api/admin/tenants/${name}`;
+    for (const bind of [
+      { username: "a", usernamePrefix: "b" },
+      { username: "" },
+      { username: "   " },
+      { username: "a".repeat(129) },
+      { usernamePrefix: "" },
+      { username: 5 },
+      { usernamePrefix: ["agent-"] },
+    ]) {
+      const response = await call(path, ADMIN, { method: "PUT", ...jsonBody(bind) });
+      expect(response.status, JSON.stringify(bind)).toBe(400);
+      expect((await response.json<{ error: { code: string } }>()).error.code).toBe("invalid_binding");
+    }
+    expect(
+      (
+        await call(path, ADMIN, {
+          method: "PUT",
+          headers: { "Content-Type": "text/plain" },
+          body: "username=x",
+        })
+      ).status,
+    ).toBe(415);
+    expect(
+      (await call(path, ADMIN, { method: "PUT", headers: { "Content-Type": "application/json" }, body: "{" }))
+        .status,
+    ).toBe(400);
+    expect((await call(`/api/tenants/${name}`, WRONG)).status).toBe(401);
+    const created = await call(path, ADMIN, { method: "PUT", ...jsonBody({ username: "a".repeat(128) }) });
+    expect(created.status).toBe(201);
+    const t = await tenant({ username: "thehuman" });
+    const bad = await call(`${t.admin}/token`, ADMIN, {
+      method: "POST",
+      ...jsonBody({ username: "a", usernamePrefix: "b" }),
+    });
+    expect(bad.status).toBe(400);
+    expect((await send(t, "still me", "general", undefined, "thehuman")).status).toBe(201);
+    expect(await whoami(t)).toMatchObject({ username: "thehuman" });
   });
 });

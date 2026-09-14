@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   admin,
+  type Binding,
   bearer,
+  binding,
   body,
   digest,
   equalHash,
@@ -10,6 +12,7 @@ import {
   integer,
   json,
   newToken,
+  optionalBody,
   slug,
   text,
 } from "./http";
@@ -23,6 +26,7 @@ export type Message = {
   createdAt: string;
 };
 type MessageRow = { id: number; channel: string; username: string; text: string; createdAt: string };
+type TenantRow = { token_hash: string; bound_username: string | null; bound_prefix: string | null };
 type Waiter = { channel: string; wake: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
@@ -52,15 +56,55 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
         INSERT OR IGNORE INTO schema_version VALUES (1);
       `);
+      // v2: a token may be bound to one display name or a name prefix (ADR 0002). Existing rows stay NULL.
+      const versions = ctx.storage.sql
+        .exec<{ version: number }>("SELECT version FROM schema_version")
+        .toArray()
+        .map((row) => row.version);
+      if (!versions.includes(2)) {
+        ctx.storage.sql.exec(`
+          ALTER TABLE tenant ADD COLUMN bound_username TEXT;
+          ALTER TABLE tenant ADD COLUMN bound_prefix TEXT;
+          INSERT INTO schema_version VALUES (2);
+        `);
+      }
     });
   }
 
-  private authorize(hash: string): void {
-    const row = this.ctx.storage.sql
-      .exec<{ token_hash: string }>("SELECT token_hash FROM tenant WHERE singleton = 1")
+  private tenantRow(): TenantRow | undefined {
+    return this.ctx.storage.sql
+      .exec<TenantRow>("SELECT token_hash, bound_username, bound_prefix FROM tenant WHERE singleton = 1")
       .toArray()[0];
+  }
+
+  private authorize(hash: string): TenantRow {
+    const row = this.tenantRow();
     if (!row || !equalHash(hash, row.token_hash))
       throw new HttpError(401, "unauthorized", "Unknown tenant or invalid access key.");
+    return row;
+  }
+
+  /** A bound capability may only send as its bound name (or under its bound prefix). */
+  private requireBoundName(row: TenantRow, username: string): void {
+    if (row.bound_username !== null && username !== row.bound_username) {
+      throw new HttpError(403, "username_bound", `This access key may only send as "${row.bound_username}".`);
+    }
+    if (row.bound_prefix !== null && !username.startsWith(row.bound_prefix)) {
+      throw new HttpError(
+        403,
+        "username_bound",
+        `This access key may only send as a name starting with "${row.bound_prefix}".`,
+      );
+    }
+  }
+
+  private identity(tenant: string, row: Omit<TenantRow, "token_hash">, token?: string) {
+    return {
+      tenant,
+      ...(token === undefined ? {} : { token }),
+      username: row.bound_username,
+      usernamePrefix: row.bound_prefix,
+    };
   }
 
   private requireTenant(): void {
@@ -240,20 +284,40 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (isAdmin) {
         await admin(request, this.env);
         if (!rest.length && request.method === "PUT") {
+          const bind: Binding = binding(await optionalBody(request)) ?? { username: null, prefix: null };
           const token = newToken();
           const hash = await digest(token);
           if (this.ctx.storage.sql.exec("SELECT singleton FROM tenant").toArray().length)
             throw new HttpError(409, "tenant_exists", "Tenant already exists. Rotate its key instead.");
-          this.ctx.storage.sql.exec("INSERT INTO tenant VALUES (1, ?)", hash);
-          return json({ tenant, token }, 201);
+          this.ctx.storage.sql.exec(
+            "INSERT INTO tenant (singleton, token_hash, bound_username, bound_prefix) VALUES (1, ?, ?, ?)",
+            hash,
+            bind.username,
+            bind.prefix,
+          );
+          return json(
+            this.identity(tenant, { bound_username: bind.username, bound_prefix: bind.prefix }, token),
+            201,
+          );
         }
         this.requireTenant();
         if (rest.length === 1 && rest[0] === "token" && request.method === "POST") {
+          // No body keeps the current bind; an explicit null clears it; a string rebinds (ADR 0002).
+          const bind = binding(await optionalBody(request));
           const token = newToken();
           const hash = await digest(token);
-          this.ctx.storage.sql.exec("UPDATE tenant SET token_hash = ? WHERE singleton = 1", hash);
+          if (bind) {
+            this.ctx.storage.sql.exec(
+              "UPDATE tenant SET token_hash = ?, bound_username = ?, bound_prefix = ? WHERE singleton = 1",
+              hash,
+              bind.username,
+              bind.prefix,
+            );
+          } else {
+            this.ctx.storage.sql.exec("UPDATE tenant SET token_hash = ? WHERE singleton = 1", hash);
+          }
           for (const waiter of this.waiters) waiter.wake();
-          return json({ tenant, token });
+          return json(this.identity(tenant, this.authorize(hash), token));
         }
         if (
           rest.length === 4 &&
@@ -291,7 +355,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         const username = input ? text(input.username, "username", 128) : "";
         const content = input ? text(input.text, "text", 16384) : "";
         const payloadHash = input ? await digest(JSON.stringify([username, content])) : "";
-        this.authorize(hash);
+        const capability = this.authorize(hash);
+        // Bound-name check precedes any transaction: a rejected send stores nothing and wakes nobody.
+        if (input) this.requireBoundName(capability, username);
+        if (!rest.length && request.method === "GET") return json(this.identity(tenant, capability));
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
           if (after) slug(after);

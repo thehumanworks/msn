@@ -121,13 +121,38 @@ export async function body(request: Request): Promise<Record<string, unknown>> {
   return parsed as Record<string, unknown>;
 }
 
-export function text(value: unknown, field: string, maxBytes: number): string {
+/** Admin routes take an optional JSON body: no Content-Type means "no fields", not an error. */
+export async function optionalBody(request: Request): Promise<Record<string, unknown>> {
+  if (!request.headers.has("Content-Type")) return {};
+  return body(request);
+}
+
+export function text(value: unknown, field: string, maxBytes: number, code = "invalid_message"): string {
   if (typeof value !== "string" || !value.trim() || new TextEncoder().encode(value).length > maxBytes) {
-    throw new HttpError(
-      400,
-      "invalid_message",
-      `${field} must be non-blank text, at most ${maxBytes} UTF-8 bytes.`,
-    );
+    throw new HttpError(400, code, `${field} must be non-blank text, at most ${maxBytes} UTF-8 bytes.`);
   }
   return value;
+}
+
+/** A token is bound to exactly one display name, to a name prefix, or to nothing. */
+export type Binding = { username: string | null; prefix: string | null };
+
+/**
+ * Reads `username` / `usernamePrefix` from an admin body. Returns undefined when neither key is
+ * present (provision: unbound; rotate: keep). An explicit null on either key clears the bind.
+ */
+export function binding(input: Record<string, unknown>): Binding | undefined {
+  if (!("username" in input) && !("usernamePrefix" in input)) return undefined;
+  const { username, usernamePrefix } = input;
+  if (typeof username === "string" && typeof usernamePrefix === "string") {
+    throw new HttpError(400, "invalid_binding", "Use either username or usernamePrefix, not both.");
+  }
+  if (typeof username === "string")
+    return { username: text(username, "username", 128, "invalid_binding"), prefix: null };
+  if (typeof usernamePrefix === "string") {
+    return { username: null, prefix: text(usernamePrefix, "usernamePrefix", 128, "invalid_binding") };
+  }
+  if ((username ?? null) === null && (usernamePrefix ?? null) === null)
+    return { username: null, prefix: null };
+  throw new HttpError(400, "invalid_binding", "username and usernamePrefix must be strings or null.");
 }
