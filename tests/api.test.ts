@@ -36,11 +36,12 @@ async function send(
   channel = "general",
   key?: string,
   username = "human / agent",
+  contentType?: string,
 ) {
   return call(`${t.path}/channels/${channel}/messages`, t.token, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
-    body: JSON.stringify({ username, text: content }),
+    body: JSON.stringify({ username, text: content, ...(contentType === undefined ? {} : { contentType }) }),
   });
 }
 async function page(t: Tenant, query = "", channel = "general"): Promise<Page> {
@@ -98,12 +99,111 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     expect(first.messages.map((m) => m.username)).toEqual(["Tomas", "planner-agent"]);
     expect(first.messages[0]).toMatchObject({ tenant: t.name, channel: "general", text: "Hello agent 👋" });
     expect(new Date(first.messages[0].createdAt).toISOString()).toBe(first.messages[0].createdAt);
+    expect(first.messages.map((m) => m.contentType)).toEqual(["text/plain", "text/plain"]); // omitted defaults
     expect(await page(t)).toEqual(first); // reads do not consume
     expect(await page(t, `?after=${first.nextCursor}`)).toEqual({
       messages: [],
       nextCursor: first.nextCursor,
       hasMore: false,
     });
+  });
+
+  it("types application/json payloads, rejects non-JSON text and unknown types, and keeps text/plain default", async () => {
+    const t = await tenant();
+    const command = '{"op":"ping","task":42}';
+    const typed = await send(t, command, "general", "cmd-1", "planner-agent", "application/json");
+    expect(typed.status).toBe(201);
+    const explicit = await send(t, "Looks good to me", "general", undefined, "Tomas", "text/plain");
+    expect(explicit.status).toBe(201);
+    for (const value of ["[1,2]", '"quoted"', "42", " {} "]) {
+      expect((await send(t, value, "general", undefined, "agent", "application/json")).status, value).toBe(
+        201,
+      );
+    }
+    for (const value of ['{"op":', "not json", "{'op':'ping'}", ""]) {
+      const response = await send(t, value, "general", undefined, "agent", "application/json");
+      expect(response.status, value).toBe(400);
+      expect((await response.json<{ error: { code: string } }>()).error.code).toBe("invalid_message");
+    }
+    for (const value of ["text/html", "application/json; charset=utf-8", "", null, 1]) {
+      const response = await send(t, "x", "general", undefined, "agent", value as string);
+      expect(response.status, String(value)).toBe(400);
+      expect((await response.json<{ error: { code: string } }>()).error.code).toBe("invalid_content_type");
+    }
+    const { messages } = await page(t);
+    expect(messages.map((m) => [m.contentType, m.text])).toEqual([
+      ["application/json", command],
+      ["text/plain", "Looks good to me"],
+      ["application/json", "[1,2]"],
+      ["application/json", '"quoted"'],
+      ["application/json", "42"],
+      ["application/json", " {} "],
+    ]);
+    expect(
+      messages.filter((m) => m.contentType === "application/json").map((m) => JSON.parse(m.text)),
+    ).toEqual([{ op: "ping", task: 42 }, [1, 2], "quoted", 42, {}]);
+    expect((await send(t, "🙂".repeat(4097), "general", undefined, "agent", "application/json")).status).toBe(
+      400,
+    );
+    const big = JSON.stringify({ pad: "x".repeat(16384 - 10) });
+    expect(new TextEncoder().encode(big).length).toBe(16384);
+    expect((await send(t, big, "general", undefined, "agent", "application/json")).status).toBe(201);
+    expect((await send(t, `${big} `, "general", undefined, "agent", "application/json")).status).toBe(400);
+  });
+
+  it("includes contentType in the idempotency digest and replays typed messages intact", async () => {
+    const t = await tenant();
+    const body = '{"op":"ping"}';
+    const first = await send(t, body, "general", "typed", "agent", "application/json");
+    expect(first.status).toBe(201);
+    const replay = await send(t, body, "general", "typed", "agent", "application/json");
+    expect(replay.status).toBe(200);
+    const created = await first.json<{ message: Message; replayed: boolean }>();
+    expect(await replay.json()).toEqual({ message: created.message, replayed: true });
+    expect(created.message.contentType).toBe("application/json");
+    expect((await send(t, body, "general", "typed", "agent", "text/plain")).status).toBe(409);
+    expect((await send(t, body, "general", "typed", "agent")).status).toBe(409);
+    expect((await send(t, body, "general", "untyped", "agent")).status).toBe(201);
+    expect((await send(t, body, "general", "untyped", "agent", "text/plain")).status).toBe(200);
+    expect((await send(t, body, "general", "untyped", "agent", "application/json")).status).toBe(409);
+    expect((await page(t)).messages).toHaveLength(2);
+  });
+
+  it("migrates a version-1 schema in place so older rows read back as text/plain", async () => {
+    const t = await tenant();
+    await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
+    await runInDurableObject(t.stub, (_, state) => {
+      state.storage.transactionSync(() => {
+        state.storage.sql.exec("ALTER TABLE messages DROP COLUMN contentType");
+        state.storage.sql.exec("DELETE FROM schema_version WHERE version = 2");
+        state.storage.sql.exec(
+          "INSERT INTO messages(channel, username, text, createdAt, key, digest, bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "general",
+          "legacy",
+          "written before contentType existed",
+          new Date().toISOString(),
+          null,
+          "legacy-digest",
+          0,
+        );
+      });
+    });
+    await abortAllDurableObjects();
+    // The constructor migration runs on the first request after the restart; use a fresh stub handle.
+    const restarted = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name]));
+    const versions = await runInDurableObject(restarted, (_, state) =>
+      state.storage.sql
+        .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
+        .toArray(),
+    );
+    expect(versions).toEqual([{ version: 1 }, { version: 2 }]);
+    expect((await send(t, '{"op":"after"}', "general", undefined, "agent", "application/json")).status).toBe(
+      201,
+    );
+    expect((await page(t)).messages.map((m) => [m.username, m.contentType])).toEqual([
+      ["legacy", "text/plain"],
+      ["agent", "application/json"],
+    ]);
   });
 
   it("keeps 60 concurrent sends without lost writes, across independent tenants and channels", async () => {

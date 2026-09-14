@@ -12,6 +12,7 @@ Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
 node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY]
+node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
 node scripts/msn.mjs provision TENANT
@@ -21,8 +22,14 @@ node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
 follow prints one JSON message per line; cursor files are tenant/channel/server-bound.
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
+--json sends contentType application/json; invalid JSON exits 2 without any request.
+Messages carry contentType (text/plain default); only parse text when it is application/json.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
 `;
+
+class UsageError extends Error {
+  exitCode = 2;
+}
 
 function number(value, fallback, max) {
   if (value === undefined) return fallback;
@@ -50,6 +57,7 @@ export async function run({
     options: {
       help: { type: "boolean", short: "h" },
       text: { type: "string" },
+      json: { type: "string" },
       key: { type: "string" },
       after: { type: "string" },
       wait: { type: "string" },
@@ -123,8 +131,21 @@ export async function run({
     return;
   }
   if (command === "send") {
-    if (!env.MSN_USERNAME?.trim() || !values.text?.trim())
-      throw new Error("Set MSN_USERNAME and pass --text.");
+    if (values.text !== undefined && values.json !== undefined)
+      throw new UsageError("Pass either --text or --json, not both.");
+    const content = values.json ?? values.text;
+    if (!env.MSN_USERNAME?.trim() || !content?.trim())
+      throw new UsageError("Set MSN_USERNAME and pass --text or --json.");
+    const payload = { username: env.MSN_USERNAME, text: content };
+    if (values.json !== undefined) {
+      // Validate locally so malformed JSON never reaches the Worker.
+      try {
+        JSON.parse(content);
+      } catch {
+        throw new UsageError("--json must be valid JSON.");
+      }
+      payload.contentType = "application/json";
+    }
     const key = values.key ?? randomUUID();
     err(`Idempotency-Key: ${key}`);
     out(
@@ -132,7 +153,7 @@ export async function run({
         await request(`${path}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Idempotency-Key": key },
-          body: JSON.stringify({ username: env.MSN_USERNAME, text: values.text }),
+          body: JSON.stringify(payload),
         }),
       ),
     );
@@ -196,7 +217,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   run({ signal: controller.signal }).catch((error) => {
     if (!controller.signal.aborted) {
       console.error(error.message);
-      process.exitCode = 1;
+      process.exitCode = error.exitCode ?? 1;
     }
   });
 }

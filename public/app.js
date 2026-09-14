@@ -36,6 +36,15 @@ function stopPolling() {
   polling = null;
 }
 
+/** Pretty-print an application/json body as text; unparsable bodies fall back to the raw text. */
+function pretty(text) {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function render(messages) {
   if (messages.length) $("messages").querySelector(".empty")?.remove();
   for (const message of messages) {
@@ -55,8 +64,16 @@ function render(messages) {
     const label = document.createElement("span");
     label.textContent = `#${message.channel} · ${message.id}`;
     meta.append(name, time, label);
-    const content = document.createElement("p");
-    content.textContent = message.text;
+    // Untrusted content only ever goes through textContent, whatever its contentType claims.
+    const structured = message.contentType === "application/json";
+    if (structured) {
+      const kind = document.createElement("span");
+      kind.className = "message-kind";
+      kind.textContent = "application/json";
+      meta.append(kind);
+    }
+    const content = document.createElement(structured ? "pre" : "p");
+    content.textContent = structured ? pretty(message.text) : message.text;
     article.append(meta, content);
     $("messages").append(article);
     if (seen.size > 1000) {

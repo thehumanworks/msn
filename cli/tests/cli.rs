@@ -13,6 +13,8 @@
 //! I10 status_401_exits_3 / status_404_exits_4 / network_refusal_exits_6 / delete_204
 //! I11 invalid_slug_exits_2
 //! I12 help_lists_commands_and_env
+//! I13 send_json_sets_content_type / send_json_invalid_exits_2_before_network
+//!     / send_json_from_stdin / send_json_invalid_utf8_stdin_exits_2 / send_text_and_json_conflict
 //!
 //! Edge: empty_response_body, non_json_error_body, send_text_from_stdin, follow_sigint_exits_0
 
@@ -213,6 +215,147 @@ fn send_generates_uuid_key() {
     let payload: serde_json::Value = serde_json::from_slice(&rec.body).unwrap();
     assert_eq!(payload["username"], "free name");
     assert_eq!(payload["text"], "hello");
+    assert!(
+        payload.get("contentType").is_none(),
+        "--text sends omit contentType (Worker default text/plain)"
+    );
+}
+
+#[test]
+fn send_json_sets_content_type() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"message":{"id":3,"contentType":"application/json"},"replayed":false}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "planner-agent",
+        "send",
+        "general",
+        "--json",
+        r#"{"op":"ping","task":42}"#,
+        "--key",
+        "cmd-1",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert!(stdout_str(&out).contains(r#""contentType":"application/json""#));
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 1);
+    assert_eq!(
+        rec[0].headers.get("idempotency-key").map(String::as_str),
+        Some("cmd-1")
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&rec[0].body).unwrap();
+    assert_eq!(payload["username"], "planner-agent");
+    assert_eq!(payload["text"], r#"{"op":"ping","task":42}"#);
+    assert_eq!(payload["contentType"], "application/json");
+}
+
+#[test]
+fn send_json_invalid_exits_2_before_network() {
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":1}}"#)]);
+    let url = server.url();
+    for json in [r#"{"op":"#, "not json", "{'op':'ping'}", "", "  "] {
+        let mut args = tenant_args(&url).to_vec();
+        args.extend(["--username", "u", "send", "general", "--json", json]);
+        let out = output_of(&args);
+        assert_eq!(out.status.code(), Some(2), "{json:?} {}", stderr_str(&out));
+        assert!(stderr_str(&out).contains("JSON"), "{json:?}");
+        assert!(
+            !stderr_str(&out).contains("Idempotency-Key"),
+            "no retry key for a rejected payload: {json:?}"
+        );
+    }
+    assert!(
+        server.recorded().is_empty(),
+        "invalid JSON must never be sent"
+    );
+}
+
+#[test]
+fn send_json_from_stdin() {
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":2}}"#)]);
+    let url = server.url();
+    let mut child = bin()
+        .args(tenant_args(&url))
+        .args(["--username", "pipe", "send", "general", "--json", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("{\"op\":\"ping\",\"note\":\"héllo 👋\"}\n".as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(payload["text"], "{\"op\":\"ping\",\"note\":\"héllo 👋\"}\n");
+    assert_eq!(payload["contentType"], "application/json");
+}
+
+#[test]
+fn send_json_invalid_utf8_stdin_exits_2() {
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":2}}"#)]);
+    let url = server.url();
+    let mut child = bin()
+        .args(tenant_args(&url))
+        .args(["--username", "pipe", "send", "general", "--json", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"op\":\"\xff\xfe\"}")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("UTF-8"));
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn send_text_and_json_conflict() {
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":1}}"#)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "u",
+        "send",
+        "general",
+        "--text",
+        "x",
+        "--json",
+        "{}",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "u", "send", "general"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+    assert!(server.recorded().is_empty());
 }
 
 #[test]

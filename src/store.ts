@@ -3,6 +3,8 @@ import {
   admin,
   bearer,
   body,
+  type ContentType,
+  contentType,
   digest,
   equalHash,
   failure,
@@ -20,9 +22,18 @@ export type Message = {
   channel: string;
   username: string;
   text: string;
+  contentType: ContentType;
   createdAt: string;
 };
-type MessageRow = { id: number; channel: string; username: string; text: string; createdAt: string };
+type MessageRow = {
+  id: number;
+  channel: string;
+  username: string;
+  text: string;
+  contentType: ContentType;
+  createdAt: string;
+};
+const MESSAGE_COLUMNS = "id, channel, username, text, contentType, createdAt";
 type Waiter = { channel: string; wake: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
@@ -52,6 +63,13 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
         INSERT OR IGNORE INTO schema_version VALUES (1);
       `);
+      // Version 2: optional payload typing. Existing rows default to text/plain.
+      if (!ctx.storage.sql.exec("SELECT version FROM schema_version WHERE version = 2").toArray().length) {
+        ctx.storage.sql.exec(
+          "ALTER TABLE messages ADD COLUMN contentType TEXT NOT NULL DEFAULT 'text/plain'",
+        );
+        ctx.storage.sql.exec("INSERT INTO schema_version VALUES (2)");
+      }
     });
   }
 
@@ -92,7 +110,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   private page(tenant: string, channel: string, after: number, limit: number) {
     const rows = this.ctx.storage.sql
       .exec<MessageRow>(
-        "SELECT id, channel, username, text, createdAt FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?",
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
         channel,
         after,
         limit + 1,
@@ -165,6 +183,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     channel: string,
     username: string,
     content: string,
+    type: ContentType,
     key: string | null,
     hash: string,
   ): Response {
@@ -172,7 +191,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (key) {
         const old = this.ctx.storage.sql
           .exec<MessageRow & { digest: string; deleted: number }>(
-            "SELECT id, channel, username, text, createdAt, digest, deleted FROM messages WHERE channel = ? AND key = ?",
+            `SELECT ${MESSAGE_COLUMNS}, digest, deleted FROM messages WHERE channel = ? AND key = ?`,
             channel,
             key,
           )
@@ -208,10 +227,11 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          "INSERT INTO messages(channel, username, text, createdAt, key, digest, bytes) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, channel, username, text, createdAt",
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
+          type,
           new Date().toISOString(),
           key,
           hash,
@@ -290,7 +310,13 @@ export class MsnDurableObject extends DurableObject<Env> {
             : null;
         const username = input ? text(input.username, "username", 128) : "";
         const content = input ? text(input.text, "text", 16384) : "";
-        const payloadHash = input ? await digest(JSON.stringify([username, content])) : "";
+        const type = input ? contentType(input.contentType, content) : "text/plain";
+        // text/plain keeps the pre-typing digest input so retries of older messages still replay.
+        const payloadHash = input
+          ? await digest(
+              JSON.stringify(type === "text/plain" ? [username, content] : [username, content, type]),
+            )
+          : "";
         this.authorize(hash);
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
@@ -325,7 +351,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                   "invalid_key",
                   "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
                 );
-              return this.send(tenant, channel, username, content, key, payloadHash);
+              return this.send(tenant, channel, username, content, type, key, payloadHash);
             }
             if (request.method === "GET") {
               this.requireChannel(channel);

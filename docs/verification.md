@@ -59,6 +59,21 @@ Against `https://msn.rodat-human-ada.workers.dev`, tenant `main`, via `fnox run 
 
 Follow (first attempt used `--after` and `--cursor-file` together and exited 2 before polling). Repeat on `cli-follow-1789421714` with `--cursor-file` only: send id 6 (`follow-arrives`) appeared as one JSON line; cursor file had `tenant=main`, `channel=cli-follow-1789421714`, `after=6`, mode `0600`; then `delete` id 6. No smoke message text remains on `main`. Empty uniquely named channels/tenants remain (no delete-channel API).
 
+## Optional message payload typing (`contentType`, issue #5) — 2026-09-14
+
+Verification contract: I1 existing sends stay `text/plain` (field omitted → `tests/api.test.ts::round-trips…`, `tests/cli.test.mjs::--text sends omit contentType`, `cli/tests/cli.rs::send_generates_uuid_key`); I2 invalid `--json` never reaches the Worker with exit 2 (`tests/cli.test.mjs::--json validates locally`, `cli/tests/cli.rs::send_json_invalid_exits_2_before_network`, `send_json_invalid_utf8_stdin_exits_2`, `tests/browser.spec.mjs` CLI exit-2 check); I3 Worker rejects `application/json` whose `text` is not JSON with 400 (`tests/api.test.ts::types application/json payloads…`); I4 inbox never interprets JSON as HTML (`tests/browser.spec.mjs::untrusted content is plain text…` posts an `application/json` body containing `<img onerror>` and `<script>` strings; asserts `<pre>` text, zero child elements, no `window.pwned`); I5 digest includes `contentType` (`tests/api.test.ts::includes contentType in the idempotency digest…`); I6 schema migration v1→v2 (`tests/api.test.ts::migrates a version-1 schema…`); I7 docs (`README.md`, `cli/README.md`, `public/guide.html`, ADR `docs/adr/0002-optional-message-content-type.md`).
+
+Observed results (this checkout, Node 22, bun 1.4.2 for install, Rust 1.94 stable):
+
+- `bun run typecheck`: exit 0. `bun run lint`: `Checked 18 files … No fixes applied.`
+- `vitest run`: `Tests 20 passed (20)` (17 existing + 3 new Worker cases on real workerd SQLite DOs).
+- `node --test tests/cli.test.mjs`: `pass 7, fail 0` (6 existing + 1 new).
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`: clean.
+- `cargo test --test cli`: `40 passed` (35 existing + 5 new: `send_json_sets_content_type`, `send_json_invalid_exits_2_before_network`, `send_json_from_stdin`, `send_json_invalid_utf8_stdin_exits_2`, `send_text_and_json_conflict`). `cargo test --lib`: 17 pass plus 3 new `validate_json`/`read_json` cases; the pre-existing `cursor::tests::given_unreadable_cursor_when_load_then_generic` fails only because this container runs as root (a `0o000` file is still readable), on the unmodified tree as well; it is unrelated to this change and passes on CI's non-root runners.
+- Playwright (`tests/browser.spec.mjs`, desktop + mobile Chromium against `wrangler dev`): `10 passed`. The first test now also sends `--json '{"op":"ping","task":42}'` through the real Node CLI, checks the inbox renders it pretty-printed in `<pre>` with an `application/json` marker, confirms `poll` reports `contentType` per message, and confirms an invalid `--json` exits 2. In this container Playwright 1.63 had to be pointed at the preinstalled Chromium via `launchOptions.executablePath` in a session-only config; the committed config is unchanged. Across three full runs, one mobile run failed the unmodified "network-uncertain sends preserve drafts" test: the live long-poll overwrote the status text after the deliberately aborted (but server-stored) send, before the assertion read it. That race predates this change and is not touched here.
+
+Not run: live deployment smoke (no production credentials in this session); mutation testing (no mutator is configured for the Worker, and `cargo mutants` was not run).
+
 ## GitHub Release binary — 2026-09-14
 
 - Tag: `v0.1.1` — https://github.com/thehumanworks/msn/releases/tag/v0.1.1
