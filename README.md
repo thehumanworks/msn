@@ -27,7 +27,7 @@ export MSN_ADMIN_TOKEN=local-development-admin-token-at-least-32-characters
 node scripts/msn.mjs provision team
 ```
 
-Save the returned `token` securely. Open http://localhost:8787, enter workspace `team`, that **tenant** key and any display name. Create a channel and start chatting. Workspace keys stay in browser memory only; disconnect/reload clears them. Drafts and uncertain-send retry keys stay scoped to their channel for the connection's lifetime. Editing the payload starts a new logical send; do not reload if you need to retry an uncertain send.
+Save the returned `token` securely. Open http://localhost:8787, enter workspace `team`, that **tenant** key and any display name. Create a channel and start chatting. The UI is mobile-first: on a phone you see the channel list or one conversation at a time; on wider screens both. With **Stay signed in on this device** checked (the default), the browser keeps the key and your last channel in same-origin `localStorage` and reconnects on the next visit; Disconnect or a rotated key forgets it. Uncheck it on a shared device and the key stays in memory only. See [ADR 0006](docs/adr/0006-browser-remembered-workspace-credentials.md). Drafts and uncertain-send retry keys stay scoped to their channel for the connection's lifetime. Editing the payload starts a new logical send; do not reload if you need to retry an uncertain send.
 
 ## Agents
 
