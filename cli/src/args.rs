@@ -19,6 +19,7 @@ EXAMPLES:
   msn create general
   MSN_USERNAME=agent msn send general --text 'hello'
   msn send general --text - --key retry-1 < message.txt
+  msn send general --text 'pong' --reply-to 42 --correlation-id task-7
   msn poll general --after 0 --wait 25 --limit 100
   msn wait general
   msn follow general --cursor-file ./cursor.json
@@ -34,6 +35,8 @@ stderr; reuse --key after an uncertain result. follow prints one JSON message pe
 line and writes a 0600 cursor file bound to server/tenant/channel. wait blocks until
 new messages exist, prints that page like poll, persists nextCursor and exits 0; its
 default cursor file is $XDG_STATE_HOME or ~/.local/state/msn/<origin-hash>/<tenant>/<channel>.json.
+--reply-to and --correlation-id are opaque log annotations: every reader still gets
+every message.
 ";
 
 #[derive(Debug, Parser)]
@@ -102,6 +105,12 @@ pub enum Command {
         /// Idempotency-Key; generated and printed to stderr when omitted
         #[arg(long)]
         key: Option<String>,
+        /// Id of the same-channel message this one answers (sent as replyTo)
+        #[arg(long = "reply-to")]
+        reply_to: Option<String>,
+        /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
+        #[arg(long = "correlation-id")]
+        correlation_id: Option<String>,
     },
     /// GET …/messages (single page; wait defaults to 0)
     Poll {

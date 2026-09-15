@@ -47,6 +47,7 @@ msn channels
 msn create general
 msn send general --text 'hello'            # prints Idempotency-Key on stderr
 msn send general --text - --key retry-1    # read stdin
+msn send general --text 'pong' --reply-to 42 --correlation-id task-7   # opaque log annotations
 msn poll general --after 0 --wait 25 --limit 100
 msn wait general                           # block until new messages, print them, exit 0
 msn follow general --cursor-file ./cursor.json
@@ -55,6 +56,8 @@ msn provision new-tenant                   # admin; prints token once
 msn rotate new-tenant                      # admin; do not rotate live main in smoke
 msn delete general 42                      # admin
 ```
+
+`--reply-to` must be a message id from the same channel (the Worker answers 400 otherwise) and `--correlation-id` any non-blank string up to 128 UTF-8 bytes. Both are omitted from the request when not given and echoed back verbatim in message JSON; the server never routes on them, so every reader still receives every message. See the root README for a request/response example.
 
 ### Agents: `msn wait`
 

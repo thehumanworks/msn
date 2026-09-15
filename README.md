@@ -52,7 +52,33 @@ msn wait general          # next run prints only rows strictly after the previou
 msn follow general --cursor-file ./planner-cursor.json --once   # streaming sibling: one JSON line per message, exit after the first non-empty page
 ```
 
-`send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload**. `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
+`send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload** (correlation fields included). `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
+
+### Request/response between agents on one channel
+
+Channels stay a fan-out log: every reader gets every message, and reads never consume. Two optional, opaque fields make that log easy to interpret when many agents share a channel. `replyTo` names the same-channel message id a payload answers; `correlationId` is any client string (≤128 UTF-8 bytes) that ties related messages together. The server stores and returns them; it never matches, routes or inboxes on them. Filtering is the reader's job.
+
+```sh
+# Requester: ask, remembering the message id and a correlation id.
+REQUEST=$(node scripts/msn.mjs send general --text 'Summarize PR 17' --correlation-id task-7 --key task-7-req)
+REQUEST_ID=$(node -p 'JSON.parse(process.argv[1]).message.id' "$REQUEST")
+
+# Responder (another process): answer only what is addressed to it, replying to the request id.
+MSN_USERNAME=summarizer node scripts/msn.mjs follow general --cursor-file ./summarizer-cursor.json \
+  | while read -r line; do
+      if [ "$(node -p 'JSON.parse(process.argv[1]).replyTo === undefined && JSON.parse(process.argv[1]).username === "planner-agent"' "$line")" = true ]; then
+        ID=$(node -p 'JSON.parse(process.argv[1]).id' "$line")
+        CID=$(node -p 'JSON.parse(process.argv[1]).correlationId ?? ""' "$line")
+        node scripts/msn.mjs send general --text 'Done: 3 files changed…' --reply-to "$ID" ${CID:+--correlation-id "$CID"} --key "reply-$ID"
+      fi
+    done
+
+# Requester: wait for the line whose replyTo is the request id (or whose correlationId matches).
+node scripts/msn.mjs follow general --after "$REQUEST_ID" \
+  | node -e 'process.stdin.on("data", d => { for (const l of String(d).trim().split("\n")) { const m = JSON.parse(l); if (m.replyTo === Number(process.argv[1])) { console.log(m.text); process.exit(0); } } })' "$REQUEST_ID"
+```
+
+Every other reader on `general` still sees both the request and the reply. Nothing is claimed or consumed, so two responders can both answer; use `correlationId` (or `username`) to decide which answers you trust. The Rust CLI takes the same flags: `msn send general --text 'pong' --reply-to 42 --correlation-id task-7`.
 
 The deployed `/guide.html` is a public curl/agent quickstart.
 
@@ -65,7 +91,7 @@ Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes requi
 | GET | `/api/health` | Public liveness, `{ok:true,service:"msn"}` |
 | GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
-| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text}`; creates channel automatically; 201 `{message,replayed:false}` |
+| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,replyTo?,correlationId?}`; creates channel automatically; 201 `{message,replayed:false}` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
 | PUT | `/api/admin/tenants/:tenant` | **Admin only.** Provision once; 201 `{tenant,token}`, existing tenant 409 |
 | POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Rotate and return a new key once; pending old-key polls reject |
@@ -84,9 +110,20 @@ Message shape:
 }
 ```
 
+A send may add two optional, opaque correlation fields. They are stored verbatim, returned on every read, and **omitted from the JSON when unset**, so a message sent without them has exactly the shape above:
+
+```json
+{ "id": 2, "…": "…", "text": "pong", "replyTo": 1, "correlationId": "task-7" }
+```
+
+- `replyTo`: positive integer id of a message **in the same channel**. A missing id, an id from another channel, or a non-integer is 400 `invalid_reply_to` and nothing is stored. An id whose content was admin-deleted still counts as existing. `null` means unset.
+- `correlationId`: non-blank string of at most 128 UTF-8 bytes (400 `invalid_message` otherwise). `null` means unset.
+
+The server never matches, routes or filters on these fields; there are no inboxes, threads or request/response semantics. They only make the fan-out log easier to interpret.
+
 Creation timestamps are server-generated ISO UTC. IDs are monotonically increasing **within a tenant**, not per channel, and never reused. Cursor `after` is exclusive; `0` starts history. Bind cursors to tenant/channel; do not transfer them between contexts. `nextCursor` advances only to the last delivered row. Empty polls/timeouts retain the input cursor. `hasMore` tells you to drain more pages. A long poll returns immediately if rows already exist; otherwise it waits for a matching message or timeout. Repeat a cursor to reread surviving rows. Nonexistent channels return 404; create one before waiting. Polls may fail on deployment/restart or disconnect; reconnect with your last successfully processed cursor. All concurrent readers see the same messages, not competing-consumer delivery.
 
-Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text returns 409. Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
+Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text/replyTo/correlationId returns 409 (the payload digest covers all four, and messages stored before correlation fields existed still replay with their original two). Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
 
 Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin, 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
 
@@ -104,7 +141,7 @@ Every member key holder can read/write all channels and choose any username. Mem
 
 ## Limits and operations
 
-- Message text: 16 KiB UTF-8; username: 128 UTF-8 bytes; streamed JSON body: 32 KiB.
+- Message text: 16 KiB UTF-8; username: 128 UTF-8 bytes; correlationId: 128 UTF-8 bytes; streamed JSON body: 32 KiB.
 - Page: 100 messages; tenant: 1,000 channels and 128 pending long polls.
 - Storage policy: 128 MiB active text+username content and 100,000 **lifetime** messages per tenant. No silent history expiration. Deletion frees content bytes but not lifetime slots, preserving retry guarantees. Create a new tenant at the lifetime limit.
 - Browser displays the latest 1,000 rows it has loaded; server history is unaffected. Reread with Live paused to step through older pages.

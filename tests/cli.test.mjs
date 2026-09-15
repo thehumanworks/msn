@@ -73,6 +73,43 @@ test("CLI send preserves display username and explicit retry key; stdout stays J
   assert.equal(h.calls[0].redirect, "error");
 });
 
+test("CLI send forwards --reply-to and --correlation-id only when given, and rejects bad values offline", async () => {
+  const h = harness(
+    ["send", "general", "--text", "pong", "--reply-to", "42", "--correlation-id", "task-7"],
+    [{ message: { id: 43, replyTo: 42, correlationId: "task-7" } }],
+  );
+  await h.execute();
+  assert.deepEqual(JSON.parse(h.calls[0].body), {
+    username: "free name",
+    text: "pong",
+    replyTo: 42,
+    correlationId: "task-7",
+  });
+  assert.deepEqual(JSON.parse(h.output[0]), { message: { id: 43, replyTo: 42, correlationId: "task-7" } });
+  const only = harness(["send", "general", "--text", "x", "--correlation-id", "only"], [{}]);
+  await only.execute();
+  assert.deepEqual(Object.keys(JSON.parse(only.calls[0].body)), ["username", "text", "correlationId"]);
+  const plain = harness(["send", "general", "--text", "x"], [{}]);
+  await plain.execute();
+  assert.deepEqual(Object.keys(JSON.parse(plain.calls[0].body)), ["username", "text"]);
+  for (const argv of [
+    ["send", "general", "--text", "x", "--reply-to", "0"],
+    ["send", "general", "--text", "x", "--reply-to", "-1"],
+    ["send", "general", "--text", "x", "--reply-to", "1.5"],
+    ["send", "general", "--text", "x", "--reply-to", "07"],
+    ["send", "general", "--text", "x", "--correlation-id", " "],
+    ["send", "general", "--text", "x", "--correlation-id", "x".repeat(129)],
+    ["send", "general", "--text", "x", "--correlation-id", "🙂".repeat(33)],
+  ]) {
+    const bad = harness(argv);
+    await assert.rejects(bad.execute());
+    assert.equal(bad.calls.length, 0, argv.join(" "));
+  }
+  const max = harness(["send", "general", "--text", "x", "--correlation-id", "🙂".repeat(32)], [{}]);
+  await max.execute();
+  assert.equal(JSON.parse(max.calls[0].body).correlationId, "🙂".repeat(32));
+});
+
 test("CLI poll supports single/long polling and rereads exactly the requested cursor", async () => {
   const h = harness(["poll", "general", "--after", "42", "--wait", "25", "--limit", "2"]);
   await h.execute();

@@ -11,7 +11,7 @@ Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
-node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY]
+node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY] [--reply-to ID] [--correlation-id STR]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
 node scripts/msn.mjs provision TENANT
@@ -21,6 +21,8 @@ node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
 follow prints one JSON message per line; cursor files are tenant/channel/server-bound.
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
+--reply-to (same-channel message id) and --correlation-id (opaque, <=128 bytes) are optional
+annotations agents can filter on; every reader still receives every message.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
 `;
 
@@ -51,6 +53,8 @@ export async function run({
       help: { type: "boolean", short: "h" },
       text: { type: "string" },
       key: { type: "string" },
+      "reply-to": { type: "string" },
+      "correlation-id": { type: "string" },
       after: { type: "string" },
       wait: { type: "string" },
       limit: { type: "string" },
@@ -126,13 +130,25 @@ export async function run({
     if (!env.MSN_USERNAME?.trim() || !values.text?.trim())
       throw new Error("Set MSN_USERNAME and pass --text.");
     const key = values.key ?? randomUUID();
+    // Unset correlation fields are omitted, so a plain send is byte-for-byte what it was before.
+    const body = { username: env.MSN_USERNAME, text: values.text };
+    if (values["reply-to"] !== undefined) {
+      body.replyTo = number(values["reply-to"], 0, Number.MAX_SAFE_INTEGER);
+      if (!body.replyTo) throw new Error("--reply-to must be a positive message id.");
+    }
+    if (values["correlation-id"] !== undefined) {
+      const id = values["correlation-id"];
+      if (!id.trim() || Buffer.byteLength(id) > 128)
+        throw new Error("--correlation-id must be non-blank text of at most 128 UTF-8 bytes.");
+      body.correlationId = id;
+    }
     err(`Idempotency-Key: ${key}`);
     out(
       JSON.stringify(
         await request(`${path}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Idempotency-Key": key },
-          body: JSON.stringify({ username: env.MSN_USERNAME, text: values.text }),
+          body: JSON.stringify(body),
         }),
       ),
     );
