@@ -4,8 +4,9 @@ pub mod config;
 pub mod cursor;
 pub mod error;
 
+use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -23,7 +24,7 @@ use config::{
     CHANNELS_PAGE_LIMIT, MAX_LIMIT, MAX_SAFE_INTEGER, MAX_WAIT, parse_int, require_tenant,
     require_text, require_token, require_username, slug,
 };
-use cursor::{CursorBinding, load_cursor, write_cursor};
+use cursor::{CursorBinding, default_cursor_path, load_cursor, write_cursor};
 use error::CliError;
 
 const BACKOFF_START_MS: u64 = 1000;
@@ -77,7 +78,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             }
             poll(&url, &tenant, &token, channel, after, wait, limit)
         }
-        Command::Follow {
+        Command::Wait {
             channel,
             after,
             wait,
@@ -87,36 +88,66 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
-            let wait = parse_optional_int(wait.as_deref(), 25, MAX_WAIT)?;
-            let limit = parse_optional_int(limit.as_deref(), 100, MAX_LIMIT)?;
-            if wait < 1 {
-                return Err(CliError::usage("limit and follow wait must be positive."));
-            }
-            if limit < 1 {
-                return Err(CliError::usage("limit and follow wait must be positive."));
-            }
+            let (wait, limit) = parse_loop_bounds(wait.as_deref(), limit.as_deref())?;
+            let file = match (&after, cursor_file) {
+                (Some(_), Some(_)) => {
+                    return Err(CliError::usage(
+                        "Use either --after or --cursor-file, not both.",
+                    ));
+                }
+                (Some(_), None) => None,
+                (None, Some(path)) => Some(PathBuf::from(path)),
+                (None, None) => {
+                    let path = default_cursor_path(&url, &tenant, channel)?;
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    Some(path)
+                }
+            };
+            let cursor_after =
+                resolve_cursor(&url, &tenant, channel, after.as_deref(), file.as_deref())?;
+            let target = LoopTarget {
+                url: &url,
+                tenant: &tenant,
+                token: &token,
+                channel,
+                wait,
+                limit,
+                cursor_file: file.as_deref(),
+            };
+            wait_for_messages(&target, cursor_after, stop)
+        }
+        Command::Follow {
+            channel,
+            after,
+            wait,
+            limit,
+            cursor_file,
+            once,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let (wait, limit) = parse_loop_bounds(wait.as_deref(), limit.as_deref())?;
             if after.is_some() && cursor_file.is_some() {
                 return Err(CliError::usage(
                     "Use either --after or --cursor-file, not both.",
                 ));
             }
-            let mut cursor_after = parse_optional_int(after.as_deref(), 0, MAX_SAFE_INTEGER)?;
             let file = cursor_file.map(PathBuf::from);
-            if let Some(path) = file.as_ref() {
-                let binding = CursorBinding::new(&url, &tenant, channel, 0);
-                cursor_after = load_cursor(path, &binding)?;
-            }
-            follow(
-                &url,
-                &tenant,
-                &token,
+            let cursor_after =
+                resolve_cursor(&url, &tenant, channel, after.as_deref(), file.as_deref())?;
+            let target = LoopTarget {
+                url: &url,
+                tenant: &tenant,
+                token: &token,
                 channel,
-                cursor_after,
                 wait,
                 limit,
-                file.as_deref(),
-                stop,
-            )
+                cursor_file: file.as_deref(),
+            };
+            follow(&target, cursor_after, once, stop)
         }
         Command::Provision { tenant } => {
             let token = require_token(cli.admin_token.as_deref(), "MSN_ADMIN_TOKEN")?;
@@ -145,6 +176,31 @@ fn parse_optional_int(raw: Option<&str>, default: u64, max: u64) -> Result<u64, 
     match raw {
         None => Ok(default),
         Some(value) => parse_int(value, max),
+    }
+}
+
+/// `--wait` (default 25) and `--limit` (default 100) for the long-poll loops; both must be ≥ 1.
+fn parse_loop_bounds(wait: Option<&str>, limit: Option<&str>) -> Result<(u64, u64), CliError> {
+    let wait = parse_optional_int(wait, 25, MAX_WAIT)?;
+    let limit = parse_optional_int(limit, 100, MAX_LIMIT)?;
+    if wait < 1 || limit < 1 {
+        return Err(CliError::usage("limit and follow wait must be positive."));
+    }
+    Ok((wait, limit))
+}
+
+/// `--after` when given, else the bound cursor file's value (0 when the file is absent).
+fn resolve_cursor(
+    url: &Url,
+    tenant: &str,
+    channel: &str,
+    after: Option<&str>,
+    cursor_file: Option<&Path>,
+) -> Result<u64, CliError> {
+    let after = parse_optional_int(after, 0, MAX_SAFE_INTEGER)?;
+    match cursor_file {
+        Some(path) => load_cursor(path, &CursorBinding::new(url, tenant, channel, after)),
+        None => Ok(after),
     }
 }
 
@@ -237,18 +293,88 @@ fn finish(response: &client::RawResponse) -> Result<(), CliError> {
     print_success(response.status, &response.body)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn follow(
-    url: &Url,
-    tenant: &str,
-    token: &str,
-    channel: &str,
-    mut after: u64,
+/// Everything a long-poll loop needs besides the moving cursor.
+struct LoopTarget<'a> {
+    url: &'a Url,
+    tenant: &'a str,
+    token: &'a str,
+    channel: &'a str,
     wait: u64,
     limit: u64,
-    cursor_file: Option<&std::path::Path>,
+    cursor_file: Option<&'a Path>,
+}
+
+/// A successfully fetched, validated `{messages,nextCursor,hasMore}` page.
+struct Page<'a> {
+    raw: &'a str,
+    messages: &'a [Value],
+    next_cursor: u64,
+}
+
+enum Flow {
+    Continue,
+    Stop,
+}
+
+fn follow(
+    target: &LoopTarget<'_>,
+    after: u64,
+    once: bool,
     stop: Arc<AtomicBool>,
 ) -> Result<(), CliError> {
+    poll_loop(target, after, stop, |page| {
+        for message in page.messages {
+            println!(
+                "{}",
+                serde_json::to_string(message).map_err(|e| CliError::generic(e.to_string()))?
+            );
+            io::stdout()
+                .flush()
+                .map_err(|error| CliError::generic(error.to_string()))?;
+        }
+        if once && !page.messages.is_empty() {
+            Ok(Flow::Stop)
+        } else {
+            Ok(Flow::Continue)
+        }
+    })
+}
+
+fn wait_for_messages(
+    target: &LoopTarget<'_>,
+    after: u64,
+    stop: Arc<AtomicBool>,
+) -> Result<(), CliError> {
+    poll_loop(target, after, stop, |page| {
+        if page.messages.is_empty() {
+            return Ok(Flow::Continue);
+        }
+        println!("{}", page.raw);
+        io::stdout()
+            .flush()
+            .map_err(|error| CliError::generic(error.to_string()))?;
+        Ok(Flow::Stop)
+    })
+}
+
+/// GET pages from `after` until `on_page` says stop or a signal flips `stop`. Each 2xx page is
+/// delivered to `on_page` first and only then persisted to the cursor file, so an interrupt can
+/// replay a page but never skips one. 429/5xx/transport errors retry with 1s→15s backoff.
+fn poll_loop(
+    target: &LoopTarget<'_>,
+    mut after: u64,
+    stop: Arc<AtomicBool>,
+    mut on_page: impl FnMut(&Page<'_>) -> Result<Flow, CliError>,
+) -> Result<(), CliError> {
+    let LoopTarget {
+        url,
+        tenant,
+        token,
+        channel,
+        wait,
+        limit,
+        cursor_file,
+    } = *target;
     let client = MsnClient::new(url)?;
     let mut backoff_ms = BACKOFF_START_MS;
     while !stop.load(Ordering::SeqCst) {
@@ -257,9 +383,19 @@ fn follow(
         );
         match client.get(&path, Some(token)) {
             Ok(response) if (200..300).contains(&response.status) => {
-                emit_follow_page(&response.body, &mut after)?;
+                let parsed = parse_page(&response.body)?;
+                let page = Page {
+                    raw: response.body.trim(),
+                    messages: &parsed.0,
+                    next_cursor: parsed.1.unwrap_or(after),
+                };
+                let flow = on_page(&page)?;
+                after = page.next_cursor;
                 if let Some(path) = cursor_file {
                     write_cursor(path, &CursorBinding::new(url, tenant, channel, after))?;
+                }
+                if matches!(flow, Flow::Stop) {
+                    return Ok(());
                 }
                 backoff_ms = BACKOFF_START_MS;
             }
@@ -286,34 +422,24 @@ fn follow(
     Ok(())
 }
 
-fn emit_follow_page(body: &str, after: &mut u64) -> Result<(), CliError> {
+/// Validates a messages page and returns its rows plus `nextCursor` (absent → `None`).
+fn parse_page(body: &str) -> Result<(Vec<Value>, Option<u64>), CliError> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return Err(CliError::generic("Empty response body"));
     }
-    let page: Value =
+    let mut page: Value =
         serde_json::from_str(trimmed).map_err(|_| CliError::generic("Response was not JSON"))?;
-    let messages = page
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| CliError::generic("Response was not JSON"))?;
-    for message in messages {
-        println!(
-            "{}",
-            serde_json::to_string(message).map_err(|e| CliError::generic(e.to_string()))?
-        );
-        io::stdout()
-            .flush()
-            .map_err(|error| CliError::generic(error.to_string()))?;
-    }
-    if let Some(next) = page.get("nextCursor") {
-        if let Some(n) = next.as_u64() {
-            *after = n;
-        } else if let Some(s) = next.as_str() {
-            *after = parse_int(s, MAX_SAFE_INTEGER)?;
-        }
-    }
-    Ok(())
+    let next_cursor = match page.get("nextCursor") {
+        Some(Value::String(s)) => Some(parse_int(s, MAX_SAFE_INTEGER)?),
+        Some(other) => other.as_u64(),
+        None => None,
+    };
+    let messages = match page.get_mut("messages").map(Value::take) {
+        Some(Value::Array(messages)) => messages,
+        _ => return Err(CliError::generic("Response was not JSON")),
+    };
+    Ok((messages, next_cursor))
 }
 
 fn interruptible_sleep(backoff_ms: u64, stop: &AtomicBool, message: &str, after: u64) -> bool {
