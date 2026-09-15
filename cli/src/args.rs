@@ -8,7 +8,7 @@ Environment:
   MSN_WORKSPACE_TENANT    Tenant slug (--tenant)
   MSN_WORKSPACE_TOKEN     Tenant capability token (--token); never a positional
   MSN_ADMIN_TOKEN         Administrator token (--admin-token) for provision/rotate/delete
-  MSN_USERNAME            Display name for send (--username)
+  MSN_USERNAME            Display name for send (--username); never binds a token
 
 Exit codes: 0 ok; 1 generic; 2 usage/config; 3 auth (401/403); 4 not found (404);
   5 conflict (409/410); 6 network (connect/TLS/redirect)
@@ -27,7 +27,10 @@ EXAMPLES:
   msn follow general --cursor-file ./cursor.json --once
   fnox run -- msn channels
   msn provision new-tenant
-  msn rotate new-tenant
+  msn provision thehuman --username thehuman       # token may only send as thehuman
+  msn provision agents --username-prefix agent-    # token may only send as agent-*
+  msn rotate new-tenant                            # keeps the current bind
+  msn rotate new-tenant --unbind                   # clears it
   msn delete general 42
 
 HTTPS is required except localhost. MSN_URL must be a bare origin (no path, query,
@@ -40,6 +43,10 @@ exist, prints that page like poll, persists nextCursor and exits 0; its default
 cursor file is $XDG_STATE_HOME or ~/.local/state/msn/<origin-hash>/<tenant>/<channel>.json.
 --reply-to and --correlation-id are opaque log annotations: every reader still gets
 every message.
+
+A bound token is rejected by the server (403 username_bound, exit 3) when send uses
+another --username. Only the --username FLAG binds on provision/rotate; MSN_USERNAME
+from the environment never does.
 ";
 
 #[derive(Debug, Parser)]
@@ -79,9 +86,13 @@ pub struct Cli {
     )]
     pub admin_token: Option<String>,
 
-    /// Unverified display name for send
+    /// Display name for send; on provision/rotate the flag binds the new token to that name
     #[arg(long, env = "MSN_USERNAME", global = true)]
     pub username: Option<String>,
+
+    /// True when --username came from the command line rather than MSN_USERNAME (set by main).
+    #[arg(skip)]
+    pub username_from_flag: bool,
 
     #[command(subcommand)]
     pub command: Command,
@@ -167,10 +178,23 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Admin PUT /api/admin/tenants/{tenant}
-    Provision { tenant: String },
-    /// Admin POST /api/admin/tenants/{tenant}/token
-    Rotate { tenant: String },
+    /// Admin PUT /api/admin/tenants/{tenant}; --username or --username-prefix binds the token
+    Provision {
+        tenant: String,
+        /// Bind the token to display names starting with this prefix (not with --username)
+        #[arg(long = "username-prefix")]
+        username_prefix: Option<String>,
+    },
+    /// Admin POST /api/admin/tenants/{tenant}/token; keeps the bind unless told otherwise
+    Rotate {
+        tenant: String,
+        /// Rebind the new token to display names starting with this prefix
+        #[arg(long = "username-prefix")]
+        username_prefix: Option<String>,
+        /// Clear the bound name so the new token may send as any display name
+        #[arg(long)]
+        unbind: bool,
+    },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
 }

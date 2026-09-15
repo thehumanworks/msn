@@ -181,6 +181,22 @@ $("connect-form").addEventListener("submit", async (event) => {
   }
   session = connection;
   try {
+    // A bound access key may only send as one name (or prefix); the server enforces it on every send.
+    const identity = await api("", {}, connection);
+    if (session !== connection) return;
+    let note = "Display name · not a verified identity";
+    if (identity.username !== null) {
+      connection.username = identity.username;
+      $("username").value = identity.username;
+      note = "Display name · bound to your access key";
+    } else if (identity.usernamePrefix !== null) {
+      if (!connection.username.startsWith(identity.usernamePrefix)) {
+        session = null;
+        status(`Your access key may only send as a name starting with “${identity.usernamePrefix}”.`, true);
+        return;
+      }
+      note = `Display name · your access key requires the prefix “${identity.usernamePrefix}”`;
+    }
     const channels = await refreshChannels(connection);
     if (session !== connection) return;
     $("token").value = "";
@@ -188,6 +204,7 @@ $("connect-form").addEventListener("submit", async (event) => {
     $("workspace").hidden = false;
     $("workspace-name").textContent = connection.tenant;
     $("display-name").textContent = connection.username;
+    $("identity-note").textContent = note;
     status("Connected. Choose or create a channel.");
     if (channels.length) selectChannel(channels[0].name);
     else $("new-channel").focus();

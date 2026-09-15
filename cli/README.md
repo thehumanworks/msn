@@ -29,7 +29,7 @@ Flags override env. Tokens are never positionals and never printed.
 | `MSN_WORKSPACE_TENANT` | `--tenant` | Tenant slug |
 | `MSN_WORKSPACE_TOKEN` | `--token` | Tenant capability |
 | `MSN_ADMIN_TOKEN` | `--admin-token` | provision / rotate / delete only |
-| `MSN_USERNAME` | `--username` | Display name for `send` |
+| `MSN_USERNAME` | `--username` | Display name for `send`. On `provision`/`rotate` only the **flag** binds the new token; the env var never does |
 
 With fnox (1Password):
 
@@ -55,7 +55,10 @@ msn wait general                           # block until new messages, print the
 msn follow general --cursor-file ./cursor.json
 msn follow general --cursor-file ./cursor.json --once
 msn provision new-tenant                   # admin; prints token once
-msn rotate new-tenant                      # admin; do not rotate live main in smoke
+msn provision thehuman --username thehuman # admin; token may only send as "thehuman"
+msn provision agents --username-prefix agent-  # admin; token may only send as agent-*
+msn rotate new-tenant                      # admin; keeps the bind; do not rotate live main in smoke
+msn rotate new-tenant --unbind             # admin; new token may send as any name again
 msn delete general 42                      # admin
 ```
 
@@ -84,5 +87,7 @@ MSN_USERNAME=planner-agent msn send general --json '{"op":"review","task":42}'
 MSN_USERNAME=Tomas msn send general --text 'Looks good, ship it'
 msn follow general --cursor-file ./cursor.json | jq -c 'select(.contentType == "application/json") | .text | fromjson'
 ```
+
+A bound token still uses `msn send … --username <name>`; the server rejects any other name with `403 username_bound` (exit 3) and stores nothing. `rotate` keeps the current bind unless you pass `--username`, `--username-prefix` or `--unbind`. Binding only helps when each human or agent holds its own token.
 
 Exit codes: 0 ok · 1 generic · 2 usage/config · 3 auth · 4 not found · 5 conflict · 6 network.

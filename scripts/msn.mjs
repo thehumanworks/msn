@@ -15,8 +15,8 @@ node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY] [--reply-to I
 node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
-node scripts/msn.mjs provision TENANT
-node scripts/msn.mjs rotate TENANT
+node scripts/msn.mjs provision TENANT [--username NAME | --username-prefix PREFIX]
+node scripts/msn.mjs rotate TENANT [--username NAME | --username-prefix PREFIX | --unbind]
 node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
@@ -27,6 +27,9 @@ annotations agents can filter on; every reader still receives every message.
 --json sends contentType application/json; invalid JSON exits 2 without any request.
 Messages carry contentType (text/plain default); only parse text when it is application/json.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
+A token bound with --username (or --username-prefix) may only send as that name (prefix);
+the server answers 403 username_bound otherwise. rotate keeps the bind unless you pass
+a new one or --unbind. MSN_USERNAME never binds a token.
 `;
 
 class UsageError extends Error {
@@ -67,6 +70,9 @@ export async function run({
       wait: { type: "string" },
       limit: { type: "string" },
       "cursor-file": { type: "string" },
+      username: { type: "string" },
+      "username-prefix": { type: "string" },
+      unbind: { type: "boolean" },
     },
   });
   if (values.help || !positionals.length) {
@@ -107,10 +113,22 @@ export async function run({
     return data;
   }
   if (command === "provision" || command === "rotate") {
+    const chosen = [values.username, values["username-prefix"], values.unbind].filter(Boolean).length;
+    if (chosen > 1 || (values.unbind && command !== "rotate"))
+      throw new Error("Use only one of --username, --username-prefix or --unbind (rotate only).");
+    // No body: provision stays unbound and rotate keeps the current bind. Env MSN_USERNAME never binds.
+    const bind = values.username
+      ? { username: values.username }
+      : values["username-prefix"]
+        ? { usernamePrefix: values["username-prefix"] }
+        : values.unbind
+          ? { username: null }
+          : undefined;
     out(
       JSON.stringify(
         await request(command === "rotate" ? "/token" : "", {
           method: command === "rotate" ? "POST" : "PUT",
+          ...(bind ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(bind) } : {}),
         }),
       ),
     );
@@ -138,11 +156,14 @@ export async function run({
     if (values.text !== undefined && values.json !== undefined)
       throw new UsageError("Pass either --text or --json, not both.");
     const content = values.json ?? values.text;
-    if (!env.MSN_USERNAME?.trim() || !content?.trim())
+    // --username overrides MSN_USERNAME for this send; a token bound to another name is
+    // rejected by the server with 403 username_bound.
+    const username = values.username ?? env.MSN_USERNAME;
+    if (!username?.trim() || !content?.trim())
       throw new UsageError("Set MSN_USERNAME and pass --text or --json.");
     // Unset typing and correlation fields are omitted, so a plain --text send is byte-for-byte
     // what it was before either feature.
-    const body = { username: env.MSN_USERNAME, text: content };
+    const body = { username, text: content };
     if (values.json !== undefined) {
       // Validate locally so malformed JSON never reaches the Worker.
       try {
