@@ -1,10 +1,46 @@
 const $ = (id) => document.getElementById(id);
+const SESSION_KEY = "msn.session";
+const CHANNEL_KEY = (tenant) => `msn.channel.${tenant}`;
 let session = null;
 let channel = "";
 let cursor = 0;
 let generation = 0;
 let polling = null;
 const seen = new Set();
+
+// Browser storage is optional: private windows or blocked site data must not break the app.
+const storage = {
+  get(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {}
+  },
+  remove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  },
+};
+
+function savedSession() {
+  try {
+    const parsed = JSON.parse(storage.get(SESSION_KEY) ?? "null");
+    if (parsed && typeof parsed.tenant === "string" && typeof parsed.token === "string") return parsed;
+  } catch {}
+  return null;
+}
+
+function forgetSession(tenant) {
+  storage.remove(SESSION_KEY);
+  if (tenant) storage.remove(CHANNEL_KEY(tenant));
+}
 
 function draft(connection = session, name = channel) {
   if (!connection.drafts.has(name)) connection.drafts.set(name, { content: "", retry: null, sending: false });
@@ -14,6 +50,10 @@ function draft(connection = session, name = channel) {
 function status(message, error = false) {
   $("status").textContent = message;
   $("status").classList.toggle("error", error);
+}
+
+function view(name) {
+  $("workspace").dataset.view = name;
 }
 
 async function api(path, options = {}, connection = session) {
@@ -36,13 +76,21 @@ function stopPolling() {
   polling = null;
 }
 
+function formatTime(iso) {
+  const date = new Date(iso);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function render(messages) {
   if (messages.length) $("messages").querySelector(".empty")?.remove();
   for (const message of messages) {
     if (seen.has(message.id)) continue;
     seen.add(message.id);
     const article = document.createElement("article");
-    article.className = "message";
+    article.className = message.username === session?.username ? "message mine" : "message";
     article.dataset.id = message.id;
     const meta = document.createElement("div");
     meta.className = "message-meta";
@@ -50,10 +98,11 @@ function render(messages) {
     name.textContent = message.username;
     const time = document.createElement("time");
     time.dateTime = message.createdAt;
-    time.textContent = new Date(message.createdAt).toLocaleString();
+    time.textContent = formatTime(message.createdAt);
     time.title = message.createdAt;
     const label = document.createElement("span");
-    label.textContent = `#${message.channel} · ${message.id}`;
+    label.textContent = `#${message.id}`;
+    label.title = `#${message.channel} · message ${message.id}`;
     meta.append(name, time, label);
     const content = document.createElement("p");
     content.textContent = message.text;
@@ -87,13 +136,9 @@ async function poll(live = false) {
       if (generation !== epoch) return;
       render(data.messages);
       cursor = data.nextCursor;
-      $("cursor").textContent = `Cursor ${cursor} · last 1,000 displayed`;
+      $("cursor").textContent = `Cursor ${cursor}`;
       $("more").hidden = !data.hasMore;
-      status(
-        live
-          ? `Live in #${selected} · waiting for messages`
-          : `Poll complete · ${data.messages.length} messages`,
-      );
+      status(live ? `Live in #${selected}` : `Polled #${selected} · ${data.messages.length} new`);
       backoff = 1000;
     } catch (error) {
       if (generation !== epoch || error.name === "AbortError") return;
@@ -117,13 +162,15 @@ function selectChannel(name) {
   seen.clear();
   $("messages").replaceChildren();
   $("channel-title").textContent = `# ${name}`;
-  $("channel-note").textContent = "A shared conversation for humans and agents.";
+  $("channel-note").textContent = "Everyone in the workspace receives a copy.";
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   for (const id of ["poll", "reread", "message"]) $(id).disabled = false;
   $("send").disabled = draft().sending;
   for (const button of $("channels").children)
     button.setAttribute("aria-current", String(button.dataset.channel === name));
+  if (session.remember) storage.set(CHANNEL_KEY(session.tenant), name);
+  view("chat");
   poll($("live").checked);
 }
 
@@ -147,22 +194,18 @@ async function refreshChannels(connection = session) {
     button.addEventListener("click", () => selectChannel(item.name));
     $("channels").append(button);
   }
+  if (!channels.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No channels yet. Create the first one below.";
+    $("channels").append(empty);
+  }
   return channels;
 }
 
-$("connect-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const connection = {
-    tenant: $("tenant").value.trim(),
-    token: $("token").value.trim(),
-    username: $("username").value.trim(),
-    drafts: new Map(),
-  };
-  if (!connection.username || new TextEncoder().encode(connection.username).length > 128) {
-    status("Display name must be 1–128 UTF-8 bytes.", true);
-    return;
-  }
+async function connect(connection, { initial = "" } = {}) {
   session = connection;
+  status("Connecting…");
   try {
     const channels = await refreshChannels(connection);
     if (session !== connection) return;
@@ -171,15 +214,41 @@ $("connect-form").addEventListener("submit", async (event) => {
     $("workspace").hidden = false;
     $("workspace-name").textContent = connection.tenant;
     $("display-name").textContent = connection.username;
-    status("Connected. Choose or create a channel.");
-    if (channels.length) selectChannel(channels[0].name);
-    else $("new-channel").focus();
-  } catch (error) {
-    if (session === connection) {
-      session = null;
-      status(error.message, true);
+    if (connection.remember) {
+      storage.set(
+        SESSION_KEY,
+        JSON.stringify({ tenant: connection.tenant, token: connection.token, username: connection.username }),
+      );
+    } else forgetSession(connection.tenant);
+    status("Connected.");
+    const preferred = channels.find((item) => item.name === initial) ?? channels[0];
+    if (preferred) selectChannel(preferred.name);
+    else {
+      view("channels");
+      $("new-channel").focus();
     }
+  } catch (error) {
+    if (session !== connection) return;
+    session = null;
+    if (error.status === 401 || error.status === 403) forgetSession(connection.tenant);
+    status(error.message, true);
   }
+}
+
+$("connect-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const connection = {
+    tenant: $("tenant").value.trim(),
+    token: $("token").value.trim(),
+    username: $("username").value.trim(),
+    remember: $("remember").checked,
+    drafts: new Map(),
+  };
+  if (!connection.username || new TextEncoder().encode(connection.username).length > 128) {
+    status("Display name must be 1–128 UTF-8 bytes.", true);
+    return;
+  }
+  await connect(connection, { initial: storage.get(CHANNEL_KEY(connection.tenant)) ?? "" });
 });
 
 $("channel-form").addEventListener("submit", async (event) => {
@@ -196,6 +265,12 @@ $("channel-form").addEventListener("submit", async (event) => {
     if (session === connection) status(error.message, true);
   }
 });
+
+function autosize() {
+  const box = $("message");
+  box.style.height = "auto";
+  box.style.height = `${Math.min(box.scrollHeight, 160)}px`;
+}
 
 $("send-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -229,6 +304,7 @@ $("send-form").addEventListener("submit", async (event) => {
     if (state.retry === attempt) state.retry = null;
     if (session !== connection || selected !== channel) return;
     $("message").value = state.content;
+    autosize();
     poll($("live").checked); // Read from the last cursor, not the sent ID: no skipped concurrent replies.
   } catch (error) {
     if (session === connection && selected === channel)
@@ -241,9 +317,11 @@ $("send-form").addEventListener("submit", async (event) => {
 
 $("message").addEventListener("input", () => {
   if (session && channel) draft().content = $("message").value;
+  autosize();
 });
 $("message").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+  // Enter sends; Shift+Enter inserts a newline. Ctrl/⌘+Enter always sends.
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey || !event.shiftKey)) {
     event.preventDefault();
     $("send-form").requestSubmit();
   }
@@ -261,18 +339,34 @@ $("live").addEventListener("change", () => {
     status("Live paused. Poll once when ready.");
   }
 });
+$("back").addEventListener("click", () => view("channels"));
 $("refresh").addEventListener("click", () => refreshChannels().catch((error) => status(error.message, true)));
 $("disconnect").addEventListener("click", () => {
   stopPolling();
+  forgetSession(session?.tenant);
   session = null;
   channel = "";
   cursor = 0;
   seen.clear();
   $("message").value = "";
+  autosize();
   $("messages").replaceChildren();
   $("channels").replaceChildren();
   $("workspace").hidden = true;
   $("welcome").hidden = false;
-  status("Disconnected. Access key cleared.");
+  view("channels");
+  status("Disconnected. Access key cleared from this browser.");
   $("token").focus();
 });
+
+// Reconnect with remembered credentials; an invalid key is forgotten and the form shown instead.
+const remembered = savedSession();
+if (remembered) {
+  $("tenant").value = remembered.tenant;
+  $("token").value = remembered.token; // Cleared on success; left in place so a transient failure is one tap to retry.
+  $("username").value = remembered.username ?? "";
+  connect(
+    { ...remembered, remember: true, drafts: new Map() },
+    { initial: storage.get(CHANNEL_KEY(remembered.tenant)) ?? "" },
+  );
+}

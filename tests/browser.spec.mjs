@@ -14,14 +14,31 @@ async function provision(request) {
   const { token } = await response.json();
   return { tenant, token, headers: { Authorization: `Bearer ${token}` }, path: `/api/tenants/${tenant}` };
 }
-async function connect(page, t, name = "Tomas") {
+async function connect(page, t, name = "Tomas", { remember = true } = {}) {
   await page.goto("/");
   await page.getByLabel("Workspace", { exact: true }).fill(t.tenant);
   await page.getByLabel("Access key").fill(t.token);
   await page.getByLabel("Your display name").fill(name);
+  await page.getByLabel("Stay signed in on this device").setChecked(remember);
   await page.getByRole("button", { name: "Connect", exact: false }).click();
   await expect(page.locator("#workspace")).toBeVisible();
 }
+// Phones show one pane at a time; the back button is hidden on wide viewports.
+async function channelsPane(page) {
+  const back = page.getByRole("button", { name: "Back to channels" });
+  if (await back.isVisible()) await back.click();
+}
+async function openChannel(page, name) {
+  await channelsPane(page);
+  await page.getByRole("button", { name: `# ${name}`, exact: true }).click();
+  await expect(page.locator("#channel-title")).toHaveText(`# ${name}`);
+}
+async function disconnect(page) {
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(page.locator("#welcome")).toBeVisible();
+}
+const stored = (page) => page.evaluate(() => [localStorage.length, sessionStorage.length]);
 
 test("human and CLI agent exchange messages live; poll, reread and admin deletion work", async ({
   page,
@@ -78,14 +95,14 @@ test("human and CLI agent exchange messages live; poll, reread and admin deletio
   await expect(page.locator(".message p")).toHaveText(["Hello human", "manual poll"]);
   await page.screenshot({ path: testInfo.outputPath("conversation.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
   expect(errors).toEqual([]);
-  await page.getByRole("button", { name: "Disconnect" }).click();
+  await disconnect(page);
   await expect(page.locator("#token")).toHaveValue("");
   await expect(page.locator(".message")).toHaveCount(0);
+  expect(await stored(page)).toEqual([0, 0]);
 });
 
-test("untrusted content is plain text; channel switches ignore late polls and keys never persist", async ({
+test("untrusted content is plain text; channel switches ignore late polls; keys persist only when asked", async ({
   page,
   request,
 }) => {
@@ -99,20 +116,70 @@ test("untrusted content is plain text; channel switches ignore late polls and ke
     headers: t.headers,
     data: { username: "agent", text: "beta only" },
   });
-  await connect(page, t);
+  await connect(page, t, "Tomas", { remember: false });
   await expect(page.locator(".message p")).toHaveText(attack);
   await expect(page.locator(".message img, .message script")).toHaveCount(0);
   expect(await page.evaluate(() => window.pwned)).toBeUndefined();
-  await page.getByRole("button", { name: "# beta", exact: true }).click();
+  await openChannel(page, "beta");
   await request.post(`${t.path}/channels/alpha/messages`, {
     headers: t.headers,
     data: { username: "agent", text: "late alpha" },
   });
   await expect(page.locator(".message p")).toHaveText("beta only");
-  await page.getByRole("button", { name: "Disconnect" }).click();
+  expect(await stored(page)).toEqual([0, 0]);
   await page.reload();
   await expect(page.locator("#welcome")).toBeVisible();
   await expect(page.locator("#token")).toHaveValue("");
+  await expect(page.locator("#workspace")).toBeHidden();
+});
+
+test("remembered credentials reconnect on reload, restore the last channel, and are forgotten on disconnect or rejection", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/alpha`, { headers: t.headers });
+  await request.put(`${t.path}/channels/beta`, { headers: t.headers });
+  await connect(page, t, "Tomas");
+  await expect(page.locator("#channel-title")).toHaveText("# alpha");
+  await openChannel(page, "beta");
+  await page.reload();
+  await expect(page.locator("#workspace")).toBeVisible();
+  await expect(page.locator("#welcome")).toBeHidden();
+  await expect(page.locator("#channel-title")).toHaveText("# beta");
+  await expect(page.locator("#display-name")).toHaveText("Tomas");
+  await expect(page.locator("#token")).toHaveValue("");
+  await page.getByLabel("Message", { exact: true }).fill("still me");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".message p")).toHaveText(["still me"]);
+  const history = await request.get(`${t.path}/channels/beta/messages`, { headers: t.headers });
+  expect((await history.json()).messages[0]).toMatchObject({ username: "Tomas", text: "still me" });
+  // A rotated key invalidates what the browser remembered: show the form, prefilled except for the key.
+  const rotated = await request.post(`/api/admin/tenants/${t.tenant}/token`, {
+    headers: { Authorization: `Bearer ${ADMIN}` },
+  });
+  expect(rotated.status()).toBe(200);
+  await page.reload();
+  await expect(page.locator("#welcome")).toBeVisible();
+  await expect(page.locator("#status")).toContainText("invalid access key");
+  await expect(page.getByLabel("Workspace", { exact: true })).toHaveValue(t.tenant);
+  await expect(page.getByLabel("Your display name")).toHaveValue("Tomas");
+  expect(await stored(page)).toEqual([0, 0]);
+  await page.reload();
+  await expect(page.locator("#welcome")).toBeVisible();
+  await expect(page.getByLabel("Workspace", { exact: true })).toHaveValue("");
+  const { token } = await rotated.json();
+  await connect(page, { ...t, token }, "Tomas");
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("msn.session")))).toEqual({
+    tenant: t.tenant,
+    token,
+    username: "Tomas",
+  });
+  await disconnect(page);
+  expect(await stored(page)).toEqual([0, 0]);
+  await page.reload();
+  await expect(page.locator("#welcome")).toBeVisible();
+  await expect(page.locator("#workspace")).toBeHidden();
 });
 
 test("network-uncertain sends preserve drafts and reuse idempotency keys", async ({ page, request }) => {
@@ -174,19 +241,19 @@ test("channel-scoped drafts and retry keys survive navigation; late sends cannot
   await page.getByLabel("Message", { exact: true }).fill("alpha uncertain");
   await page.getByRole("button", { name: "Send message" }).click();
   await started;
-  await page.getByRole("button", { name: "# beta", exact: true }).click();
+  await openChannel(page, "beta");
   await expect(page.locator("#message")).toHaveValue("");
   await page.getByLabel("Message", { exact: true }).fill("beta draft");
   release();
   await expect(page.locator("#message")).toHaveValue("beta draft");
-  await page.getByRole("button", { name: "# alpha", exact: true }).click();
+  await openChannel(page, "alpha");
   await expect(page.locator("#message")).toHaveValue("alpha uncertain");
   await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.locator("#message")).toHaveValue("");
   expect(keys).toHaveLength(2);
   expect(keys[0]).toBe(keys[1]);
-  await page.getByRole("button", { name: "# beta", exact: true }).click();
+  await openChannel(page, "beta");
   await expect(page.locator("#message")).toHaveValue("beta draft");
   const history = await request.get(`${t.path}/channels/alpha/messages`, { headers: t.headers });
   expect((await history.json()).messages).toHaveLength(1);
