@@ -62,6 +62,24 @@ test("human and CLI agent exchange messages live; poll, reread and admin deletio
   );
   await expect(page.locator(".message p")).toHaveText(["Hello agent", "Hello human"]);
   await expect(page.locator(".message time").first()).toHaveAttribute("datetime", /T.*Z$/);
+  // An agent command message on the same channel as the human-readable lines.
+  await promisify(execFile)(
+    process.execPath,
+    [cli, "send", "general", "--json", '{"op":"ping","task":42}', "--key", "agent-cmd"],
+    { env: agentEnv },
+  );
+  await expect(page.locator(".message pre")).toHaveText('{\n  "op": "ping",\n  "task": 42\n}');
+  await expect(page.locator(".message-kind")).toHaveText("application/json");
+  const typed = await promisify(execFile)(process.execPath, [cli, "poll", "general"], { env: agentEnv });
+  expect(JSON.parse(typed.stdout).messages.map((m) => m.contentType)).toEqual([
+    "text/plain",
+    "text/plain",
+    "application/json",
+  ]);
+  const invalid = await promisify(execFile)(process.execPath, [cli, "send", "general", "--json", '{"op":'], {
+    env: agentEnv,
+  }).catch((error) => error);
+  expect(invalid.code).toBe(2);
   await page.getByLabel("Live", { exact: true }).uncheck();
   await request.post(`${t.path}/channels/general/messages`, {
     headers: t.headers,
@@ -70,7 +88,7 @@ test("human and CLI agent exchange messages live; poll, reread and admin deletio
   await page.getByRole("button", { name: "Poll once" }).click();
   await expect(page.locator(".message p")).toHaveText(["Hello agent", "Hello human", "manual poll"]);
   await page.getByRole("button", { name: "Reread" }).click();
-  await expect(page.locator(".message")).toHaveCount(3);
+  await expect(page.locator(".message")).toHaveCount(4);
   await request.delete(`/api/admin/tenants/${t.tenant}/channels/general/messages/${history.messages[0].id}`, {
     headers: { Authorization: `Bearer ${ADMIN}` },
   });
@@ -95,14 +113,27 @@ test("untrusted content is plain text; channel switches ignore late polls and ke
     headers: t.headers,
     data: { username: "<script>alert(1)</script>", text: attack },
   });
+  const structuredAttack = JSON.stringify({
+    op: "notify",
+    html: attack,
+    script: "<script>alert(1)</script>",
+  });
+  await request.post(`${t.path}/channels/alpha/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: structuredAttack, contentType: "application/json" },
+  });
   await request.post(`${t.path}/channels/beta/messages`, {
     headers: t.headers,
     data: { username: "agent", text: "beta only" },
   });
   await connect(page, t);
   await expect(page.locator(".message p")).toHaveText(attack);
+  await expect(page.locator(".message pre")).toHaveText(
+    JSON.stringify(JSON.parse(structuredAttack), null, 2),
+  );
   await expect(page.locator(".message img, .message script")).toHaveCount(0);
   expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  expect(await page.evaluate(() => document.querySelector(".message pre").children.length)).toBe(0);
   await page.getByRole("button", { name: "# beta", exact: true }).click();
   await request.post(`${t.path}/channels/alpha/messages`, {
     headers: t.headers,

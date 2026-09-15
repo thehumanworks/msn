@@ -48,6 +48,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         Command::Send {
             channel,
             text,
+            json,
             key,
             reply_to,
             correlation_id,
@@ -64,14 +65,25 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 .as_deref()
                 .map(require_correlation_id)
                 .transpose()?;
-            let text = read_text(&text)?;
+            let payload = match (text, json) {
+                (Some(text), None) => Payload {
+                    text: read_text(&text)?,
+                    content_type: None,
+                },
+                (None, Some(json)) => Payload {
+                    text: read_json(&json)?,
+                    content_type: Some(JSON_CONTENT_TYPE),
+                },
+                // clap enforces exactly one of --text / --json.
+                _ => return Err(CliError::usage("Pass either --text or --json, not both.")),
+            };
             send(
                 &url,
                 &tenant,
                 &token,
                 channel,
                 &username,
-                &text,
+                &payload,
                 key.as_deref(),
                 Correlation {
                     reply_to,
@@ -222,6 +234,14 @@ fn resolve_cursor(
     }
 }
 
+const JSON_CONTENT_TYPE: &str = "application/json";
+
+/// A send body: `text` plus an optional payload type (omitted means text/plain on the Worker).
+pub struct Payload {
+    pub text: String,
+    pub content_type: Option<&'static str>,
+}
+
 fn read_text(text: &str) -> Result<String, CliError> {
     if text == "-" {
         let mut buf = String::new();
@@ -229,6 +249,25 @@ fn read_text(text: &str) -> Result<String, CliError> {
         return require_text(&buf);
     }
     require_text(text)
+}
+
+/// Validates `--json` locally (UTF-8, then JSON) so an invalid payload never reaches the Worker.
+fn read_json(json: &str) -> Result<String, CliError> {
+    let raw = if json == "-" {
+        let mut bytes = Vec::new();
+        io::stdin().read_to_end(&mut bytes)?;
+        String::from_utf8(bytes).map_err(|_| CliError::usage("--json must be valid UTF-8 JSON."))?
+    } else {
+        json.to_string()
+    };
+    validate_json(&raw)?;
+    Ok(raw)
+}
+
+fn validate_json(raw: &str) -> Result<(), CliError> {
+    serde_json::from_str::<Value>(raw)
+        .map(|_| ())
+        .map_err(|_| CliError::usage("--json must be valid UTF-8 JSON."))
 }
 
 fn health(url: &Url) -> Result<(), CliError> {
@@ -256,8 +295,11 @@ pub struct Correlation {
 
 /// The POST body for a send. Unset correlation fields are omitted, so a plain send is byte-for-byte
 /// what older CLIs produced and idempotency replays keep matching.
-pub fn send_body(username: &str, text: &str, correlation: &Correlation) -> Value {
-    let mut body = json!({ "username": username, "text": text });
+pub fn send_body(username: &str, payload: &Payload, correlation: &Correlation) -> Value {
+    let mut body = json!({ "username": username, "text": payload.text });
+    if let Some(content_type) = payload.content_type {
+        body["contentType"] = Value::String(content_type.to_string());
+    }
     if let Some(reply_to) = correlation.reply_to {
         body["replyTo"] = json!(reply_to);
     }
@@ -274,7 +316,7 @@ fn send(
     token: &str,
     channel: &str,
     username: &str,
-    text: &str,
+    payload: &Payload,
     key: Option<&str>,
     correlation: Correlation,
 ) -> Result<(), CliError> {
@@ -284,7 +326,7 @@ fn send(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     eprintln!("Idempotency-Key: {key}");
     let _ = io::stderr().flush();
-    let body = send_body(username, text, &correlation);
+    let body = send_body(username, payload, &correlation);
     let response = client.post_json(
         &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
         token,
@@ -506,4 +548,41 @@ pub fn install_stop_signals() -> Arc<AtomicBool> {
         std::process::exit(0);
     });
     stop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn given_invalid_json_when_validate_then_usage_exit_2() {
+        for raw in ["{\"op\":", "not json", "{'op':'ping'}", "", "  "] {
+            let err = validate_json(raw).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{raw:?}");
+            assert!(err.to_string().contains("JSON"));
+        }
+    }
+
+    #[test]
+    fn given_any_json_value_when_validate_then_ok() {
+        for raw in [
+            "{\"op\":\"ping\"}",
+            "[1,2]",
+            "\"quoted\"",
+            "42",
+            "null",
+            " {} ",
+        ] {
+            assert!(validate_json(raw).is_ok(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn given_inline_json_when_read_json_then_raw_text_is_preserved() {
+        assert_eq!(
+            read_json(" {\"op\": \"ping\"} ").unwrap(),
+            " {\"op\": \"ping\"} "
+        );
+        assert_eq!(read_json("{\"op\":").unwrap_err().exit_code(), 2);
+    }
 }

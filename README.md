@@ -39,6 +39,7 @@ export MSN_USERNAME=planner-agent
 
 node scripts/msn.mjs create general
 node scripts/msn.mjs send general --text 'Ready for review' --key task-42-review
+node scripts/msn.mjs send general --json '{"op":"review","task":42}' --key task-42-cmd
 node scripts/msn.mjs poll general --after 0             # one immediate page (reread from the start)
 node scripts/msn.mjs follow general --cursor-file ./planner-cursor.json
 node scripts/msn.mjs --help
@@ -52,7 +53,7 @@ msn wait general          # next run prints only rows strictly after the previou
 msn follow general --cursor-file ./planner-cursor.json --once   # streaming sibling: one JSON line per message, exit after the first non-empty page
 ```
 
-`send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload** (correlation fields included). `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
+`send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload** (typing and correlation fields included). `--text` sends plain text; `--json` sends the same `text` field tagged `contentType: "application/json"`, validating the JSON locally first and exiting 2 without any request when it is invalid. `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
 
 ### Request/response between agents on one channel
 
@@ -80,6 +81,15 @@ node scripts/msn.mjs follow general --after "$REQUEST_ID" \
 
 Every other reader on `general` still sees both the request and the reply. Nothing is claimed or consumed, so two responders can both answer; use `correlationId` (or `username`) to decide which answers you trust. The Rust CLI takes the same flags: `msn send general --text 'pong' --reply-to 42 --correlation-id task-7`.
 
+Agents and humans share one channel. A small command message and human-readable lines can interleave; readers filter on `contentType` and only `JSON.parse` the typed ones:
+
+```sh
+node scripts/msn.mjs send general --json '{"op":"ping"}' --key ping-1              # planner-agent
+MSN_USERNAME=Tomas node scripts/msn.mjs send general --text 'Looks good, ship it'  # human
+node scripts/msn.mjs follow general --cursor-file ./planner-cursor.json \
+  | jq -c 'select(.contentType == "application/json") | .text | fromjson'   # {"op":"ping"}
+```
+
 The deployed `/guide.html` is a public curl/agent quickstart.
 
 ## HTTP contract
@@ -91,7 +101,7 @@ Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes requi
 | GET | `/api/health` | Public liveness, `{ok:true,service:"msn"}` |
 | GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
-| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,replyTo?,correlationId?}`; creates channel automatically; 201 `{message,replayed:false}` |
+| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?}`; creates channel automatically; 201 `{message,replayed:false}` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
 | PUT | `/api/admin/tenants/:tenant` | **Admin only.** Provision once; 201 `{tenant,token}`, existing tenant 409 |
 | POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Rotate and return a new key once; pending old-key polls reject |
@@ -106,9 +116,12 @@ Message shape:
   "channel": "general",
   "username": "planner-agent",
   "text": "Ready for review",
+  "contentType": "text/plain",
   "createdAt": "2026-09-14T12:00:00.000Z"
 }
 ```
+
+`contentType` is optional on send and defaults to `text/plain`; the only other value is `application/json`, which requires `text` to parse as JSON (any JSON value) and is rejected with 400 otherwise. Every returned message carries `contentType`, so readers can filter on it and `JSON.parse` only typed bodies. The body always lives in `text` and the 16 KiB limit applies unchanged. Old clients that omit the field keep sending plain text, and they can ignore the extra response key. Arbitrary MIME types, attachments, binary and multipart payloads are not supported.
 
 A send may add two optional, opaque correlation fields. They are stored verbatim, returned on every read, and **omitted from the JSON when unset**, so a message sent without them has exactly the shape above:
 
@@ -123,7 +136,7 @@ The server never matches, routes or filters on these fields; there are no inboxe
 
 Creation timestamps are server-generated ISO UTC. IDs are monotonically increasing **within a tenant**, not per channel, and never reused. Cursor `after` is exclusive; `0` starts history. Bind cursors to tenant/channel; do not transfer them between contexts. `nextCursor` advances only to the last delivered row. Empty polls/timeouts retain the input cursor. `hasMore` tells you to drain more pages. A long poll returns immediately if rows already exist; otherwise it waits for a matching message or timeout. Repeat a cursor to reread surviving rows. Nonexistent channels return 404; create one before waiting. Polls may fail on deployment/restart or disconnect; reconnect with your last successfully processed cursor. All concurrent readers see the same messages, not competing-consumer delivery.
 
-Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text/replyTo/correlationId returns 409 (the payload digest covers all four, and messages stored before correlation fields existed still replay with their original two). Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
+Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text/contentType/replyTo/correlationId returns 409 (the payload digest covers all five, and a plain text/plain message stored before either field existed still replays on its original username/text). Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
 
 Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin, 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
 
@@ -145,6 +158,7 @@ Every member key holder can read/write all channels and choose any username. Mem
 - Page: 100 messages; tenant: 1,000 channels and 128 pending long polls.
 - Storage policy: 128 MiB active text+username content and 100,000 **lifetime** messages per tenant. No silent history expiration. Deletion frees content bytes but not lifetime slots, preserving retry guarantees. Create a new tenant at the lifetime limit.
 - Browser displays the latest 1,000 rows it has loaded; server history is unaffected. Reread with Live paused to step through older pages.
+- Browser sends are always `text/plain`. An `application/json` message is pretty-printed as text inside a `<pre>` via `textContent`; nothing is ever interpreted as HTML.
 - Monitor account storage/request limits and DO billing in Cloudflare. A hot tenant uses one DO; long polling keeps it active and costs duration. A trusted member can consume shared quota or poll slots. Rotate compromised keys; quotas are not per-user fairness controls.
 - Production credentials should be kept in a secret manager. Rotating the Worker admin secret uses `wrangler secret put ADMIN_TOKEN`. Tenant key rotation uses the admin API and does not require a deploy.
 

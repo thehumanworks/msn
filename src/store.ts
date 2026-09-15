@@ -3,6 +3,8 @@ import {
   admin,
   bearer,
   body,
+  type ContentType,
+  contentType,
   correlationId,
   digest,
   equalHash,
@@ -22,6 +24,7 @@ export type Message = {
   channel: string;
   username: string;
   text: string;
+  contentType: ContentType;
   createdAt: string;
   /** Opaque correlation fields; absent from JSON when unset. The server never matches on them. */
   replyTo?: number;
@@ -34,17 +37,18 @@ type MessageRow = {
   channel: string;
   username: string;
   text: string;
+  contentType: ContentType;
   createdAt: string;
   replyTo: number | null;
   correlationId: string | null;
 };
-const MESSAGE_COLUMNS = "id, channel, username, text, createdAt, replyTo, correlationId";
+const MESSAGE_COLUMNS = "id, channel, username, text, contentType, createdAt, replyTo, correlationId";
 type Waiter = { channel: string; wake: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** Old clients must keep seeing today's shape: unset correlation fields are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
@@ -58,13 +62,15 @@ function toMessage(row: MessageRow, tenant: string): Message {
 }
 
 /**
- * Idempotency digest input. Sends without correlation fields hash exactly as before this
- * feature, so retries of messages stored under schema version 1 still replay instead of 409.
+ * Idempotency digest input. A plain text/plain send without correlation fields hashes exactly as
+ * it did before either feature, so retries of messages stored under schema version 1 still replay
+ * instead of 409. Any typed or annotated send hashes over every field that distinguishes it.
  */
-export function payload(username: string, text: string, correlation: Correlation): string {
+export function payload(username: string, text: string, type: ContentType, correlation: Correlation): string {
   const { replyTo, correlationId } = correlation;
-  if (replyTo === undefined && correlationId === undefined) return JSON.stringify([username, text]);
-  return JSON.stringify([username, text, replyTo ?? null, correlationId ?? null]);
+  if (type === "text/plain" && replyTo === undefined && correlationId === undefined)
+    return JSON.stringify([username, text]);
+  return JSON.stringify([username, text, type, replyTo ?? null, correlationId ?? null]);
 }
 
 /** One object per tenant. Channel indexes and message writes share one transaction boundary. */
@@ -82,7 +88,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL REFERENCES channels(name),
           username TEXT NOT NULL, text TEXT NOT NULL, createdAt TEXT NOT NULL,
           key TEXT, digest TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL,
-          replyTo INTEGER, correlationId TEXT,
+          replyTo INTEGER, correlationId TEXT, contentType TEXT NOT NULL DEFAULT 'text/plain',
           UNIQUE(channel, key)
         );
         CREATE INDEX IF NOT EXISTS channel_messages ON messages(channel, deleted, id);
@@ -90,18 +96,28 @@ export class MsnDurableObject extends DurableObject<Env> {
         INSERT OR IGNORE INTO usage VALUES (1, 0, 0);
         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
       `);
-      // schema_version lists every applied version; the highest row is the current schema.
-      // A fresh database already has the current CREATE TABLE shape and only needs the marker.
+      // schema_version lists every applied version; the highest row is the current schema. A fresh
+      // database already has the current CREATE TABLE shape, so it records the history and stops.
       const version = ctx.storage.sql
         .exec<{ version: number | null }>("SELECT MAX(version) AS version FROM schema_version")
         .one().version;
       if (version === null) {
-        ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", SCHEMA_VERSION);
-      } else if (version < 2) {
-        // v1 → v2: opaque correlation fields (issue #4). Existing rows stay unset (NULL).
-        ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN replyTo INTEGER");
-        ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN correlationId TEXT");
-        ctx.storage.sql.exec("INSERT INTO schema_version VALUES (2)");
+        for (let applied = 1; applied <= SCHEMA_VERSION; applied++)
+          ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", applied);
+      } else {
+        if (version < 2) {
+          // v1 → v2: opaque correlation fields (ADR 0003). Existing rows stay unset (NULL).
+          ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN replyTo INTEGER");
+          ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN correlationId TEXT");
+          ctx.storage.sql.exec("INSERT INTO schema_version VALUES (2)");
+        }
+        if (version < 3) {
+          // v2 → v3: optional payload typing (ADR 0004). Existing rows read back as text/plain.
+          ctx.storage.sql.exec(
+            "ALTER TABLE messages ADD COLUMN contentType TEXT NOT NULL DEFAULT 'text/plain'",
+          );
+          ctx.storage.sql.exec("INSERT INTO schema_version VALUES (3)");
+        }
       }
     });
   }
@@ -216,6 +232,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     channel: string,
     username: string,
     content: string,
+    type: ContentType,
     correlation: Correlation,
     key: string | null,
     hash: string,
@@ -274,10 +291,11 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, createdAt, key, digest, bytes, replyTo, correlationId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
+          type,
           new Date().toISOString(),
           key,
           hash,
@@ -358,10 +376,11 @@ export class MsnDurableObject extends DurableObject<Env> {
             : null;
         const username = input ? text(input.username, "username", 128) : "";
         const content = input ? text(input.text, "text", 16384) : "";
+        const type = input ? contentType(input.contentType, content) : "text/plain";
         const correlation: Correlation = input
           ? { replyTo: replyTarget(input.replyTo), correlationId: correlationId(input.correlationId) }
           : {};
-        const payloadHash = input ? await digest(payload(username, content, correlation)) : "";
+        const payloadHash = input ? await digest(payload(username, content, type, correlation)) : "";
         this.authorize(hash);
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
@@ -396,7 +415,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                   "invalid_key",
                   "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
                 );
-              return this.send(tenant, channel, username, content, correlation, key, payloadHash);
+              return this.send(tenant, channel, username, content, type, correlation, key, payloadHash);
             }
             if (request.method === "GET") {
               this.requireChannel(channel);

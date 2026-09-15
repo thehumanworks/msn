@@ -20,6 +20,7 @@ EXAMPLES:
   MSN_USERNAME=agent msn send general --text 'hello'
   msn send general --text - --key retry-1 < message.txt
   msn send general --text 'pong' --reply-to 42 --correlation-id task-7
+  msn send general --json '{\"op\":\"ping\"}'       # contentType application/json
   msn poll general --after 0 --wait 25 --limit 100
   msn wait general
   msn follow general --cursor-file ./cursor.json
@@ -31,10 +32,12 @@ EXAMPLES:
 
 HTTPS is required except localhost. MSN_URL must be a bare origin (no path, query,
 credentials or fragment). Redirects are errors. send prints Idempotency-Key on
-stderr; reuse --key after an uncertain result. follow prints one JSON message per
-line and writes a 0600 cursor file bound to server/tenant/channel. wait blocks until
-new messages exist, prints that page like poll, persists nextCursor and exits 0; its
-default cursor file is $XDG_STATE_HOME or ~/.local/state/msn/<origin-hash>/<tenant>/<channel>.json.
+stderr; reuse --key after an uncertain result. --json validates UTF-8 JSON locally
+and exits 2 before any request when it is invalid; --text stays text/plain. Every
+message carries contentType. follow prints one JSON message per line and writes a
+0600 cursor file bound to server/tenant/channel. wait blocks until new messages
+exist, prints that page like poll, persists nextCursor and exits 0; its default
+cursor file is $XDG_STATE_HOME or ~/.local/state/msn/<origin-hash>/<tenant>/<channel>.json.
 --reply-to and --correlation-id are opaque log annotations: every reader still gets
 every message.
 ";
@@ -96,12 +99,16 @@ pub enum Command {
         channel: String,
     },
     /// POST /api/tenants/{tenant}/channels/{channel}/messages
+    #[command(group(clap::ArgGroup::new("payload").required(true).args(["text", "json"])))]
     Send {
         /// Channel slug
         channel: String,
-        /// Message text; pass - to read stdin
+        /// Message text (contentType text/plain); pass - to read stdin
         #[arg(long)]
-        text: String,
+        text: Option<String>,
+        /// JSON payload (contentType application/json), validated locally; pass - to read stdin
+        #[arg(long)]
+        json: Option<String>,
         /// Idempotency-Key; generated and printed to stderr when omitted
         #[arg(long)]
         key: Option<String>,

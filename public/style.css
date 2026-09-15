@@ -343,12 +343,32 @@ nav button[aria-current="true"] {
   color: var(--muted);
   font-size: 11px;
 }
-.message p {
+.message p,
+.message pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: #e0e7e1;
   font-size: 14px;
   margin: 7px 0;
+}
+.message pre {
+  font:
+    13px ui-monospace,
+    monospace;
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: #19251c;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.message-kind {
+  font:
+    10px ui-monospace,
+    monospace;
+  letter-spacing: 1px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 2px 7px;
 }
 .history-bar {
   display: flex;

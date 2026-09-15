@@ -110,6 +110,35 @@ test("CLI send forwards --reply-to and --correlation-id only when given, and rej
   assert.equal(JSON.parse(max.calls[0].body).correlationId, "🙂".repeat(32));
 });
 
+test("CLI --text sends omit contentType; --json validates locally and marks application/json", async () => {
+  const plain = harness(["send", "general", "--text", "hello"], [{ message: { id: 1 } }]);
+  await plain.execute();
+  assert.equal("contentType" in JSON.parse(plain.calls[0].body), false);
+  const command = '{"op":"ping","task":42}';
+  const typed = harness(["send", "general", "--json", command, "--key", "cmd-1"], [{ message: { id: 2 } }]);
+  await typed.execute();
+  assert.equal(typed.calls.length, 1);
+  assert.deepEqual(JSON.parse(typed.calls[0].body), {
+    username: "free name",
+    text: command,
+    contentType: "application/json",
+  });
+  assert.equal(typed.calls[0].headers["Idempotency-Key"], "cmd-1");
+  assert.deepEqual(JSON.parse(typed.output[0]), { message: { id: 2 } });
+  for (const json of ['{"op":', "not json", "{'op':'ping'}", "", "  "]) {
+    const h = harness(["send", "general", "--json", json]);
+    await assert.rejects(h.execute(), (error) => error.exitCode === 2);
+    assert.equal(h.calls.length, 0, json);
+    assert.equal(h.errors.length, 0, "no retry key is printed for a rejected payload");
+  }
+  const both = harness(["send", "general", "--text", "x", "--json", "{}"]);
+  await assert.rejects(both.execute(), (error) => error.exitCode === 2 && /not both/.test(error.message));
+  assert.equal(both.calls.length, 0);
+  const neither = harness(["send", "general"]);
+  await assert.rejects(neither.execute(), (error) => error.exitCode === 2);
+  assert.equal(neither.calls.length, 0);
+});
+
 test("CLI poll supports single/long polling and rereads exactly the requested cursor", async () => {
   const h = harness(["poll", "general", "--after", "42", "--wait", "25", "--limit", "2"]);
   await h.execute();

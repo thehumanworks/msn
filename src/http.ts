@@ -146,3 +146,26 @@ export function correlationId(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   return text(value, "correlationId", 128);
 }
+
+export const CONTENT_TYPES = ["text/plain", "application/json"] as const;
+export type ContentType = (typeof CONTENT_TYPES)[number];
+
+/** Optional payload typing: omitted means text/plain; application/json requires `text` to parse as JSON. */
+export function contentType(value: unknown, content: string): ContentType {
+  if (value === undefined) return "text/plain";
+  if (!CONTENT_TYPES.includes(value as ContentType)) {
+    throw new HttpError(400, "invalid_content_type", "contentType must be text/plain or application/json.");
+  }
+  if (value === "application/json") {
+    try {
+      JSON.parse(content);
+    } catch {
+      throw new HttpError(
+        400,
+        "invalid_message",
+        "text must be valid JSON when contentType is application/json.",
+      );
+    }
+  }
+  return value as ContentType;
+}

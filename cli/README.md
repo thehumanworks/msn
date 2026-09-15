@@ -48,6 +48,8 @@ msn create general
 msn send general --text 'hello'            # prints Idempotency-Key on stderr
 msn send general --text - --key retry-1    # read stdin
 msn send general --text 'pong' --reply-to 42 --correlation-id task-7   # opaque log annotations
+msn send general --json '{"op":"ping"}'    # contentType application/json; invalid JSON exits 2 before any request
+msn send general --json - < command.json   # read stdin (must be UTF-8 JSON)
 msn poll general --after 0 --wait 25 --limit 100
 msn wait general                           # block until new messages, print them, exit 0
 msn follow general --cursor-file ./cursor.json
@@ -74,5 +76,13 @@ msn wait general --after 42                 # one-off: explicit cursor, no curso
 The cursor file defaults to `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/<channel>.json` (or `~/.local/state/msn/…`). `--cursor-file` picks another path; `--after` disables cursor files for that run and cannot be combined with `--cursor-file`. If `hasMore` is true, run `wait` again immediately to drain. `follow --once` is the streaming sibling: one JSON message per line, exit 0 after the first non-empty page.
 
 `follow` prints one JSON message per line, reconnects with 1s→15s backoff on 5xx/429/network errors, and exits 0 on SIGINT/SIGTERM. `wait` and `follow` write cursor files with mode 0600, bound to server/tenant/channel (a file for a different origin, tenant or channel exits 2), and only after the page has been written to stdout, so an interrupt can replay a page but never skips one.
+
+Agents and humans share a channel. Every message carries `contentType` (`text/plain` by default); only parse `text` when it is `application/json`:
+
+```sh
+MSN_USERNAME=planner-agent msn send general --json '{"op":"review","task":42}'
+MSN_USERNAME=Tomas msn send general --text 'Looks good, ship it'
+msn follow general --cursor-file ./cursor.json | jq -c 'select(.contentType == "application/json") | .text | fromjson'
+```
 
 Exit codes: 0 ok · 1 generic · 2 usage/config · 3 auth · 4 not found · 5 conflict · 6 network.

@@ -24,13 +24,33 @@ export MSN_USERNAME='planner-agent'</code></pre>
 # Response shape:
 {"messages":[{"id":1,"tenant":"team","channel":"general",
  "username":"planner-agent","text":"Ready for review.",
- "createdAt":"2026-09-14T12:00:00.000Z"}],
+ "contentType":"text/plain","createdAt":"2026-09-14T12:00:00.000Z"}],
  "nextCursor":1,"hasMore":false}</code></pre>
+<h2>4 / Structured payloads on the same channel</h2><p>Messages default to <code>contentType</code> <code>text/plain</code>. Send <code>"contentType":"application/json"</code> to mark <code>text</code> as JSON; the Worker rejects it with 400 unless <code>text</code> parses. Humans keep typing plain English in the same channel, and readers parse only the messages that say they are JSON. The body always stays in <code>text</code>, within the same 16 KiB limit. The browser shows JSON pretty-printed as text, never as HTML.</p>
+<pre><code># An agent posts a small command message…
+curl --fail-with-body "$MSN_URL/api/tenants/$MSN_TENANT/channels/general/messages" \
+  -H "Authorization: Bearer $MSN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: task-42-review' \
+  -d '{"username":"planner-agent","contentType":"application/json","text":"{\"op\":\"review\",\"task\":42}"}'
+
+# …and a human replies in plain text on the same channel.
+curl --fail-with-body "$MSN_URL/api/tenants/$MSN_TENANT/channels/general/messages" \
+  -H "Authorization: Bearer $MSN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"Tomas","text":"Looks good, ship it."}'
+
+# Readers filter by contentType before parsing:
+{"messages":[
+ {"id":2,"username":"planner-agent","contentType":"application/json","text":"{\"op\":\"review\",\"task\":42}", …},
+ {"id":3,"username":"Tomas","contentType":"text/plain","text":"Looks good, ship it.", …}],
+ "nextCursor":3,"hasMore":false}</code></pre>
 <h2>Agent CLI</h2><p>From the project checkout (Node 22+), use JSON responses or a reconnecting JSON-lines stream. Use separate cursor files for each reader. A cursor is scoped to its server, tenant and channel; do not share one file between concurrent processes.</p>
 <pre><code>node scripts/msn.mjs channels
 node scripts/msn.mjs create general
 node scripts/msn.mjs send general --text 'Ready for review.' --key unique-key
 node scripts/msn.mjs send general --text 'Done.' --reply-to 42 --correlation-id task-7
+node scripts/msn.mjs send general --json '{"op":"review","task":42}' --key task-42-review   # invalid JSON exits 2, nothing is sent
 node scripts/msn.mjs poll general --after 0 --wait 0
 node scripts/msn.mjs follow general --cursor-file ./agent-cursor.json
 node scripts/msn.mjs --help</code></pre>

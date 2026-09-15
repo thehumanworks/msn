@@ -12,6 +12,7 @@ Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
 node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY] [--reply-to ID] [--correlation-id STR]
+node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
 node scripts/msn.mjs provision TENANT
@@ -23,8 +24,14 @@ follow prints one JSON message per line; cursor files are tenant/channel/server-
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
 --reply-to (same-channel message id) and --correlation-id (opaque, <=128 bytes) are optional
 annotations agents can filter on; every reader still receives every message.
+--json sends contentType application/json; invalid JSON exits 2 without any request.
+Messages carry contentType (text/plain default); only parse text when it is application/json.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
 `;
+
+class UsageError extends Error {
+  exitCode = 2;
+}
 
 function number(value, fallback, max) {
   if (value === undefined) return fallback;
@@ -52,6 +59,7 @@ export async function run({
     options: {
       help: { type: "boolean", short: "h" },
       text: { type: "string" },
+      json: { type: "string" },
       key: { type: "string" },
       "reply-to": { type: "string" },
       "correlation-id": { type: "string" },
@@ -127,21 +135,34 @@ export async function run({
     return;
   }
   if (command === "send") {
-    if (!env.MSN_USERNAME?.trim() || !values.text?.trim())
-      throw new Error("Set MSN_USERNAME and pass --text.");
-    const key = values.key ?? randomUUID();
-    // Unset correlation fields are omitted, so a plain send is byte-for-byte what it was before.
-    const body = { username: env.MSN_USERNAME, text: values.text };
+    if (values.text !== undefined && values.json !== undefined)
+      throw new UsageError("Pass either --text or --json, not both.");
+    const content = values.json ?? values.text;
+    if (!env.MSN_USERNAME?.trim() || !content?.trim())
+      throw new UsageError("Set MSN_USERNAME and pass --text or --json.");
+    // Unset typing and correlation fields are omitted, so a plain --text send is byte-for-byte
+    // what it was before either feature.
+    const body = { username: env.MSN_USERNAME, text: content };
+    if (values.json !== undefined) {
+      // Validate locally so malformed JSON never reaches the Worker.
+      try {
+        JSON.parse(content);
+      } catch {
+        throw new UsageError("--json must be valid JSON.");
+      }
+      body.contentType = "application/json";
+    }
     if (values["reply-to"] !== undefined) {
       body.replyTo = number(values["reply-to"], 0, Number.MAX_SAFE_INTEGER);
-      if (!body.replyTo) throw new Error("--reply-to must be a positive message id.");
+      if (!body.replyTo) throw new UsageError("--reply-to must be a positive message id.");
     }
     if (values["correlation-id"] !== undefined) {
       const id = values["correlation-id"];
       if (!id.trim() || Buffer.byteLength(id) > 128)
-        throw new Error("--correlation-id must be non-blank text of at most 128 UTF-8 bytes.");
+        throw new UsageError("--correlation-id must be non-blank text of at most 128 UTF-8 bytes.");
       body.correlationId = id;
     }
+    const key = values.key ?? randomUUID();
     err(`Idempotency-Key: ${key}`);
     out(
       JSON.stringify(
@@ -212,7 +233,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   run({ signal: controller.signal }).catch((error) => {
     if (!controller.signal.aborted) {
       console.error(error.message);
-      process.exitCode = 1;
+      process.exitCode = error.exitCode ?? 1;
     }
   });
 }
