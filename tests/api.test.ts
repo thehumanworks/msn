@@ -10,15 +10,18 @@ declare module "cloudflare:workers" {
 const ADMIN = "test-admin-secret-000000000000000000000";
 const WRONG = "wrong-token-00000000000000000000000000";
 type Page = { messages: Message[]; nextCursor: number; hasMore: boolean };
-const SCHEMA_HISTORY = [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }];
+const SCHEMA_HISTORY = [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }];
 /**
  * Rewinds a live database to an older schema version — dropping every column added after it —
  * so the constructor migration runs the whole chain again on the next restart.
  */
-function rewind(state: DurableObjectState, version: 1 | 2 | 3): void {
+function rewind(state: DurableObjectState, version: 1 | 2 | 3 | 4): void {
   state.storage.transactionSync(() => {
-    state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_username");
-    state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_prefix");
+    state.storage.sql.exec("DROP TABLE access_keys");
+    if (version < 4) {
+      state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_username");
+      state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_prefix");
+    }
     if (version < 3) state.storage.sql.exec("ALTER TABLE messages DROP COLUMN contentType");
     if (version < 2) {
       state.storage.sql.exec("ALTER TABLE messages DROP COLUMN replyTo");
@@ -853,5 +856,196 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     expect(bad.status).toBe(400);
     expect((await send(t, "still me", "general", undefined, "thehuman")).status).toBe(201);
     expect(await whoami(t)).toMatchObject({ username: "thehuman" });
+  });
+
+  it("issues independently bound participant keys for the same channels and lists no secrets", async () => {
+    const t = await tenant({ username: "Tomas" });
+    const other = await tenant();
+    const created = await call(`${t.admin}/keys/planner`, ADMIN, {
+      method: "PUT",
+      ...jsonBody({ username: "planner-agent" }),
+    });
+    expect(created.status).toBe(201);
+    const key = await created.json<{ id: string; token: string; username: string; createdAt: string }>();
+    expect(key).toMatchObject({ id: "planner", username: "planner-agent", usernamePrefix: null });
+    expect(key.token).toMatch(/^[a-f0-9]{64}$/);
+    const agent = { ...t, token: key.token };
+    expect(await whoami(agent)).toEqual({ tenant: t.name, username: "planner-agent", usernamePrefix: null });
+    expect((await send(t, "please review", "general", undefined, "Tomas")).status).toBe(201);
+    expect((await send(agent, "ready", "general", undefined, "planner-agent")).status).toBe(201);
+    expect((await send(agent, "spoof", "general", undefined, "Tomas")).status).toBe(403);
+    expect((await page(t)).messages).toEqual((await page(agent)).messages);
+    expect((await call(`${other.path}/channels`, key.token)).status).toBe(401);
+    for (const token of [t.token, key.token]) {
+      expect((await call(`${t.admin}/keys`, token)).status).toBe(403);
+      expect(
+        (await call(`${t.admin}/keys/evil`, token, { method: "PUT", ...jsonBody({ username: "evil" }) }))
+          .status,
+      ).toBe(403);
+      expect((await call(`${t.admin}/keys/planner`, token, { method: "DELETE" })).status).toBe(403);
+    }
+    const list = await (await call(`${t.admin}/keys`, ADMIN)).json<{ keys: unknown[] }>();
+    expect(list).toEqual({
+      keys: [{ id: "planner", username: "planner-agent", usernamePrefix: null, createdAt: key.createdAt }],
+    });
+    const stored = await runInDurableObject(t.stub, (_, state) =>
+      state.storage.sql.exec("SELECT * FROM access_keys").one(),
+    );
+    expect(stored.token_hash).not.toBe(key.token);
+    expect(JSON.stringify(stored)).not.toContain(key.token);
+    expect(
+      (
+        await call(`${t.admin}/keys/planner`, ADMIN, {
+          method: "PUT",
+          ...jsonBody({ username: "replacement" }),
+        })
+      ).status,
+    ).toBe(409);
+    expect((await send(agent, "still authorized", "general", undefined, "planner-agent")).status).toBe(201);
+    await abortAllDurableObjects();
+    expect(await whoami(agent)).toMatchObject({ username: "planner-agent" });
+  });
+
+  it("revokes only the selected participant and its pending polls; replacement cannot revive the old key", async () => {
+    const t = await tenant();
+    async function issue(id: string) {
+      const response = await call(`${t.admin}/keys/${id}`, ADMIN, {
+        method: "PUT",
+        ...jsonBody({ username: id }),
+      });
+      expect(response.status).toBe(201);
+      return { ...t, token: (await response.json<{ token: string }>()).token };
+    }
+    const a = await issue("alice");
+    const b = await issue("bob");
+    await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
+    const waitingA = call(`${t.path}/channels/general/messages?wait=25`, a.token);
+    const waitingB = call(`${t.path}/channels/general/messages?wait=25`, b.token);
+    await expect.poll(() => pending(t)).toBe(2);
+    expect((await call(`${t.admin}/keys/alice`, ADMIN, { method: "DELETE" })).status).toBe(204);
+    expect((await waitingA).status).toBe(401);
+    expect(await pending(t)).toBe(1);
+    expect((await send(b, "hello", "general", undefined, "bob")).status).toBe(201);
+    expect((await waitingB).status).toBe(200);
+    expect((await call(`${t.path}/channels`, t.token)).status).toBe(200);
+    expect((await call(`${t.path}/channels`, a.token)).status).toBe(401);
+    expect((await send(a, "late", "general", undefined, "alice")).status).toBe(401);
+    expect((await call(`${t.admin}/keys/alice`, ADMIN, { method: "DELETE" })).status).toBe(404);
+    const replacement = await issue("alice");
+    expect(replacement.token).not.toBe(a.token);
+    expect((await call(`${t.path}/channels`, a.token)).status).toBe(401);
+    expect((await send(replacement, "back", "general", undefined, "alice")).status).toBe(201);
+  });
+
+  it("workspace rotation atomically revokes all participant keys and pending polls", async () => {
+    const t = await tenant();
+    const created = await call(`${t.admin}/keys/agents`, ADMIN, {
+      method: "PUT",
+      ...jsonBody({ usernamePrefix: "agent-" }),
+    });
+    expect(created.status).toBe(201);
+    const agent = { ...t, token: (await created.json<{ token: string }>()).token };
+    expect((await send(agent, "bad", "general", undefined, "other")).status).toBe(403);
+    expect((await send(agent, "hello", "general", undefined, "agent-one")).status).toBe(201);
+    const first = await page(agent);
+    const waiting = call(
+      `${t.path}/channels/general/messages?after=${first.nextCursor}&wait=25`,
+      agent.token,
+    );
+    await expect.poll(() => pending(t)).toBe(1);
+    await rotate(t);
+    expect((await waiting).status).toBe(401);
+    expect((await call(`${t.path}/channels`, agent.token)).status).toBe(401);
+    expect(await (await call(`${t.admin}/keys`, ADMIN)).json()).toEqual({ keys: [] });
+    expect((await page(t)).messages).toEqual(first.messages);
+  });
+
+  it("rejects participant sends revoked while their bodies are still streaming", async () => {
+    const t = await tenant();
+    const response = await call(`${t.admin}/keys/agent`, ADMIN, {
+      method: "PUT",
+      ...jsonBody({ username: "agent" }),
+    });
+    const { token } = await response.json<{ token: string }>();
+    const ready = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+    const stream = new ReadableStream<Uint8Array>({ start: ready.resolve });
+    const controller = await ready.promise;
+    const sending = call(`${t.path}/channels/general/messages`, token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: stream,
+    });
+    controller.enqueue(new TextEncoder().encode('{"username":"agent",'));
+    await delay(30);
+    expect((await call(`${t.admin}/keys/agent`, ADMIN, { method: "DELETE" })).status).toBe(204);
+    controller.enqueue(new TextEncoder().encode('"text":"late"}'));
+    controller.close();
+    expect((await sending).status).toBe(401);
+    expect(await (await call(`${t.path}/channels`, t.token)).json()).toMatchObject({ channels: [] });
+  });
+
+  it("requires a valid participant binding and bounds the number of active keys", async () => {
+    const t = await tenant();
+    for (const input of [
+      {},
+      { username: null },
+      { usernamePrefix: null },
+      { username: "" },
+      { username: "a", usernamePrefix: "a" },
+    ]) {
+      expect((await call(`${t.admin}/keys/new`, ADMIN, { method: "PUT", ...jsonBody(input) })).status).toBe(
+        400,
+      );
+    }
+    expect((await call(`${t.admin}/keys/new`, ADMIN, { method: "PUT" })).status).toBe(415);
+    expect(
+      (await call(`${t.admin}/keys/UPPER`, ADMIN, { method: "PUT", ...jsonBody({ username: "a" }) })).status,
+    ).toBe(400);
+    expect(await (await call(`${t.admin}/keys`, ADMIN)).json()).toEqual({ keys: [] });
+    await runInDurableObject(t.stub, (_, state) => {
+      state.storage.transactionSync(() => {
+        for (let i = 0; i < 1000; i++)
+          state.storage.sql.exec(
+            "INSERT INTO access_keys VALUES (?, ?, ?, NULL, ?)",
+            `key-${i}`,
+            `hash-${i}`,
+            `agent-${i}`,
+            "2026-09-16T00:00:00.000Z",
+          );
+      });
+    });
+    const denied = await call(`${t.admin}/keys/overflow`, ADMIN, {
+      method: "PUT",
+      ...jsonBody({ username: "a" }),
+    });
+    expect(denied.status).toBe(409);
+    expect(await denied.json()).toMatchObject({ error: { code: "key_quota" } });
+    await call(`${t.admin}/keys/key-0`, ADMIN, { method: "DELETE" });
+    expect(
+      (await call(`${t.admin}/keys/new`, ADMIN, { method: "PUT", ...jsonBody({ username: "a" }) })).status,
+    ).toBe(201);
+  });
+
+  it("migrates v4 in place without changing the workspace key, binding or history", async () => {
+    const t = await tenant({ username: "Tomas" });
+    await send(t, "old history", "general", "retry", "Tomas");
+    const before = await page(t);
+    await runInDurableObject(t.stub, (_, state) => rewind(state, 4));
+    await abortAllDurableObjects();
+    expect(await whoami(t)).toEqual({ tenant: t.name, username: "Tomas", usernamePrefix: null });
+    expect(await page(t)).toEqual(before);
+    expect((await send(t, "old history", "general", "retry", "Tomas")).status).toBe(200);
+    expect(await (await call(`${t.admin}/keys`, ADMIN)).json()).toEqual({ keys: [] });
+    expect(
+      (await call(`${t.admin}/keys/agent`, ADMIN, { method: "PUT", ...jsonBody({ username: "agent" }) }))
+        .status,
+    ).toBe(201);
+    await abortAllDurableObjects();
+    expect(
+      await runInDurableObject(
+        env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name])),
+        (_, state) => state.storage.sql.exec("SELECT version FROM schema_version ORDER BY version").toArray(),
+      ),
+    ).toEqual(SCHEMA_HISTORY);
   });
 });

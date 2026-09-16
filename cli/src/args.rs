@@ -7,8 +7,10 @@ Environment:
   MSN_URL                 Worker origin (default https://msn.rodat-human-ada.workers.dev)
   MSN_WORKSPACE_TENANT    Tenant slug (--tenant)
   MSN_WORKSPACE_TOKEN     Tenant capability token (--token); never a positional
-  MSN_ADMIN_TOKEN         Administrator token (--admin-token) for provision/rotate/delete
-  MSN_USERNAME            Display name for send (--username); never binds a token
+  MSN_TENANT / MSN_TOKEN  Legacy fallbacks when the canonical workspace variable is absent
+  MSN_ADMIN_TOKEN         Administrator token (--admin-token) for admin commands
+  MSN_USERNAME            Display name and default reader (--username); env never binds a token
+  MSN_READER              Reader identity for automatic wait cursors (--reader)
 
 Exit codes: 0 ok; 1 generic; 2 usage/config; 3 auth (401/403); 4 not found (404);
   5 conflict (409/410); 6 network (connect/TLS/redirect)
@@ -22,7 +24,12 @@ EXAMPLES:
   msn send general --text 'pong' --reply-to 42 --correlation-id task-7
   msn send general --json '{\"op\":\"ping\"}'       # contentType application/json
   msn poll general --after 0 --wait 25 --limit 100
-  msn wait general
+  msn wait general --reader reviewer
+  msn whoami
+  msn key-create reviewer --username reviewer
+  msn key-create agents --username-prefix agent-
+  msn keys
+  msn key-revoke reviewer
   msn follow general --cursor-file ./cursor.json
   msn follow general --cursor-file ./cursor.json --once
   fnox run -- msn channels
@@ -40,13 +47,25 @@ and exits 2 before any request when it is invalid; --text stays text/plain. Ever
 message carries contentType. follow prints one JSON message per line and writes a
 0600 cursor file bound to server/tenant/channel. wait blocks until new messages
 exist, prints that page like poll, persists nextCursor and exits 0; its default
-cursor file is $XDG_STATE_HOME or ~/.local/state/msn/<origin-hash>/<tenant>/<channel>.json.
+cursor file is $XDG_STATE_HOME/msn/<origin-hash>/<tenant>/readers/<reader-hash>/<channel>.json
+(or ~/.local/state/msn/...). Reader identity is --reader/MSN_READER, otherwise
+--username/MSN_USERNAME; set one or pass --cursor-file/--after. Reader names must be
+non-blank and at most 128 UTF-8 bytes. Tokens are not part of this path: rotation
+preserves reader progress. Legacy shared cursors are never adopted automatically;
+the first run for each reader replays history from 0. Distinct readers get every
+message; cursor persistence is not an acknowledgment of processing.
+
+wait/follow hold a <cursor-file>.lock sidecar while using a cursor. A concurrent
+user of the same cursor exits 5. Normal exits and SIGINT/SIGTERM/SIGHUP release it.
+After an unclean exit (such as SIGKILL), confirm the owner is no longer running
+before manually removing the lock; stale locks are never deleted automatically.
 --reply-to and --correlation-id are opaque log annotations: every reader still gets
 every message.
 
 A bound token is rejected by the server (403 username_bound, exit 3) when send uses
-another --username. Only the --username FLAG binds on provision/rotate; MSN_USERNAME
-from the environment never does.
+another --username. Only explicit --username or --username-prefix flags bind on provision/rotate/key-create;
+MSN_USERNAME from the environment never does. key-create requires a binding.
+rotate is a workspace-wide emergency reset: it also revokes all participant keys.
 ";
 
 #[derive(Debug, Parser)]
@@ -54,7 +73,7 @@ from the environment never does.
     name = "msn",
     version,
     about = "Channel messaging CLI for agents and humans",
-    long_about = "msn talks to the msn Cloudflare Worker over HTTPS.\n\nTenant commands use Authorization: Bearer <MSN_WORKSPACE_TOKEN>. Admin commands (provision, rotate, delete) use MSN_ADMIN_TOKEN and /api/admin/. Output is JSON on stdout; errors go to stderr with a distinct exit code.",
+    long_about = "msn talks to the msn Cloudflare Worker over HTTPS.\n\nTenant commands use Authorization: Bearer <MSN_WORKSPACE_TOKEN>. Admin commands (provision, rotate, delete, key-create, keys, key-revoke) use MSN_ADMIN_TOKEN and /api/admin/. Output is JSON on stdout; errors go to stderr with a distinct exit code.",
     after_help = EXAMPLES,
     arg_required_else_help = true,
     subcommand_required = true
@@ -77,7 +96,7 @@ pub struct Cli {
     )]
     pub token: Option<String>,
 
-    /// Administrator token (provision/rotate/delete only; never printed)
+    /// Administrator token (admin commands only; never printed)
     #[arg(
         long = "admin-token",
         env = "MSN_ADMIN_TOKEN",
@@ -86,9 +105,13 @@ pub struct Cli {
     )]
     pub admin_token: Option<String>,
 
-    /// Display name for send; on provision/rotate the flag binds the new token to that name
+    /// Display name/default reader; on provision/rotate/key-create only the flag binds a token
     #[arg(long, env = "MSN_USERNAME", global = true)]
     pub username: Option<String>,
+
+    /// Automatic wait cursor identity (defaults to --username/MSN_USERNAME; first run replays history)
+    #[arg(long, env = "MSN_READER", global = true)]
+    pub reader: Option<String>,
 
     /// True when --username came from the command line rather than MSN_USERNAME (set by main).
     #[arg(skip)]
@@ -102,6 +125,20 @@ pub struct Cli {
 pub enum Command {
     /// GET /api/health (no token)
     Health,
+    /// GET /api/tenants/{tenant}; show this token's tenant and username binding
+    Whoami,
+    /// Admin PUT …/keys/{key}; requires explicit --username or --username-prefix
+    KeyCreate {
+        /// Participant key slug (1–64 [a-z0-9_-], starting with a letter or digit)
+        key: String,
+        /// Bind the key to names starting with this prefix (not with --username)
+        #[arg(long = "username-prefix")]
+        username_prefix: Option<String>,
+    },
+    /// Admin GET …/keys; list participant key metadata (no tokens)
+    Keys,
+    /// Admin DELETE …/keys/{key}; revoke one participant key
+    KeyRevoke { key: String },
     /// GET /api/tenants/{tenant}/channels
     Channels,
     /// PUT /api/tenants/{tenant}/channels/{channel}
@@ -155,7 +192,7 @@ pub enum Command {
         /// Page size, 1–100 (default 100)
         #[arg(long)]
         limit: Option<String>,
-        /// Atomic 0600 JSON cursor bound to server/tenant/channel (default under ~/.local/state/msn)
+        /// Atomic 0600 JSON cursor; overrides automatic reader-scoped state (exclusive while running)
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
     },
@@ -185,7 +222,7 @@ pub enum Command {
         #[arg(long = "username-prefix")]
         username_prefix: Option<String>,
     },
-    /// Admin POST /api/admin/tenants/{tenant}/token; keeps the bind unless told otherwise
+    /// Workspace-wide emergency reset: rotate token and revoke all participant keys; keeps binding
     Rotate {
         tenant: String,
         /// Rebind the new token to display names starting with this prefix

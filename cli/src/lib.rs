@@ -24,7 +24,7 @@ use config::{
     CHANNELS_PAGE_LIMIT, MAX_LIMIT, MAX_SAFE_INTEGER, MAX_WAIT, parse_int, require_correlation_id,
     require_tenant, require_text, require_token, require_username, slug,
 };
-use cursor::{CursorBinding, default_cursor_path, load_cursor, write_cursor};
+use cursor::{CursorBinding, CursorLock, default_cursor_path, load_cursor, write_cursor};
 use error::CliError;
 
 const BACKOFF_START_MS: u64 = 1000;
@@ -34,6 +34,57 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
         Command::Health => health(&url),
+        Command::Whoami => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            finish(&MsnClient::new(&url)?.get(&format!("/api/tenants/{tenant}"), Some(&token))?)
+        }
+        Command::KeyCreate {
+            key,
+            username_prefix,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.admin_token.as_deref(), "MSN_ADMIN_TOKEN")?;
+            let key = slug(&key)?;
+            let bound = cli
+                .username_from_flag
+                .then_some(cli.username.as_deref())
+                .flatten();
+            let bind = binding(bound, username_prefix.as_deref(), false)?.ok_or_else(|| {
+                CliError::usage("key-create requires an explicit --username or --username-prefix flag; MSN_USERNAME never binds a key.")
+            })?;
+            // A participant key must have a usable binding. Do not change provision/rotate.
+            if bound
+                .or(username_prefix.as_deref())
+                .is_some_and(|name| name.trim().is_empty())
+            {
+                return Err(CliError::usage("Key username/prefix must be non-blank."));
+            }
+            admin_key(
+                &url,
+                "PUT",
+                &format!("/api/admin/tenants/{tenant}/keys/{key}"),
+                &token,
+                Some(bind),
+            )
+        }
+        Command::Keys => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.admin_token.as_deref(), "MSN_ADMIN_TOKEN")?;
+            finish(
+                &MsnClient::new(&url)?
+                    .get(&format!("/api/admin/tenants/{tenant}/keys"), Some(&token))?,
+            )
+        }
+        Command::KeyRevoke { key } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.admin_token.as_deref(), "MSN_ADMIN_TOKEN")?;
+            let key = slug(&key)?;
+            finish(
+                &MsnClient::new(&url)?
+                    .delete(&format!("/api/admin/tenants/{tenant}/keys/{key}"), &token)?,
+            )
+        }
         Command::Channels => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -119,6 +170,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             let (wait, limit) = parse_loop_bounds(wait.as_deref(), limit.as_deref())?;
+            let reader = if after.is_none() && cursor_file.is_none() {
+                Some(cli.reader.as_deref().or(cli.username.as_deref()).ok_or_else(|| {
+                    CliError::usage("Automatic wait cursors require --reader/MSN_READER or --username/MSN_USERNAME. Set a distinct reader identity, or pass --cursor-file or --after. A new reader replays history from 0.")
+                })?)
+            } else {
+                None
+            };
             let file = match (&after, cursor_file) {
                 (Some(_), Some(_)) => {
                     return Err(CliError::usage(
@@ -128,15 +186,23 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 (Some(_), None) => None,
                 (None, Some(path)) => Some(PathBuf::from(path)),
                 (None, None) => {
-                    let path = default_cursor_path(&url, &tenant, channel)?;
+                    let path = default_cursor_path(
+                        &url,
+                        &tenant,
+                        reader.expect("automatic reader"),
+                        channel,
+                    )?;
                     if let Some(parent) = path.parent() {
                         fs::create_dir_all(parent)?;
                     }
                     Some(path)
                 }
             };
+            // Acquire before reading and hold until all output and cursor writes are finished.
+            let lock = file.as_deref().map(CursorLock::acquire).transpose()?;
+            let file = lock.as_ref().map(CursorLock::cursor_path);
             let cursor_after =
-                resolve_cursor(&url, &tenant, channel, after.as_deref(), file.as_deref())?;
+                resolve_cursor(&url, &tenant, channel, after.as_deref(), file, reader)?;
             let target = LoopTarget {
                 url: &url,
                 tenant: &tenant,
@@ -144,7 +210,8 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 channel,
                 wait,
                 limit,
-                cursor_file: file.as_deref(),
+                cursor_file: file,
+                reader,
             };
             wait_for_messages(&target, cursor_after, stop)
         }
@@ -166,8 +233,11 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 ));
             }
             let file = cursor_file.map(PathBuf::from);
+            // Acquire before reading and hold until all output and cursor writes are finished.
+            let lock = file.as_deref().map(CursorLock::acquire).transpose()?;
+            let file = lock.as_ref().map(CursorLock::cursor_path);
             let cursor_after =
-                resolve_cursor(&url, &tenant, channel, after.as_deref(), file.as_deref())?;
+                resolve_cursor(&url, &tenant, channel, after.as_deref(), file, None)?;
             let target = LoopTarget {
                 url: &url,
                 tenant: &tenant,
@@ -175,7 +245,8 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 channel,
                 wait,
                 limit,
-                cursor_file: file.as_deref(),
+                cursor_file: file,
+                reader: None,
             };
             follow(&target, cursor_after, once, stop)
         }
@@ -255,10 +326,14 @@ fn resolve_cursor(
     channel: &str,
     after: Option<&str>,
     cursor_file: Option<&Path>,
+    reader: Option<&str>,
 ) -> Result<u64, CliError> {
     let after = parse_optional_int(after, 0, MAX_SAFE_INTEGER)?;
     match cursor_file {
-        Some(path) => load_cursor(path, &CursorBinding::new(url, tenant, channel, after)),
+        Some(path) => load_cursor(
+            path,
+            &CursorBinding::new(url, tenant, channel, after).with_reader(reader),
+        ),
         None => Ok(after),
     }
 }
@@ -441,6 +516,7 @@ struct LoopTarget<'a> {
     wait: u64,
     limit: u64,
     cursor_file: Option<&'a Path>,
+    reader: Option<&'a str>,
 }
 
 /// A successfully fetched, validated `{messages,nextCursor,hasMore}` page.
@@ -463,10 +539,11 @@ fn follow(
 ) -> Result<(), CliError> {
     poll_loop(target, after, stop, |page| {
         for message in page.messages {
-            println!(
+            writeln!(
+                io::stdout().lock(),
                 "{}",
                 serde_json::to_string(message).map_err(|e| CliError::generic(e.to_string()))?
-            );
+            )?;
             io::stdout()
                 .flush()
                 .map_err(|error| CliError::generic(error.to_string()))?;
@@ -488,7 +565,7 @@ fn wait_for_messages(
         if page.messages.is_empty() {
             return Ok(Flow::Continue);
         }
-        println!("{}", page.raw);
+        writeln!(io::stdout().lock(), "{}", page.raw)?;
         io::stdout()
             .flush()
             .map_err(|error| CliError::generic(error.to_string()))?;
@@ -513,14 +590,20 @@ fn poll_loop(
         wait,
         limit,
         cursor_file,
+        reader,
     } = *target;
-    let client = MsnClient::new(url)?;
+    let client = Arc::new(MsnClient::new(url)?);
     let mut backoff_ms = BACKOFF_START_MS;
     while !stop.load(Ordering::SeqCst) {
         let path = format!(
             "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}"
         );
-        match client.get(&path, Some(token)) {
+        let Some(response) =
+            get_interruptible(Arc::clone(&client), path, token.to_string(), &stop)?
+        else {
+            return Ok(());
+        };
+        match response {
             Ok(response) if (200..300).contains(&response.status) => {
                 let parsed = parse_page(&response.body)?;
                 let page = Page {
@@ -529,9 +612,18 @@ fn poll_loop(
                     next_cursor: parsed.1.unwrap_or(after),
                 };
                 let flow = on_page(&page)?;
-                after = page.next_cursor;
-                if let Some(path) = cursor_file {
-                    write_cursor(path, &CursorBinding::new(url, tenant, channel, after))?;
+                if stop.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                // An empty page prints nothing. Do not acknowledge its cursor implicitly.
+                if !page.messages.is_empty() {
+                    after = page.next_cursor;
+                    if let Some(path) = cursor_file {
+                        write_cursor(
+                            path,
+                            &CursorBinding::new(url, tenant, channel, after).with_reader(reader),
+                        )?;
+                    }
                 }
                 if matches!(flow, Flow::Stop) {
                     return Ok(());
@@ -595,16 +687,42 @@ fn interruptible_sleep(backoff_ms: u64, stop: &AtomicBool, message: &str, after:
     stop.load(Ordering::SeqCst)
 }
 
-pub fn install_stop_signals() -> Arc<AtomicBool> {
+/// Only the HTTP exchange runs in the background: it cannot print or mutate cursors.
+/// Cancellation returns through the owning stack so cursor lock guards always drop.
+fn get_interruptible(
+    client: Arc<MsnClient>,
+    path: String,
+    token: String,
+    stop: &AtomicBool,
+) -> Result<Option<Result<client::RawResponse, CliError>>, CliError> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("msn-poll".into())
+        .spawn(move || {
+            let _ = tx.send(client.get(&path, Some(&token)));
+        })?;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(response) => return Ok((!stop.load(Ordering::SeqCst)).then_some(response)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(CliError::generic("Polling worker stopped unexpectedly."));
+            }
+        }
+    }
+}
+
+pub fn install_stop_signals() -> Result<Arc<AtomicBool>, CliError> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
-    let _ = ctrlc::set_handler(move || {
+    ctrlc::set_handler(move || {
         flag.store(true, Ordering::SeqCst);
-        let _ = io::stdout().flush();
-        let _ = io::stderr().flush();
-        std::process::exit(0);
-    });
-    stop
+    })
+    .map_err(|error| CliError::generic(format!("Cannot install stop signal handler: {error}")))?;
+    Ok(stop)
 }
 
 #[cfg(test)]

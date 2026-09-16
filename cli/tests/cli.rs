@@ -35,7 +35,14 @@
 //! F1 follow_once_exits_after_first_non_empty_page
 //! H1 help_lists_commands_and_env (adds `wait`)
 //!
-//! Mutation run (cargo mutants -f src/lib.rs -f src/cursor.rs -f src/args.rs -f src/main.rs):
+//! Reader/key workflow addendum:
+//! R1 automatic cursors require a reader, stay independent under shared HOME, and survive token rotation
+//! R2 cursor sidecar exclusion; ordinary/signal cleanup; SIGKILL/stale-lock manual recovery
+//! R3 stdout failure and empty pages never advance cursor progress
+//! K1 whoami and participant-key admin routes, explicit binding only, correct credentials/statuses
+//! E1 legacy env fallbacks, canonical env precedence (even empty), explicit flag precedence
+//!
+//! Historical mutation run before reader/key changes (cargo mutants -f src/lib.rs -f src/cursor.rs -f src/args.rs -f src/main.rs):
 //! 85/86 caught. Equivalent survivor: `interruptible_sleep` `<` → `<=` on the 50 ms sleep loop.
 
 mod common;
@@ -61,7 +68,10 @@ fn bin() -> Command {
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
     }
-    cmd.env("HOME", std::env::temp_dir());
+    let home = tmp_file("msn-test-home");
+    cmd.env("HOME", &home);
+    cmd.env("XDG_STATE_HOME", home.join("state"));
+    cmd.env("XDG_CONFIG_HOME", home.join("config"));
     cmd
 }
 
@@ -1058,6 +1068,16 @@ fn help_lists_commands_and_env() {
         "MSN_WORKSPACE_TOKEN",
         "MSN_ADMIN_TOKEN",
         "MSN_USERNAME",
+        "MSN_READER",
+        "MSN_TENANT",
+        "MSN_TOKEN",
+        "whoami",
+        "key-create",
+        "key-revoke",
+        "keys",
+        "replays history",
+        "Legacy shared cursors",
+        "revokes all participant keys",
         "EXAMPLES",
         "--reply-to",
         "--correlation-id",
@@ -1391,7 +1411,8 @@ fn wait_default_cursor_file_resumes_after_previous_run() {
     let run = || {
         let mut cmd = bin();
         cmd.env("HOME", &home)
-            .args(wait_args(&url, &["--wait", "1"]));
+            .env_remove("XDG_STATE_HOME")
+            .args(wait_args(&url, &["--wait", "1", "--reader", "alice"]));
         output_capped(cmd, Duration::from_secs(8))
     };
     // When wait runs twice with no cursor flags
@@ -1413,7 +1434,12 @@ fn wait_default_cursor_file_resumes_after_previous_run() {
     let hash = origins[0].file_name().to_string_lossy().into_owned();
     assert_eq!(hash.len(), 16, "{hash}");
     assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{hash}");
-    let file = origins[0].path().join("team").join("general.json");
+    let file = origins[0]
+        .path()
+        .join("team")
+        .join("readers")
+        .join(msn_cli::cursor::reader_hash("alice").unwrap())
+        .join("general.json");
     let saved = read_cursor(&file);
     assert_eq!(saved["server"], url);
     assert_eq!(saved["tenant"], "team");
@@ -1448,6 +1474,7 @@ fn wait_after_flag_skips_cursor_file() {
     // When
     let mut cmd = bin();
     cmd.env("HOME", &home)
+        .env_remove("XDG_STATE_HOME")
         .args(wait_args(&url, &["--after", "5", "--wait", "1"]));
     let out = output_capped(cmd, Duration::from_secs(8));
     // Then the explicit cursor is used and nothing is persisted
@@ -1667,4 +1694,660 @@ fn wait_file(path: &std::path::Path) -> String {
         std::thread::sleep(Duration::from_millis(50));
     }
     panic!("cursor file not written: {}", path.display());
+}
+
+#[test]
+fn whoami_uses_workspace_token_and_prints_binding() {
+    for body in [
+        r#"{"tenant":"team","username":"alice","usernamePrefix":null}"#,
+        r#"{"tenant":"team","username":null,"usernamePrefix":"agent-"}"#,
+        r#"{"tenant":"team","username":null,"usernamePrefix":null}"#,
+    ] {
+        let server = MockServer::spawn(vec![Scripted::json(200, body)]);
+        let out = output_of(&[&tenant_args(&server.url())[..], &["whoami"]].concat());
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+        assert_eq!(stdout_str(&out).trim(), body);
+        let rec = server.recorded();
+        assert_eq!(rec[0].method, "GET");
+        assert_eq!(rec[0].path, "/api/tenants/team");
+        assert_eq!(rec[0].headers["authorization"], "Bearer tenant-secret");
+    }
+}
+
+#[test]
+fn participant_key_workflow_uses_admin_routes_without_workspace_token() {
+    let created = r#"{"id":"alice","token":"participant-secret","username":"alice","usernamePrefix":null,"createdAt":"t"}"#;
+    let listed =
+        r#"{"keys":[{"id":"alice","username":"alice","usernamePrefix":null,"createdAt":"t"}]}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(201, created),
+        Scripted::json(200, listed),
+        Scripted::empty(204),
+    ]);
+    let url = server.url();
+    let base = [
+        "--url",
+        &url,
+        "--tenant",
+        "team",
+        "--admin-token",
+        "admin-secret",
+    ];
+    for (args, method, path, body) in [
+        (
+            &["key-create", "alice", "--username", "alice"][..],
+            "PUT",
+            "/api/admin/tenants/team/keys/alice",
+            created,
+        ),
+        (&["keys"][..], "GET", "/api/admin/tenants/team/keys", listed),
+        (
+            &["key-revoke", "alice"][..],
+            "DELETE",
+            "/api/admin/tenants/team/keys/alice",
+            r#"{"deleted":true}"#,
+        ),
+    ] {
+        let out = output_of(&[&base[..], args].concat());
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+        assert_eq!(stdout_str(&out).trim(), body);
+        let rec = server.recorded();
+        let last = rec.last().unwrap();
+        assert_eq!(last.method, method);
+        assert_eq!(last.path, path);
+        assert_eq!(last.headers["authorization"], "Bearer admin-secret");
+        if method == "PUT" {
+            assert!(json_content_type(last));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&last.body).unwrap(),
+                serde_json::json!({"username":"alice"})
+            );
+        } else {
+            assert!(last.body.is_empty());
+            assert!(!stdout_str(&out).contains("participant-secret"));
+        }
+    }
+}
+
+#[test]
+fn key_create_only_explicit_binding_flags_count() {
+    let server = MockServer::spawn(vec![Scripted::json(201, "{}"), Scripted::json(201, "{}")]);
+    let url = server.url();
+    let base = [
+        "--url",
+        &url,
+        "--tenant",
+        "team",
+        "--admin-token",
+        "admin-secret",
+    ];
+    // Global username flag before the subcommand also binds; env never does.
+    for (args, expected) in [
+        (
+            &["--username", "alice", "key-create", "one"][..],
+            serde_json::json!({"username":"alice"}),
+        ),
+        (
+            &["key-create", "two", "--username-prefix", "agent-"][..],
+            serde_json::json!({"usernamePrefix":"agent-"}),
+        ),
+    ] {
+        let mut cmd = bin();
+        cmd.env("MSN_USERNAME", "ambient").args(base).args(args);
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+        let rec = server.recorded();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&rec.last().unwrap().body).unwrap(),
+            expected
+        );
+    }
+    for args in [
+        &["key-create", "one"][..],
+        &[
+            "key-create",
+            "one",
+            "--username",
+            "alice",
+            "--username-prefix",
+            "agent-",
+        ],
+        &["key-create", "one", "--username", "   "],
+        &["key-create", "one", "--username-prefix", ""],
+        &["key-create", "BAD", "--username", "alice"],
+        &["key-revoke", "../bad"],
+    ] {
+        let mut cmd = bin();
+        cmd.env("MSN_USERNAME", "ambient").args(base).args(args);
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr_str(&out));
+        if args.len() == 2 && args[0] == "key-create" {
+            assert!(stderr_str(&out).contains("explicit --username"));
+        }
+    }
+    assert_eq!(
+        server.recorded().len(),
+        2,
+        "invalid commands reached network"
+    );
+}
+
+#[test]
+fn participant_commands_require_the_correct_credentials_and_tenant() {
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    for command in [
+        &["keys"][..],
+        &["key-create", "alice", "--username", "alice"],
+        &["key-revoke", "alice"],
+    ] {
+        let out = output_of(&[&tenant_args(&url)[..], command].concat());
+        assert_eq!(out.status.code(), Some(2));
+        assert!(stderr_str(&out).contains("MSN_ADMIN_TOKEN"));
+        let out = output_of(&[&["--url", &url, "--admin-token", "admin"][..], command].concat());
+        assert_eq!(out.status.code(), Some(2));
+        assert!(stderr_str(&out).contains("MSN_WORKSPACE_TENANT"));
+    }
+    let out = output_of(&[
+        "--url",
+        &url,
+        "--tenant",
+        "team",
+        "--admin-token",
+        "admin",
+        "whoami",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr_str(&out).contains("MSN_WORKSPACE_TOKEN"));
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn participant_commands_preserve_status_exit_codes() {
+    for (args, status, exit) in [
+        (&["key-create", "alice", "--username", "alice"][..], 409, 5),
+        (&["key-revoke", "missing"][..], 404, 4),
+        (&["keys"][..], 403, 3),
+        (&["whoami"][..], 401, 3),
+    ] {
+        let server = MockServer::spawn(vec![Scripted::json(
+            status,
+            r#"{"error":{"message":"denied"}}"#,
+        )]);
+        let out = output_of(
+            &[
+                &tenant_args(&server.url())[..],
+                &["--admin-token", "admin"],
+                args,
+            ]
+            .concat(),
+        );
+        assert_eq!(out.status.code(), Some(exit), "{}", stderr_str(&out));
+        assert!(out.stdout.is_empty());
+        assert!(stderr_str(&out).contains("denied"));
+    }
+}
+
+#[test]
+fn legacy_env_aliases_canonical_and_flag_precedence() {
+    let server = MockServer::spawn(
+        (0..3)
+            .map(|_| Scripted::json(200, r#"{"channels":[]}"#))
+            .collect(),
+    );
+    let url = server.url();
+    for (canonical, flags, expected_tenant, expected_token) in [
+        (false, false, "legacy", "legacy-token"),
+        (true, false, "canonical", "canonical-token"),
+        (true, true, "flag", "flag-token"),
+    ] {
+        let mut cmd = bin();
+        cmd.env("MSN_TENANT", "legacy")
+            .env("MSN_TOKEN", "legacy-token")
+            .args(["--url", &url]);
+        if canonical {
+            cmd.env("MSN_WORKSPACE_TENANT", "canonical")
+                .env("MSN_WORKSPACE_TOKEN", "canonical-token");
+        }
+        if flags {
+            cmd.args(["--tenant", "flag", "--token", "flag-token"]);
+        }
+        cmd.arg("channels");
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+        let rec = server.recorded();
+        let last = rec.last().unwrap();
+        assert_eq!(
+            last.path,
+            format!("/api/tenants/{expected_tenant}/channels?limit=1000")
+        );
+        assert_eq!(
+            last.headers["authorization"],
+            format!("Bearer {expected_token}")
+        );
+    }
+    for canonical in ["MSN_WORKSPACE_TENANT", "MSN_WORKSPACE_TOKEN"] {
+        let mut cmd = bin();
+        cmd.env("MSN_TENANT", "legacy")
+            .env("MSN_TOKEN", "legacy-token")
+            .env(canonical, "")
+            .args(["--url", &url, "channels"]);
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+    }
+    assert_eq!(server.recorded().len(), 3);
+}
+
+struct StateHome(PathBuf);
+
+impl StateHome {
+    fn new() -> Self {
+        let path = tmp_file("msn-reader-home");
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = bin();
+        cmd.env("HOME", &self.0)
+            .env("XDG_STATE_HOME", self.0.join("state"));
+        cmd
+    }
+
+    fn cursor(&self, url: &str, reader: &str) -> PathBuf {
+        self.0
+            .join("state/msn")
+            .join(msn_cli::cursor::origin_hash(&url::Url::parse(url).unwrap()))
+            .join("team/readers")
+            .join(msn_cli::cursor::reader_hash(reader).unwrap())
+            .join("general.json")
+    }
+}
+
+impl Drop for StateHome {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn distinct_readers_share_home_but_each_replays_history_and_rotation_preserves_progress() {
+    let next = r#"{"messages":[{"id":9}],"nextCursor":9,"hasMore":false}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, PAGE_7_8),
+        Scripted::json(200, PAGE_7_8),
+        Scripted::json(200, next),
+    ]);
+    let url = server.url();
+    let home = StateHome::new();
+    let legacy = home
+        .cursor(&url, "alice")
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("general.json");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let old = format!(r#"{{"server":"{url}","tenant":"team","channel":"general","after":999}}"#);
+    fs::write(&legacy, &old).unwrap();
+    for (reader, token, page) in [
+        ("alice", "first-token", PAGE_7_8),
+        ("bob", "first-token", PAGE_7_8),
+        ("alice", "rotated-token", next),
+    ] {
+        let mut cmd = home.command();
+        cmd.args([
+            "--url", &url, "--tenant", "team", "--token", token, "wait", "general", "--reader",
+            reader,
+        ]);
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+        assert_eq!(stdout_str(&out).trim(), page);
+        assert_eq!(read_cursor(&home.cursor(&url, reader))["reader"], reader);
+        assert_mode_0600(&home.cursor(&url, reader));
+    }
+    let rec = server.recorded();
+    assert!(rec[0].path.contains("after=0&"));
+    assert!(rec[1].path.contains("after=0&"));
+    assert!(rec[2].path.contains("after=8&"));
+    assert_eq!(rec[2].headers["authorization"], "Bearer rotated-token");
+    assert_eq!(
+        fs::read_to_string(legacy).unwrap(),
+        old,
+        "legacy state changed"
+    );
+}
+
+#[test]
+fn reader_precedence_flag_then_env_then_username_flag_or_env() {
+    let server = MockServer::spawn((0..4).map(|_| Scripted::json(200, PAGE_7_8)).collect());
+    let url = server.url();
+    let home = StateHome::new();
+    for (flags, env_reader, expected) in [
+        (
+            &["--reader", "reader-flag", "--username", "username-flag"][..],
+            Some("reader-env"),
+            "reader-flag",
+        ),
+        (
+            &["--username", "username-flag"][..],
+            Some("reader-env"),
+            "reader-env",
+        ),
+        (&["--username", "username-flag"][..], None, "username-flag"),
+        (&[][..], None, "username-env"),
+    ] {
+        let mut cmd = home.command();
+        cmd.env("MSN_USERNAME", "username-env")
+            .args(wait_args(&url, flags));
+        if let Some(reader) = env_reader {
+            cmd.env("MSN_READER", reader);
+        }
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+        assert_eq!(
+            read_cursor(&home.cursor(&url, expected))["reader"],
+            expected
+        );
+    }
+    assert!(
+        server
+            .recorded()
+            .iter()
+            .all(|rec| rec.path.contains("after=0&"))
+    );
+}
+
+#[test]
+fn automatic_wait_requires_valid_reader_before_network() {
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    let out = output_of(&wait_args(&url, &[]));
+    assert_eq!(out.status.code(), Some(2));
+    for option in [
+        "--reader",
+        "MSN_READER",
+        "MSN_USERNAME",
+        "--cursor-file",
+        "--after",
+    ] {
+        assert!(stderr_str(&out).contains(option), "{}", stderr_str(&out));
+    }
+    for invalid in [
+        "".to_string(),
+        " \t".to_string(),
+        "x".repeat(129),
+        "🙂".repeat(33),
+    ] {
+        let out = output_of(&wait_args(
+            &url,
+            &["--reader", &invalid, "--username", "valid-fallback"],
+        ));
+        assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+        assert!(stderr_str(&out).contains("128 UTF-8 bytes"));
+    }
+    let mut cmd = bin();
+    cmd.env("MSN_USERNAME", " ").args(wait_args(&url, &[]));
+    let out = output_capped(cmd, Duration::from_secs(3));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn explicit_cursor_and_after_do_not_require_reader_or_home() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, PAGE_7_8),
+        Scripted::json(200, PAGE_7_8),
+    ]);
+    let home = StateHome::new();
+    let file = home.0.join("explicit.json");
+    for flags in [
+        &["--cursor-file", file.to_str().unwrap()][..],
+        &["--after", "0"],
+    ] {
+        let mut cmd = bin();
+        cmd.env_remove("HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env("MSN_READER", " ")
+            .args(wait_args(&server.url(), flags));
+        let out = output_capped(cmd, Duration::from_secs(3));
+        assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    }
+    assert_eq!(read_cursor(&file)["after"], 8);
+    assert!(read_cursor(&file).get("reader").is_none());
+}
+
+fn lock_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn wait_for_request(server: &MockServer) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while server.recorded().is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!server.recorded().is_empty(), "child did not start polling");
+}
+
+fn exit_capped(child: &mut std::process::Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("child did not exit promptly");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn same_cursor_excludes_competitors_and_signal_cleanup_allows_resume() {
+    for signal in ["-INT", "-TERM", "-HUP"] {
+        let server = MockServer::spawn(vec![
+            Scripted::json(200, PAGE_7_8).delayed(Duration::from_secs(30)),
+        ]);
+        let url = server.url();
+        let home = StateHome::new();
+        let file = home.0.join("cursor.json");
+        let before =
+            format!(r#"{{"server":"{url}","tenant":"team","channel":"general","after":3}}"#);
+        fs::write(&file, &before).unwrap();
+        let mut first = home
+            .command()
+            .args(wait_args(&url, &["--cursor-file", file.to_str().unwrap()]))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for_request(&server);
+        assert!(lock_path(&file).exists());
+        assert_mode_0600(&lock_path(&file));
+        // A follow process competes with wait; both use the same lock protocol.
+        let out = output_of(
+            &[
+                &tenant_args(&url)[..],
+                &[
+                    "follow",
+                    "general",
+                    "--once",
+                    "--cursor-file",
+                    file.to_str().unwrap(),
+                ],
+            ]
+            .concat(),
+        );
+        assert_eq!(out.status.code(), Some(5), "{}", stderr_str(&out));
+        assert!(stderr_str(&out).contains("manually remove"));
+        assert!(lock_path(&file).exists(), "competitor removed owner's lock");
+        assert_eq!(server.recorded().len(), 1);
+        assert!(
+            Command::new("kill")
+                .args([signal, &first.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(exit_capped(&mut first).code(), Some(0));
+        assert!(!lock_path(&file).exists(), "lock survived {signal}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        let lock = msn_cli::cursor::CursorLock::acquire(&file).unwrap();
+        drop(lock);
+        assert!(!lock_path(&file).exists());
+    }
+}
+
+#[test]
+fn stale_lock_is_never_automatically_removed() {
+    let server = MockServer::spawn(vec![]);
+    let home = StateHome::new();
+    let file = home.0.join("cursor.json");
+    let stale = "{\"pid\":99999999}\n";
+    fs::write(lock_path(&file), stale).unwrap();
+    let out = output_of(&wait_args(
+        &server.url(),
+        &["--cursor-file", file.to_str().unwrap()],
+    ));
+    assert_eq!(out.status.code(), Some(5));
+    assert!(stderr_str(&out).contains("confirming the owner"));
+    assert_eq!(fs::read_to_string(lock_path(&file)).unwrap(), stale);
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn cursor_lock_cleanup_on_success_and_error() {
+    for (status, body, code) in [(200, PAGE_7_8, 0), (404, "{}", 4), (200, "invalid-json", 1)] {
+        let server = MockServer::spawn(vec![Scripted::json(status, body)]);
+        let home = StateHome::new();
+        let file = home.0.join("cursor.json");
+        let out = output_of(&wait_args(
+            &server.url(),
+            &["--cursor-file", file.to_str().unwrap()],
+        ));
+        assert_eq!(out.status.code(), Some(code), "{}", stderr_str(&out));
+        assert!(!lock_path(&file).exists());
+    }
+    let server = MockServer::spawn(vec![]);
+    let home = StateHome::new();
+    let file = home.0.join("cursor.json");
+    fs::write(&file, "invalid-json").unwrap();
+    let out = output_of(&wait_args(
+        &server.url(),
+        &["--cursor-file", file.to_str().unwrap()],
+    ));
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!lock_path(&file).exists());
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn failed_stdout_never_advances_cursor_and_releases_lock() {
+    for command in ["wait", "follow"] {
+        let server = MockServer::spawn(vec![
+            Scripted::json(200, PAGE_7_8).delayed(Duration::from_millis(150)),
+        ]);
+        let url = server.url();
+        let home = StateHome::new();
+        let file = home.0.join("cursor.json");
+        let before =
+            format!(r#"{{"server":"{url}","tenant":"team","channel":"general","after":3}}"#);
+        fs::write(&file, &before).unwrap();
+        let mut child = home
+            .command()
+            .args(tenant_args(&url))
+            .args([command, "general", "--cursor-file", file.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take()); // Close the only read end before the response arrives.
+        assert!(!exit_capped(&mut child).success());
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        assert!(!lock_path(&file).exists());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn empty_pages_do_not_acknowledge_progress_without_stdout() {
+    for command in ["wait", "follow"] {
+        let server = MockServer::spawn(vec![
+            Scripted::json(200, r#"{"messages":[],"nextCursor":100,"hasMore":false}"#),
+            Scripted::json(200, PAGE_7_8).delayed(Duration::from_secs(30)),
+        ]);
+        let url = server.url();
+        let home = StateHome::new();
+        let file = home.0.join("cursor.json");
+        let before =
+            format!(r#"{{"server":"{url}","tenant":"team","channel":"general","after":3}}"#);
+        fs::write(&file, &before).unwrap();
+        let mut child = home
+            .command()
+            .args(tenant_args(&url))
+            .args([command, "general", "--cursor-file", file.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while server.recorded().len() < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(server.recorded().len(), 2);
+        interrupt(child.id());
+        assert_eq!(exit_capped(&mut child).code(), Some(0));
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        assert!(output.is_empty());
+        assert!(server.recorded()[1].path.contains("after=3&"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        assert!(!lock_path(&file).exists());
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn automatic_same_reader_is_locked_and_sigkill_requires_manual_recovery() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, PAGE_7_8).delayed(Duration::from_secs(30)),
+    ]);
+    let url = server.url();
+    let home = StateHome::new();
+    let file = home.cursor(&url, "alice");
+    let mut child = home
+        .command()
+        .args(wait_args(&url, &["--reader", "alice"]))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_request(&server);
+    let mut cmd = home.command();
+    cmd.args(wait_args(&url, &["--reader", "alice"]));
+    let out = output_capped(cmd, Duration::from_secs(3));
+    assert_eq!(out.status.code(), Some(5));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(lock_path(&file).exists());
+    let mut cmd = home.command();
+    cmd.args(wait_args(&url, &["--reader", "alice"]));
+    let out = output_capped(cmd, Duration::from_secs(3));
+    assert_eq!(out.status.code(), Some(5));
+    assert!(lock_path(&file).exists());
+    assert_eq!(server.recorded().len(), 1);
+    assert!(!file.exists(), "undelivered response advanced cursor");
 }

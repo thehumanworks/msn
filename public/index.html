@@ -54,8 +54,9 @@
         </header>
         <div class="toolbar">
           <span id="cursor">Cursor 0</span>
+          <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
           <button type="button" id="poll" class="quiet" disabled>Poll once</button>
-          <button type="button" id="reread" class="quiet" disabled>Reread</button>
+          <button type="button" id="reread" class="quiet" title="Reset this channel’s cached history and delivery cursor" disabled>Reread</button>
           <button type="button" id="more" class="quiet" hidden>Load next page</button>
         </div>
         <div id="messages" role="log" aria-label="Messages" aria-live="polite"><div class="empty">Nothing here yet.</div></div>

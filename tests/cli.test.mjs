@@ -282,3 +282,132 @@ test("CLI follow retries transient failures but stops on authentication failures
     /401: denied/,
   );
 });
+
+test("CLI participant keys use admin routes and explicit bindings, never the ambient display name", async () => {
+  for (const [args, method, path] of [
+    [["keys"], undefined, "/keys"],
+    [["key-create", "planner", "--username", "planner-agent"], "PUT", "/keys/planner"],
+    [["key-create", "agents", "--username-prefix", "agent-"], "PUT", "/keys/agents"],
+    [["key-revoke", "planner"], "DELETE", "/keys/planner"],
+  ]) {
+    const h = harness(args);
+    await h.execute();
+    assert.equal(h.calls[0].method, method);
+    assert.equal(h.calls[0].url, `https://msn.test/api/admin/tenants/team${path}`);
+    assert.equal(h.calls[0].headers.Authorization, "Bearer admin-secret");
+    if (args[0] === "key-create") {
+      assert.deepEqual(
+        JSON.parse(h.calls[0].body),
+        args[2] === "--username" ? { username: args[3] } : { usernamePrefix: args[3] },
+      );
+    }
+  }
+  for (const args of [
+    ["key-create", "planner"],
+    ["key-create", "planner", "--unbind"],
+    ["key-create", "planner", "--username", ""],
+    ["key-create", "planner", "--username", " "],
+    ["key-create", "planner", "--username", "a", "--username-prefix", "agent-"],
+    ["key-create", "UPPER", "--username", "a"],
+    ["key-revoke", "UPPER"],
+  ]) {
+    const h = harness(args);
+    await assert.rejects(h.execute());
+    assert.equal(h.calls.length, 0);
+  }
+  const denied = harness(["keys"], [], { env: { ...env, MSN_ADMIN_TOKEN: "" } });
+  await assert.rejects(denied.execute(), /MSN_ADMIN_TOKEN/);
+  assert.equal(denied.calls.length, 0);
+});
+
+test("CLI whoami uses member credentials and canonical workspace env takes precedence over legacy aliases", async () => {
+  const identity = { tenant: "canonical", username: "planner", usernamePrefix: null };
+  const h = harness(["whoami"], [identity], {
+    env: { ...env, MSN_WORKSPACE_TENANT: "canonical", MSN_WORKSPACE_TOKEN: "canonical-key" },
+  });
+  await h.execute();
+  assert.equal(h.calls[0].url, "https://msn.test/api/tenants/canonical");
+  assert.equal(h.calls[0].headers.Authorization, "Bearer canonical-key");
+  assert.deepEqual(JSON.parse(h.output[0]), identity);
+  const legacy = harness(["whoami"]);
+  await legacy.execute();
+  assert.equal(legacy.calls[0].url, "https://msn.test/api/tenants/team");
+  assert.equal(legacy.calls[0].headers.Authorization, "Bearer tenant-secret");
+  const missing = harness(["whoami"], [], { env: { ...env, MSN_WORKSPACE_TOKEN: "" } });
+  await assert.rejects(missing.execute(), /MSN_WORKSPACE_TOKEN/);
+  assert.equal(missing.calls.length, 0);
+});
+
+test("CLI follow locks its cursor before reading, refuses concurrent readers, and releases on abort", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "msn-cli-lock-"));
+  const file = join(dir, "cursor.json");
+  const controller = new AbortController();
+  let ready;
+  const started = new Promise((resolve) => {
+    ready = resolve;
+  });
+  const first = harness(["follow", "general", "--cursor-file", file], [], {
+    signal: controller.signal,
+    fetcher: async () => {
+      ready();
+      return new Promise((_, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+      });
+    },
+  });
+  const running = first.execute();
+  try {
+    await started;
+    const competitor = harness(["follow", "general", "--cursor-file", file]);
+    await assert.rejects(competitor.execute(), /Cursor is locked/);
+    assert.equal(competitor.calls.length, 0);
+    const owner = JSON.parse(await readFile(`${file}.lock`, "utf8"));
+    assert.equal(owner.pid, process.pid);
+    controller.abort();
+    await running;
+    await assert.rejects(readFile(`${file}.lock`), { code: "ENOENT" });
+    await assert.rejects(readFile(file), { code: "ENOENT" });
+    // A stale lock is never guessed away, even if its PID looks impossible.
+    await writeFile(`${file}.lock`, '{"pid":999999999}');
+    await assert.rejects(competitor.execute(), /confirming the owner/);
+    assert.equal(await readFile(`${file}.lock`, "utf8"), '{"pid":999999999}');
+  } finally {
+    controller.abort();
+    await running;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI follow releases locks on local/output/auth errors without advancing or retrying output", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "msn-cli-lock-error-"));
+  const file = join(dir, "cursor.json");
+  try {
+    const original = { server: env.MSN_URL, tenant: env.MSN_TENANT, channel: "general", after: 3 };
+    await writeFile(file, JSON.stringify(original));
+    const h = harness(
+      ["follow", "general", "--cursor-file", file],
+      [{ messages: [{ id: 4 }], nextCursor: 4 }],
+      {
+        out: () => {
+          throw new Error("output failed");
+        },
+      },
+    );
+    await assert.rejects(h.execute(), /output failed/);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), original);
+    await assert.rejects(readFile(`${file}.lock`), { code: "ENOENT" });
+    const denied = harness(["follow", "general", "--cursor-file", file], [], {
+      fetcher: async () => Response.json({ error: { message: "revoked" } }, { status: 401 }),
+    });
+    await assert.rejects(denied.execute(), /401/);
+    await assert.rejects(readFile(`${file}.lock`), { code: "ENOENT" });
+    await writeFile(file, "malformed");
+    const corrupt = harness(["follow", "general", "--cursor-file", file]);
+    await assert.rejects(corrupt.execute());
+    assert.equal(corrupt.calls.length, 0);
+    await assert.rejects(readFile(`${file}.lock`), { code: "ENOENT" });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

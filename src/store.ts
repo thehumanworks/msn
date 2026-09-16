@@ -47,12 +47,15 @@ type MessageRow = {
 };
 const MESSAGE_COLUMNS = "id, channel, username, text, contentType, createdAt, replyTo, correlationId";
 type TenantRow = { token_hash: string; bound_username: string | null; bound_prefix: string | null };
+type AccessKeyRow = TenantRow & { id: string; createdAt: string };
+const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
 type Waiter = { channel: string; wake: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
-const SCHEMA_VERSION = 4;
+const MAX_KEYS = 1000;
+const SCHEMA_VERSION = 5;
 
 /** Old clients must keep seeing today's shape: unset correlation fields are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
@@ -89,6 +92,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS tenant (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), token_hash TEXT NOT NULL,
           bound_username TEXT, bound_prefix TEXT
+        );
+        CREATE TABLE IF NOT EXISTS access_keys (
+          id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+          bound_username TEXT, bound_prefix TEXT, createdAt TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS channels (name TEXT PRIMARY KEY, createdAt TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS messages (
@@ -132,6 +139,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           ctx.storage.sql.exec("ALTER TABLE tenant ADD COLUMN bound_prefix TEXT");
           ctx.storage.sql.exec("INSERT INTO schema_version VALUES (4)");
         }
+        // v4 → v5 is additive: legacy workspace keys and messages are untouched.
+        if (version < 5) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (5)");
       }
     });
   }
@@ -144,9 +153,12 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   private authorize(hash: string): TenantRow {
     const row = this.tenantRow();
-    if (!row || !equalHash(hash, row.token_hash))
-      throw new HttpError(401, "unauthorized", "Unknown tenant or invalid access key.");
-    return row;
+    if (row && equalHash(hash, row.token_hash)) return row;
+    const key = this.ctx.storage.sql
+      .exec<AccessKeyRow>("SELECT * FROM access_keys WHERE token_hash = ?", hash)
+      .toArray()[0];
+    if (row && key) return key;
+    throw new HttpError(401, "unauthorized", "Unknown tenant or invalid access key.");
   }
 
   /** A bound capability may only send as its bound name (or under its bound prefix). */
@@ -390,18 +402,79 @@ export class MsnDurableObject extends DurableObject<Env> {
           const bind = binding(await optionalBody(request));
           const token = newToken();
           const hash = await digest(token);
-          if (bind) {
-            this.ctx.storage.sql.exec(
-              "UPDATE tenant SET token_hash = ?, bound_username = ?, bound_prefix = ? WHERE singleton = 1",
-              hash,
-              bind.username,
-              bind.prefix,
-            );
-          } else {
-            this.ctx.storage.sql.exec("UPDATE tenant SET token_hash = ? WHERE singleton = 1", hash);
-          }
+          this.ctx.storage.transactionSync(() => {
+            if (bind) {
+              this.ctx.storage.sql.exec(
+                "UPDATE tenant SET token_hash = ?, bound_username = ?, bound_prefix = ? WHERE singleton = 1",
+                hash,
+                bind.username,
+                bind.prefix,
+              );
+            } else {
+              this.ctx.storage.sql.exec("UPDATE tenant SET token_hash = ? WHERE singleton = 1", hash);
+            }
+            // Rotation remains a workspace-wide emergency reset, not a partial revocation.
+            this.ctx.storage.sql.exec("DELETE FROM access_keys");
+          });
           for (const waiter of this.waiters) waiter.wake();
           return json(this.identity(tenant, this.authorize(hash), token));
+        }
+        if (rest[0] === "keys") {
+          if (rest.length === 1 && request.method === "GET") {
+            return json({
+              keys: this.ctx.storage.sql
+                .exec(`SELECT ${KEY_METADATA} FROM access_keys ORDER BY id`)
+                .toArray(),
+            });
+          }
+          if (rest.length === 2) {
+            const id = slug(rest[1]);
+            if (request.method === "PUT") {
+              const bind = binding(await body(request));
+              if (!bind || (bind.username === null && bind.prefix === null))
+                throw new HttpError(
+                  400,
+                  "invalid_binding",
+                  "Participant keys require username or usernamePrefix.",
+                );
+              const token = newToken();
+              const hash = await digest(token);
+              const metadata = this.ctx.storage.transactionSync(() => {
+                if (this.ctx.storage.sql.exec("SELECT id FROM access_keys WHERE id = ?", id).toArray().length)
+                  throw new HttpError(
+                    409,
+                    "key_exists",
+                    "Key already exists. Revoke it before issuing a replacement.",
+                  );
+                if (
+                  this.ctx.storage.sql
+                    .exec<{ count: number }>("SELECT COUNT(*) AS count FROM access_keys")
+                    .one().count >= MAX_KEYS
+                )
+                  throw new HttpError(409, "key_quota", "Tenant participant key limit reached (1,000).");
+                return this.ctx.storage.sql
+                  .exec(
+                    `INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt) VALUES (?, ?, ?, ?, ?) RETURNING ${KEY_METADATA}`,
+                    id,
+                    hash,
+                    bind.username,
+                    bind.prefix,
+                    new Date().toISOString(),
+                  )
+                  .one();
+              });
+              return json({ ...metadata, token }, 201);
+            }
+            if (request.method === "DELETE") {
+              const deleted = this.ctx.storage.sql
+                .exec("DELETE FROM access_keys WHERE id = ? RETURNING id", id)
+                .toArray();
+              if (!deleted.length) throw new HttpError(404, "key_not_found", "Participant key not found.");
+              // Recheck every pending poll; other participants retain their waiters and access.
+              for (const waiter of this.waiters) waiter.wake();
+              return new Response(null, { status: 204 });
+            }
+          }
         }
         if (
           rest.length === 4 &&

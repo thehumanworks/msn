@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 export const help = `msn — channel messaging for agents and humans (Node 22+)
 
-Environment: MSN_URL, MSN_TENANT, MSN_TOKEN, MSN_USERNAME
+Environment: MSN_URL, MSN_WORKSPACE_TENANT, MSN_WORKSPACE_TOKEN, MSN_USERNAME
+Legacy aliases: MSN_TENANT, MSN_TOKEN (canonical workspace variables take precedence)
 Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 
+node scripts/msn.mjs whoami
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
 node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY] [--reply-to ID] [--correlation-id STR]
@@ -17,6 +20,9 @@ node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
 node scripts/msn.mjs provision TENANT [--username NAME | --username-prefix PREFIX]
 node scripts/msn.mjs rotate TENANT [--username NAME | --username-prefix PREFIX | --unbind]
+node scripts/msn.mjs keys
+node scripts/msn.mjs key-create KEY --username NAME [or --username-prefix PREFIX]
+node scripts/msn.mjs key-revoke KEY
 node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
@@ -29,7 +35,8 @@ Messages carry contentType (text/plain default); only parse text when it is appl
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
 A token bound with --username (or --username-prefix) may only send as that name (prefix);
 the server answers 403 username_bound otherwise. rotate keeps the bind unless you pass
-a new one or --unbind. MSN_USERNAME never binds a token.
+a new one or --unbind. Rotation revokes ALL participant keys in that workspace.
+MSN_USERNAME never binds a token; key-create requires an explicit binding flag.
 `;
 
 class UsageError extends Error {
@@ -46,6 +53,44 @@ function slug(value) {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(value ?? ""))
     throw new Error("Use a lowercase tenant/channel identifier (1–64 letters, digits, _ or -).");
   return value;
+}
+
+// Same .lock protocol as the Rust CLI, including canonical path aliases. A dead
+// process leaves a lock: never guess whether it is safe to remove someone else's.
+async function lockCursor(file) {
+  let path;
+  try {
+    path = await realpath(file);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    try {
+      if ((await lstat(file)).isSymbolicLink())
+        throw new Error("Cursor file must not be a dangling symlink.");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    path = join(await realpath(dirname(file)), basename(file));
+  }
+  const lockPath = `${path}.lock`;
+  let handle;
+  try {
+    handle = await open(lockPath, "wx", 0o600);
+  } catch (error) {
+    if (error.code === "EEXIST")
+      throw new Error(
+        `Cursor is locked: ${lockPath}. After confirming the owner is no longer running, manually remove this .lock file and retry.`,
+      );
+    throw error;
+  }
+  try {
+    await handle.writeFile(`${JSON.stringify({ pid: process.pid })}\n`);
+    await handle.close();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await unlink(lockPath).catch(() => {});
+    throw error;
+  }
+  return { path, lockPath };
 }
 
 export async function run({
@@ -80,13 +125,28 @@ export async function run({
     return;
   }
   const [command, target, id] = positionals;
-  if (!["channels", "create", "send", "poll", "follow", "provision", "rotate", "delete"].includes(command))
+  if (
+    ![
+      "whoami",
+      "keys",
+      "key-create",
+      "key-revoke",
+      "channels",
+      "create",
+      "send",
+      "poll",
+      "follow",
+      "provision",
+      "rotate",
+      "delete",
+    ].includes(command)
+  )
     throw new Error(`Unknown command: ${command}`);
-  const expected = command === "channels" ? 1 : command === "delete" ? 3 : 2;
+  const expected = ["channels", "whoami", "keys"].includes(command) ? 1 : command === "delete" ? 3 : 2;
   if (positionals.length !== expected) throw new Error("Wrong arguments. Run --help.");
-  const admin = ["provision", "rotate", "delete"].includes(command);
-  const token = env[admin ? "MSN_ADMIN_TOKEN" : "MSN_TOKEN"];
-  if (!token) throw new Error(`Set ${admin ? "MSN_ADMIN_TOKEN" : "MSN_TOKEN"}.`);
+  const admin = ["provision", "rotate", "delete", "keys", "key-create", "key-revoke"].includes(command);
+  const token = admin ? env.MSN_ADMIN_TOKEN : (env.MSN_WORKSPACE_TOKEN ?? env.MSN_TOKEN);
+  if (!token) throw new Error(`Set ${admin ? "MSN_ADMIN_TOKEN" : "MSN_WORKSPACE_TOKEN (or MSN_TOKEN)"}.`);
   const base = new URL(env.MSN_URL ?? "http://localhost:8787");
   if (base.username || base.password || base.search || base.hash || base.pathname !== "/")
     throw new Error("MSN_URL must be a server origin without credentials, path, query or fragment.");
@@ -95,7 +155,9 @@ export async function run({
     !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname))
   )
     throw new Error("Use HTTPS (HTTP is allowed only on localhost).");
-  const tenant = slug(["provision", "rotate"].includes(command) ? target : env.MSN_TENANT);
+  const tenant = slug(
+    ["provision", "rotate"].includes(command) ? target : (env.MSN_WORKSPACE_TENANT ?? env.MSN_TENANT),
+  );
   const prefix = `/api/${admin ? "admin/" : ""}tenants/${tenant}`;
   async function request(path, options = {}) {
     const response = await fetcher(`${base.origin}${prefix}${path}`, {
@@ -112,10 +174,22 @@ export async function run({
     }
     return data;
   }
-  if (command === "provision" || command === "rotate") {
-    const chosen = [values.username, values["username-prefix"], values.unbind].filter(Boolean).length;
+  if (["provision", "rotate", "key-create"].includes(command)) {
+    const chosen = [
+      values.username !== undefined,
+      values["username-prefix"] !== undefined,
+      values.unbind,
+    ].filter(Boolean).length;
     if (chosen > 1 || (values.unbind && command !== "rotate"))
       throw new Error("Use only one of --username, --username-prefix or --unbind (rotate only).");
+    if (command === "key-create" && chosen !== 1)
+      throw new UsageError(
+        "key-create requires --username NAME or --username-prefix PREFIX; MSN_USERNAME never binds a key.",
+      );
+    for (const value of [values.username, values["username-prefix"]]) {
+      if (value !== undefined && (!value.trim() || Buffer.byteLength(value) > 128))
+        throw new UsageError("Key binding must be non-blank and at most 128 UTF-8 bytes.");
+    }
     // No body: provision stays unbound and rotate keeps the current bind. Env MSN_USERNAME never binds.
     const bind = values.username
       ? { username: values.username }
@@ -126,12 +200,23 @@ export async function run({
           : undefined;
     out(
       JSON.stringify(
-        await request(command === "rotate" ? "/token" : "", {
-          method: command === "rotate" ? "POST" : "PUT",
-          ...(bind ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(bind) } : {}),
-        }),
+        await request(
+          command === "rotate" ? "/token" : command === "key-create" ? `/keys/${slug(target)}` : "",
+          {
+            method: command === "rotate" ? "POST" : "PUT",
+            ...(bind ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(bind) } : {}),
+          },
+        ),
       ),
     );
+    return;
+  }
+  if (command === "whoami" || command === "keys") {
+    out(JSON.stringify(await request(command === "whoami" ? "" : "/keys")));
+    return;
+  }
+  if (command === "key-revoke") {
+    out(JSON.stringify(await request(`/keys/${slug(target)}`, { method: "DELETE" })));
     return;
   }
   if (command === "channels") {
@@ -200,51 +285,67 @@ export async function run({
   const wait = number(values.wait, command === "follow" ? 25 : 0, 25);
   const limit = number(values.limit, 100, 100);
   if (!limit || (command === "follow" && !wait)) throw new Error("limit and follow wait must be positive.");
-  const file = values["cursor-file"];
+  let file = values["cursor-file"];
   if (file && command !== "follow") throw new Error("--cursor-file is only supported by follow.");
   const binding = { server: base.origin, tenant, channel };
-  if (file) {
-    if (values.after !== undefined) throw new Error("Use either --after or --cursor-file, not both.");
-    try {
-      const saved = JSON.parse(await readFile(file, "utf8"));
-      if (Object.keys(binding).some((key) => saved[key] !== binding[key]))
-        throw new Error("Cursor file belongs to a different server, tenant or channel.");
-      after = number(String(saved.after), 0, Number.MAX_SAFE_INTEGER);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+  if (file && values.after !== undefined) throw new Error("Use either --after or --cursor-file, not both.");
+  const lock = file ? await lockCursor(file) : null;
+  if (lock) file = lock.path;
+  try {
+    if (file) {
+      try {
+        const saved = JSON.parse(await readFile(file, "utf8"));
+        if (Object.keys(binding).some((key) => saved[key] !== binding[key]))
+          throw new Error("Cursor file belongs to a different server, tenant or channel.");
+        after = number(String(saved.after), 0, Number.MAX_SAFE_INTEGER);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
     }
-  }
-  let backoff = 1000;
-  do {
-    try {
-      const data = await request(`${path}/messages?after=${after}&wait=${wait}&limit=${limit}`);
+    let backoff = 1000;
+    do {
+      let data;
+      try {
+        data = await request(`${path}/messages?after=${after}&wait=${wait}&limit=${limit}`);
+      } catch (error) {
+        if (signal?.aborted) return;
+        if (command !== "follow" || (error.status && error.status < 500 && error.status !== 429)) throw error;
+        if (error.code && error.code !== "ECONNRESET") throw error;
+        err(`${error.message}; reconnecting from cursor ${after}`);
+        const { setTimeout } = await import("node:timers/promises");
+        try {
+          await setTimeout(backoff, undefined, { signal });
+        } catch {
+          return;
+        }
+        backoff = Math.min(backoff * 2, 15000);
+        continue;
+      }
       if (command === "poll") {
         out(JSON.stringify(data));
         return;
       }
+      // Output and disk failures are not network errors and must not be retried.
       for (const message of data.messages) out(JSON.stringify(message));
       after = data.nextCursor;
       if (file) {
         const temp = `${file}.${process.pid}.tmp`;
-        await writeFile(temp, `${JSON.stringify({ ...binding, after })}\n`, { mode: 0o600 });
-        await rename(temp, file);
+        try {
+          await writeFile(temp, `${JSON.stringify({ ...binding, after })}\n`, { mode: 0o600 });
+          await rename(temp, file);
+        } finally {
+          await unlink(temp).catch(() => {});
+        }
       }
       backoff = 1000;
-    } catch (error) {
-      if (signal?.aborted) return;
-      if (command !== "follow" || (error.status && error.status < 500 && error.status !== 429)) throw error;
-      // Local disk failures are not retryable network errors.
-      if (error.code && error.code !== "ECONNRESET") throw error;
-      err(`${error.message}; reconnecting from cursor ${after}`);
-      const { setTimeout } = await import("node:timers/promises");
-      try {
-        await setTimeout(backoff, undefined, { signal });
-      } catch {
-        return;
-      }
-      backoff = Math.min(backoff * 2, 15000);
+    } while (!signal?.aborted);
+  } finally {
+    if (lock) {
+      await unlink(lock.lockPath).catch((error) =>
+        err(`Could not remove cursor lock ${lock.lockPath}: ${error.message}`),
+      );
     }
-  } while (!signal?.aborted);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

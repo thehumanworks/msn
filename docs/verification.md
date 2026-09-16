@@ -1,3 +1,24 @@
+# Local verification — 2026-09-16
+
+Participant keys, reader isolation and browser reading improvements are implemented in this checkout. **Not deployed:** the production evidence below describes earlier versions, not these changes. No production secret files were read, no production requests were made, and no production workspaces or keys were modified.
+
+| Check | Observed result |
+| --- | --- |
+| `bun run check` | TypeScript and Biome passed; 36 real-workerd API tests, 13 Node CLI tests and 40 desktop/mobile Chromium tests passed |
+| `cargo fmt --manifest-path cli/Cargo.toml --all -- --check` | Passed |
+| `cargo clippy --manifest-path cli/Cargo.toml --all-targets --all-features -- -D warnings` | Passed, zero warnings |
+| `cargo test --manifest-path cli/Cargo.toml --locked` | 27 unit and 75 integration tests passed, zero failures |
+| `bun run test:participants` | Passed: builds the real Rust binary, starts a local Worker on a temporary loopback port, and runs both CLIs with isolated HOME/state and fixture secrets |
+| `git diff --check` | Passed |
+
+The repeatable participant smoke checks independent key creation, `whoami`, shared-channel fan-out, separate readers sharing HOME, cursor resume, name enforcement, reply/correlation fields, secret-free key listing, targeted revocation of pending reads, other participants retaining access, cross-CLI cursor locks, signal cleanup, and emergency revoke-all rotation. Temporary Worker state and CLI state are removed afterward.
+
+Regression tests include v4→v5 migration and earlier schema upgrades without losing the original key/history, revocation during a streamed send, browser stale-response handling, non-JSON 401s, 403 draft retention, channel resume versus Reread, memory cache bounds, mobile hidden-pane pruning/scroll anchoring and safe correlation rendering. Initial test failures were corrected and the final suites rerun; expected forced-restart/cancelled-poll workerd diagnostics remain visible.
+
+Limits: Linux Rust checks and Chromium desktop/mobile only. No live deployment, production migration, Firefox/WebKit run, load/soak test, or downstream exactly-once processing guarantee. Browser progress remains memory-only. Cursor sidecar locks require cooperating updated clients and manual recovery after an unclean exit. See ADR 0007 for the decisions and README for usage.
+
+---
+
 # Delivery evidence — 2026-09-14
 
 ## Deployed application

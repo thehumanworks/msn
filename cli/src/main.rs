@@ -11,8 +11,19 @@ fn main() {
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     // MSN_USERNAME must never bind a token by accident: only an explicit flag counts for admin commands.
     cli.username_from_flag = matches.value_source("username") == Some(ValueSource::CommandLine);
+    // Clap handles explicit flags and canonical env values. Only absent canonical values
+    // fall back to legacy names; an empty canonical value remains an error.
+    if cli.tenant.is_none() {
+        cli.tenant = std::env::var("MSN_TENANT").ok();
+    }
+    if cli.token.is_none() {
+        cli.token = std::env::var("MSN_TOKEN").ok();
+    }
     let stop = if matches!(cli.command, Command::Follow { .. } | Command::Wait { .. }) {
-        install_stop_signals()
+        install_stop_signals().unwrap_or_else(|error| {
+            write_err(&error);
+            std::process::exit(error.exit_code());
+        })
     } else {
         Arc::new(AtomicBool::new(false))
     };

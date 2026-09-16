@@ -14,6 +14,8 @@ pub struct CursorBinding {
     pub tenant: String,
     pub channel: String,
     pub after: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader: Option<String>,
 }
 
 impl CursorBinding {
@@ -23,12 +25,24 @@ impl CursorBinding {
             tenant: tenant.to_string(),
             channel: channel.to_string(),
             after,
+            reader: None,
         }
+    }
+
+    pub fn with_reader(mut self, reader: Option<&str>) -> Self {
+        self.reader = reader.map(str::to_string);
+        self
     }
 }
 
-/// `$XDG_STATE_HOME` (or `$HOME/.local/state`) `/msn/<origin-hash>/<tenant>/<channel>.json`.
-pub fn default_cursor_path(url: &Url, tenant: &str, channel: &str) -> Result<PathBuf, CliError> {
+/// `$XDG_STATE_HOME` (or `$HOME/.local/state`) `/msn/<origin-hash>/<tenant>/readers/<reader-hash>/<channel>.json`.
+pub fn default_cursor_path(
+    url: &Url,
+    tenant: &str,
+    reader: &str,
+    channel: &str,
+) -> Result<PathBuf, CliError> {
+    let reader_hash = reader_hash(reader)?;
     let state_home = match std::env::var_os("XDG_STATE_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => match std::env::var_os("HOME") {
@@ -44,20 +58,108 @@ pub fn default_cursor_path(url: &Url, tenant: &str, channel: &str) -> Result<Pat
         .join("msn")
         .join(origin_hash(url))
         .join(tenant)
+        .join("readers")
+        .join(reader_hash)
         .join(format!("{channel}.json")))
 }
 
 /// FNV-1a 64 of the ASCII origin, as 16 lowercase hex digits. Stable across releases,
 /// unlike `std::hash::DefaultHasher`, so persisted paths keep resolving.
 pub fn origin_hash(url: &Url) -> String {
+    stable_hash(origin_key(url).as_bytes())
+}
+
+/// Stable FNV-1a, not a credential hash. The full reader is also bound in the file
+/// so even a hash collision fails closed rather than silently sharing progress.
+pub fn reader_hash(reader: &str) -> Result<String, CliError> {
+    if reader.trim().is_empty() || reader.len() > 128 {
+        return Err(CliError::usage(
+            "Reader identity (--reader/MSN_READER or --username/MSN_USERNAME) must be non-blank and at most 128 UTF-8 bytes.",
+        ));
+    }
+    Ok(stable_hash(reader.as_bytes()))
+}
+
+fn stable_hash(bytes: &[u8]) -> String {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash = OFFSET_BASIS;
-    for byte in origin_key(url).bytes() {
+    for &byte in bytes {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(PRIME);
     }
     format!("{hash:016x}")
+}
+
+/// Exclusive ownership of a canonical cursor path. Never guess whether an existing
+/// lock is stale: PID reuse and shared filesystems make that unsafe.
+#[derive(Debug)]
+pub struct CursorLock {
+    cursor: PathBuf,
+    sidecar: PathBuf,
+}
+
+impl CursorLock {
+    pub fn acquire(path: &Path) -> Result<Self, CliError> {
+        let cursor = match fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Resolve parent aliases even when the cursor does not exist yet.
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| CliError::usage("--cursor-file must name a file."))?;
+                // Dangling symlinks cannot be normalized safely.
+                if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                    return Err(CliError::usage(
+                        "--cursor-file must not be a dangling symlink.",
+                    ));
+                }
+                fs::canonicalize(parent)?.join(name)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut name = cursor.as_os_str().to_os_string();
+        name.push(".lock");
+        let sidecar = PathBuf::from(name);
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&sidecar).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                CliError::conflict(format!("Cursor is locked: {}. Another wait/follow may be using it. After confirming the owner is no longer running, manually remove this .lock file and retry; stale locks are never removed automatically.", sidecar.display()))
+            } else {
+                CliError::generic(format!("Cannot lock cursor {}: {error}", cursor.display()))
+            }
+        })?;
+        let guard = Self { cursor, sidecar };
+        // Construct the guard first, so an error writing metadata also releases it.
+        writeln!(file, "{{\"pid\":{}}}", std::process::id())?;
+        Ok(guard)
+    }
+
+    pub fn cursor_path(&self) -> &Path {
+        &self.cursor
+    }
+}
+
+impl Drop for CursorLock {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.sidecar) {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Could not remove cursor lock {}: {error}. Confirm the owner has stopped before manually removing it.",
+                self.sidecar.display()
+            );
+        }
+    }
 }
 
 pub fn load_cursor(path: &Path, expected: &CursorBinding) -> Result<u64, CliError> {
@@ -67,14 +169,15 @@ pub fn load_cursor(path: &Path, expected: &CursorBinding) -> Result<u64, CliErro
         Err(error) => return Err(CliError::generic(error.to_string())),
     };
     let saved: CursorFile = serde_json::from_str(&raw).map_err(|_| {
-        CliError::usage("Cursor file belongs to a different server, tenant or channel.")
+        CliError::usage("Cursor file belongs to a different server, tenant, channel or reader.")
     })?;
     if saved.server != expected.server
         || saved.tenant != expected.tenant
         || saved.channel != expected.channel
+        || (expected.reader.is_some() && saved.reader != expected.reader)
     {
         return Err(CliError::usage(
-            "Cursor file belongs to a different server, tenant or channel.",
+            "Cursor file belongs to a different server, tenant, channel or reader.",
         ));
     }
     parse_after_value(&saved.after)
@@ -113,6 +216,8 @@ fn sibling_tmp(path: &Path) -> PathBuf {
 
 #[derive(Deserialize)]
 struct CursorFile {
+    #[serde(default)]
+    reader: Option<String>,
     server: String,
     tenant: String,
     channel: String,
@@ -225,11 +330,15 @@ mod tests {
         let url = Url::parse("https://msn.test").unwrap();
         let path = with_env(
             &[("XDG_STATE_HOME", Some("/xdg")), ("HOME", Some("/home/u"))],
-            || default_cursor_path(&url, "team", "general").unwrap(),
+            || default_cursor_path(&url, "team", "alice", "general").unwrap(),
         );
         assert_eq!(
             path,
-            PathBuf::from(format!("/xdg/msn/{}/team/general.json", origin_hash(&url)))
+            PathBuf::from(format!(
+                "/xdg/msn/{}/team/readers/{}/general.json",
+                origin_hash(&url),
+                reader_hash("alice").unwrap()
+            ))
         );
     }
 
@@ -238,22 +347,23 @@ mod tests {
         let url = Url::parse("https://msn.test").unwrap();
         let path = with_env(
             &[("XDG_STATE_HOME", None), ("HOME", Some("/home/u"))],
-            || default_cursor_path(&url, "team", "general").unwrap(),
+            || default_cursor_path(&url, "team", "alice", "general").unwrap(),
         );
         assert_eq!(
             path,
             PathBuf::from(format!(
-                "/home/u/.local/state/msn/{}/team/general.json",
-                origin_hash(&url)
+                "/home/u/.local/state/msn/{}/team/readers/{}/general.json",
+                origin_hash(&url),
+                reader_hash("alice").unwrap()
             ))
         );
         let other_channel = with_env(
             &[("XDG_STATE_HOME", None), ("HOME", Some("/home/u"))],
-            || default_cursor_path(&url, "team", "other").unwrap(),
+            || default_cursor_path(&url, "team", "alice", "other").unwrap(),
         );
         let other_tenant = with_env(
             &[("XDG_STATE_HOME", None), ("HOME", Some("/home/u"))],
-            || default_cursor_path(&url, "other", "general").unwrap(),
+            || default_cursor_path(&url, "other", "alice", "general").unwrap(),
         );
         assert_ne!(path, other_channel);
         assert_ne!(path, other_tenant);
@@ -268,7 +378,7 @@ mod tests {
             [("XDG_STATE_HOME", Some("")), ("HOME", Some(""))],
         ] {
             let err = with_env(&vars, || {
-                default_cursor_path(&url, "team", "general").unwrap_err()
+                default_cursor_path(&url, "team", "alice", "general").unwrap_err()
             });
             assert_eq!(err.exit_code(), 2, "{vars:?}");
             assert!(err.to_string().contains("--cursor-file"));
@@ -280,13 +390,70 @@ mod tests {
         let url = Url::parse("https://msn.test").unwrap();
         let path = with_env(
             &[("XDG_STATE_HOME", Some("")), ("HOME", Some("/home/u"))],
-            || default_cursor_path(&url, "team", "general").unwrap(),
+            || default_cursor_path(&url, "team", "alice", "general").unwrap(),
         );
         assert!(
             path.starts_with("/home/u/.local/state/msn"),
             "{}",
             path.display()
         );
+    }
+
+    #[test]
+    fn reader_hash_validates_utf8_bytes_and_is_stable() {
+        assert_eq!(reader_hash("alice").unwrap(), "508b2abb65a03907");
+        for reader in ["", " \n", &"x".repeat(129), &"🙂".repeat(33)] {
+            assert_eq!(reader_hash(reader).unwrap_err().exit_code(), 2);
+        }
+        for reader in [&"x".repeat(128), &"🙂".repeat(32), "../../escape"] {
+            let hash = reader_hash(reader).unwrap();
+            assert_eq!(hash.len(), 16);
+            assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+        assert_ne!(reader_hash("alice").unwrap(), reader_hash("bob").unwrap());
+    }
+
+    #[test]
+    fn automatic_cursor_rejects_legacy_or_wrong_reader_even_at_same_path() {
+        let path = tmp_path();
+        let url = Url::parse("https://msn.test").unwrap();
+        let base = CursorBinding::new(&url, "team", "general", 8);
+        let expected = base.clone().with_reader(Some("alice"));
+        for reader in [None, Some("bob")] {
+            write_cursor(&path, &base.clone().with_reader(reader)).unwrap();
+            assert_eq!(load_cursor(&path, &expected).unwrap_err().exit_code(), 2);
+            // Explicit files retain their server/tenant/channel-only compatibility.
+            assert_eq!(load_cursor(&path, &base).unwrap(), 8);
+        }
+        write_cursor(&path, &expected).unwrap();
+        assert_eq!(load_cursor(&path, &expected).unwrap(), 8);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cursor_lock_normalizes_symlink_and_parent_aliases() {
+        let dir = tmp_path();
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("cursor.json");
+        let alias = dir.join("alias.json");
+        // Nonexistent cursors and ./ aliases must lock the same pathname.
+        let lock = CursorLock::acquire(&file).unwrap();
+        assert_eq!(
+            CursorLock::acquire(&dir.join("./cursor.json"))
+                .unwrap_err()
+                .exit_code(),
+            5
+        );
+        drop(lock);
+        fs::write(&file, "{}").unwrap();
+        std::os::unix::fs::symlink(&file, &alias).unwrap();
+        let lock = CursorLock::acquire(&alias).unwrap();
+        assert_eq!(lock.cursor_path(), file);
+        assert_eq!(CursorLock::acquire(&file).unwrap_err().exit_code(), 5);
+        drop(lock);
+        drop(CursorLock::acquire(&file).unwrap());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
