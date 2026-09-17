@@ -1,10 +1,14 @@
+pub mod agent;
 pub mod args;
 pub mod client;
 pub mod config;
 pub mod cursor;
 pub mod error;
 pub mod identity;
+pub mod processing;
 pub mod profile;
+pub mod task_client;
+pub mod tasks;
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -45,6 +49,110 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
+        Command::Start {
+            channel,
+            after,
+            limit,
+            max_bytes,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let after = after
+                .as_deref()
+                .map(|v| parse_int(v, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let limit = parse_optional_int(limit.as_deref(), DEFAULT_SNAPSHOT_LIMIT, MAX_LIMIT)?;
+            require_positive_limit(limit)?;
+            let budget = parse_optional_int(
+                max_bytes.as_deref(),
+                DEFAULT_CATCHUP_MAX_BYTES,
+                MAX_CATCHUP_MAX_BYTES,
+            )?;
+            agent::start(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                cli.username.as_deref(),
+                cli.reader.as_deref(),
+                after,
+                limit,
+                budget,
+            )
+        }
+        Command::Show {
+            channel,
+            message_id,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let id = parse_int(&message_id, MAX_SAFE_INTEGER)?;
+            if id == 0 {
+                return Err(CliError::usage("message ID must be positive."));
+            }
+            agent::print_json(&agent::show(&url, &tenant, &token, channel, id)?)
+        }
+        Command::Peek {
+            channel,
+            wait,
+            limit,
+            cursor_file,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let wait = parse_optional_int(wait.as_deref(), 0, MAX_WAIT)?;
+            let limit = parse_optional_int(limit.as_deref(), 100, MAX_LIMIT)?;
+            require_positive_limit(limit)?;
+            let reader = identity::resolve_username(
+                &url,
+                &tenant,
+                &token,
+                cli.reader.as_deref().or(cli.username.as_deref()),
+            )?;
+            processing::peek(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                &reader,
+                cursor_file.as_deref().map(Path::new),
+                wait,
+                limit,
+                stop,
+            )
+        }
+        Command::Commit {
+            channel,
+            through,
+            cursor_file,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let through = parse_int(&through, MAX_SAFE_INTEGER)?;
+            let reader = identity::resolve_username(
+                &url,
+                &tenant,
+                &token,
+                cli.reader.as_deref().or(cli.username.as_deref()),
+            )?;
+            processing::commit(
+                &url,
+                &tenant,
+                channel,
+                &reader,
+                cursor_file.as_deref().map(Path::new),
+                through,
+            )
+        }
+        Command::Task { command } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            task_client::execute(&url, &tenant, &token, cli.username.as_deref(), command)
+        }
         Command::Profile { .. }
         | Command::Activate { .. }
         | Command::Deactivate

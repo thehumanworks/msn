@@ -449,7 +449,7 @@ mod tests {
         fs::write(&file, "{}").unwrap();
         std::os::unix::fs::symlink(&file, &alias).unwrap();
         let lock = CursorLock::acquire(&alias).unwrap();
-        assert_eq!(lock.cursor_path(), file);
+        assert_eq!(lock.cursor_path(), fs::canonicalize(&file).unwrap());
         assert_eq!(CursorLock::acquire(&file).unwrap_err().exit_code(), 5);
         drop(lock);
         drop(CursorLock::acquire(&file).unwrap());

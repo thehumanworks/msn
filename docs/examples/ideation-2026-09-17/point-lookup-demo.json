@@ -1,0 +1,16 @@
+{
+  "channel": "ideation",
+  "cases": [
+    {
+      "requestedId": 240,
+      "returnedId": 241,
+      "checkedHelper": "unavailable"
+    },
+    {
+      "requestedId": 241,
+      "returnedId": 241,
+      "checkedHelper": "found"
+    }
+  ],
+  "scope": "Exact equality checks prevent accepting the wrong row; this does not distinguish absent from deleted."
+}

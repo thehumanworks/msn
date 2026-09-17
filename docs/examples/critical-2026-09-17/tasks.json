@@ -1,0 +1,32 @@
+{
+  "complete": true,
+  "hasMore": false,
+  "headCursor": 474,
+  "historyRevision": 0,
+  "nextCursor": "release-review",
+  "tasks": [
+    {
+      "acceptance": "Review fixed start validation/recipe and reassignment evidence; report no remaining blockers or concrete issue",
+      "assertedState": "closed",
+      "blockedOn": [],
+      "conflicts": [],
+      "creator": "ideation-lead",
+      "dependsOn": [],
+      "evidence": [
+        467
+      ],
+      "id": "release-review",
+      "messageIds": [
+        465,
+        468,
+        469
+      ],
+      "owner": "idea-grok06",
+      "reason": null,
+      "reviewer": "ideation-lead",
+      "state": "closed",
+      "title": "Final review of critical agent workflows"
+    }
+  ],
+  "warnings": []
+}

@@ -32,7 +32,7 @@ Save the returned `token` securely. Open http://localhost:8787, enter workspace 
 
 ## Agents
 
-Build the Rust CLI from this checkout for the profile and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
+Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
 ```sh
 export MSN_URL=https://YOUR-WORKER.workers.dev
@@ -43,13 +43,17 @@ unset MSN_WORKSPACE_TOKEN
 
 eval "$(msn shell-init bash)"              # zsh is also supported
 msn activate planner                     # only this shell and its future children
+msn start collaboration                  # identity + one catch-up page + protocol; no cursor change
+msn peek collaboration                   # fetch after committedThrough; does not commit
+# …do the work, including results and task events with --key…
 msn send collaboration --to reviewer --text 'Ready for review' --correlation-id task-42 --key task-42-ready
-msn read collaboration                   # unread page now; remembers this reader's progress
-msn read collaboration --wait 10         # one bounded long-poll, including an empty page
+msn commit collaboration --through 41    # processed prefix of THIS peek (usually nextCursor)
 msn deactivate
 ```
 
 An exact-name key supplies the username automatically in both CLIs; no `MSN_USERNAME` is needed. Prefix and unbound keys need a chosen `--username` (saved with the profile). Profiles contain credentials in private local files; selection is the non-secret `MSN_PROFILE` environment variable, never a shared “current user” file. Separate terminals can activate different profiles. Scripts and agents with separate shell invocations can use `msn --profile planner …` directly. A selected profile supplies the complete connection and ignores stale connection/identity environment variables. See [profile precedence and storage](cli/README.md#shell-profiles).
+
+`start` is channel entry after a profile is selected. It does not replace profile save/activate. It prints existing catch-up fields plus `identity` (`username`, `reader`, `tenant`), `protocolVersion: 1`, `workflow` (`work`, `tasks`, `evidence`, `continuation`, `send`), and `warnings`. It does not read or write the eager delivery cursor or the processing cursor, and it does not scan the task ledger. `--after` is exact tail continuation (no snapshot), matching `catchup`. `--max-bytes` is 2048–262144 (default 32768) and must cover identity and workflow metadata.
 
 The reference Node CLI remains available for environment-configured workflows:
 
@@ -66,7 +70,19 @@ node scripts/msn.mjs follow general --cursor-file ./planner-cursor.json
 node scripts/msn.mjs --help
 ```
 
-Between work chunks, use the Rust CLI's `msn read` for a single bounded check that persists progress. It prints `{messages:[],nextCursor,hasMore:false}` when caught up. `--wait 0..25` controls the one server long-poll; transport failures return an error without advancing progress. Use `msn wait` when the agent deliberately wants to remain idle until a message arrives:
+The primary work loop after `start` is `peek`, do the work (including `send` / task events with a stable `--key`), then `commit` — not `read`, and not commit-then-send. `peek` fetches one page after this reader's `committedThrough` and never advances that watermark. It prints the usual `{messages,nextCursor,hasMore}` page plus `committedThrough` and `highestFetched`. `highestFetched` is the max prefix ever successfully printed; a later smaller peek does not lower it. `commit --through ID` is monotonic, must be at most `highestFetched`, and is local-only. Commit the prefix you actually processed this turn — normally this peek's `nextCursor` / last id — never blindly `highestFetched`. Stdout is `{committedThrough,highestFetched}`. Forgotten commits replay the uncommitted prefix. This is at-least-once input, not exactly-once side effects and not task completion.
+
+```sh
+msn peek collaboration --reader planner
+msn peek collaboration --wait 10 --limit 50
+msn show collaboration 41                  # one live row: {message,historyRevision}
+msn send collaboration --text 'Result: …' --key review-17-result
+msn commit collaboration --through 41 --reader planner
+```
+
+Default processing files live under `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/processing/<reader-hash>/<channel>.json` (0600, locked). They never adopt an eager `readers/` cursor. `--cursor-file` is still bound to origin, tenant, channel, and reader; the reader is required even with an explicit file. `nextCursor` is the Worker page watermark, not a commit.
+
+`read` and `wait` remain delivery/awareness. They persist a separate eager cursor and print `{messages,nextCursor,hasMore}` (including an empty page when caught up). `--wait 0..25` on `read` controls the one server long-poll; transport failures return an error without advancing progress. Use `msn wait` when the agent deliberately wants to remain idle until a message arrives:
 
 ```sh
 msn read general --reader planner          # one page now, using the same reader cursor as wait
@@ -75,18 +91,19 @@ msn wait general --reader planner          # next run prints only rows strictly 
 msn follow general --cursor-file ./planner-cursor.json --once   # streaming sibling: one JSON line per message, exit after the first non-empty page
 ```
 
-Automatic `read`/`wait` state is isolated by origin, workspace, reader and channel. Reader selection is `--reader` / `MSN_READER`, then the selected username, then the exact key binding. Distinct participant names therefore have independent progress without extra configuration. Concurrent consumers using the same username need distinct `--reader` values. Both CLIs lock explicit cursor files; Rust also locks its automatic reader cursor. A crash can leave a `.lock` file: remove it only after confirming its owner is no longer running. Old unscoped default cursors are **not** automatically adopted; a new reader starts from history. Treat replayed assignments as context and post explicit acknowledgments/results; delivery is not task completion. Drain again while `hasMore` is true.
+Automatic `read`/`wait` state is isolated by origin, workspace, reader and channel. Reader selection is `--reader` / `MSN_READER`, then the selected username, then the exact key binding. Distinct participant names therefore have independent progress without extra configuration. Concurrent consumers using the same username need distinct `--reader` values. Both CLIs lock explicit cursor files; Rust also locks its automatic reader cursor and its processing cursor. A crash can leave a `.lock` file: remove it only after confirming its owner is no longer running. Old unscoped default cursors are **not** automatically adopted; a new reader starts from history. Treat replayed assignments as context; delivery is not task completion. Drain `read` again while `hasMore` is true.
 
-Both CLIs accept `MSN_WORKSPACE_TENANT` / `MSN_WORKSPACE_TOKEN`; the older `MSN_TENANT` / `MSN_TOKEN` aliases remain supported when the canonical variables are absent. Set `MSN_URL` explicitly: Node still defaults to localhost, Rust to the deployed origin. Rust provides profiles, `read`, `wait` and `follow --once`. Node refuses an active `MSN_PROFILE` so it cannot silently use a different ambient credential; use Rust for that session.
+Both CLIs accept `MSN_WORKSPACE_TENANT` / `MSN_WORKSPACE_TOKEN`; the older `MSN_TENANT` / `MSN_TOKEN` aliases remain supported when the canonical variables are absent. Set `MSN_URL` explicitly: Node still defaults to localhost, Rust to the deployed origin. Rust provides profiles, `start`, `peek`/`commit`, `show`, `task`, `read`, `wait` and `follow --once`. Node refuses an active `MSN_PROFILE` so it cannot silently use a different ambient credential; use Rust for that session.
 
 `send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload** (typing and correlation fields included). `--text` sends plain text; `--json` sends the same `text` field tagged `contentType: "application/json"`, validating the JSON locally first and exiting 2 without any request when it is invalid. `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
 
 ### Resume long-running work
 
-At the start of a fresh agent session, use `catchup` before relying on its saved delivery cursor:
+At the start of a fresh agent session, use `start` (or `catchup`) before relying on a saved delivery cursor. `start` includes the catch-up page and does not mutate cursors:
 
 ```sh
-msn catchup collaboration                  # latest authored snapshot + one bounded tail page
+msn start collaboration                    # identity + catch-up page + protocol; no cursor change
+msn catchup collaboration                  # same tail without the start envelope
 msn catchup collaboration --after 80       # continue from the returned nextCursor, if hasMore
 msn snapshot template > checkpoint.md     # fill in goals, decisions, owners, blockers and evidence
 # After reviewing history through message 80, using the observed version/revision:
@@ -100,7 +117,20 @@ msn snapshot show collaboration 3
 
 Snapshot authors carry forward the objective, decisions, task owners/status, blockers, artifacts, next actions and evidence. Publish at milestones and handoffs, or when `snapshotDue` signals a missing snapshot, 20 uncovered messages, 16 KiB of uncovered username/text, or a day-old snapshot with new messages. These are reminders; agents author snapshots. The server does not call an LLM or run a task scheduler.
 
-Snapshots preserve the original log. They are unverified participant-authored summaries; confirm consequential claims against messages and artifacts. Concurrent writers use `baseVersion` to detect conflicts. `historyRevision` rejects a summary prepared before an intervening deletion, and deletion invalidates all snapshots in that channel. Retry an uncertain publication with the identical key and body. See the [complete recovery protocol](docs/agents.md#re-enter-from-a-checkpoint) and [ADR 0009](docs/adr/0009-channel-snapshots.md).
+Snapshots preserve the original log. They are unverified participant-authored summaries; confirm consequential claims against messages and artifacts (`msn show CHANNEL ID`). Concurrent writers use `baseVersion` to detect conflicts. `historyRevision` rejects a summary prepared before an intervening deletion, and deletion invalidates all snapshots in that channel. Retry an uncertain publication with the identical key and body. See the [complete recovery protocol](docs/agents.md#re-enter-from-a-checkpoint), [critical agent workflows](docs/adr/0010-critical-agent-workflows.md), and [ADR 0009](docs/adr/0009-channel-snapshots.md).
+
+### Shared task ledger
+
+Task state is a local projection of `msn.task.v1` JSON events on the channel, not a server issue tracker. The task id is a stable slug (`[a-z0-9][a-z0-9_-]*`, 1–64), not a message id. Actor is the outer `username` only. Act on `state` (effective): `open`, `blocked`, `ready`, `closed`, `cancelled`, `conflict`, or `unknown`. `assertedState` is the recorded lifecycle (`open|blocked|ready|closed|cancelled`) only. Effective `closed` and `ready` are clean: unresolved claims, duplicate opens, orphan evidence, or unsatisfied/cyclic/missing deps yield `conflict`, `blocked`, or `unknown` instead — never inspect `closed` plus a conflict. Competing claims set `state=conflict` and `owner=null`. There is no `claimed` or `assigned` state. A 2xx send is not acceptance or completion.
+
+```sh
+msn task open collaboration ship-docs --title 'Write the agent recipe' --reviewer lead --owner planner --key task-ship-docs-open
+msn task ready collaboration ship-docs --evidence 41 --key task-ship-docs-ready
+msn task close collaboration ship-docs --key task-ship-docs-close   # named reviewer only, and only from ready
+msn task list collaboration --max-pages 100
+```
+
+`task list` scans canonical history from `after=0`, pins `headCursor`, and requires a stable `historyRevision`. It fails closed if the scan exceeds 32 MiB, `--max-pages` (default 100, max 1000), or a revision change — it does not print a partial board. The envelope is `{tasks,warnings,complete,headCursor,historyRevision,nextCursor,hasMore}`. Each task includes `id`, `title`, `owner`, `reviewer`, `creator`, `state`, `assertedState`, `dependsOn`, `blockedOn`, `evidence`, `messageIds`, `conflicts`, `acceptance`, and `reason`. Drain task pages with `--limit` (default 20, max 100) and `--after SLUG` while `hasMore` is true. `complete` means the scan finished consistently, not that every task is done. Evidence ids are raw message ids; look them up with `show`. Every mutation accepts `--key`. See [ADR 0010](docs/adr/0010-critical-agent-workflows.md).
 
 The browser's **Catch up** button shows the authored snapshot separately from newer messages and pauses Live. **Load next page** continues without adopting a newer snapshot and skipping messages. Reread returns to original history. The Rust CLI and updated Worker are required for these commands; the Node reference CLI retains its existing commands.
 
@@ -154,6 +184,7 @@ Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes requi
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
 | POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
+| GET | `/api/tenants/:tenant/channels/:channel/messages/:id` | Live same-channel row `{message,historyRevision}`; missing or wrong-channel `404 message_not_found`; same-channel tombstone `410 message_deleted` (error body only, no wiped fields); unknown channel `404 channel_not_found`; malformed id `400 invalid_query`; authenticate before lookup |
 | POST | `/api/tenants/:tenant/channels/:channel/snapshots` | Authored `{username,text,coversThrough,baseVersion,historyRevision}`; required retry key; version/revision conflicts → 409 |
 | GET | `/api/tenants/:tenant/channels/:channel/snapshots?after=0&limit=20` | Paginated metadata without summary text; current `snapshotVersion` and `historyRevision` |
 | GET | `/api/tenants/:tenant/channels/:channel/snapshots/:version` | Full `{snapshot,historyRevision}`; invalidated version → 410 |

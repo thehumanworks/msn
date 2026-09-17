@@ -1,0 +1,202 @@
+[
+  {
+    "id": "C01",
+    "title": "One-call agent start",
+    "proposal": "Validate identity, return one bounded catchup page plus a short protocol recipe and warnings. No cursor mutation or automatic draining.",
+    "effort": "S",
+    "evidence": [
+      349,
+      358,
+      360
+    ]
+  },
+  {
+    "id": "C02",
+    "title": "Task state and dependency ledger",
+    "proposal": "One typed-event projection for assignment, owner, blocked-on, definition of done, ready, named-integrator closure and conflicts. Visibility first; no exclusive claims or automatic completion.",
+    "effort": "M",
+    "evidence": [
+      260,
+      326,
+      330,
+      356
+    ]
+  },
+  {
+    "id": "C03",
+    "title": "Budgeted attention and progressive expansion",
+    "proposal": "CLI fetches internally, prints complete metadata index plus selected bodies. Expand own/broadcast/watched and explicitly marked decision messages. Untyped peer decisions can be missed; opt-in until validated.",
+    "effort": "S–M",
+    "evidence": [
+      337,
+      346,
+      355,
+      362
+    ]
+  },
+  {
+    "id": "C04",
+    "title": "Exact evidence lookup",
+    "proposal": "Point/bounded-batch lookup by channel+message ID, missing/deleted distinction, metadata first and explicit body expansion. Shared primitive for citations, index views and snapshot checks.",
+    "effort": "S–M",
+    "evidence": [
+      280,
+      336,
+      345
+    ]
+  },
+  {
+    "id": "C05",
+    "title": "Crash-safe processing cursor",
+    "proposal": "peek then explicit prefix-closed commit after processing; monotonic and limited to fetched messages. One ordered worker per reader. At-least-once input, no exactly-once side-effect claim.",
+    "effort": "S",
+    "evidence": [
+      343,
+      345,
+      350
+    ]
+  },
+  {
+    "id": "C06",
+    "title": "Checkpoint review and handoff",
+    "proposal": "Augment existing snapshots with citation presence/coverage checks, explicit reply-to-cited-message change flags and agent handoff residue. Unknown parsing stays unknown; no summary truth badge.",
+    "effort": "S–M",
+    "evidence": [
+      269,
+      311,
+      313,
+      334
+    ]
+  },
+  {
+    "id": "C07",
+    "title": "Human steering and persistent decisions",
+    "proposal": "Visible pending asks plus steer/decision references that survive catchup and addressing. Browser prose remains valid. Human authority must be explicitly configured; username binding alone does not prove a human role.",
+    "effort": "M",
+    "evidence": [
+      283,
+      315,
+      339,
+      340
+    ]
+  },
+  {
+    "id": "C08",
+    "title": "Artifact receipts",
+    "proposal": "Digest, relative path, baseline commit and clean/dirty/untracked provenance. Verify local bytes without claiming availability or test success.",
+    "effort": "S",
+    "evidence": [
+      342,
+      344,
+      348
+    ]
+  },
+  {
+    "id": "C09",
+    "title": "Run trace and communication audit",
+    "proposal": "Structural reply/recipient graph, absent later reply edges, retrieval completeness and per-run volume. Never infer semantic answered/completed from an edge.",
+    "effort": "S–M",
+    "evidence": [
+      259,
+      341,
+      363
+    ]
+  },
+  {
+    "id": "C10",
+    "title": "Durable send intent",
+    "proposal": "Persist generated idempotency key and recoverable payload before POST; resume uncertain sends with same bytes/key. Define retention and settled records.",
+    "effort": "S–M",
+    "evidence": [
+      266,
+      333,
+      350
+    ]
+  },
+  {
+    "id": "C11",
+    "title": "Typed participant MCP adapter",
+    "proposal": "Small generated/maintained tool schema around start, catchup, send and identity. No admin credentials in tool arguments; avoid a second divergent protocol surface.",
+    "effort": "M",
+    "evidence": [
+      305,
+      358,
+      360
+    ]
+  },
+  {
+    "id": "C12",
+    "title": "Advisory exclusive claims and takeover",
+    "proposal": "Server CAS claim generation with explicit authorized reassignment and reason. Prevent conflicting claim records, not external edits. Requires evidence costly duplicate work beats visibility alone.",
+    "effort": "M",
+    "evidence": [
+      270,
+      301,
+      323
+    ]
+  },
+  {
+    "id": "C13",
+    "title": "Durable subscriptions and targeted wakeups",
+    "proposal": "Wake agents for named dependency transitions or subscribed events without repeated full-channel turns. Preserve replay/history and missed-decision recovery. Transport choice follows measured idle/wakeup cost.",
+    "effort": "M–L",
+    "evidence": [
+      307,
+      329,
+      355
+    ]
+  },
+  {
+    "id": "C14",
+    "title": "Cross-machine processed state",
+    "proposal": "Server-held authorized reader committed-through with conflict/takeover/retention policy, building on local peek/commit for ephemeral agent homes.",
+    "effort": "M",
+    "evidence": [
+      320,
+      341,
+      345
+    ]
+  },
+  {
+    "id": "C15",
+    "title": "Dissent that survives summaries",
+    "proposal": "Typed claim/dissent/link projection retaining later objections and competing closures. No automatic winner or resolver authority. Gate on evidence ordinary replies lose actionable dissent.",
+    "effort": "S–M",
+    "evidence": [
+      319,
+      328,
+      331,
+      361
+    ]
+  },
+  {
+    "id": "C16",
+    "title": "Channel-scoped credentials",
+    "proposal": "Constrain read/write capability to allowed channels, with consistent enforcement across every route. Existing separate tenants remain simpler project isolation.",
+    "effort": "M",
+    "evidence": [
+      279,
+      334
+    ]
+  },
+  {
+    "id": "C17",
+    "title": "Content-addressed artifact sharing",
+    "proposal": "Private blob side store addressed by digest, with authenticated bounded transfer, retention/deletion and reference messages. Fresh machines retrieve non-git artifacts without host paths.",
+    "effort": "L",
+    "evidence": [
+      332,
+      348
+    ]
+  },
+  {
+    "id": "C18",
+    "title": "Adversarial decision protocol",
+    "proposal": "For explicitly high-stakes decisions require a named opponent/dissent review and evidence-linked close. Returning agents see current structured decision references; no claim of semantic truth.",
+    "effort": "L",
+    "evidence": [
+      306,
+      331
+    ]
+  }
+]

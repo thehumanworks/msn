@@ -92,6 +92,14 @@ function toMessage(row: MessageRow, tenant: string): Message {
   };
 }
 
+/** Path ids are positive safe canonical integers; 0 and leading zeros are rejected. */
+function messageId(value: string): number {
+  if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new HttpError(400, "invalid_query", "Message id must be a positive safe integer.");
+  }
+  return Number(value);
+}
+
 /**
  * Idempotency digest input. A plain text/plain send without correlation fields hashes exactly as
  * it did before either feature, so retries of messages stored under schema version 1 still replay
@@ -420,6 +428,21 @@ export class MsnDurableObject extends DurableObject<Env> {
         .exec<{ revision: number }>("SELECT revision FROM channel_history WHERE channel = ?", channel)
         .toArray()[0]?.revision ?? 0
     );
+  }
+
+  /** Same-channel live row only; tombstones and other channels do not leak bodies. */
+  private showMessage(tenant: string, channel: string, id: number): Response {
+    const row = this.ctx.storage.sql
+      .exec<MessageRow & { deleted: number }>(
+        `SELECT ${MESSAGE_COLUMNS}, deleted FROM messages WHERE channel = ? AND id = ?`,
+        channel,
+        id,
+      )
+      .toArray()[0];
+    if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+    if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+    const { deleted: _deleted, ...message } = row;
+    return json({ message: toMessage(message, tenant), historyRevision: this.historyRevision(channel) });
   }
 
   private latestSnapshot(channel: string): SnapshotRow | undefined {
@@ -904,6 +927,10 @@ export class MsnDurableObject extends DurableObject<Env> {
                 historyRevision: this.historyRevision(channel),
               });
             }
+          }
+          if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
+            this.requireChannel(channel);
+            return this.showMessage(tenant, channel, messageId(rest[3]));
           }
           if (rest.length === 3 && rest[2] === "messages") {
             if (request.method === "POST") {

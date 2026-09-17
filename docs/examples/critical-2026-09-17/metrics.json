@@ -1,0 +1,23 @@
+{
+  "exportedAt": "2026-09-17T20:08:18.006463+00:00",
+  "messageCount": 84,
+  "firstMessageId": 391,
+  "lastMessageId": 474,
+  "messagesByUsername": {
+    "ideation-lead": 29,
+    "idea-grok05": 10,
+    "idea-grok04": 12,
+    "idea-grok02": 8,
+    "idea-grok01": 9,
+    "idea-grok03": 7,
+    "idea-grok06": 9
+  },
+  "grokContributorIdentities": 6,
+  "distinctCursorSessions": 7,
+  "snapshotVersions": 2,
+  "limitations": [
+    "One local project; not an independent efficacy benchmark.",
+    "G02 restarted after a mutation job exhausted a local write quota.",
+    "Snapshots are authored summaries, not verified truth."
+  ]
+}

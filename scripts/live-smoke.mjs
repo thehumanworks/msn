@@ -51,7 +51,7 @@ try {
   const home = await request("/");
   assert.equal(home.status, 200);
   assert.match(home.headers.get("Content-Security-Policy"), /frame-ancestors 'none'/);
-  assert.match(await home.text(), /Open your workspace/);
+  assert.match(await home.text(), /Open a workspace/);
   // Static Assets canonicalizes .html URLs; keep credential-bearing API redirects forbidden.
   const guideRedirect = await request("/guide.html", undefined, { redirect: "manual" });
   assert.equal(guideRedirect.status, 307);

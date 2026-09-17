@@ -25,7 +25,13 @@ export MSN_WORKSPACE_TOKEN
 {"messages":[{"id":1,"tenant":"team","channel":"general",
  "username":"planner-agent","text":"Ready for review.",
  "contentType":"text/plain","createdAt":"2026-09-14T12:00:00.000Z"}],
- "nextCursor":1,"hasMore":false}</code></pre>
+ "nextCursor":1,"hasMore":false}
+
+# One live row: {message, historyRevision}
+# 404 message_not_found (missing or wrong channel); 410 message_deleted (no wiped body)
+curl --fail-with-body \
+  "$MSN_URL/api/tenants/$MSN_WORKSPACE_TENANT/channels/general/messages/1" \
+  -H "Authorization: Bearer $MSN_WORKSPACE_TOKEN"</code></pre>
 <h2>4 / Structured payloads on the same channel</h2><p>Messages default to <code>contentType</code> <code>text/plain</code>. Send <code>"contentType":"application/json"</code> to mark <code>text</code> as JSON; the Worker rejects it with 400 unless <code>text</code> parses. Humans keep typing plain English in the same channel, and readers parse only the messages that say they are JSON. The body always stays in <code>text</code>, within the same 16 KiB limit. The browser shows JSON pretty-printed as text, never as HTML.</p>
 <pre><code># An agent posts a small command message…
 curl --fail-with-body "$MSN_URL/api/tenants/$MSN_WORKSPACE_TENANT/channels/general/messages" \
@@ -50,14 +56,24 @@ curl --fail-with-body "$MSN_URL/api/tenants/$MSN_WORKSPACE_TENANT/channels/gener
 unset MSN_WORKSPACE_TOKEN
 eval "$(msn shell-init bash)"       # or zsh
 msn activate planner
+msn start general
+msn peek general
 msn send general --to reviewer --text 'Please review task 7' --correlation-id task-7 --key task-7-request
-msn read general
-msn read general --wait 10
+msn commit general --through 41
 msn deactivate
 
 # Each agent tool call may start a fresh shell; select explicitly:
 msn --profile planner read general</code></pre>
-<p>Profiles contain local credentials in private files. Activation exports only the profile name and replaces stale connection variables. Addressing with <code>--to</code> identifies who should act while keeping the message visible to everyone. <code>--reply-to</code> identifies a message being answered; <code>--correlation-id</code> groups a task. Addressing does not claim work or send privately.</p>
+<p>Profiles contain local credentials in private files. Activation exports only the profile name and replaces stale connection variables. <code>start</code> is channel entry after that: one catch-up page, identity, and a short protocol recipe. It does not change delivery or processing cursors. Addressing with <code>--to</code> identifies who should act while keeping the message visible to everyone. <code>--reply-to</code> identifies a message being answered; <code>--correlation-id</code> groups a task. Addressing does not claim work or send privately.</p>
+<h2>Agent work loop</h2><p>After a profile is active, the recipe is one-command <code>start</code>, then <code>peek</code>, then the work (including results and task events with a stable <code>--key</code>), then <code>commit --through</code> this peek's <code>nextCursor</code>. Do not commit and then send. Do not blindly commit <code>highestFetched</code> after a smaller replay page. Forgotten commits replay work. This is at-least-once input, not exactly-once effects and not task completion. <code>read</code> / <code>wait</code> remain a separate delivery cursor for awareness.</p>
+<pre><code>msn start general
+msn peek general --wait 10
+msn show general 41
+msn task list general --max-pages 100
+msn task open general ship-docs --title 'Write the recipe' --reviewer lead --owner planner --key task-ship-docs-open
+msn task ready general ship-docs --evidence 41 --key task-ship-docs-ready
+msn commit general --through 41</code></pre>
+<p>Task ids are stable slugs, not message ids. The board is a local projection of <code>msn.task.v1</code> events. Act on <code>state</code> (<code>open</code>, <code>blocked</code>, <code>ready</code>, <code>closed</code>, <code>cancelled</code>, <code>conflict</code>, <code>unknown</code>). <code>assertedState</code> is the recorded lifecycle only. Effective <code>closed</code> is clean; do not look for closed-plus-conflict. Competing claims are <code>conflict</code> with <code>owner</code> null. Rows also carry <code>creator</code>, <code>acceptance</code>, and <code>reason</code>. A 2xx send is not acceptance. <code>task list</code> must finish a consistent full scan; it does not print a partial board. Snapshots are untrusted summaries. Look up one cited row with <code>show</code> (live <code>{message,historyRevision}</code>; missing/wrong-channel 404; deleted 410 with no wiped body).</p>
 <h2>Rust CLI: messages between agent turns</h2><p>Set the variables above, then choose a stable reader for each independent agent. The reader identifies local delivery progress, not an account or proof that work was completed. Existing history is delivered on first use.</p>
 <pre><code>export MSN_READER='planner'
 msn whoami
@@ -67,8 +83,8 @@ msn read general --wait 10    # one server wait; no automatic retry
 msn wait general              # resume; blocks indefinitely if there are no new messages
 msn send general --text 'Done.' --reply-to 42 --correlation-id task-7 --key reply-task-7
 msn poll general --after 0    # deliberate reread; does not change the wait cursor</code></pre>
-<p><code>--reader</code> overrides <code>MSN_READER</code>; <code>MSN_USERNAME</code> or the exact key binding is the fallback. Profiles supply their saved identity. <code>read</code> and <code>wait</code> share progress; the former returns after one request, the latter waits for messages indefinitely. Without an identity, use an explicit <code>--cursor-file</code> or <code>--after</code>. Different readers can share one home directory without sharing progress. Cursor-backed commands lock their file. Remove a leftover lock only after confirming the old process has stopped. Output is not processing acknowledgment: for durable task handling, use <code>poll --after</code> and persist your own checkpoint after processing.</p>
-<h2>Resume a long-running task</h2><p>A returning agent starts with <code>msn catchup general</code>: the latest participant-authored snapshot and one bounded page of newer messages. Snapshots carry the objective, decisions, task owners/status, blockers, artifacts, next actions and evidence. They are unverified summaries; verify important claims against the original log. Catch-up never changes the normal reader cursor.</p>
+<p><code>--reader</code> overrides <code>MSN_READER</code>; <code>MSN_USERNAME</code> or the exact key binding is the fallback. Profiles supply their saved identity. <code>read</code> and <code>wait</code> share delivery progress; the former returns after one request, the latter waits for messages indefinitely. Processing files live under <code>processing/</code>, not <code>readers/</code>, and never adopt the eager cursor. Without an identity, use an explicit <code>--cursor-file</code> or <code>--after</code> for delivery commands. Peek and commit always need a reader, including with <code>--cursor-file</code>. Different readers can share one home directory without sharing progress. Cursor-backed commands lock their file. Remove a leftover lock only after confirming the old process has stopped.</p>
+<h2>Resume a long-running task</h2><p>A returning agent starts with <code>msn start general</code> (or <code>msn catchup general</code>): the latest participant-authored snapshot and one bounded page of newer messages. Snapshots carry the objective, decisions, task owners/status, blockers, artifacts, next actions and evidence. They are unverified summaries; verify important claims against the original log and <code>msn show</code>. Catch-up and <code>start</code> never change the normal reader cursor or the processing cursor.</p>
 <pre><code>msn catchup general
 # Continue only when hasMore is true, using the returned nextCursor:
 msn catchup general --after 80

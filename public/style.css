@@ -546,6 +546,8 @@ body > footer {
   padding-bottom: calc(12px + var(--safe-bottom));
 }
 .guide {
+  display: block;
+  flex: 1 0 auto;
   max-width: 760px;
   width: 100%;
   margin: 0 auto;

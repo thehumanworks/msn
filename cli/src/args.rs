@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::config::DEFAULT_URL;
 
 pub const EXAMPLES: &str = "\
+Agents: begin with msn start CHANNEL; use peek/commit for processing progress.
+
 Environment:
   MSN_URL                 Worker origin (default https://msn.rodat-human-ada.workers.dev)
   MSN_WORKSPACE_TENANT    Tenant slug (--tenant)
@@ -23,6 +25,12 @@ EXAMPLES:
   msn profile save planner
   eval \"$(msn shell-init bash)\"
   msn activate planner
+  msn start general
+  msn peek general --wait 10
+  msn commit general --through 42  # only after processing every delivered row through 42
+  msn show general 42
+  msn task open general task-1 --title 'Review change' --owner reviewer --reviewer planner
+  msn task list general
   msn send general --text 'hello'
   msn send general --to reviewer --text 'Please review' --correlation-id task-7
   msn read general                 # unread page now, including empty when caught up
@@ -153,6 +161,44 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Agent entry: validated identity + one bounded checkpoint/tail page; never moves a cursor
+    Start {
+        channel: String,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<String>,
+        /// Total output budget, 2048–262144 bytes (default 32768)
+        #[arg(long = "max-bytes")]
+        max_bytes: Option<String>,
+    },
+    /// Read work after committed progress without committing it (one ordered worker per reader)
+    Peek {
+        channel: String,
+        /// Seconds to wait, 0–25 (default 0)
+        #[arg(long)]
+        wait: Option<String>,
+        #[arg(long)]
+        limit: Option<String>,
+        /// Separate processing state, bound to origin/workspace/channel/reader
+        #[arg(long = "cursor-file")]
+        cursor_file: Option<String>,
+    },
+    /// Commit processing of every message through a previously fetched watermark
+    Commit {
+        channel: String,
+        #[arg(long)]
+        through: String,
+        #[arg(long = "cursor-file")]
+        cursor_file: Option<String>,
+    },
+    /// Fetch one exact message by channel and ID (404 absent, 410 deleted)
+    Show { channel: String, message_id: String },
+    /// Publish readable task events or project a complete, bounded task board
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
     /// Save or inspect named local participant connections (never prints saved keys)
     Profile {
         #[command(subcommand)]
@@ -316,6 +362,90 @@ pub enum Command {
     },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// Open a task with an explicit reviewer and optional owner/dependencies
+    Open {
+        channel: String,
+        task: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        reviewer: String,
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        #[arg(long)]
+        acceptance: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Record yourself taking work; competing claims stay visible as conflicts
+    Claim {
+        channel: String,
+        task: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Creator/reviewer explicitly reassigns work and resolves competing claims
+    Assign {
+        channel: String,
+        task: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Owner records a blocker
+    Block {
+        channel: String,
+        task: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Owner offers a result for review, citing surviving channel message IDs
+    Ready {
+        channel: String,
+        task: String,
+        #[arg(long, required = true)]
+        evidence: Vec<String>,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Named reviewer accepts ready work; the projection checks dependencies and conflicts
+    Close {
+        channel: String,
+        task: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Creator/reviewer cancels a task with a reason
+    Cancel {
+        channel: String,
+        task: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Reconstruct canonical task state; fail rather than publish a partial history
+    List {
+        channel: String,
+        /// Maximum history pages, 1–1000 (default 100); total scan capped at 32 MiB
+        #[arg(long = "max-pages")]
+        max_pages: Option<String>,
+        /// Exclusive task ID output cursor (history is always scanned completely)
+        #[arg(long)]
+        after: Option<String>,
+        /// Task rows per output page, 1–100 (default 20)
+        #[arg(long)]
+        limit: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

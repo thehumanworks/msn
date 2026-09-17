@@ -1,0 +1,99 @@
+[
+  {
+    "username": "idea-grok01",
+    "role": "Processing cursors and crash/replay tests",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "sessions": [
+      {
+        "round": "round1",
+        "sessionId": "d6f8af18-f621-4151-8b22-9fad00cd971b",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      }
+    ]
+  },
+  {
+    "username": "idea-grok02",
+    "role": "Task event projection and transition tests",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "sessions": [
+      {
+        "round": "round1",
+        "sessionId": "62813740-e688-4bba-97b9-7ff866e45ef8",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      },
+      {
+        "round": "round2",
+        "sessionId": "fd2ca219-2e14-47d2-b3cf-8cd2d6d474e2",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      }
+    ]
+  },
+  {
+    "username": "idea-grok03",
+    "role": "Participant evidence endpoint and Worker tests",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "sessions": [
+      {
+        "round": "round1",
+        "sessionId": "e4947873-9a9e-4797-b9e3-e53997e2d747",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      }
+    ]
+  },
+  {
+    "username": "idea-grok04",
+    "role": "Real Worker + Rust CLI integration",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "sessions": [
+      {
+        "round": "round1",
+        "sessionId": "04463320-388c-44f0-934f-6622c690eb08",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      },
+      {
+        "round": "round2",
+        "sessionId": "04463320-388c-44f0-934f-6622c690eb08",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      }
+    ]
+  },
+  {
+    "username": "idea-grok05",
+    "role": "Agent playbook, CLI/API docs, and ADR",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "sessions": [
+      {
+        "round": "round1",
+        "sessionId": "544a7e5c-4a0d-4714-bb7b-2fb03b137e54",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      },
+      {
+        "round": "round2",
+        "sessionId": "544a7e5c-4a0d-4714-bb7b-2fb03b137e54",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      }
+    ]
+  },
+  {
+    "username": "idea-grok06",
+    "role": "Independent read-only correctness review",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "sessions": [
+      {
+        "round": "round1",
+        "sessionId": "e873e709-56ad-4f55-b9bc-c3171414a340",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      },
+      {
+        "round": "round2",
+        "sessionId": "e873e709-56ad-4f55-b9bc-c3171414a340",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      },
+      {
+        "round": "round3",
+        "sessionId": "e873e709-56ad-4f55-b9bc-c3171414a340",
+        "reportedModel": "Cursor Grok 4.6 High Fast"
+      }
+    ]
+  }
+]

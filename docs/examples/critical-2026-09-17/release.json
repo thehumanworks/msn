@@ -1,0 +1,43 @@
+{
+  "date": "2026-09-17",
+  "productionUrl": "https://msn.rodat-human-ada.workers.dev",
+  "workerVersion": "9230a842-2aab-486d-bad0-5ec4c089b54e",
+  "previousVersionInThisRun": "d6d7f023-dac9-4fe0-96e5-d3fb25bc960c",
+  "betweenDeployments": "Only public/style.css changed: normal document layout for the guide. Worker code was identical.",
+  "review": {
+    "reviewer": "idea-grok06",
+    "requestedModel": "cursor-grok-4.6-high-fast",
+    "appReviewMessage": 467,
+    "releasePolishReviewMessage": 472,
+    "reviewTask": "release-review",
+    "effectiveTaskState": "closed",
+    "closeMessage": 469,
+    "openBlockers": 0
+  },
+  "checks": {
+    "typescript": "passed",
+    "biome": "passed",
+    "rustFormatting": "passed",
+    "clippyWarningsDenied": "passed",
+    "rustFullSuite": "passed",
+    "finalEntryTests": "8 passed",
+    "workerAndNodeTests": "passed",
+    "browserDesktopAndMobile": "58 passed",
+    "finalGuideDesktopAndMobile": "2 passed",
+    "participantIntegration": "passed",
+    "snapshotIntegration": "passed",
+    "criticalWorkflowIntegration": "passed",
+    "liveCriticalSmoke": "passed, including cleanup",
+    "liveLegacySmoke": "passed, including cleanup",
+    "finalProductionBrowser": "guide code height equals scroll height, footer follows content, no browser errors",
+    "symlinkedTempCursorRegression": "reproduced existing macOS assertion failure, corrected expected canonical path, passed",
+    "wranglerDryRun": "passed"
+  },
+  "archiveBoundary": {
+    "lastMessageId": 474,
+    "snapshotVersion": 2,
+    "gitPublication": "Commit/push and GitHub CI/release verification follow this archive. Their authoritative records are GitHub and later live channel messages."
+  },
+  "smokeCleanup": "Only smoke-owned messages were deleted. Empty uniquely named test tenants, participant keys, invalidated snapshot metadata and retry tombstones remain; existing user workspaces were not used.",
+  "credentialsIncluded": false
+}
