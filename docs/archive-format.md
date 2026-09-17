@@ -231,6 +231,38 @@ imp-<first 16 hex of instanceId>-<sourceId>
 This makes a repeated or resumed import a server-side replay rather than a duplicate, and a changed
 payload under the same identity a server `409` — reported as a conflict, never silently rewritten.
 
+Snapshot publishes use `imp-<first 16 hex>-snap-<version>`. Begin and completion markers use
+`imp-<first 16 hex>-begin` and `imp-<first 16 hex>-done`. Invalidated snapshots are never published
+as valid; they are sent as `msn.import.v1` with `payload.kind: "snapshot-unavailable"` and key
+`imp-<first 16 hex>-snapunavail-<version>`.
+
+### Import map
+
+Default path: `$XDG_STATE_HOME/msn/<dest-origin-hash>/<dest-tenant>/imports/<instanceId>/<DEST>.json`
+(or `--state-file`). Mode 0600, sibling `.lock` exclusive while running. The file binds destination
+`server`/`tenant`/`channel` and source `instanceId`. Status is `in-progress` until the completion
+marker is written, then `complete`. A matching map is a continuation of that copy: destination
+existence is expected and does **not** require `--allow-existing`. A dest that exists with no
+matching map is refused unless `--allow-existing` is given.
+
+Import never writes reader or processing cursor files. Importing history does not mark destination
+work processed.
+
+### Trust
+
+`--trust provenance` (default) wraps every imported message, including `msn.task.v1`. Those events
+do not enter the destination task projection. `--trust replay-tasks` is the only way they are sent
+as live `application/json` task events. It re-attributes actorship to the importing participant,
+prints a warning on stderr, and is never implied by another flag. If the destination already has
+that task slug, the importer keeps the events wrapped and reports a conflict.
+
+### What is not reconstructible
+
+Deleted message bodies and invalidated snapshot text are not in the archive and are never invented.
+`boundary.historyRevision > 0` is reported as source redaction that cannot be reconstructed. Unknown
+`record` values and unknown JSON schemas are surfaced and wrapped or skipped; they are not rewritten
+to look fully restored.
+
 ## 7. CLI surface
 
 ```sh
@@ -259,3 +291,20 @@ catch-up is fetched again; a changed `historyRevision` is exit 5 and no `FILE`.
 `--limit N` is the message and snapshot **page size** (1–100, default 100), not a cap on archive
 length. `--force` is required to replace an existing `FILE`. Success prints one JSON object on
 stdout: `path`, counts, `boundary`, `contentHash`, `status`.
+
+### Import request sequence
+
+`msn import FILE --channel DEST` verifies `FILE` with `verify_archive` (rules 1–6) before any
+destination write. Destination authentication is the selected profile; archive fields are never
+used as credentials. The importer lists destination channels: a missing `DEST` is created; an
+existing `DEST` is refused unless `--allow-existing` or a matching import map already exists.
+
+`--dry-run` prints source, destination, counts, trust mode, unsupported records, unresolved
+references and anticipated losses, then exits 0 after read-only destination listing. It writes
+neither the destination nor the import map.
+
+A live import writes a begin marker, then messages in `sourceId` order, then valid snapshots
+(remapped `coversThrough`, dest `baseVersion`/`historyRevision` pinned and stored on the map so
+retries keep the same body), then unavailable-snapshot provenance for invalidated versions, then
+a completion marker. Success prints `{status, source, destination, trust, counts, unresolved,
+losses, stateFile}`. Interruption leaves `status: in-progress` and prints a resume command.

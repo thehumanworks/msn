@@ -43,6 +43,10 @@ EXAMPLES:
   msn catchup general --after 42    # exact continuation; snapshot is omitted
   msn export general --out ./general.msnarchive.jsonl
   msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100 --force
+  msn import ./general.msnarchive.jsonl --channel dest
+  msn import ./general.msnarchive.jsonl --channel dest --dry-run
+  msn import ./general.msnarchive.jsonl --channel dest --trust replay-tasks
+  msn import ./general.msnarchive.jsonl --channel dest --allow-existing --state-file ./import.json
   msn send general --text - --key retry-1 < message.txt
   msn send general --text 'pong' --reply-to 42 --correlation-id task-7
   msn send general --json '{\"op\":\"ping\"}'       # contentType application/json
@@ -97,6 +101,20 @@ result. catchup without --after returns the latest valid snapshot plus the oldes
 --after is an exact continuation and omits the snapshot. catchup is read-only and never
 reads or writes the automatic read cursor. Continue deliberately from nextCursor while
 hasMore/incomplete is true.
+
+msn import copies one archive into the selected destination profile. Nothing in the
+file grants access; destination authentication is independent. The safe default is a
+new channel: an existing DEST is refused unless --allow-existing is given (appending
+into live history is the caller's decision; msn never merges implicitly). Every
+imported message is sent by the authenticated destination participant as msn.import.v1;
+source.username is an unverified claim. --trust provenance (default) keeps imported
+msn.task.v1 events out of the live task board. --trust replay-tasks is the only way
+they re-enter the projection; it re-attributes actorship to the importer, warns on
+stderr, and is never implied by another flag. Retries reuse imp-<16hex>-<sourceId>.
+A 409 under that identity with a different payload is a conflict, not a rewrite.
+The import map lives under $XDG_STATE_HOME/msn/<origin-hash>/<tenant>/imports/...
+(or --state-file) with mode 0600 and a lock. Import never writes read or processing
+cursors. A partial import stays in-progress until a completion marker is written.
 
 A bound token is rejected by the server (403 username_bound, exit 3) when send uses
 another --username. Only explicit --username or --username-prefix flags bind on provision/rotate/key-create;
@@ -311,6 +329,26 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Copy a portable archive into a destination channel (one-way; never impersonates)
+    Import {
+        /// Archive file (`msn.channel.archive.v1`)
+        file: String,
+        /// Destination channel slug
+        #[arg(long)]
+        channel: String,
+        /// Report source, destination, counts, trust, unsupported records and losses; write nothing
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// How imported task events are treated (default: wrapped provenance, inert on the board)
+        #[arg(long, value_enum, default_value_t = TrustPolicy::Provenance)]
+        trust: TrustPolicy,
+        /// Import map (default `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/imports/...`)
+        #[arg(long = "state-file")]
+        state_file: Option<String>,
+        /// Append into an existing destination channel (explicit; never implicit)
+        #[arg(long = "allow-existing")]
+        allow_existing: bool,
+    },
     /// Fetch unread messages once, print the page, and persist the reader cursor
     Read {
         channel: String,
@@ -519,6 +557,25 @@ pub enum ProfileCommand {
     List,
     /// Show one profile's metadata without its key
     Show { name: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum TrustPolicy {
+    /// Wrap every record as `msn.import.v1`; imported task events stay off the live board
+    #[default]
+    Provenance,
+    /// Replay `msn.task.v1` events as live destination events (re-attributes actorship)
+    #[value(name = "replay-tasks")]
+    ReplayTasks,
+}
+
+impl TrustPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Provenance => "provenance",
+            Self::ReplayTasks => "replay-tasks",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

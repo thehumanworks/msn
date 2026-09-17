@@ -18,7 +18,8 @@
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run lint && bun run test && bun run test:browser",
     "msn": "node scripts/msn.mjs",
-    "test:critical": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/critical.integration.mjs"
+    "test:critical": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/critical.integration.mjs",
+    "test:transfer": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/transfer.integration.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.13",

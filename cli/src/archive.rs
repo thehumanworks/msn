@@ -50,6 +50,28 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex_lower(&Sha256::digest(bytes))
 }
 
+/// Destination `Idempotency-Key` for an imported message (`docs/archive-format.md` §6).
+///
+/// `imp-<first 16 hex of instanceId>-<sourceId>`. A repeated or resumed import is a
+/// server-side replay; a changed payload under the same identity is a 409 conflict.
+pub fn import_idempotency_key(instance_id: &str, source_id: u64) -> String {
+    format!("imp-{}-{source_id}", instance_prefix(instance_id))
+}
+
+/// Destination `Idempotency-Key` for an imported snapshot publish.
+pub fn import_snapshot_key(instance_id: &str, version: u64) -> String {
+    format!("imp-{}-snap-{version}", instance_prefix(instance_id))
+}
+
+/// Destination `Idempotency-Key` for an import marker or unavailable-snapshot record.
+pub fn import_marker_key(instance_id: &str, marker: &str) -> String {
+    format!("imp-{}-{marker}", instance_prefix(instance_id))
+}
+
+fn instance_prefix(instance_id: &str) -> &str {
+    instance_id.get(..16).unwrap_or(instance_id)
+}
+
 /// `contentHash` of the exact concatenated line bytes (each including its `\n`).
 ///
 /// Equivalent to [`ContentHasher`] over the same bytes. The completion line is
@@ -662,6 +684,27 @@ mod tests {
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn import_keys_follow_archive_format_section_6() {
+        let instance = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            import_idempotency_key(instance, 41),
+            "imp-0123456789abcdef-41"
+        );
+        assert_eq!(
+            import_snapshot_key(instance, 2),
+            "imp-0123456789abcdef-snap-2"
+        );
+        assert_eq!(
+            import_marker_key(instance, "begin"),
+            "imp-0123456789abcdef-begin"
+        );
+        assert_ne!(
+            import_idempotency_key(instance, 1),
+            import_idempotency_key(&"ab".repeat(32), 1)
         );
     }
 
