@@ -47,3 +47,7 @@ Schema v7 adds channel snapshots and a channel history revision. Snapshot versio
 Catch-up reads checkpoint metadata, head, counters and the oldest tail synchronously, then bounds the entire serialized JSON envelope by both message count and UTF-8 bytes. Message serialization is counted once per candidate, avoiding repeated serialization of large pages. Oversized first evidence returns 413 with the required budget. Exact `after` continuation omits the snapshot and never advances past unseen messages due to a newer summary. Reader delivery cursors are untouched. Snapshot reminders expose uncovered count/bytes and age; the server neither schedules nor generates summaries.
 
 The browser provides a deliberate bounded catch-up view with participant-authored text rendered safely, separate from canonical messages. Continuing after a revision change clears stale content; leaving for raw Poll/Live clears the unvalidated snapshot. Full protocol, trust model and application quotas are in [ADR 0009](adr/0009-channel-snapshots.md).
+
+## Portable archives (one-way) and deferred replica sync
+
+One-way channel copy is [archive-format.md](archive-format.md) and ADR 0011; import is issue #12. Bidirectional replica synchronisation is deferred: [ADR 0014](adr/0014-bidirectional-channel-sync-spike.md). Coordination that a later reader should follow uses one remote Worker (ADR 0012), not a pair of writable replicas.
