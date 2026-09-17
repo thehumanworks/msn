@@ -1063,6 +1063,7 @@ fn help_lists_commands_and_env() {
         "provision",
         "rotate",
         "delete",
+        "export",
         "MSN_URL",
         "MSN_WORKSPACE_TENANT",
         "MSN_WORKSPACE_TOKEN",

@@ -30,7 +30,11 @@ fn main() {
     }
     let stop = if matches!(
         cli.command,
-        Command::Follow { .. } | Command::Wait { .. } | Command::Read { .. } | Command::Peek { .. }
+        Command::Follow { .. }
+            | Command::Wait { .. }
+            | Command::Read { .. }
+            | Command::Peek { .. }
+            | Command::Export { .. }
     ) {
         install_stop_signals().unwrap_or_else(|error| {
             write_err(&error);

@@ -154,6 +154,19 @@ and an importer must never present it as current truth.
 * `boundary` repeats the pinned values **re-verified after the final page**. If `historyRevision`
   changed during the export (a redaction or snapshot invalidation intervened), the export fails with
   exit code 5 and produces no file.
+* `firstSourceId` / `lastSourceId` are omitted when `messageCount` is 0. When messages were written
+  they are the first and last exported `sourceId` values and must agree with the body lines.
+
+### 3.5 Shared library (`cli/src/archive.rs`)
+
+Record types, `instanceId`, `contentHash` / `ContentHasher`, and the streaming verifier live in
+`msn_cli::archive`. `msn import` must reuse them; they have no HTTP or `FILE.partial` concerns.
+
+`verify_archive(reader, visit)` (and `verify_archive_path`) enforce §5 rules 1–6 while invoking
+`visit` once per body record with the raw JSON object (unknown keys preserved). It never buffers
+the file as `Vec<Record>`. It also recomputes `instanceId` from the source fields and rejects a
+mismatch. An unknown `record` value is yielded to `visit` and counted on the returned
+`VerifiedArchive.unsupported_record_count`; it is not dropped.
 
 ## 4. What is never exported
 
@@ -229,3 +242,20 @@ msn import ./channel.msnarchive.jsonl --channel DEST [--dry-run] [--trust proven
 Both commands resolve their connection from the selected profile exactly like every other
 subcommand. `import` authenticates independently at the destination; nothing in the archive grants
 access anywhere.
+
+### Export request sequence
+
+`msn export` pins the boundary from `GET …/catchup?limit=1&maxBytes=262144` **before** paging.
+`channelCreatedAt` comes from `GET …/channels`. Messages are then read with
+`GET …/channels/{c}/messages?after=N&limit=L` (`L` is `--limit`, default 100, max 100). Every page
+is validated: ids strictly ascending, each `> after` and `<= headCursor`, `nextCursor` equal to the
+last id (or the request `after` on an empty page), and every row the expected tenant/channel. A
+row with `id > headCursor` is a concurrent append: it is omitted and paging stops. Snapshots use
+`GET …/snapshots?after=V&limit=L` plus `GET …/snapshots/{version}`. A `410` on show becomes a
+metadata-only record (`"invalidated": true`, no `text`) and is never fatal. After the last page,
+catch-up is fetched again; a changed `historyRevision` is exit 5 and no `FILE`.
+
+`--after N` is the exclusive message lower bound (default 0) stored as `boundary.after`.
+`--limit N` is the message and snapshot **page size** (1–100, default 100), not a cap on archive
+length. `--force` is required to replace an existing `FILE`. Success prints one JSON object on
+stdout: `path`, counts, `boundary`, `contentHash`, `status`.

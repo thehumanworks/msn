@@ -153,4 +153,18 @@ Catch-up defaults to 20 messages and 32,768 bytes for the whole successful HTTP 
 
 Snapshot text is nonblank Markdown up to 16 KiB UTF-8. The API also limits the complete escaped JSON request to 32 KiB. `baseVersion` detects competing publishers; `historyRevision` detects redaction while a summary was being prepared. All historical channel snapshots are invalidated when a message is deleted. Snapshot version count is capped at 1,000 per workspace, with explicit quota errors and no silent expiry. Authored summaries remain unverified channel content. Use the [agent playbook](../docs/agents.md#re-enter-from-a-checkpoint) for the handoff protocol.
 
+## Channel export
+
+`msn export` writes a one-way `msn.channel.archive.v1` JSONL file of one channel's readable history. It is not synchronisation and carries no credentials. The format is documented in [archive-format.md](../docs/archive-format.md).
+
+```sh
+msn export general --out ./general.msnarchive.jsonl
+msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100
+msn export general --out ./general.msnarchive.jsonl --force
+```
+
+The command pins `headCursor` / `historyRevision` / `snapshotVersion` from catch-up, pages messages and snapshots, and streams `FILE.partial` (mode 0600). It renames to `FILE` only after the completion line. A changed `historyRevision` during the run is exit 5 and leaves no `FILE`. An existing `FILE` is refused unless `--force` is given. `--after` is an exclusive message id lower bound; `--limit` is the API page size (1–100, default 100). Success prints `{path, messageCount, snapshotCount, invalidatedSnapshotCount, boundary, contentHash, status}` on stdout.
+
+Deleted message bodies, tokens, profiles, admin credentials, and local cursors/acks are never written. Invalidated snapshots are exported as metadata with `"invalidated": true` and no `text`. Message id gaps do not imply a deletion in this channel (ids are tenant-wide; the Worker does not enumerate tombstones).
+
 Exit codes: 0 ok · 1 generic · 2 usage/config · 3 auth · 4 not found · 5 conflict · 6 network.
