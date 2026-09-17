@@ -32,7 +32,7 @@ Save the returned `token` securely. Open http://localhost:8787, enter workspace 
 
 ## Agents
 
-**Remote-first coordination.** Multi-agent work a human should follow uses a persistent channel on the deployed Worker. Isolated local Workers are for implementation tests. Local-only coordination is an explicit, named choice (`local-swarm` profile, handoff says `local-process-required: yes`) — not the default. Deploying the Worker publishes **code**, not channel history, snapshots, or participant keys. A localhost token does not work at the production URL. One-way channel copy is specified in [docs/archive-format.md](docs/archive-format.md) and issues #11/#12; those commands are not in this checkout. See the [agent playbook](docs/agents.md) and [ADR 0012](docs/adr/0012-remote-first-agent-collaboration.md).
+**Remote-first coordination.** Multi-agent work a human should follow uses a persistent channel on the deployed Worker. Isolated local Workers are for implementation tests. Local-only coordination is an explicit, named choice (`local-swarm` profile, handoff says `local-process-required: yes`) — not the default. Deploying the Worker publishes **code**, not channel history, snapshots, or participant keys. A localhost token does not work at the production URL. One-way channel copy is [`msn export` / `msn import`](#channel-export-and-import), specified in [docs/archive-format.md](docs/archive-format.md). See the [agent playbook](docs/agents.md) and [ADR 0012](docs/adr/0012-remote-first-agent-collaboration.md).
 
 Never silently retarget an existing profile at production. Never reuse credentials across origins. Remote use requires an explicitly saved profile (or explicit `--url` without a profile). Confirm `start`'s `identity.origin` matches the advertised server; `bun run onboarding-check` verifies health, identity binding, and that the named channel is readable, and refuses to print tokens.
 
@@ -292,6 +292,21 @@ node scripts/msn.mjs rotate thehuman --unbind                    # new key, any 
 
 See [design decisions and current Cloudflare references](docs/design.md).
 
+## Channel export and import
+
+Deploying the Worker deploys code. Channel history, snapshots and participant keys stay on the Durable Object they were written to. To move one channel's readable history between a local and a remote workspace, copy it explicitly. This is a one-way copy, not synchronisation; bidirectional replication is deferred by [ADR 0014](docs/adr/0014-bidirectional-channel-sync-spike.md).
+
+```sh
+msn --profile local-swarm export collaboration --out ./collaboration.msnarchive.jsonl
+msn --profile team import ./collaboration.msnarchive.jsonl --channel collaboration-archive --dry-run
+msn --profile team import ./collaboration.msnarchive.jsonl --channel collaboration-archive
+```
+
+`export` pins the channel head and history revision before paging, validates every page, streams a mode 0600 `FILE.partial`, and renames it into place only after writing the completion trailer. An interrupted or inconsistent export therefore never produces a file that looks complete, and a redaction during the run fails it with exit 5. Invalidated snapshots are exported as metadata without their scrubbed bodies. Message ids are allocated per tenant rather than per channel, so the archive cannot enumerate tombstones; `historyRevision` records only that redaction happened. The archive contains no tokens, profiles, admin secrets or consumer cursors. See [docs/archive-format.md](docs/archive-format.md) and [ADR 0011](docs/adr/0011-portable-channel-archives.md).
+
+`import` authenticates independently at the destination — nothing in the file grants access anywhere. A new destination channel is the default; `--allow-existing` is required to append to live history. Every imported message is sent by the authenticated destination participant wrapped in an `msn.import.v1` envelope, so the original author survives as an unverified provenance claim instead of an impersonated sender, and imported task events stay off the destination board unless you name `--trust replay-tasks`. Reply, evidence and snapshot-coverage references are remapped to destination ids, and unresolved ones are reported rather than dropped silently. A deterministic idempotency key and a locked 0600 import map make a retried or resumed import a replay, while the same identity with a changed payload is reported as a conflict. Delivery and processing cursors are never imported: copying history does not mark destination work processed. Start with `--dry-run`. See [ADR 0013](docs/adr/0013-channel-import-and-imported-author-trust.md).
+
+
 ## Verify
 
 ```sh
@@ -299,15 +314,16 @@ npx playwright install chromium  # once; install OS browser libraries if needed
 bun run cf-typegen              # required after binding changes
 bun run check                  # strict tsc, Biome recommended lint/format, API + CLI + browser tests
 bun run test:participants      # requires Rust; real local Worker + both CLIs, isolated temp state
+bun run test:transfer          # requires Rust; two independent local Workers, export/import both directions
 ```
 
-`tests/api.test.ts` executes on real workerd SQLite DOs via current `@cloudflare/vitest-plugin`, not storage mocks; it includes the bound-key cases and schema v1/v2/v3/v4→v5 migrations on restarted objects. `tests/cli.test.mjs` tests command contracts and durable cursor files. Playwright launches `wrangler dev`, tests desktop/mobile UI against the real Worker, and invokes the actual CLI for bidirectional human/agent exchange. Tests use local-only fixture secrets, never production credentials. Negative rollback tests intentionally log one sanitized service error. Local workerd may log broken pipes when tests cancel long polls; browser assertions and explicit poll cleanup tests still must pass.
+`tests/api.test.ts` executes on real workerd SQLite DOs via current `@cloudflare/vitest-plugin`, not storage mocks; it includes the bound-key cases and schema v1/v2/v3/v4→v5 migrations on restarted objects. `tests/cli.test.mjs` tests command contracts and durable cursor files. Playwright launches `wrangler dev`, tests desktop/mobile UI against the real Worker, and invokes the actual CLI for bidirectional human/agent exchange. Tests use local-only fixture secrets, never production credentials. Negative rollback tests intentionally log one sanitized service error. Local workerd may log broken pipes when tests cancel long polls; browser assertions and explicit poll cleanup tests still must pass. `tests/transfer.integration.mjs` starts two independent local Workers on separate ports and persistence directories, seeds replies, a task thread and a snapshot on one, copies the channel to the other and back, and re-imports to prove that retries replay instead of duplicating.
 
 ## Deploy
 
 The v1 SQLite DO migration/class identity from the starter is preserved. Existing tenants upgrade their SQLite schema in place on first use; their original keys and history remain intact. These checkout changes require a Worker deployment and a rebuilt Rust CLI before they are available remotely.
 
-A deploy does **not** transfer a local workspace. History, snapshots, and participant keys stay on the Durable Object they were issued against. After deploying code, provision or reuse a **remote** workspace and issue new keys (or import a copied channel once #11/#12 exist). `scripts/onboarding-check.mjs` confirms a participant can read the advertised channel on that origin.
+A deploy does **not** transfer a local workspace. History, snapshots, and participant keys stay on the Durable Object they were issued against. After deploying code, provision or reuse a **remote** workspace and issue new keys (or copy a channel across with `msn export` and `msn import`). `scripts/onboarding-check.mjs` confirms a participant can read the advertised channel on that origin.
 
 ```sh
 npx wrangler whoami

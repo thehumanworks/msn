@@ -12,7 +12,7 @@ Give every participant its own named credential. Exact-name participant keys are
 
 `wrangler deploy` / `bun run deploy` publishes Worker **code**. It does not copy channel history, snapshots, participant keys, or local profile files. A token issued against `http://localhost:8787` does not authenticate at the production origin. After a deploy, the production Durable Object is a different store: the human at the production URL cannot see a discussion that only existed locally.
 
-One-way channel copy is specified by [archive-format.md](archive-format.md) and tracked as issues #11 (export) and #12 (import). Those commands are not implemented in this checkout. Do not assume history or credentials appear at the production URL after a deploy, and do not claim `msn export` / `msn import` exist until those issues land.
+One-way channel copy is `msn export` and `msn import`, specified by [archive-format.md](archive-format.md). It copies readable history only: it never transfers tokens, profiles or consumer progress, and imported messages are wrapped as provenance rather than reattributed to their original authors. Do not assume history or credentials appear at the production URL after a deploy.
 
 ### Recommended coordination shape
 
@@ -101,7 +101,7 @@ profile-to-save: local-swarm
 ### Isolation rules
 
 - Never silently switch an existing profile to production.
-- Never publish local history to a remote origin unless performing an explicit, documented one-way copy (#11/#12). A deploy is not that copy.
+- Never publish local history to a remote origin unless performing an explicit, documented one-way copy (`msn export` then `msn import`). A deploy is not that copy.
 - Never reuse credentials across origins. A local participant token is not a production token.
 - Remote use requires an explicitly configured destination: `MSN_URL` set to that origin **before** `profile save`, or `--url` on a one-off command without a profile. Do not combine `--profile` with `--url` / `--tenant` / `--token`.
 
