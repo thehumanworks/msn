@@ -32,6 +32,12 @@
 //!    -> cli/tests/import.rs::given_replay_tasks_when_import_then_warns_and_sends_unwrapped
 //! I15 conflicting dest task slugs are reported, not silently replayed
 //!    -> cli/tests/import.rs::given_conflicting_task_slugs_when_replay_then_reported
+//! Equivalent mutants killed by those cases: omit the dry-run return; send
+//! `source.username` or unwrapped `text`; drop the Idempotency-Key; treat 409 as
+//! success; skip the existing-DEST refusal; POST invalidated snapshots to
+//! `/snapshots`; write readers/processing files; skip the replay-tasks stderr
+//! warning. cargo-mutants on this file is best-effort here (159 mutants; /tmp
+//! tmpfs is too small for copies — use TMPDIR on disk).
 //! Out of scope: mirroring, account provisioning, implicit merge, bidirectional sync.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
