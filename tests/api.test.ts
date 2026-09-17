@@ -2,7 +2,7 @@ import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
-import type { Message } from "../src/store";
+import { type Message, payload } from "../src/store";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv extends Env {}
@@ -10,14 +10,25 @@ declare module "cloudflare:workers" {
 const ADMIN = "test-admin-secret-000000000000000000000";
 const WRONG = "wrong-token-00000000000000000000000000";
 type Page = { messages: Message[]; nextCursor: number; hasMore: boolean };
-const SCHEMA_HISTORY = [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }];
+const SCHEMA_HISTORY = [
+  { version: 1 },
+  { version: 2 },
+  { version: 3 },
+  { version: 4 },
+  { version: 5 },
+  { version: 6 },
+  { version: 7 },
+];
 /**
  * Rewinds a live database to an older schema version — dropping every column added after it —
  * so the constructor migration runs the whole chain again on the next restart.
  */
-function rewind(state: DurableObjectState, version: 1 | 2 | 3 | 4): void {
+function rewind(state: DurableObjectState, version: 1 | 2 | 3 | 4 | 5): void {
   state.storage.transactionSync(() => {
-    state.storage.sql.exec("DROP TABLE access_keys");
+    state.storage.sql.exec("DROP TABLE snapshots");
+    state.storage.sql.exec("DROP TABLE channel_history");
+    if (version < 5) state.storage.sql.exec("DROP TABLE access_keys");
+    if (version < 6) state.storage.sql.exec("ALTER TABLE messages DROP COLUMN recipient");
     if (version < 4) {
       state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_username");
       state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_prefix");
@@ -519,6 +530,7 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     const nulls = await send(t, "nulls", "general", undefined, "human / agent", {
       replyTo: null,
       correlationId: null,
+      to: null,
     });
     expect(nulls.status).toBe(201);
     const listed = (await page(t)).messages;
@@ -527,6 +539,68 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     const replay = await send(t, "plain", "general", "plain");
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual({ message, replayed: true });
+  });
+
+  it("carries an opaque recipient through send, poll, long-poll wakeups and idempotent replay", async () => {
+    const t = await tenant();
+    await send(t, "root");
+    const after = (await page(t)).nextCursor;
+    const waiting = page(t, `?after=${after}&wait=3`);
+    await expect.poll(() => pending(t)).toBe(1);
+    const created = await send(t, "assigned", "general", "recipient-key", "lead", {
+      to: "  agent-🚀  ",
+      correlationId: "task-recipient",
+    });
+    expect(created.status).toBe(201);
+    const { message } = await created.json<{ message: Message }>();
+    expect(message).toMatchObject({ to: "  agent-🚀  ", correlationId: "task-recipient" });
+    expect((await waiting).messages).toEqual([message]);
+    // Addressing is display metadata only: every reader still receives the same page.
+    expect((await page(t)).messages.at(-1)).toEqual(message);
+    expect((await page(t)).messages.at(-1)).toEqual(message);
+    const replay = await send(t, "assigned", "general", "recipient-key", "lead", {
+      to: "  agent-🚀  ",
+      correlationId: "task-recipient",
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ message, replayed: true });
+  });
+
+  it("keeps historical payload serialization stable and appends recipients only when addressed", () => {
+    expect(payload("sender", "plain", "text/plain", {})).toBe('["sender","plain"]');
+    expect(
+      payload("sender", '{"ok":true}', "application/json", {
+        replyTo: 42,
+        correlationId: "task-7",
+      }),
+    ).toBe('["sender","{\\"ok\\":true}","application/json",42,"task-7"]');
+    expect(payload("sender", "plain", "text/plain", { to: "reviewer" })).toBe(
+      '["sender","plain","reviewer"]',
+    );
+    expect(
+      payload("sender", '{"ok":true}', "application/json", {
+        replyTo: 42,
+        correlationId: "task-7",
+        to: "reviewer",
+      }),
+    ).toBe('["sender","{\\"ok\\":true}","application/json",42,"task-7","reviewer"]');
+  });
+
+  it("validates recipient labels and includes them in the idempotency digest", async () => {
+    const t = await tenant();
+    expect((await call(`${t.path}/channels/general`, t.token, { method: "PUT" })).status).toBe(201);
+    for (const to of ["", " ", "x".repeat(129), "🙂".repeat(33), 7, {}]) {
+      const response = await send(t, "bad", "general", undefined, "sender", { to });
+      expect(response.status, JSON.stringify(to)).toBe(400);
+    }
+    expect((await page(t)).messages).toEqual([]);
+    expect((await send(t, "same", "general", "to-key", "sender", { to: "agent-a" })).status).toBe(201);
+    expect((await send(t, "same", "general", "to-key", "sender", { to: "agent-a" })).status).toBe(200);
+    expect((await send(t, "same", "general", "to-key", "sender", { to: "agent-b" })).status).toBe(409);
+    expect((await send(t, "same", "general", "to-key", "sender")).status).toBe(409);
+    expect((await send(t, "unicode", "general", undefined, "sender", { to: "🙂".repeat(32) })).status).toBe(
+      201,
+    );
   });
 
   it("carries replyTo and correlationId through send, poll, long-poll wakeups and idempotent replay", async () => {
@@ -1045,6 +1119,60 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
       await runInDurableObject(
         env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name])),
         (_, state) => state.storage.sql.exec("SELECT version FROM schema_version ORDER BY version").toArray(),
+      ),
+    ).toEqual(SCHEMA_HISTORY);
+  });
+
+  it("migrates v5 recipient storage without changing history or old idempotency digests", async () => {
+    const t = await tenant();
+    expect((await call(`${t.path}/channels/general`, t.token, { method: "PUT" })).status).toBe(201);
+    const historicalSerialization = '["sender","old history","text/plain",null,"work"]';
+    const digestBytes = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(historicalSerialization),
+    );
+    const historicalDigest = Array.from(new Uint8Array(digestBytes), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    await runInDurableObject(t.stub, (_, state) => {
+      rewind(state, 5);
+      state.storage.sql.exec(
+        "INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, correlationId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "general",
+        "sender",
+        "old history",
+        "text/plain",
+        "2026-01-01T00:00:00.000Z",
+        "old-v5",
+        historicalDigest,
+        17,
+        "work",
+      );
+      state.storage.sql.exec("UPDATE usage SET messages = 1, bytes = 17 WHERE singleton = 1");
+    });
+    await abortAllDurableObjects();
+    expect((await page(t)).messages).toEqual([
+      {
+        id: expect.any(Number),
+        tenant: t.name,
+        channel: "general",
+        username: "sender",
+        text: "old history",
+        contentType: "text/plain",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        correlationId: "work",
+      },
+    ]);
+    expect(
+      (await send(t, "old history", "general", "old-v5", "sender", { correlationId: "work" })).status,
+    ).toBe(200);
+    const addressed = await send(t, "new history", "general", "new-v6", "sender", { to: "agent" });
+    expect(addressed.status).toBe(201);
+    expect((await addressed.json<{ message: Message }>()).message.to).toBe("agent");
+    const fresh = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name]));
+    expect(
+      await runInDurableObject(fresh, (_, state) =>
+        state.storage.sql.exec("SELECT version FROM schema_version ORDER BY version").toArray(),
       ),
     ).toEqual(SCHEMA_HISTORY);
   });

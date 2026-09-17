@@ -1350,6 +1350,13 @@ fn wait_args<'a>(url: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
+fn read_args<'a>(url: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = tenant_args(url).to_vec();
+    args.extend(["read", "general"]);
+    args.extend_from_slice(extra);
+    args
+}
+
 fn assert_mode_0600(path: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -1361,6 +1368,92 @@ fn assert_mode_0600(path: &std::path::Path) {
 
 fn read_cursor(path: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn read_empty_page_prints_once_without_advancing_cursor() {
+    let server = MockServer::spawn(vec![Scripted::json(200, EMPTY_PAGE)]);
+    let url = server.url();
+    let file = tmp_file("msn-read-empty-cursor");
+    let out = output_of(&read_args(&url, &["--cursor-file", file.to_str().unwrap()]));
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(stdout_str(&out).trim(), EMPTY_PAGE);
+    assert_eq!(server.recorded().len(), 1);
+    assert_eq!(
+        server.recorded()[0].path,
+        "/api/tenants/team/channels/general/messages?after=0&wait=0&limit=100"
+    );
+    assert!(!file.exists(), "an empty page must not advance the cursor");
+}
+
+#[test]
+fn read_does_not_retry_server_errors() {
+    let server = MockServer::spawn(vec![Scripted::json(503, r#"{"error":"busy"}"#)]);
+    let url = server.url();
+    let out = output_of(&read_args(&url, &["--after", "4", "--wait", "1"]));
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_str(&out).contains("503"), "{}", stderr_str(&out));
+    assert_eq!(server.recorded().len(), 1);
+}
+
+#[test]
+fn read_rejects_out_of_range_bounds_before_network() {
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    for flags in [["--wait", "26"].as_slice(), ["--limit", "0"].as_slice()] {
+        let out = output_of(&read_args(&url, flags));
+        assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn read_default_cursor_resumes_after_previous_run() {
+    let first = r#"{"messages":[{"id":3}],"nextCursor":3,"hasMore":false}"#;
+    let second = r#"{"messages":[{"id":4}],"nextCursor":4,"hasMore":false}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, first),
+        Scripted::json(200, second),
+    ]);
+    let url = server.url();
+    let home = tmp_file("msn-read-home");
+    fs::create_dir_all(&home).unwrap();
+    let run = || {
+        let mut cmd = bin();
+        cmd.env("HOME", &home)
+            .env_remove("XDG_STATE_HOME")
+            .args(read_args(&url, &["--reader", "alice"]));
+        output_capped(cmd, Duration::from_secs(8))
+    };
+
+    let out1 = run();
+    assert_eq!(out1.status.code(), Some(0), "{}", stderr_str(&out1));
+    assert_eq!(stdout_str(&out1).trim(), first);
+    let out2 = run();
+    assert_eq!(out2.status.code(), Some(0), "{}", stderr_str(&out2));
+    assert_eq!(stdout_str(&out2).trim(), second);
+
+    let rec = server.recorded();
+    assert_eq!(rec.len(), 2);
+    assert!(rec[0].path.contains("after=0&wait=0"), "{}", rec[0].path);
+    assert!(rec[1].path.contains("after=3&wait=0"), "{}", rec[1].path);
+    let msn_dir = home.join(".local").join("state").join("msn");
+    let origin = fs::read_dir(msn_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let file = origin
+        .join("team")
+        .join("readers")
+        .join(msn_cli::cursor::reader_hash("alice").unwrap())
+        .join("general.json");
+    assert_eq!(read_cursor(&file)["after"], 4);
+    assert_mode_0600(&file);
+    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -2061,18 +2154,15 @@ fn reader_precedence_flag_then_env_then_username_flag_or_env() {
 }
 
 #[test]
-fn automatic_wait_requires_valid_reader_before_network() {
-    let server = MockServer::spawn(vec![]);
+fn automatic_wait_infers_an_exact_reader_or_requires_a_valid_override() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"tenant":"team","username":null,"usernamePrefix":null}"#,
+    )]);
     let url = server.url();
     let out = output_of(&wait_args(&url, &[]));
     assert_eq!(out.status.code(), Some(2));
-    for option in [
-        "--reader",
-        "MSN_READER",
-        "MSN_USERNAME",
-        "--cursor-file",
-        "--after",
-    ] {
+    for option in ["--reader", "--username"] {
         assert!(stderr_str(&out).contains(option), "{}", stderr_str(&out));
     }
     for invalid in [
@@ -2092,7 +2182,9 @@ fn automatic_wait_requires_valid_reader_before_network() {
     cmd.env("MSN_USERNAME", " ").args(wait_args(&url, &[]));
     let out = output_capped(cmd, Duration::from_secs(3));
     assert_eq!(out.status.code(), Some(2));
-    assert!(server.recorded().is_empty());
+    let recorded = server.recorded();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].path, "/api/tenants/team");
 }
 
 #[test]

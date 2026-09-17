@@ -134,7 +134,7 @@ test("untrusted content is plain text; channel switches ignore late polls; keys 
   const attack = '<img src=x onerror="window.pwned=true">';
   await request.post(`${t.path}/channels/alpha/messages`, {
     headers: t.headers,
-    data: { username: "<script>alert(1)</script>", text: attack },
+    data: { username: "<script>alert(1)</script>", text: attack, to: attack },
   });
   const structuredAttack = JSON.stringify({
     op: "notify",
@@ -151,6 +151,7 @@ test("untrusted content is plain text; channel switches ignore late polls; keys 
   });
   await connect(page, t, "Tomas", { remember: false });
   await expect(page.locator(".message p")).toHaveText(attack);
+  await expect(page.locator(".message-annotation").first()).toHaveText(`To: ${attack}`);
   await expect(page.locator(".message pre")).toHaveText(
     JSON.stringify(JSON.parse(structuredAttack), null, 2),
   );
@@ -227,6 +228,39 @@ test("network-uncertain sends preserve drafts and reuse idempotency keys", async
   await connect(page, t);
   let first = true;
   const keys = [];
+  const recipients = [];
+  await page.route("**/channels/general/messages", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    keys.push(route.request().headers()["idempotency-key"]);
+    recipients.push(route.request().postDataJSON().to);
+    if (first) {
+      first = false;
+      await route.fetch();
+      await route.abort("failed");
+    } else await route.continue();
+  });
+  await page.getByLabel("To", { exact: true }).fill("review-agent");
+  await page.getByLabel("Message", { exact: true }).fill("uncertain");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#status")).toContainText("draft is preserved");
+  await expect(page.locator("#message")).toHaveValue("uncertain");
+  await expect(page.locator("#recipient")).toHaveValue("review-agent");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator("#recipient")).toHaveValue("");
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).toBe(keys[1]);
+  expect(recipients).toEqual(["review-agent", "review-agent"]);
+  const result = await request.get(`${t.path}/channels/general/messages`, { headers: t.headers });
+  expect((await result.json()).messages).toMatchObject([{ to: "review-agent" }]);
+});
+
+test("editing an uncertain recipient creates a new logical send and retry key", async ({ page, request }) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  const keys = [];
+  let first = true;
   await page.route("**/channels/general/messages", async (route) => {
     if (route.request().method() !== "POST") return route.continue();
     keys.push(route.request().headers()["idempotency-key"]);
@@ -236,17 +270,57 @@ test("network-uncertain sends preserve drafts and reuse idempotency keys", async
       await route.abort("failed");
     } else await route.continue();
   });
-  await page.getByLabel("Message", { exact: true }).fill("uncertain");
+  await page.getByLabel("To", { exact: true }).fill(" agent-one ");
+  await page.getByLabel("Message", { exact: true }).fill("same text");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.locator("#status")).toContainText("draft is preserved");
-  await expect(page.locator("#message")).toHaveValue("uncertain");
+  await page.getByLabel("To", { exact: true }).fill("agent-two");
   await page.getByRole("button", { name: "Send message" }).click();
-  await expect(page.locator("#message")).toHaveValue("");
   expect(keys).toHaveLength(2);
-  expect(keys[0]).toBe(keys[1]);
+  expect(keys[1]).not.toBe(keys[0]);
   const result = await request.get(`${t.path}/channels/general/messages`, { headers: t.headers });
-  expect((await result.json()).messages).toHaveLength(1);
+  expect((await result.json()).messages.map((message) => message.to)).toEqual([" agent-one ", "agent-two"]);
 });
+
+for (const editedField of ["message", "recipient"]) {
+  test(`editing only ${editedField} during a send preserves the complete draft`, async ({
+    page,
+    request,
+  }) => {
+    const t = await provision(request);
+    await request.put(`${t.path}/channels/general`, { headers: t.headers });
+    await connect(page, t);
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    let started;
+    const sent = new Promise((resolve) => {
+      started = resolve;
+    });
+    await page.route("**/channels/general/messages", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch();
+      started();
+      await held;
+      await route.fulfill({ response });
+    });
+    await page.getByLabel("To", { exact: true }).fill("first-agent");
+    await page.getByLabel("Message", { exact: true }).fill("first draft");
+    await page.getByRole("button", { name: "Send message" }).click();
+    await sent;
+    await page.locator(`#${editedField}`).fill(editedField === "message" ? "next draft" : "next-agent");
+    release();
+    // Wait for the completed request, then assert the unchanged half was preserved too.
+    await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
+    await expect(page.locator("#recipient")).toHaveValue(
+      editedField === "recipient" ? "next-agent" : "first-agent",
+    );
+    await expect(page.locator("#message")).toHaveValue(
+      editedField === "message" ? "next draft" : "first draft",
+    );
+  });
+}
 
 test("channel-scoped drafts and retry keys survive navigation; late sends cannot clear another draft", async ({
   page,
@@ -277,23 +351,30 @@ test("channel-scoped drafts and retry keys survive navigation; late sends cannot
       await route.abort("failed");
     } else await route.continue();
   });
+  await page.getByLabel("To", { exact: true }).fill("alpha-agent");
   await page.getByLabel("Message", { exact: true }).fill("alpha uncertain");
   await page.getByRole("button", { name: "Send message" }).click();
   await started;
   await openChannel(page, "beta");
   await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator("#recipient")).toHaveValue("");
+  await page.getByLabel("To", { exact: true }).fill("beta-agent");
   await page.getByLabel("Message", { exact: true }).fill("beta draft");
   release();
   await expect(page.locator("#message")).toHaveValue("beta draft");
+  await expect(page.locator("#recipient")).toHaveValue("beta-agent");
   await openChannel(page, "alpha");
   await expect(page.locator("#message")).toHaveValue("alpha uncertain");
+  await expect(page.locator("#recipient")).toHaveValue("alpha-agent");
   await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator("#recipient")).toHaveValue("");
   expect(keys).toHaveLength(2);
   expect(keys[0]).toBe(keys[1]);
   await openChannel(page, "beta");
   await expect(page.locator("#message")).toHaveValue("beta draft");
+  await expect(page.locator("#recipient")).toHaveValue("beta-agent");
   const history = await request.get(`${t.path}/channels/alpha/messages`, { headers: t.headers });
   expect((await history.json()).messages).toHaveLength(1);
 });
@@ -751,5 +832,144 @@ for (const budget of ["channel count", "total messages"]) {
       await expect(page.locator("#status")).toHaveText("Polled #beta · 1 new");
       expect(requests.at(-1)).toEqual({ name: "beta", after: 0 });
     }
+  });
+}
+
+async function snapshotFixture(request, t, channel = "general", tail = 22) {
+  const sent = await request.post(`${t.path}/channels/${channel}/messages`, {
+    headers: t.headers,
+    data: { username: "planner", text: "Original decision: use checkpoints." },
+  });
+  const first = (await sent.json()).message;
+  const text = '## Objective\nResume safely.\n<img src=x onerror="window.pwned=true">';
+  const published = await request.post(`${t.path}/channels/${channel}/snapshots`, {
+    headers: { ...t.headers, "Idempotency-Key": "browser-checkpoint" },
+    data: { username: "planner", text, coversThrough: first.id, baseVersion: 0, historyRevision: 0 },
+  });
+  expect(published.status()).toBe(201);
+  for (let i = 0; i < tail; i++) {
+    await request.post(`${t.path}/channels/${channel}/messages`, {
+      headers: t.headers,
+      data: { username: "reviewer", text: `Follow-up ${i}`, to: "planner" },
+    });
+  }
+  return { first, text };
+}
+
+test("catch-up separates safe authored snapshot from bounded tail, preserves drafts, and resumes exactly", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  const { text } = await snapshotFixture(request, t);
+  await connect(page, t, "Tomas", { live: false });
+  await expect(page.locator(".message")).toHaveCount(23);
+  await page.getByLabel("Message", { exact: true }).fill("My unfinished thought");
+  await page.getByLabel("To", { exact: true }).fill("reviewer");
+  await page.getByRole("button", { name: "Catch up", exact: true }).click();
+  await expect(page.locator("#checkpoint")).toBeVisible();
+  await expect(page.locator("#checkpoint-title")).toContainText("Snapshot v1");
+  await page.locator("#checkpoint-title").click();
+  await expect(page.locator("#checkpoint-text")).toHaveText(text);
+  await expect(page.locator("#checkpoint img, #checkpoint script")).toHaveCount(0);
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  await expect(page.locator(".message")).toHaveCount(20);
+  await expect(page.locator(".message p").first()).toHaveText("Follow-up 0");
+  await expect(page.locator("#catchup-note")).toContainText("More messages remain");
+  await expect(page.getByLabel("Live", { exact: true })).not.toBeChecked();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("My unfinished thought");
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("reviewer");
+  await page.getByRole("button", { name: "Load next page" }).click();
+  await expect(page.locator(".message")).toHaveCount(22);
+  await expect(page.locator(".message p").last()).toHaveText("Follow-up 21");
+  await expect(page.locator("#checkpoint-title")).toContainText("Snapshot v1");
+  await expect(page.locator("#catchup-note")).toContainText("Caught up at this request");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "Reread", exact: true }).click();
+  await expect(page.locator("#checkpoint")).toBeHidden();
+  await expect(page.locator("#checkpoint-text")).toHaveText("");
+  await expect(page.locator(".message")).toHaveCount(23);
+  await disconnect(page);
+  await expect(page.locator("#checkpoint-text")).toHaveText("");
+});
+
+test("catch-up continuation notices redaction and discards stale snapshot and cached messages", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  const { first } = await snapshotFixture(request, t);
+  await connect(page, t, "Tomas", { live: false });
+  await page.getByRole("button", { name: "Catch up", exact: true }).click();
+  await expect(page.locator(".message")).toHaveCount(20);
+  await request.delete(`/api/admin/tenants/${t.tenant}/channels/general/messages/${first.id}`, {
+    headers: { Authorization: `Bearer ${ADMIN}` },
+  });
+  await page.getByRole("button", { name: "Load next page" }).click();
+  await expect(page.locator("#status")).toContainText("Channel history changed");
+  await expect(page.locator("#checkpoint-text")).toHaveText("");
+  await expect(page.locator(".message")).toHaveCount(0);
+  await page.getByRole("button", { name: "Catch up", exact: true }).click();
+  await expect(page.locator("#catchup-note")).toContainText("No snapshot loaded");
+  await expect(page.locator(".message")).toHaveCount(20);
+  await expect(page.locator("#checkpoint-text")).toHaveText("");
+});
+
+test("late catch-up response cannot display another channel's snapshot", async ({ page, request }) => {
+  const t = await provision(request);
+  await snapshotFixture(request, t, "alpha", 1);
+  await request.post(`${t.path}/channels/beta/messages`, {
+    headers: t.headers,
+    data: { username: "planner", text: "Beta only" },
+  });
+  let release;
+  let captured;
+  const started = new Promise((resolve) => {
+    captured = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**${t.path}/channels/alpha/catchup?*`, async (route) => {
+    const response = await route.fetch();
+    captured();
+    await gate;
+    await route.fulfill({ response }).catch(() => {});
+  });
+  await connect(page, t, "Tomas", { live: false });
+  await page.getByRole("button", { name: "Catch up", exact: true }).click();
+  await started;
+  await openChannel(page, "beta");
+  release();
+  await expect(page.locator(".message p")).toHaveText("Beta only");
+  await expect(page.locator("#checkpoint")).toBeHidden();
+  await expect(page.locator("#checkpoint-text")).toHaveText("");
+});
+
+for (const transition of ["Poll once", "Live", "channel return"]) {
+  test(`leaving catch-up via ${transition} clears an unvalidated cached snapshot`, async ({
+    page,
+    request,
+  }) => {
+    const t = await provision(request);
+    const { first } = await snapshotFixture(request, t, "alpha", 1);
+    await request.put(`${t.path}/channels/beta`, { headers: t.headers });
+    await connect(page, t, "Tomas", { live: false });
+    await page.getByRole("button", { name: "Catch up", exact: true }).click();
+    await expect(page.locator("#checkpoint")).toBeVisible();
+    await expect(page.locator("#checkpoint-text")).not.toHaveText("");
+    await request.delete(`/api/admin/tenants/${t.tenant}/channels/alpha/messages/${first.id}`, {
+      headers: { Authorization: `Bearer ${ADMIN}` },
+    });
+    if (transition === "channel return") {
+      await openChannel(page, "beta");
+      await openChannel(page, "alpha");
+    } else if (transition === "Live") {
+      await page.getByLabel("Live", { exact: true }).check();
+    } else {
+      await page.getByRole("button", { name: "Poll once", exact: true }).click();
+    }
+    await expect(page.locator("#checkpoint")).toBeHidden();
+    await expect(page.locator("#checkpoint-text")).toHaveText("");
   });
 }

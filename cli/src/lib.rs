@@ -3,6 +3,8 @@ pub mod client;
 pub mod config;
 pub mod cursor;
 pub mod error;
+pub mod identity;
+pub mod profile;
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -16,13 +18,15 @@ use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
-use args::{Cli, Command};
+use args::{Cli, Command, SnapshotCommand};
 use client::{
     MsnClient, classify, error_message, is_retryable_status, print_success, status_error,
 };
 use config::{
-    CHANNELS_PAGE_LIMIT, MAX_LIMIT, MAX_SAFE_INTEGER, MAX_WAIT, parse_int, require_correlation_id,
-    require_tenant, require_text, require_token, require_username, slug,
+    CHANNELS_PAGE_LIMIT, DEFAULT_CATCHUP_MAX_BYTES, DEFAULT_SNAPSHOT_LIMIT, MAX_CATCHUP_MAX_BYTES,
+    MAX_LIMIT, MAX_SAFE_INTEGER, MAX_SNAPSHOT_TEXT_BYTES, MAX_WAIT, MIN_CATCHUP_MAX_BYTES,
+    parse_int, require_correlation_id, require_idempotency_key, require_tenant, require_text,
+    require_token, slug,
 };
 use cursor::{CursorBinding, CursorLock, default_cursor_path, load_cursor, write_cursor};
 use error::CliError;
@@ -31,8 +35,22 @@ const BACKOFF_START_MS: u64 = 1000;
 const BACKOFF_MAX_MS: u64 = 15000;
 
 pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
+    if matches!(
+        &cli.command,
+        Command::Snapshot {
+            command: SnapshotCommand::Template
+        }
+    ) {
+        return snapshot_template();
+    }
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
+        Command::Profile { .. }
+        | Command::Activate { .. }
+        | Command::Deactivate
+        | Command::ShellInit { .. } => Err(CliError::generic(
+            "Local profile commands must be prepared before execution.",
+        )),
         Command::Health => health(&url),
         Command::Whoami => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
@@ -103,10 +121,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             key,
             reply_to,
             correlation_id,
+            to,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
-            let username = require_username(cli.username.as_deref())?;
             let channel = slug(&channel)?;
             let reply_to = reply_to
                 .as_deref()
@@ -115,6 +133,16 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let correlation_id = correlation_id
                 .as_deref()
                 .map(require_correlation_id)
+                .transpose()?;
+            let to = to
+                .as_deref()
+                .map(|value| {
+                    identity::validate_username(value).map_err(|_| {
+                        CliError::usage(
+                            "--to must be a non-blank username of at most 128 UTF-8 bytes.",
+                        )
+                    })
+                })
                 .transpose()?;
             let payload = match (text, json) {
                 (Some(text), None) => Payload {
@@ -128,6 +156,8 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 // clap enforces exactly one of --text / --json.
                 _ => return Err(CliError::usage("Pass either --text or --json, not both.")),
             };
+            let username =
+                identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
             send(
                 &url,
                 &tenant,
@@ -139,6 +169,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 Correlation {
                     reply_to,
                     correlation_id,
+                    to,
                 },
             )
         }
@@ -159,6 +190,160 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             }
             poll(&url, &tenant, &token, channel, after, wait, limit)
         }
+        Command::Snapshot { command } => match command {
+            SnapshotCommand::Template => unreachable!("handled before connection parsing"),
+            SnapshotCommand::Publish {
+                channel,
+                text,
+                covers_through,
+                base_version,
+                history_revision,
+                key,
+            } => {
+                let tenant = require_tenant(cli.tenant.as_deref())?;
+                let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+                let channel = slug(&channel)?;
+                let text = read_snapshot_text(&text)?;
+                let covers_through = parse_int(&covers_through, MAX_SAFE_INTEGER)?;
+                let base_version = parse_int(&base_version, MAX_SAFE_INTEGER)?;
+                let history_revision = parse_int(&history_revision, MAX_SAFE_INTEGER)?;
+                let key = key.as_deref().map(require_idempotency_key).transpose()?;
+                let username =
+                    identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
+                publish_snapshot(
+                    &url,
+                    &tenant,
+                    &token,
+                    channel,
+                    &username,
+                    &text,
+                    covers_through,
+                    base_version,
+                    history_revision,
+                    key,
+                )
+            }
+            SnapshotCommand::List {
+                channel,
+                after,
+                limit,
+            } => {
+                let tenant = require_tenant(cli.tenant.as_deref())?;
+                let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+                let channel = slug(&channel)?;
+                let after = parse_optional_int(after.as_deref(), 0, MAX_SAFE_INTEGER)?;
+                let limit =
+                    parse_optional_int(limit.as_deref(), DEFAULT_SNAPSHOT_LIMIT, MAX_LIMIT)?;
+                require_positive_limit(limit)?;
+                list_snapshots(&url, &tenant, &token, channel, after, limit)
+            }
+            SnapshotCommand::Show { channel, version } => {
+                let tenant = require_tenant(cli.tenant.as_deref())?;
+                let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+                let channel = slug(&channel)?;
+                let version = parse_int(&version, MAX_SAFE_INTEGER)?;
+                if version == 0 {
+                    return Err(CliError::usage("version must be an integer from 1."));
+                }
+                show_snapshot(&url, &tenant, &token, channel, version)
+            }
+        },
+        Command::Catchup {
+            channel,
+            after,
+            limit,
+            max_bytes,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let after = after
+                .as_deref()
+                .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let limit = parse_optional_int(limit.as_deref(), DEFAULT_SNAPSHOT_LIMIT, MAX_LIMIT)?;
+            require_positive_limit(limit)?;
+            let max_bytes = parse_optional_int(
+                max_bytes.as_deref(),
+                DEFAULT_CATCHUP_MAX_BYTES,
+                MAX_CATCHUP_MAX_BYTES,
+            )?;
+            if max_bytes < MIN_CATCHUP_MAX_BYTES {
+                return Err(CliError::usage(
+                    "max-bytes must be an integer from 1024 to 262144.",
+                ));
+            }
+            catchup(&url, &tenant, &token, channel, after, limit, max_bytes)
+        }
+        Command::Read {
+            channel,
+            after,
+            wait,
+            limit,
+            cursor_file,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let wait = parse_optional_int(wait.as_deref(), 0, MAX_WAIT)?;
+            let limit = parse_optional_int(limit.as_deref(), 100, MAX_LIMIT)?;
+            if limit < 1 {
+                return Err(CliError::usage("limit must be an integer from 1 to 100."));
+            }
+            if after.is_some() && cursor_file.is_some() {
+                return Err(CliError::usage(
+                    "Use either --after or --cursor-file, not both.",
+                ));
+            }
+            let reader = if after.is_none() && cursor_file.is_none() {
+                Some(identity::resolve_username(
+                    &url,
+                    &tenant,
+                    &token,
+                    cli.reader.as_deref().or(cli.username.as_deref()),
+                )?)
+            } else {
+                None
+            };
+            let file = match cursor_file {
+                Some(path) => Some(PathBuf::from(path)),
+                None if after.is_none() => {
+                    let path = default_cursor_path(
+                        &url,
+                        &tenant,
+                        reader.as_deref().expect("automatic reader"),
+                        channel,
+                    )?;
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    Some(path)
+                }
+                None => None,
+            };
+            let lock = file.as_deref().map(CursorLock::acquire).transpose()?;
+            let file = lock.as_ref().map(CursorLock::cursor_path);
+            let cursor_after = resolve_cursor(
+                &url,
+                &tenant,
+                channel,
+                after.as_deref(),
+                file,
+                reader.as_deref(),
+            )?;
+            read_once(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                cursor_after,
+                wait,
+                limit,
+                file,
+                reader.as_deref(),
+                &stop,
+            )
+        }
         Command::Wait {
             channel,
             after,
@@ -171,9 +356,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let channel = slug(&channel)?;
             let (wait, limit) = parse_loop_bounds(wait.as_deref(), limit.as_deref())?;
             let reader = if after.is_none() && cursor_file.is_none() {
-                Some(cli.reader.as_deref().or(cli.username.as_deref()).ok_or_else(|| {
-                    CliError::usage("Automatic wait cursors require --reader/MSN_READER or --username/MSN_USERNAME. Set a distinct reader identity, or pass --cursor-file or --after. A new reader replays history from 0.")
-                })?)
+                Some(identity::resolve_username(
+                    &url,
+                    &tenant,
+                    &token,
+                    cli.reader.as_deref().or(cli.username.as_deref()),
+                )?)
             } else {
                 None
             };
@@ -189,7 +377,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                     let path = default_cursor_path(
                         &url,
                         &tenant,
-                        reader.expect("automatic reader"),
+                        reader.as_deref().expect("automatic reader"),
                         channel,
                     )?;
                     if let Some(parent) = path.parent() {
@@ -201,8 +389,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             // Acquire before reading and hold until all output and cursor writes are finished.
             let lock = file.as_deref().map(CursorLock::acquire).transpose()?;
             let file = lock.as_ref().map(CursorLock::cursor_path);
-            let cursor_after =
-                resolve_cursor(&url, &tenant, channel, after.as_deref(), file, reader)?;
+            let cursor_after = resolve_cursor(
+                &url,
+                &tenant,
+                channel,
+                after.as_deref(),
+                file,
+                reader.as_deref(),
+            )?;
             let target = LoopTarget {
                 url: &url,
                 tenant: &tenant,
@@ -211,7 +405,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 wait,
                 limit,
                 cursor_file: file,
-                reader,
+                reader: reader.as_deref(),
             };
             wait_for_messages(&target, cursor_after, stop)
         }
@@ -309,6 +503,13 @@ fn parse_optional_int(raw: Option<&str>, default: u64, max: u64) -> Result<u64, 
     }
 }
 
+fn require_positive_limit(limit: u64) -> Result<(), CliError> {
+    if limit < 1 {
+        return Err(CliError::usage("limit must be an integer from 1 to 100."));
+    }
+    Ok(())
+}
+
 /// `--wait` (default 25) and `--limit` (default 100) for the long-poll loops; both must be ≥ 1.
 fn parse_loop_bounds(wait: Option<&str>, limit: Option<&str>) -> Result<(u64, u64), CliError> {
     let wait = parse_optional_int(wait, 25, MAX_WAIT)?;
@@ -355,6 +556,24 @@ fn read_text(text: &str) -> Result<String, CliError> {
     require_text(text)
 }
 
+fn read_snapshot_text(text: &str) -> Result<String, CliError> {
+    let text = read_text(text)?;
+    if text.len() > MAX_SNAPSHOT_TEXT_BYTES {
+        return Err(CliError::usage(
+            "Snapshot text must be at most 16384 UTF-8 bytes.",
+        ));
+    }
+    Ok(text)
+}
+
+fn snapshot_template() -> Result<(), CliError> {
+    const TEMPLATE: &str = "## Objective\n\n## Decisions\n\n## Open tasks\n\n## Blockers\n\n## Artifacts\n\n## Next actions\n\n## Unresolved\n\n## Evidence\n";
+    print!("{TEMPLATE}");
+    io::stdout()
+        .flush()
+        .map_err(|error| CliError::generic(error.to_string()))
+}
+
 /// Validates `--json` locally (UTF-8, then JSON) so an invalid payload never reaches the Worker.
 fn read_json(json: &str) -> Result<String, CliError> {
     let raw = if json == "-" {
@@ -390,14 +609,15 @@ fn create(url: &Url, tenant: &str, token: &str, channel: &str) -> Result<(), Cli
     finish(&client.put(&format!("/api/tenants/{tenant}/channels/{channel}"), token)?)
 }
 
-/// Optional correlation fields for `send`; `None` leaves the field out of the JSON body entirely.
+/// Optional message annotations for `send`; `None` leaves the field out of the JSON body entirely.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Correlation {
     pub reply_to: Option<u64>,
     pub correlation_id: Option<String>,
+    pub to: Option<String>,
 }
 
-/// The POST body for a send. Unset correlation fields are omitted, so a plain send is byte-for-byte
+/// The POST body for a send. Unset annotation fields are omitted, so a plain send is byte-for-byte
 /// what older CLIs produced and idempotency replays keep matching.
 pub fn send_body(username: &str, payload: &Payload, correlation: &Correlation) -> Value {
     let mut body = json!({ "username": username, "text": payload.text });
@@ -409,6 +629,9 @@ pub fn send_body(username: &str, payload: &Payload, correlation: &Correlation) -
     }
     if let Some(correlation_id) = &correlation.correlation_id {
         body["correlationId"] = json!(correlation_id);
+    }
+    if let Some(to) = &correlation.to {
+        body["to"] = json!(to);
     }
     body
 }
@@ -454,6 +677,126 @@ fn poll(
         "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}"
     );
     finish(&client.get(&path, Some(token))?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_snapshot(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    text: &str,
+    covers_through: u64,
+    base_version: u64,
+    history_revision: u64,
+    key: Option<&str>,
+) -> Result<(), CliError> {
+    let client = MsnClient::new(url)?;
+    let key = key
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    eprintln!("Idempotency-Key: {key}");
+    let _ = io::stderr().flush();
+    let body = json!({
+        "username": username,
+        "text": text,
+        "coversThrough": covers_through,
+        "baseVersion": base_version,
+        "historyRevision": history_revision,
+    });
+    finish(&client.post_json(
+        &format!("/api/tenants/{tenant}/channels/{channel}/snapshots"),
+        token,
+        &[("Idempotency-Key", key.as_str())],
+        &body,
+    )?)
+}
+
+fn list_snapshots(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    after: u64,
+    limit: u64,
+) -> Result<(), CliError> {
+    finish(&MsnClient::new(url)?.get(
+        &format!("/api/tenants/{tenant}/channels/{channel}/snapshots?after={after}&limit={limit}"),
+        Some(token),
+    )?)
+}
+
+fn show_snapshot(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    version: u64,
+) -> Result<(), CliError> {
+    finish(&MsnClient::new(url)?.get(
+        &format!("/api/tenants/{tenant}/channels/{channel}/snapshots/{version}"),
+        Some(token),
+    )?)
+}
+
+fn catchup(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    after: Option<u64>,
+    limit: u64,
+    max_bytes: u64,
+) -> Result<(), CliError> {
+    let continuation = after
+        .map(|value| format!("&after={value}"))
+        .unwrap_or_default();
+    finish(&MsnClient::new(url)?.get(
+        &format!(
+            "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}"
+        ),
+        Some(token),
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_once(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    after: u64,
+    wait: u64,
+    limit: u64,
+    cursor_file: Option<&Path>,
+    reader: Option<&str>,
+    stop: &AtomicBool,
+) -> Result<(), CliError> {
+    let client = Arc::new(MsnClient::new(url)?);
+    let path = format!(
+        "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}"
+    );
+    let Some(response) = get_interruptible(client, path, token.to_string(), stop)? else {
+        return Ok(());
+    };
+    let response = response?;
+    classify(response.status, &response.body)?;
+    let (messages, next_cursor) = parse_page(&response.body)?;
+    writeln!(io::stdout().lock(), "{}", response.body.trim())?;
+    io::stdout()
+        .flush()
+        .map_err(|error| CliError::generic(error.to_string()))?;
+    if !messages.is_empty() {
+        if let Some(path) = cursor_file {
+            write_cursor(
+                path,
+                &CursorBinding::new(url, tenant, channel, next_cursor.unwrap_or(after))
+                    .with_reader(reader),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Body for provision/rotate: `None` leaves the bind alone (provision: unbound; rotate: kept).

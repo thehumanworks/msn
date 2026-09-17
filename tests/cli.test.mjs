@@ -33,10 +33,62 @@ function harness(argv, responses = [{}], extra = {}) {
   return { execute: () => run(options), calls, output, errors };
 }
 
+test("CLI infers an exact-bound sender without MSN_USERNAME and preserves explicit names", async () => {
+  const noName = { ...env, MSN_USERNAME: undefined };
+  const h = harness(
+    ["send", "general", "--text", "ready", "--key", "ready-1"],
+    [{ tenant: "team", username: "planner", usernamePrefix: null }, { message: { id: 1 } }],
+    { env: noName },
+  );
+  await h.execute();
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.calls[0].url, "https://msn.test/api/tenants/team");
+  assert.deepEqual(JSON.parse(h.calls[1].body), { username: "planner", text: "ready" });
+  assert.equal(h.calls[1].headers["Idempotency-Key"], "ready-1");
+  const explicit = harness(["send", "general", "--text", "ready", "--username", "chosen"], [{}], {
+    env: noName,
+  });
+  await explicit.execute();
+  assert.equal(explicit.calls.length, 1);
+  assert.equal(JSON.parse(explicit.calls[0].body).username, "chosen");
+});
+
+test("CLI requires a chosen name for prefix/unbound keys and validates payload before identity lookup", async () => {
+  const noName = { ...env, MSN_USERNAME: undefined };
+  for (const usernamePrefix of [null, "agent-"]) {
+    const h = harness(
+      ["send", "general", "--text", "ready"],
+      [{ tenant: "team", username: null, usernamePrefix }],
+      {
+        env: noName,
+      },
+    );
+    await assert.rejects(h.execute(), /no exact username binding/);
+    assert.equal(h.calls.length, 1);
+  }
+  for (const argv of [
+    ["send", "general", "--json", "{"],
+    ["send", "general", "--text", "ready", "--correlation-id", " "],
+    ["send", "general", "--text", "ready", "--username", ""],
+  ]) {
+    const h = harness(argv, [], { env: noName });
+    await assert.rejects(h.execute());
+    assert.equal(h.calls.length, 0);
+  }
+  const denied = harness(["send", "general", "--text", "ready"], [], {
+    env: noName,
+    fetcher: async () => Response.json({ error: { message: "revoked" } }, { status: 401 }),
+  });
+  await assert.rejects(denied.execute(), /401: revoked/);
+});
+
 test("CLI help is credential-free and malformed commands/unsafe origins fail before network", async () => {
   const h = harness(["--help"], [], { env: {} });
   await h.execute();
   assert.match(h.output[0], /cursor-file/);
+  const profile = harness(["channels"], [], { env: { ...env, MSN_PROFILE: "planner" } });
+  await assert.rejects(profile.execute(), /Rust CLI profile/);
+  assert.equal(profile.calls.length, 0);
   for (const argv of [
     ["unknown"],
     ["poll"],
@@ -71,6 +123,39 @@ test("CLI send preserves display username and explicit retry key; stdout stays J
   assert.deepEqual(JSON.parse(h.output[0]), { message: { id: 1 } });
   assert.deepEqual(h.errors, ["Idempotency-Key: same-key"]);
   assert.equal(h.calls[0].redirect, "error");
+});
+
+test("CLI addresses a username independently of reply and correlation annotations", async () => {
+  const h = harness(
+    [
+      "send",
+      "general",
+      "--text",
+      "review this",
+      "--to",
+      "reviewer",
+      "--reply-to",
+      "42",
+      "--correlation-id",
+      "task-7",
+    ],
+    [{}],
+  );
+  await h.execute();
+  assert.deepEqual(JSON.parse(h.calls[0].body), {
+    username: "free name",
+    text: "review this",
+    to: "reviewer",
+    replyTo: 42,
+    correlationId: "task-7",
+  });
+  for (const to of ["", " ", "😀".repeat(33)]) {
+    const bad = harness(["send", "general", "--text", "review", "--to", to], [], {
+      env: { ...env, MSN_USERNAME: undefined },
+    });
+    await assert.rejects(bad.execute(), /--to/);
+    assert.equal(bad.calls.length, 0);
+  }
 });
 
 test("CLI send forwards --reply-to and --correlation-id only when given, and rejects bad values offline", async () => {

@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::DEFAULT_URL;
 
@@ -9,8 +9,9 @@ Environment:
   MSN_WORKSPACE_TOKEN     Tenant capability token (--token); never a positional
   MSN_TENANT / MSN_TOKEN  Legacy fallbacks when the canonical workspace variable is absent
   MSN_ADMIN_TOKEN         Administrator token (--admin-token) for admin commands
-  MSN_USERNAME            Display name and default reader (--username); env never binds a token
-  MSN_READER              Reader identity for automatic wait cursors (--reader)
+  MSN_PROFILE             Saved connection for this shell (--profile)
+  MSN_USERNAME            Optional display name/default reader; exact-name keys infer it
+  MSN_READER              Reader identity for automatic read/wait cursors (--reader)
 
 Exit codes: 0 ok; 1 generic; 2 usage/config; 3 auth (401/403); 4 not found (404);
   5 conflict (409/410); 6 network (connect/TLS/redirect)
@@ -19,11 +20,24 @@ EXAMPLES:
   msn health
   msn channels
   msn create general
-  MSN_USERNAME=agent msn send general --text 'hello'
+  msn profile save planner
+  eval \"$(msn shell-init bash)\"
+  msn activate planner
+  msn send general --text 'hello'
+  msn send general --to reviewer --text 'Please review' --correlation-id task-7
+  msn read general                 # unread page now, including empty when caught up
+  msn read general --wait 10        # one bounded long-poll
+  msn snapshot publish general --text - --covers-through 42 --base-version 1 --history-revision 0
+  msn snapshot template > snapshot.md
+  msn snapshot list general --limit 20
+  msn snapshot show general 2
+  msn catchup general --limit 20 --max-bytes 32768
+  msn catchup general --after 42    # exact continuation; snapshot is omitted
   msn send general --text - --key retry-1 < message.txt
   msn send general --text 'pong' --reply-to 42 --correlation-id task-7
   msn send general --json '{\"op\":\"ping\"}'       # contentType application/json
   msn poll general --after 0 --wait 25 --limit 100
+  msn read general --reader reviewer
   msn wait general --reader reviewer
   msn whoami
   msn key-create reviewer --username reviewer
@@ -45,22 +59,34 @@ credentials or fragment). Redirects are errors. send prints Idempotency-Key on
 stderr; reuse --key after an uncertain result. --json validates UTF-8 JSON locally
 and exits 2 before any request when it is invalid; --text stays text/plain. Every
 message carries contentType. follow prints one JSON message per line and writes a
-0600 cursor file bound to server/tenant/channel. wait blocks until new messages
-exist, prints that page like poll, persists nextCursor and exits 0; its default
+0600 cursor file bound to server/tenant/channel. read makes one bounded request,
+prints its page, and persists nextCursor; wait blocks until new messages exist,
+prints that page like poll, persists nextCursor and exits 0. Their default
 cursor file is $XDG_STATE_HOME/msn/<origin-hash>/<tenant>/readers/<reader-hash>/<channel>.json
 (or ~/.local/state/msn/...). Reader identity is --reader/MSN_READER, otherwise
---username/MSN_USERNAME; set one or pass --cursor-file/--after. Reader names must be
+--username/MSN_USERNAME, then the key's exact username binding. Prefix/unbound keys
+need a chosen username or explicit reader, --cursor-file or --after. Reader names must be
 non-blank and at most 128 UTF-8 bytes. Tokens are not part of this path: rotation
 preserves reader progress. Legacy shared cursors are never adopted automatically;
 the first run for each reader replays history from 0. Distinct readers get every
 message; cursor persistence is not an acknowledgment of processing.
 
-wait/follow hold a <cursor-file>.lock sidecar while using a cursor. A concurrent
+read/wait/follow hold a <cursor-file>.lock sidecar while using a cursor. A concurrent
 user of the same cursor exits 5. Normal exits and SIGINT/SIGTERM/SIGHUP release it.
 After an unclean exit (such as SIGKILL), confirm the owner is no longer running
 before manually removing the lock; stale locks are never deleted automatically.
 --reply-to and --correlation-id are opaque log annotations: every reader still gets
-every message.
+every message. --to addresses a username; it is visible to the whole channel and
+is neither private delivery nor a work claim. read performs one request and returns
+a page even when empty; errors are not retried. Profiles store private local keys.
+
+Snapshots are authored, unverified Markdown checkpoints; canonical history remains
+the message log. Publish with the exact coversThrough, baseVersion and historyRevision
+previously observed from the server, and reuse the same key and body after an uncertain
+result. catchup without --after returns the latest valid snapshot plus the oldest tail;
+--after is an exact continuation and omits the snapshot. catchup is read-only and never
+reads or writes the automatic read cursor. Continue deliberately from nextCursor while
+hasMore/incomplete is true.
 
 A bound token is rejected by the server (403 username_bound, exit 3) when send uses
 another --username. Only explicit --username or --username-prefix flags bind on provision/rotate/key-create;
@@ -79,6 +105,10 @@ rotate is a workspace-wide emergency reset: it also revokes all participant keys
     subcommand_required = true
 )]
 pub struct Cli {
+    /// Saved participant connection (isolated selection for this shell or command)
+    #[arg(long, env = "MSN_PROFILE", global = true)]
+    pub profile: Option<String>,
+
     /// Worker origin (no path, query, credentials or fragment)
     #[arg(long, env = "MSN_URL", global = true, default_value = DEFAULT_URL)]
     pub url: String,
@@ -109,7 +139,7 @@ pub struct Cli {
     #[arg(long, env = "MSN_USERNAME", global = true)]
     pub username: Option<String>,
 
-    /// Automatic wait cursor identity (defaults to --username/MSN_USERNAME; first run replays history)
+    /// Automatic read/wait cursor identity (defaults to resolved username; first run replays history)
     #[arg(long, env = "MSN_READER", global = true)]
     pub reader: Option<String>,
 
@@ -123,6 +153,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Save or inspect named local participant connections (never prints saved keys)
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+    /// Validate a profile and activate it using the shell-init function
+    Activate { name: String },
+    /// Clear this shell's profile selection using the shell-init function
+    Deactivate,
+    /// Print shell integration: eval "$(msn shell-init bash)"
+    ShellInit {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// GET /api/health (no token)
     Health,
     /// GET /api/tenants/{tenant}; show this token's tenant and username binding
@@ -166,6 +210,9 @@ pub enum Command {
         /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
         #[arg(long = "correlation-id")]
         correlation_id: Option<String>,
+        /// Address a username (visible to everyone in the channel; not a private message)
+        #[arg(long)]
+        to: Option<String>,
     },
     /// GET …/messages (single page; wait defaults to 0)
     Poll {
@@ -179,6 +226,41 @@ pub enum Command {
         /// Page size, 1–100 (default 100)
         #[arg(long)]
         limit: Option<String>,
+    },
+    /// Publish, list, or show authored channel snapshots
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
+    /// Fetch one bounded snapshot + message tail, or continue exactly after a message id
+    Catchup {
+        /// Channel slug
+        channel: String,
+        /// Exact exclusive message id continuation; omitting it permits the latest valid snapshot
+        #[arg(long)]
+        after: Option<String>,
+        /// Maximum messages in the tail, 1–100 (default 20)
+        #[arg(long)]
+        limit: Option<String>,
+        /// Maximum complete response size in bytes, 1024–262144 (default 32768)
+        #[arg(long = "max-bytes")]
+        max_bytes: Option<String>,
+    },
+    /// Fetch unread messages once, print the page, and persist the reader cursor
+    Read {
+        channel: String,
+        /// Exclusive message id cursor; disables cursor files (not with --cursor-file)
+        #[arg(long)]
+        after: Option<String>,
+        /// Seconds to long-poll, 0–25 (default 0)
+        #[arg(long)]
+        wait: Option<String>,
+        /// Page size, 1–100 (default 100)
+        #[arg(long)]
+        limit: Option<String>,
+        /// Atomic 0600 JSON cursor; overrides automatic reader-scoped state
+        #[arg(long = "cursor-file")]
+        cursor_file: Option<String>,
     },
     /// Block until new messages exist, print that page, persist the cursor, exit 0
     Wait {
@@ -234,4 +316,64 @@ pub enum Command {
     },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SnapshotCommand {
+    /// Print an offline Markdown template for an authored checkpoint
+    Template,
+    /// Publish an authored Markdown checkpoint with optimistic concurrency preconditions
+    Publish {
+        /// Channel slug
+        channel: String,
+        /// Authored Markdown; pass - to read stdin (non-blank, at most 16 KiB UTF-8)
+        #[arg(long)]
+        text: String,
+        /// Highest channel message id represented by the snapshot (0 for empty history)
+        #[arg(long = "covers-through")]
+        covers_through: String,
+        /// Current latest snapshot version (0 for the first snapshot)
+        #[arg(long = "base-version")]
+        base_version: String,
+        /// Current channel history revision from catchup/list/show
+        #[arg(long = "history-revision")]
+        history_revision: String,
+        /// Idempotency-Key; generated and printed to stderr when omitted
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// List bounded snapshot metadata after a version
+    List {
+        /// Channel slug
+        channel: String,
+        /// Exclusive snapshot version cursor (default 0)
+        #[arg(long)]
+        after: Option<String>,
+        /// Page size, 1–100 (default 20)
+        #[arg(long)]
+        limit: Option<String>,
+    },
+    /// Show one snapshot version, including its authored text when still valid
+    Show {
+        /// Channel slug
+        channel: String,
+        /// Snapshot version
+        version: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommand {
+    /// Validate and save the current connection; refuses to overwrite an existing profile
+    Save { name: String },
+    /// List profile metadata without keys
+    List,
+    /// Show one profile's metadata without its key
+    Show { name: String },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
 }

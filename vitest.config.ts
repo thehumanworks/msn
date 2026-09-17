@@ -8,5 +8,5 @@ export default defineConfig({
       miniflare: { bindings: { ADMIN_TOKEN: "test-admin-secret-000000000000000000000" } },
     }),
   ],
-  test: { include: ["tests/api.test.ts"], testTimeout: 15000 },
+  test: { include: ["tests/*.test.ts"], testTimeout: 15000 },
 });

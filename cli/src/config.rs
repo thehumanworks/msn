@@ -6,6 +6,11 @@ pub const DEFAULT_URL: &str = "https://msn.rodat-human-ada.workers.dev";
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_WAIT: u64 = 25;
 pub const MAX_LIMIT: u64 = 100;
+pub const DEFAULT_SNAPSHOT_LIMIT: u64 = 20;
+pub const DEFAULT_CATCHUP_MAX_BYTES: u64 = 32_768;
+pub const MIN_CATCHUP_MAX_BYTES: u64 = 1_024;
+pub const MAX_CATCHUP_MAX_BYTES: u64 = 262_144;
+pub const MAX_SNAPSHOT_TEXT_BYTES: usize = 16 * 1024;
 pub const CHANNELS_PAGE_LIMIT: u64 = 1000;
 
 pub fn parse_origin(raw: &str) -> Result<Url, CliError> {
@@ -121,11 +126,28 @@ pub fn require_tenant(value: Option<&str>) -> Result<String, CliError> {
 pub fn require_username(value: Option<&str>) -> Result<String, CliError> {
     match value {
         Some(name) if !name.trim().is_empty() => Ok(name.to_string()),
-        _ => Err(CliError::usage("Set MSN_USERNAME and pass --text.")),
+        _ => Err(CliError::usage("Choose a non-blank username.")),
     }
 }
 
 pub const MAX_CORRELATION_BYTES: usize = 128;
+pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+
+/// Mirrors the Worker's Idempotency-Key grammar so invalid snapshot retries never trigger an
+/// identity lookup or mutation request.
+pub fn require_idempotency_key(value: &str) -> Result<&str, CliError> {
+    if value.is_empty()
+        || value.len() > MAX_IDEMPOTENCY_KEY_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(CliError::usage(
+            "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
+        ));
+    }
+    Ok(value)
+}
 
 /// Mirrors the Worker's rule: non-blank, at most 128 UTF-8 bytes. Fail before any network call.
 pub fn require_correlation_id(value: &str) -> Result<String, CliError> {
@@ -139,7 +161,7 @@ pub fn require_correlation_id(value: &str) -> Result<String, CliError> {
 
 pub fn require_text(value: &str) -> Result<String, CliError> {
     if value.trim().is_empty() {
-        return Err(CliError::usage("Set MSN_USERNAME and pass --text."));
+        return Err(CliError::usage("Pass --text with a non-blank message."));
     }
     Ok(value.to_string())
 }
@@ -230,6 +252,16 @@ mod tests {
         );
         assert!(require_correlation_id(&"🙂".repeat(32)).is_ok());
         assert_eq!(require_correlation_id("task-7").unwrap(), "task-7");
+    }
+
+    #[test]
+    fn snapshot_idempotency_key_uses_worker_grammar() {
+        for valid in ["a", "retry_1", "snapshot-42", &"x".repeat(128)] {
+            assert_eq!(require_idempotency_key(valid).unwrap(), valid);
+        }
+        for invalid in ["", "contains space", "slash/key", "é", &"x".repeat(129)] {
+            assert_eq!(require_idempotency_key(invalid).unwrap_err().exit_code(), 2);
+        }
     }
 
     #[test]

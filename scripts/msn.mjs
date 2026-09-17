@@ -7,14 +7,14 @@ import { parseArgs } from "node:util";
 
 export const help = `msn — channel messaging for agents and humans (Node 22+)
 
-Environment: MSN_URL, MSN_WORKSPACE_TENANT, MSN_WORKSPACE_TOKEN, MSN_USERNAME
+Environment: MSN_URL, MSN_WORKSPACE_TENANT, MSN_WORKSPACE_TOKEN, optional MSN_USERNAME
 Legacy aliases: MSN_TENANT, MSN_TOKEN (canonical workspace variables take precedence)
 Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 
 node scripts/msn.mjs whoami
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
-node scripts/msn.mjs send CHANNEL --text 'hello' [--key RETRY_KEY] [--reply-to ID] [--correlation-id STR]
+node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME] [--key RETRY_KEY] [--reply-to ID] [--correlation-id STR]
 node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
@@ -30,6 +30,7 @@ follow prints one JSON message per line; cursor files are tenant/channel/server-
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
 --reply-to (same-channel message id) and --correlation-id (opaque, <=128 bytes) are optional
 annotations agents can filter on; every reader still receives every message.
+--to USERNAME addresses a participant in the channel; it does not make a message private.
 --json sends contentType application/json; invalid JSON exits 2 without any request.
 Messages carry contentType (text/plain default); only parse text when it is application/json.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
@@ -37,6 +38,8 @@ A token bound with --username (or --username-prefix) may only send as that name 
 the server answers 403 username_bound otherwise. rotate keeps the bind unless you pass
 a new one or --unbind. Rotation revokes ALL participant keys in that workspace.
 MSN_USERNAME never binds a token; key-create requires an explicit binding flag.
+send infers the username from exact-name participant keys when MSN_USERNAME is absent.
+Use the Rust msn CLI for shell profiles and persisted bounded reads (msn read).
 `;
 
 class UsageError extends Error {
@@ -111,6 +114,7 @@ export async function run({
       key: { type: "string" },
       "reply-to": { type: "string" },
       "correlation-id": { type: "string" },
+      to: { type: "string" },
       after: { type: "string" },
       wait: { type: "string" },
       limit: { type: "string" },
@@ -124,6 +128,10 @@ export async function run({
     out(help);
     return;
   }
+  if (env.MSN_PROFILE !== undefined)
+    throw new UsageError(
+      "MSN_PROFILE selects a Rust CLI profile. Use msn, or unset MSN_PROFILE and configure this Node client explicitly.",
+    );
   const [command, target, id] = positionals;
   if (
     ![
@@ -243,9 +251,10 @@ export async function run({
     const content = values.json ?? values.text;
     // --username overrides MSN_USERNAME for this send; a token bound to another name is
     // rejected by the server with 403 username_bound.
-    const username = values.username ?? env.MSN_USERNAME;
-    if (!username?.trim() || !content?.trim())
-      throw new UsageError("Set MSN_USERNAME and pass --text or --json.");
+    let username = values.username ?? env.MSN_USERNAME;
+    if (!content?.trim()) throw new UsageError("Pass --text or --json with a non-blank message.");
+    if (username !== undefined && (!username.trim() || Buffer.byteLength(username) > 128))
+      throw new UsageError("Username must be non-blank and at most 128 UTF-8 bytes.");
     // Unset typing and correlation fields are omitted, so a plain --text send is byte-for-byte
     // what it was before either feature.
     const body = { username, text: content };
@@ -267,6 +276,20 @@ export async function run({
       if (!id.trim() || Buffer.byteLength(id) > 128)
         throw new UsageError("--correlation-id must be non-blank text of at most 128 UTF-8 bytes.");
       body.correlationId = id;
+    }
+    if (values.to !== undefined) {
+      if (!values.to.trim() || Buffer.byteLength(values.to) > 128)
+        throw new UsageError("--to must be a non-blank username of at most 128 UTF-8 bytes.");
+      body.to = values.to;
+    }
+    // Validate the payload before networking, then infer an exact-name key's sender.
+    if (username === undefined) {
+      const identity = await request("");
+      if (identity.tenant !== tenant) throw new Error("Identity response belongs to a different workspace.");
+      username = identity.username;
+      if (typeof username !== "string" || !username.trim() || Buffer.byteLength(username) > 128)
+        throw new UsageError("This key has no exact username binding. Choose --username NAME.");
+      body.username = username;
     }
     const key = values.key ?? randomUUID();
     err(`Idempotency-Key: ${key}`);

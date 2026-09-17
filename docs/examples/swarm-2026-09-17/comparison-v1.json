@@ -1,0 +1,11 @@
+{
+  "throughMessage": 81,
+  "rawMessageCount": 81,
+  "rawCompactJsonBytes": 64896,
+  "reentryFileBytes": 7850,
+  "snapshotTextBytes": 4172,
+  "tailMessageCount": 5,
+  "snapshotVersion": 1,
+  "coversThrough": 76,
+  "interpretation": "Authored lossy summary + original tail, not lossless compression. Cold agent independently recovered scope/owners/actions before inspecting history."
+}

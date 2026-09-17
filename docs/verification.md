@@ -1,3 +1,44 @@
+# Swarm snapshots and long-horizon recovery — 2026-09-17
+
+Implemented and verified locally through an eight-subagent MSN swarm: two Astra (low), two Sol (medium), and four Cursor Grok (`cursor-grok-4.6-high-fast`) participants. Native participants worked in waves within the runtime concurrency limit. Details and durable evidence: [swarm trial](swarm-collaboration-trial.md), [transcript and artifacts](examples/swarm-2026-09-17/README.md).
+
+- Rust: **127** passing tests (28 library + 79 CLI + 6 identity + 4 profile + 2 read-safety + 8 snapshots).
+- Worker/API: **51** passing tests (40 existing + 11 snapshots), including restart, CAS/replay, redaction/revision, exact continuation, full UTF-8 byte bounds and streamed-body revocation.
+- Node CLI: **16** passing tests.
+- Browser: **58** passing cases across desktop/mobile Chromium (29 per viewport); 12 new snapshot/catch-up cases cover safe text, bounded pagination, drafts, history revisions, late channel responses and raw Poll/Live/channel-return transitions.
+- Total: **252 tests**, plus both real local Worker scenarios: `npm run test:swarm` and `npm run test:participants`.
+- Cargo fmt, Clippy all-targets/all-features with warnings denied, TypeScript, Biome and `git diff --check` passed.
+- Live browser check via agent-browser: local snapshot v2 renders, Live pauses, no console errors or horizontal overflow. Screenshot saved with the trial.
+- A fresh Cursor session recovered scope, owners and next actions from a 7,850-byte saved catch-up response before opening old history. At the second checkpoint, 104,434 bytes of raw channel JSON became 3,876 bytes of authored recovery context (96.3% fewer bytes, with raw history preserved).
+
+No deployment, release or commit was performed. No bindings changed, so no type regeneration was needed. Tests simulate long-history/age/restart/race conditions; this was not a multi-day soak. Snapshot content is authored and unverified; cadence is a reminder, not an LLM scheduler. Expected workerd forced-restart/canceled-poll diagnostics remain in test output; assertions pass. Prior evidence below describes earlier states and deployments.
+
+---
+
+# Agent collaboration verification — 2026-09-17
+
+Implemented and exercised locally through MSN with three GPT-5.6 Sol subagents (two medium-effort participants and one low-effort reviewer). [The trial record](agent-collaboration-trial.md) connects the observed friction, channel exchanges, and improvements. These changes are not deployed or included in a published CLI release.
+
+| Check | Observed result |
+| --- | --- |
+| Real collaboration | Independent participant sessions coordinated implementation and review through MSN, then used profiles, bounded reads, and addressed handoffs |
+| `npm run test:participants` | Passed against a real local Worker: inferred identity, complete-profile precedence, independent bounded reads, addressed fan-out/replies/retries, revocation, cursor locks, and rotation |
+| `cargo test --manifest-path cli/Cargo.toml --locked` | 118 tests passed: 27 unit, 79 CLI, 6 identity, 4 profile, 2 read-safety |
+| Rust formatting and Clippy with warnings denied | Passed |
+| Worker API suite | 40 tests passed, including pinned historical digest vectors and v5→v6 migration |
+| Node CLI suite | 16 tests passed |
+| TypeScript and Biome | Passed |
+| `npm run test:browser` | 46 desktop/mobile Chromium tests passed after the final draft-race fixes |
+| agent-browser visual check | Connected, sent an addressed message through the human composer, verified CLI receipt; recipient control/annotations rendered, no horizontal overflow or page errors |
+
+Profile tests execute the actual Bash shell hook and prove failed activation preserves the previous selection. Read-specific tests prove SIGTERM and closed stdout release locks without advancing the saved cursor. The real participant scenario selects profiles while deliberately supplying incorrect ambient origin, tenant, token, username, and reader values; it still reads the correct workspace with independent progress.
+
+The Worker migration adds only a nullable recipient column; bindings are unchanged. Existing plain and typed/correlated retry digests have fixed compatibility vectors. Addressing remains visible to every reader and does not authorize or claim work.
+
+Browser regressions cover recipient escaping, byte-preserving names, a changed recipient generating a new retry key, independent channel drafts, and editing only text or only recipient during an in-flight successful send. Both fields of the edited draft survive completion. The final browser message was observed through the CLI in the same collaboration log (message 53). Scope is local Linux and Chromium desktop/mobile; no production migration or published binary is claimed. The prior deployment evidence below refers to earlier code.
+
+---
+
 # Local verification — 2026-09-16
 
 Participant keys, reader isolation and browser reading improvements are implemented in this checkout. **Not deployed:** the production evidence below describes earlier versions, not these changes. No production secret files were read, no production requests were made, and no production workspaces or keys were modified.

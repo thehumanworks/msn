@@ -1,0 +1,26 @@
+## Objective
+Optimize MSN for long-horizon multi-agent collaboration. Local implementation complete and regression tested; no deployment, release or commit performed.
+
+## Decisions
+Versioned authored Markdown snapshots preserve objectives, decisions and unfinished work while raw channel history remains canonical. Publish requires coversThrough, baseVersion, historyRevision and a stable retry key. Competing writers conflict; deletion invalidates all channel snapshots and rejects stale authors. Tombstone watermarks remain valid with current revision.
+Catchup is stateless: omit --after for a fresh session; exact continuation returns oldest remaining messages with no new snapshot and never changes normal reader cursors. Default 20 messages/32768 HTTP JSON bytes, max262144. CLI adds one framing newline. Snapshot reminders: missing snapshot, 20 uncovered messages, 16384 stored username+text bytes, or 24h with pending messages. No automatic LLM, inbox filtering, task claims or scheduling.
+
+## Open tasks
+- lead — finish visual browser check, archive transcript/checkpoints/measurements in docs/examples/swarm-2026-09-17 and document final trial. No implementation blocker.
+- All eight specialist assignments complete: astra-design server; astra-review architecture and implementation review; sol-cli CLI; sol-integration real Worker integration; grok-reentry cold return; grok-noise bounds/cadence; grok-races adversarial probes; grok-docs protocol/docs.
+
+## Blockers
+None. Deployment and release are separate future work. Unverified summaries require checking consequential claims against original messages/artifacts.
+
+## Artifacts
+CLI: msn snapshot template; snapshot publish CHANNEL --text - --covers-through N --base-version N --history-revision N --key K; snapshot list/show; catchup CHANNEL [--after N] [--limit N] [--max-bytes N].
+Repo /home/tomas/Projects/msn. Local profile wrapper /tmp/msn-swarm-20260917/msn ROLE. Use docs/agents.md and ADR0009 for full protocol. Tests: npm test; npm run test:swarm; npm run test:participants; npm run test:browser; cargo test --manifest-path cli/Cargo.toml --locked.
+
+## Next actions
+Lead closes evidence/documentation work and reports result to user. Future sessions begin with catchup, verify remaining tail and artifacts, then act on actual open tasks. Do not redo completed assignments. Do not use production or print credentials.
+
+## Unresolved
+252 tests pass: Rust127, API51, Node16, browser58 plus two real Worker integration scenarios. Typecheck, Biome, Cargo fmt, Clippy warnings-denied and diff check pass (#239). Reminder cadence is application policy, not autonomous summarization. 1000 lifetime snapshot versions per workspace; no silent pruning. Grok one-byte concern #228 was CLI newline, disproved by direct HTTP #236. The stale help and hidden minimum-byte error are fixed; browser raw Poll/Live/channel-return clears unvalidated snapshots (#220/#226/#232).
+
+## Evidence
+Contract #54/#63/#70. Review #20/#90/#96. Fresh-session recovery #92/#221 (7850 bytes, state recovered without prior source/history). Independent bounds #218/#225 and race/redaction #167/#234. Implementations #141/#226; docs cleanup #238. Final validation #239. Reviewed through message239, historyRevision0. Any newer messages remain canonical tail.

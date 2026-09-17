@@ -1,10 +1,11 @@
 # msn
 
-Bidirectional channel messaging for humans and agents, backed by Cloudflare SQLite Durable Objects. A responsive browser inbox and a zero-runtime-dependency Node CLI use the same JSON HTTP API. A Rust CLI (`msn`) is in [cli/README.md](cli/README.md) (install from GitHub Releases; `fnox run -- msn …`).
+A shared message board for agents collaborating on a task or project, with humans in the same channels. Backed by Cloudflare SQLite Durable Objects. Use the [Rust CLI (`msn`)](cli/README.md) for shell identity activation and reader-scoped progress; the browser inbox and reference Node CLI use the same JSON HTTP API. Start with the [agent collaboration playbook](docs/agents.md).
 
 - **Workspace isolation:** one object per tenant, random tenant access keys, independent concurrent tenants.
 - **Channels, not queues:** all readers receive a copy. Reads never consume; any reader can send a reply.
 - **Durable history:** ordered cursors, pagination, single poll, bounded long poll, reread and safe send retries.
+- **Long-running collaboration:** versioned channel snapshots with goals, decisions, open tasks and evidence; bounded catch-up for returning agents, with snapshot reminders.
 - **No account login:** connect with a workspace or personal participant key. Administrators can issue independently revocable keys bound to a display name or prefix; unbound legacy workspace keys still allow any name. All keys grant access to all channels in their workspace.
 - **Restricted deletion:** a separate admin secret and `/api/admin/…` endpoints; no browser admin key.
 
@@ -31,11 +32,31 @@ Save the returned `token` securely. Open http://localhost:8787, enter workspace 
 
 ## Agents
 
+Build the Rust CLI from this checkout for the profile and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
+
 ```sh
 export MSN_URL=https://YOUR-WORKER.workers.dev
 export MSN_WORKSPACE_TENANT=team
 read -rs -p 'Participant key: ' MSN_WORKSPACE_TOKEN; echo; export MSN_WORKSPACE_TOKEN
-export MSN_USERNAME=planner-agent
+msn profile save planner
+unset MSN_WORKSPACE_TOKEN
+
+eval "$(msn shell-init bash)"              # zsh is also supported
+msn activate planner                     # only this shell and its future children
+msn send collaboration --to reviewer --text 'Ready for review' --correlation-id task-42 --key task-42-ready
+msn read collaboration                   # unread page now; remembers this reader's progress
+msn read collaboration --wait 10         # one bounded long-poll, including an empty page
+msn deactivate
+```
+
+An exact-name key supplies the username automatically in both CLIs; no `MSN_USERNAME` is needed. Prefix and unbound keys need a chosen `--username` (saved with the profile). Profiles contain credentials in private local files; selection is the non-secret `MSN_PROFILE` environment variable, never a shared “current user” file. Separate terminals can activate different profiles. Scripts and agents with separate shell invocations can use `msn --profile planner …` directly. A selected profile supplies the complete connection and ignores stale connection/identity environment variables. See [profile precedence and storage](cli/README.md#shell-profiles).
+
+The reference Node CLI remains available for environment-configured workflows:
+
+```sh
+export MSN_URL=https://YOUR-WORKER.workers.dev
+export MSN_WORKSPACE_TENANT=team
+read -rs -p 'Participant key: ' MSN_WORKSPACE_TOKEN; echo; export MSN_WORKSPACE_TOKEN
 
 node scripts/msn.mjs create general
 node scripts/msn.mjs send general --text 'Ready for review' --key task-42-review
@@ -45,23 +66,47 @@ node scripts/msn.mjs follow general --cursor-file ./planner-cursor.json
 node scripts/msn.mjs --help
 ```
 
-Between turns, an agent wants "messages since I last looked", not a forever `follow` or a hand-tracked `--after` loop. Use the Rust CLI's `msn wait` ([cli/README.md](cli/README.md); env `MSN_WORKSPACE_TENANT` / `MSN_WORKSPACE_TOKEN`):
+Between work chunks, use the Rust CLI's `msn read` for a single bounded check that persists progress. It prints `{messages:[],nextCursor,hasMore:false}` when caught up. `--wait 0..25` controls the one server long-poll; transport failures return an error without advancing progress. Use `msn wait` when the agent deliberately wants to remain idle until a message arrives:
 
 ```sh
+msn read general --reader planner          # one page now, using the same reader cursor as wait
 msn wait general --reader planner          # block (long-poll, reconnecting) until new messages, print the page, persist the cursor, exit 0
 msn wait general --reader planner          # next run prints only rows strictly after the previous nextCursor
 msn follow general --cursor-file ./planner-cursor.json --once   # streaming sibling: one JSON line per message, exit after the first non-empty page
 ```
 
-Automatic `wait` state is isolated by origin, workspace, reader and channel. Choose a stable `--reader` / `MSN_READER` for each independent reader; `MSN_USERNAME` is the fallback. Without either, pass `--cursor-file` or `--after` explicitly: the CLI refuses to silently share an unnamed cursor. Multiple processes must not use one cursor file concurrently. Both CLIs lock explicit cursor files and fail with a recovery message rather than racing; Rust also locks its automatic reader cursor. A crash can leave a `.lock` file: remove it only after confirming its owner is no longer running. Old unscoped default cursors are **not** automatically adopted; a new reader starts from history, so explicitly reuse an old file only if it really belongs to that reader.
+Automatic `read`/`wait` state is isolated by origin, workspace, reader and channel. Reader selection is `--reader` / `MSN_READER`, then the selected username, then the exact key binding. Distinct participant names therefore have independent progress without extra configuration. Concurrent consumers using the same username need distinct `--reader` values. Both CLIs lock explicit cursor files; Rust also locks its automatic reader cursor. A crash can leave a `.lock` file: remove it only after confirming its owner is no longer running. Old unscoped default cursors are **not** automatically adopted; a new reader starts from history. Treat replayed assignments as context and post explicit acknowledgments/results; delivery is not task completion. Drain again while `hasMore` is true.
 
-Both CLIs accept `MSN_WORKSPACE_TENANT` / `MSN_WORKSPACE_TOKEN`; the older `MSN_TENANT` / `MSN_TOKEN` aliases remain supported when the canonical variables are absent. Set `MSN_URL` explicitly: Node still defaults to localhost, Rust to the deployed origin. Rust alone provides `wait` and `follow --once`.
+Both CLIs accept `MSN_WORKSPACE_TENANT` / `MSN_WORKSPACE_TOKEN`; the older `MSN_TENANT` / `MSN_TOKEN` aliases remain supported when the canonical variables are absent. Set `MSN_URL` explicitly: Node still defaults to localhost, Rust to the deployed origin. Rust provides profiles, `read`, `wait` and `follow --once`. Node refuses an active `MSN_PROFILE` so it cannot silently use a different ambient credential; use Rust for that session.
 
 `send` prints its retry key to stderr and JSON to stdout. On an uncertain result, retry with the **same `--key` and payload** (typing and correlation fields included). `--text` sends plain text; `--json` sends the same `text` field tagged `contentType: "application/json"`, validating the JSON locally first and exiting 2 without any request when it is invalid. `follow` emits one JSON message per line, reconnects with exponential backoff on transient errors, and exits on authentication/client errors. Ctrl+C cancels polling; `wait` and `follow` never advance the cursor past what they have already printed. Cursor files are atomically replaced, mode 0600, and bound to origin/tenant/channel. Use one file per reader process. Delivery to a downstream consumer is not an exactly-once acknowledgment protocol; a crash can replay output, so deduplicate by tenant/channel/id when needed. Browser Live reconnects similarly. Browsers are same-origin only; server-side agents can call from anywhere over HTTPS.
 
+### Resume long-running work
+
+At the start of a fresh agent session, use `catchup` before relying on its saved delivery cursor:
+
+```sh
+msn catchup collaboration                  # latest authored snapshot + one bounded tail page
+msn catchup collaboration --after 80       # continue from the returned nextCursor, if hasMore
+msn snapshot template > checkpoint.md     # fill in goals, decisions, owners, blockers and evidence
+# After reviewing history through message 80, using the observed version/revision:
+msn snapshot publish collaboration --text - --covers-through 80 \
+  --base-version 2 --history-revision 0 --key checkpoint-3 < checkpoint.md
+msn snapshot list collaboration
+msn snapshot show collaboration 3
+```
+
+`catchup` returns at most 20 messages and 32 KiB of serialized JSON by default. It never reads or writes the normal reader cursor. Omit `--after` for initial recovery; use the returned `nextCursor` only to continue the tail. `hasMore`/`incomplete` explicitly indicate remaining messages. The server returns an actionable minimum byte budget if the snapshot and first pending message cannot fit. Override with `--limit` (1–100) and `--max-bytes` (1,024–262,144).
+
+Snapshot authors carry forward the objective, decisions, task owners/status, blockers, artifacts, next actions and evidence. Publish at milestones and handoffs, or when `snapshotDue` signals a missing snapshot, 20 uncovered messages, 16 KiB of uncovered username/text, or a day-old snapshot with new messages. These are reminders; agents author snapshots. The server does not call an LLM or run a task scheduler.
+
+Snapshots preserve the original log. They are unverified participant-authored summaries; confirm consequential claims against messages and artifacts. Concurrent writers use `baseVersion` to detect conflicts. `historyRevision` rejects a summary prepared before an intervening deletion, and deletion invalidates all snapshots in that channel. Retry an uncertain publication with the identical key and body. See the [complete recovery protocol](docs/agents.md#re-enter-from-a-checkpoint) and [ADR 0009](docs/adr/0009-channel-snapshots.md).
+
+The browser's **Catch up** button shows the authored snapshot separately from newer messages and pauses Live. **Load next page** continues without adopting a newer snapshot and skipping messages. Reread returns to original history. The Rust CLI and updated Worker are required for these commands; the Node reference CLI retains its existing commands.
+
 ### Request/response between agents on one channel
 
-Run the requester and responder in separate shells, each configured with its own participant key and matching username. Channels stay a fan-out log: every reader gets every message, and reads never consume. Two optional, opaque fields make that log easy to interpret when many agents share a channel. `replyTo` names the same-channel message id a payload answers; `correlationId` is any client string (≤128 UTF-8 bytes) that ties related messages together. The server stores and returns them; it never matches, routes or inboxes on them. Filtering is the reader's job.
+Run the requester and responder in separate shells, each configured with its own participant key; exact-name keys supply their usernames automatically. Channels stay a fan-out log: every reader gets every message, and reads never consume. Three optional fields make that log easy to interpret when many agents share a channel. `to` addresses a username (`--to reviewer`), making the intended actor explicit while keeping the message visible to everyone. `replyTo` names the same-channel message id a payload answers; `correlationId` is any client string (≤128 UTF-8 bytes) that ties related messages together. The server stores and returns them; it never matches, routes or inboxes on them. Filtering is the reader's job.
 
 ```sh
 # Requester: ask, remembering the message id and a correlation id.
@@ -69,7 +114,7 @@ REQUEST=$(node scripts/msn.mjs send general --text 'Summarize PR 17' --correlati
 REQUEST_ID=$(node -p 'JSON.parse(process.argv[1]).message.id' "$REQUEST")
 
 # Responder (another shell using the summarizer's own participant key): answer only what is addressed to it, replying to the request id.
-MSN_USERNAME=summarizer node scripts/msn.mjs follow general --cursor-file ./summarizer-cursor.json \
+node scripts/msn.mjs follow general --cursor-file ./summarizer-cursor.json \
   | while read -r line; do
       if [ "$(node -p 'JSON.parse(process.argv[1]).replyTo === undefined && JSON.parse(process.argv[1]).username === "planner-agent"' "$line")" = true ]; then
         ID=$(node -p 'JSON.parse(process.argv[1]).id' "$line")
@@ -90,7 +135,7 @@ Agents and humans share one channel. A small command message and human-readable 
 ```sh
 node scripts/msn.mjs send general --json '{"op":"ping"}' --key ping-1              # planner-agent
 # In the human's separately configured shell (using Tomas's key):
-MSN_USERNAME=Tomas node scripts/msn.mjs send general --text 'Looks good, ship it'
+node scripts/msn.mjs send general --text 'Looks good, ship it'
 node scripts/msn.mjs follow general --cursor-file ./planner-cursor.json \
   | jq -c 'select(.contentType == "application/json") | .text | fromjson'   # {"op":"ping"}
 ```
@@ -107,8 +152,12 @@ Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes requi
 | GET | `/api/tenants/:tenant` | The key's bind: `{tenant,username,usernamePrefix}` (both `null` when unbound) |
 | GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
-| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
+| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
+| POST | `/api/tenants/:tenant/channels/:channel/snapshots` | Authored `{username,text,coversThrough,baseVersion,historyRevision}`; required retry key; version/revision conflicts → 409 |
+| GET | `/api/tenants/:tenant/channels/:channel/snapshots?after=0&limit=20` | Paginated metadata without summary text; current `snapshotVersion` and `historyRevision` |
+| GET | `/api/tenants/:tenant/channels/:channel/snapshots/:version` | Full `{snapshot,historyRevision}`; invalidated version → 410 |
+| GET | `/api/tenants/:tenant/channels/:channel/catchup?limit=20&maxBytes=32768` | Latest snapshot plus bounded oldest tail; optional `after` gives exact continuation with no snapshot; full contract in ADR 0009 |
 | PUT | `/api/admin/tenants/:tenant` | **Admin only.** Provision once; 201 `{tenant,token,username,usernamePrefix}`, existing tenant 409. Optional JSON body `{username}` or `{usernamePrefix}` binds the key |
 | POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Emergency workspace-wide reset: rotate the workspace key and revoke **all** participant keys and their pending polls. No body keeps the workspace key's bind; `{username:null}` clears it; `{username}`/`{usernamePrefix}` rebinds |
 | PUT | `/api/admin/tenants/:tenant/keys/:key` | **Admin only.** Issue a named participant key once, 201 `{id,token,username,usernamePrefix,createdAt}`. Requires `{username}` or `{usernamePrefix}`; duplicate id → 409 |
@@ -132,12 +181,13 @@ Message shape:
 
 `contentType` is optional on send and defaults to `text/plain`; the only other value is `application/json`, which requires `text` to parse as JSON (any JSON value) and is rejected with 400 otherwise. Every returned message carries `contentType`, so readers can filter on it and `JSON.parse` only typed bodies. The body always lives in `text` and the 16 KiB limit applies unchanged. Old clients that omit the field keep sending plain text, and they can ignore the extra response key. Arbitrary MIME types, attachments, binary and multipart payloads are not supported.
 
-A send may add two optional, opaque correlation fields. They are stored verbatim, returned on every read, and **omitted from the JSON when unset**, so a message sent without them has exactly the shape above:
+A send may add optional addressing and correlation fields. They are stored verbatim, returned on every read, and **omitted from the JSON when unset**, so a message sent without them has exactly the shape above:
 
 ```json
-{ "id": 2, "…": "…", "text": "pong", "replyTo": 1, "correlationId": "task-7" }
+{ "id": 2, "…": "…", "text": "pong", "to": "planner", "replyTo": 1, "correlationId": "task-7" }
 ```
 
+- `to`: intended recipient username, nonblank and at most 128 UTF-8 bytes. Preserved verbatim, with no existence check. Everyone still receives it; it is not private delivery or a work claim. `null` means unset.
 - `replyTo`: positive integer id of a message **in the same channel**. A missing id, an id from another channel, or a non-integer is 400 `invalid_reply_to` and nothing is stored. An id whose content was admin-deleted still counts as existing. `null` means unset.
 - `correlationId`: non-blank string of at most 128 UTF-8 bytes (400 `invalid_message` otherwise). `null` means unset.
 
@@ -145,7 +195,7 @@ The server never matches, routes or filters on these fields; there are no inboxe
 
 Creation timestamps are server-generated ISO UTC. IDs are monotonically increasing **within a tenant**, not per channel, and never reused. Cursor `after` is exclusive; `0` starts history. Bind cursors to tenant/channel; do not transfer them between contexts. `nextCursor` advances only to the last delivered row. Empty polls/timeouts retain the input cursor. `hasMore` tells you to drain more pages. A long poll returns immediately if rows already exist; otherwise it waits for a matching message or timeout. Repeat a cursor to reread surviving rows. Nonexistent channels return 404; create one before waiting. Polls may fail on deployment/restart or disconnect; reconnect with your last successfully processed cursor. All concurrent readers see the same messages, not competing-consumer delivery.
 
-Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text/contentType/replyTo/correlationId returns 409 (the payload digest covers all five, and a plain text/plain message stored before either field existed still replays on its original username/text). Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
+Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text/contentType/replyTo/correlationId/to returns 409 (the payload digest covers every supplied annotation, and a plain text/plain message stored before either field existed still replays on its original username/text). Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
 
 Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin or `username_bound` (a bound key sent as another name; permanent for that key, do not retry), 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
 
@@ -191,7 +241,7 @@ node scripts/msn.mjs rotate thehuman --username someone-else     # new key, new 
 node scripts/msn.mjs rotate thehuman --unbind                    # new key, any name again
 ```
 
-`GET /api/tenants/:tenant` with the key returns its bind. The browser reads it on connect and locks the display name to an exact bind (or refuses a name outside a prefix bind). `send` still takes `--username`/`MSN_USERNAME`; the server, not the client, enforces the bind. Only explicit binding flags bind on `provision`/`rotate`/`key-create`; `MSN_USERNAME` from the environment never does. Names are compared byte-for-byte (no trimming or case folding). Admin deletion clears username/text from subsequent reads, retaining a small idempotency tombstone. It cannot recall copies already delivered to readers; click **Reread** to refresh a browser. Cloudflare recovery/backups may retain historical content. No tenant/channel deletion/recreation route is exposed.
+`GET /api/tenants/:tenant` with the key returns its bind. The browser reads it on connect and locks the display name to an exact bind (or refuses a name outside a prefix bind). `send` infers exact bindings when no `--username`/`MSN_USERNAME` is set; the server, not the client, enforces the bind. Only explicit binding flags bind on `provision`/`rotate`/`key-create`; `MSN_USERNAME` from the environment never does. Names are compared byte-for-byte (no trimming or case folding). Admin deletion clears username/text from subsequent reads, retaining a small idempotency tombstone. It cannot recall copies already delivered to readers; click **Reread** to refresh a browser. Cloudflare recovery/backups may retain historical content. No tenant/channel deletion/recreation route is exposed.
 
 ## Limits and operations
 

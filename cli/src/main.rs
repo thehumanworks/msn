@@ -2,6 +2,7 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches};
 use msn_cli::args::{Cli, Command};
 use msn_cli::error::write_err;
+use msn_cli::profile;
 use msn_cli::{execute, install_stop_signals};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -19,7 +20,18 @@ fn main() {
     if cli.token.is_none() {
         cli.token = std::env::var("MSN_TOKEN").ok();
     }
-    let stop = if matches!(cli.command, Command::Follow { .. } | Command::Wait { .. }) {
+    match profile::prepare(&mut cli, &matches) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            write_err(&error);
+            std::process::exit(error.exit_code());
+        }
+    }
+    let stop = if matches!(
+        cli.command,
+        Command::Follow { .. } | Command::Wait { .. } | Command::Read { .. }
+    ) {
         install_stop_signals().unwrap_or_else(|error| {
             write_err(&error);
             std::process::exit(error.exit_code());

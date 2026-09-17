@@ -56,13 +56,26 @@
           <span id="cursor">Cursor 0</span>
           <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
           <button type="button" id="poll" class="quiet" disabled>Poll once</button>
+          <button type="button" id="catchup" class="quiet" title="Read the latest authored snapshot and one bounded page of newer messages" disabled>Catch up</button>
           <button type="button" id="reread" class="quiet" title="Reset this channel’s cached history and delivery cursor" disabled>Reread</button>
           <button type="button" id="more" class="quiet" hidden>Load next page</button>
         </div>
+        <section id="checkpoint" class="checkpoint" aria-label="Channel snapshot" hidden>
+          <details>
+            <summary id="checkpoint-title">Channel snapshot</summary>
+            <p id="checkpoint-note"></p>
+            <pre id="checkpoint-text"></pre>
+          </details>
+          <p id="catchup-note" role="status"></p>
+        </section>
         <div id="messages" role="log" aria-label="Messages" aria-live="polite"><div class="empty">Nothing here yet.</div></div>
         <form id="send-form" class="compose">
-          <label for="message" class="sr-only">Message</label>
-          <textarea id="message" rows="1" placeholder="Message" enterkeyhint="send" required disabled></textarea>
+          <div class="compose-fields">
+            <label for="recipient" class="sr-only">To</label>
+            <input id="recipient" placeholder="To (optional)" maxlength="128" autocomplete="off" spellcheck="false" disabled>
+            <label for="message" class="sr-only">Message</label>
+            <textarea id="message" rows="1" placeholder="Message" enterkeyhint="send" required disabled></textarea>
+          </div>
           <button type="submit" id="send" class="primary icon" aria-label="Send message" title="Send message (Enter)" disabled>↑</button>
         </form>
       </div>

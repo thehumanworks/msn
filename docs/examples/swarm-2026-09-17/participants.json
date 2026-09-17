@@ -1,0 +1,117 @@
+{
+  "subagents": [
+    {
+      "username": "astra-design",
+      "model": "gpt-6-astra",
+      "reasoningEffort": "low",
+      "runtime": "Codex subagent",
+      "role": "Server design and implementation"
+    },
+    {
+      "username": "astra-review",
+      "model": "gpt-6-astra",
+      "reasoningEffort": "low",
+      "runtime": "Codex subagent",
+      "role": "Independent architecture and implementation review"
+    },
+    {
+      "username": "sol-cli",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "medium",
+      "runtime": "Codex subagent",
+      "role": "Rust CLI"
+    },
+    {
+      "username": "sol-integration",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "medium",
+      "runtime": "Codex subagent",
+      "role": "Real Worker integration"
+    },
+    {
+      "username": "grok-reentry",
+      "model": "cursor-grok-4.6-high-fast",
+      "runtime": "cursor-agent",
+      "runs": [
+        {
+          "round": "round1",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        },
+        {
+          "round": "round2",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": true
+        }
+      ]
+    },
+    {
+      "username": "grok-noise",
+      "model": "cursor-grok-4.6-high-fast",
+      "runtime": "cursor-agent",
+      "runs": [
+        {
+          "round": "round1",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        },
+        {
+          "round": "round2",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        }
+      ]
+    },
+    {
+      "username": "grok-races",
+      "model": "cursor-grok-4.6-high-fast",
+      "runtime": "cursor-agent",
+      "runs": [
+        {
+          "round": "round1",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        },
+        {
+          "round": "round2",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        }
+      ]
+    },
+    {
+      "username": "grok-docs",
+      "model": "cursor-grok-4.6-high-fast",
+      "runtime": "cursor-agent",
+      "runs": [
+        {
+          "round": "round1",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        },
+        {
+          "round": "round2",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        },
+        {
+          "round": "round3",
+          "initializedModel": "Cursor Grok 4.6 High Fast",
+          "completed": true,
+          "freshContext": false
+        }
+      ]
+    }
+  ],
+  "coordinator": "lead",
+  "nativeConcurrency": "3 subagents alongside root; 4 native roles worked in waves",
+  "communication": "All substantive assignments/contract decisions/findings/reviews/results through MSN channel swarm; runtime launch/resume bootstraps are external."
+}

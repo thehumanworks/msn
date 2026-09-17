@@ -149,6 +149,12 @@ export function correlationId(value: unknown): string | undefined {
   return text(value, "correlationId", 128);
 }
 
+/** Optional `to` body field: absent/null means unset; otherwise an opaque username label. */
+export function recipient(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  return text(value, "to", 128);
+}
+
 export const CONTENT_TYPES = ["text/plain", "application/json"] as const;
 export type ContentType = (typeof CONTENT_TYPES)[number];
 
@@ -193,4 +199,22 @@ export function binding(input: Record<string, unknown>): Binding | undefined {
   if ((username ?? null) === null && (usernamePrefix ?? null) === null)
     return { username: null, prefix: null };
   throw new HttpError(400, "invalid_binding", "username and usernamePrefix must be strings or null.");
+}
+
+/** Snapshot preconditions are mandatory JSON numbers; strings and unsafe integers are rejected. */
+export function snapshotInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new HttpError(400, "invalid_snapshot", `${field} must be a nonnegative safe integer.`);
+  return value;
+}
+
+export function idempotencyKey(request: Request, required = false): string | null {
+  const key = request.headers.get("Idempotency-Key");
+  if ((required && key === null) || (key !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(key)))
+    throw new HttpError(
+      400,
+      "invalid_key",
+      "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
+    );
+  return key;
 }

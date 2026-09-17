@@ -1,0 +1,12 @@
+{
+  "rawMessages": 136,
+  "rawThrough": 239,
+  "rawCompactJsonBytes": 104434,
+  "catchupHttpJsonBytes": 3876,
+  "catchupStdoutBytes": 3877,
+  "snapshotVersion": 2,
+  "snapshotTextBytes": 3295,
+  "tailMessages": 0,
+  "snapshotDue": false,
+  "reductionPercent": 96.3
+}

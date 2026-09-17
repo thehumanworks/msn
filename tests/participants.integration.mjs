@@ -23,6 +23,7 @@ const admin = "isolated-local-e2e-admin-0000000000000000";
 const baseEnv = {
   PATH: process.env.PATH,
   HOME: dir,
+  XDG_CONFIG_HOME: join(dir, "config"),
   XDG_STATE_HOME: join(dir, "state"),
   MSN_URL: url,
   MSN_WORKSPACE_TENANT: "review-team",
@@ -80,14 +81,44 @@ try {
   const human = await rust(["key-create", "tomas", "--username", "Tomas"], adminEnv);
   const planner = await rust(["key-create", "planner", "--username", "planner-agent"], adminEnv);
   const reviewer = await node(["key-create", "reviewer", "--username", "review-agent"], adminEnv);
-  const humanEnv = { MSN_WORKSPACE_TOKEN: human.token, MSN_USERNAME: "Tomas" };
-  const plannerEnv = { MSN_WORKSPACE_TOKEN: planner.token, MSN_USERNAME: "planner-agent" };
-  const reviewerEnv = { MSN_WORKSPACE_TOKEN: reviewer.token, MSN_USERNAME: "review-agent" };
+  // No duplicate username configuration: all clients infer each key's exact binding.
+  const humanEnv = { MSN_WORKSPACE_TOKEN: human.token };
+  const plannerEnv = { MSN_WORKSPACE_TOKEN: planner.token };
+  const reviewerEnv = { MSN_WORKSPACE_TOKEN: reviewer.token };
   assert.equal((await node(["whoami"], plannerEnv)).username, "planner-agent");
   const question = await rust(
-    ["send", "general", "--text", "Please review task 7", "--key", "request-7", "--correlation-id", "task-7"],
+    [
+      "send",
+      "general",
+      "--to",
+      "planner-agent",
+      "--text",
+      "Please review task 7",
+      "--key",
+      "request-7",
+      "--correlation-id",
+      "task-7",
+    ],
     humanEnv,
   );
+  assert.equal(question.message.to, "planner-agent");
+  assert.equal(question.message.username, "Tomas");
+  await rust(["profile", "save", "planner"], plannerEnv);
+  await rust(["profile", "save", "reviewer"], reviewerEnv);
+  const staleEnv = {
+    MSN_URL: "https://wrong.invalid",
+    MSN_WORKSPACE_TENANT: "wrong-workspace",
+    MSN_WORKSPACE_TOKEN: "wrong-token",
+    MSN_USERNAME: "wrong-user",
+    MSN_READER: "wrong-reader",
+  };
+  for (const profile of ["planner", "reviewer"]) {
+    const first = await rust(["--profile", profile, "read", "general"], staleEnv);
+    assert.equal(first.messages[0].to, "planner-agent", "addressing preserves channel fan-out");
+    const empty = await rust(["--profile", profile, "read", "general", "--wait", "0"], staleEnv);
+    assert.deepEqual(empty.messages, []);
+    assert.equal(empty.nextCursor, question.message.id);
+  }
   const firstA = await rust(["wait", "general", "--reader", "planner"], plannerEnv);
   const firstB = await rust(["wait", "general", "--reader", "reviewer"], reviewerEnv);
   assert.deepEqual(
@@ -102,6 +133,8 @@ try {
     [
       "send",
       "general",
+      "--to",
+      "Tomas",
       "--text",
       "Reviewed",
       "--key",
@@ -112,6 +145,50 @@ try {
       "task-7",
     ],
     plannerEnv,
+  );
+  assert.equal(reply.message.to, "Tomas");
+  const replay = await rust(
+    [
+      "--profile",
+      "planner",
+      "send",
+      "general",
+      "--to",
+      "Tomas",
+      "--text",
+      "Reviewed",
+      "--key",
+      "reply-7",
+      "--reply-to",
+      String(question.message.id),
+      "--correlation-id",
+      "task-7",
+    ],
+    staleEnv,
+  );
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.message.id, reply.message.id);
+  await assert.rejects(
+    rust(
+      [
+        "--profile",
+        "planner",
+        "send",
+        "general",
+        "--to",
+        "review-agent",
+        "--text",
+        "Reviewed",
+        "--key",
+        "reply-7",
+        "--reply-to",
+        String(question.message.id),
+        "--correlation-id",
+        "task-7",
+      ],
+      staleEnv,
+    ),
+    (e) => e.code === 5,
   );
   for (const [name, env] of [
     ["planner", plannerEnv],
@@ -171,7 +248,7 @@ try {
   await assert.rejects(rust(["whoami"], reviewerEnv), (e) => e.code === 3);
   assert.deepEqual((await rust(["keys"], adminEnv)).keys, []);
   console.log(
-    "PASS: real local Worker + Rust/Node key lifecycle, shared-HOME reader isolation, fan-out, replies, independent revocation, cross-CLI locks, signal cleanup and revoke-all rotation.",
+    "PASS: real local Worker + Rust/Node inferred identity, profiles ignoring stale env, bounded reads, addressed fan-out/replies/retries, shared-HOME reader isolation, revocation, cross-CLI locks, signals and rotation.",
   );
 } finally {
   try {

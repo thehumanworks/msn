@@ -12,12 +12,15 @@ import {
   equalHash,
   failure,
   HttpError,
+  idempotencyKey,
   integer,
   json,
   newToken,
   optionalBody,
+  recipient,
   replyTarget,
   slug,
+  snapshotInteger,
   text,
 } from "./http";
 
@@ -29,12 +32,13 @@ export type Message = {
   text: string;
   contentType: ContentType;
   createdAt: string;
-  /** Opaque correlation fields; absent from JSON when unset. The server never matches on them. */
+  /** Opaque annotations; absent from JSON when unset. The server never matches on them. */
   replyTo?: number;
   correlationId?: string;
+  to?: string;
 };
-/** Optional correlation input on send; `undefined` means "not supplied". */
-export type Correlation = { replyTo?: number; correlationId?: string };
+/** Optional annotation input on send; `undefined` means "not supplied". */
+export type Correlation = { replyTo?: number; correlationId?: string; to?: string };
 type MessageRow = {
   id: number;
   channel: string;
@@ -44,8 +48,10 @@ type MessageRow = {
   createdAt: string;
   replyTo: number | null;
   correlationId: string | null;
+  recipient: string | null;
 };
-const MESSAGE_COLUMNS = "id, channel, username, text, contentType, createdAt, replyTo, correlationId";
+const MESSAGE_COLUMNS =
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient";
 type TenantRow = { token_hash: string; bound_username: string | null; bound_prefix: string | null };
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
@@ -55,16 +61,34 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 7;
+const MAX_SNAPSHOTS = 1000;
+const SNAPSHOT_COLUMNS =
+  "channel, version, username, text, coversThrough, historyRevision, createdAt, invalidated";
+type SnapshotRow = {
+  channel: string;
+  version: number;
+  username: string;
+  text: string;
+  coversThrough: number;
+  historyRevision: number;
+  createdAt: string;
+  invalidated: number;
+};
+function toSnapshot(row: SnapshotRow, tenant: string) {
+  const { invalidated, ...snapshot } = row;
+  return { ...snapshot, tenant, invalidated: Boolean(invalidated) };
+}
 
-/** Old clients must keep seeing today's shape: unset correlation fields are omitted, not null. */
+/** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
-  const { replyTo, correlationId, ...rest } = row;
+  const { replyTo, correlationId, recipient, ...rest } = row;
   return {
     ...rest,
     tenant,
     ...(replyTo === null ? {} : { replyTo }),
     ...(correlationId === null ? {} : { correlationId }),
+    ...(recipient === null ? {} : { to: recipient }),
   };
 }
 
@@ -74,10 +98,13 @@ function toMessage(row: MessageRow, tenant: string): Message {
  * instead of 409. Any typed or annotated send hashes over every field that distinguishes it.
  */
 export function payload(username: string, text: string, type: ContentType, correlation: Correlation): string {
-  const { replyTo, correlationId } = correlation;
-  if (type === "text/plain" && replyTo === undefined && correlationId === undefined)
-    return JSON.stringify([username, text]);
-  return JSON.stringify([username, text, type, replyTo ?? null, correlationId ?? null]);
+  const { replyTo, correlationId, to } = correlation;
+  const fields =
+    type === "text/plain" && replyTo === undefined && correlationId === undefined
+      ? [username, text]
+      : [username, text, type, replyTo ?? null, correlationId ?? null];
+  if (to !== undefined) fields.push(to);
+  return JSON.stringify(fields);
 }
 
 /** One object per tenant. Channel indexes and message writes share one transaction boundary. */
@@ -102,12 +129,23 @@ export class MsnDurableObject extends DurableObject<Env> {
           id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL REFERENCES channels(name),
           username TEXT NOT NULL, text TEXT NOT NULL, createdAt TEXT NOT NULL,
           key TEXT, digest TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL,
-          replyTo INTEGER, correlationId TEXT, contentType TEXT NOT NULL DEFAULT 'text/plain',
+          replyTo INTEGER, correlationId TEXT, recipient TEXT,
+          contentType TEXT NOT NULL DEFAULT 'text/plain',
           UNIQUE(channel, key)
         );
         CREATE INDEX IF NOT EXISTS channel_messages ON messages(channel, deleted, id);
         CREATE TABLE IF NOT EXISTS usage (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), messages INTEGER NOT NULL, bytes INTEGER NOT NULL);
         INSERT OR IGNORE INTO usage VALUES (1, 0, 0);
+        CREATE TABLE IF NOT EXISTS channel_history (
+          channel TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS snapshots (
+          channel TEXT NOT NULL, version INTEGER NOT NULL, username TEXT NOT NULL, text TEXT NOT NULL,
+          coversThrough INTEGER NOT NULL, historyRevision INTEGER NOT NULL, createdAt TEXT NOT NULL,
+          key TEXT NOT NULL, digest TEXT NOT NULL, bytes INTEGER NOT NULL,
+          invalidated INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(channel, version), UNIQUE(channel, key)
+        );
         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
@@ -141,6 +179,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         // v4 → v5 is additive: legacy workspace keys and messages are untouched.
         if (version < 5) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (5)");
+        if (version < 6) {
+          // v5 → v6: optional recipient display label. Existing history stays unaddressed (NULL).
+          ctx.storage.sql.exec("ALTER TABLE messages ADD COLUMN recipient TEXT");
+          ctx.storage.sql.exec("INSERT INTO schema_version VALUES (6)");
+        }
+        if (version < 7) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (7)");
       }
     });
   }
@@ -345,7 +389,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -356,6 +400,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           bytes,
           correlation.replyTo ?? null,
           correlation.correlationId ?? null,
+          correlation.to ?? null,
         )
         .one();
       this.ctx.storage.sql.exec(
@@ -367,6 +412,222 @@ export class MsnDurableObject extends DurableObject<Env> {
     // transactionSync succeeded; output gates delay network replies until durable commit.
     if (!result.replayed) for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
     return json(result, result.replayed ? 200 : 201);
+  }
+
+  private historyRevision(channel: string): number {
+    return (
+      this.ctx.storage.sql
+        .exec<{ revision: number }>("SELECT revision FROM channel_history WHERE channel = ?", channel)
+        .toArray()[0]?.revision ?? 0
+    );
+  }
+
+  private latestSnapshot(channel: string): SnapshotRow | undefined {
+    return this.ctx.storage.sql
+      .exec<SnapshotRow>(
+        `SELECT ${SNAPSHOT_COLUMNS} FROM snapshots WHERE channel = ? ORDER BY version DESC LIMIT 1`,
+        channel,
+      )
+      .toArray()[0];
+  }
+
+  private publishSnapshot(
+    tenant: string,
+    channel: string,
+    username: string,
+    content: string,
+    coversThrough: number,
+    baseVersion: number,
+    historyRevision: number,
+    key: string,
+    hash: string,
+  ): Response {
+    const result = this.ctx.storage.transactionSync(() => {
+      this.requireChannel(channel);
+      const old = this.ctx.storage.sql
+        .exec<SnapshotRow & { digest: string }>(
+          `SELECT ${SNAPSHOT_COLUMNS}, digest FROM snapshots WHERE channel = ? AND key = ?`,
+          channel,
+          key,
+        )
+        .toArray()[0];
+      if (old) {
+        if (old.digest !== hash)
+          throw new HttpError(
+            409,
+            "idempotency_conflict",
+            "This idempotency key was used for different content.",
+          );
+        if (old.invalidated)
+          throw new HttpError(
+            410,
+            "snapshot_invalidated",
+            "This snapshot was invalidated by redaction; retries cannot restore it.",
+          );
+        const { digest: _digest, ...row } = old;
+        return { snapshot: toSnapshot(row, tenant), replayed: true };
+      }
+      const latest = this.latestSnapshot(channel);
+      if (baseVersion !== (latest?.version ?? 0))
+        throw new HttpError(
+          409,
+          "snapshot_conflict",
+          "baseVersion is stale; read current snapshot state and reconcile.",
+        );
+      if (historyRevision !== this.historyRevision(channel))
+        throw new HttpError(
+          409,
+          "history_conflict",
+          "History changed through redaction; reread before publishing a snapshot.",
+        );
+      if (
+        (latest && coversThrough < latest.coversThrough) ||
+        (coversThrough > 0 &&
+          !this.ctx.storage.sql
+            .exec("SELECT id FROM messages WHERE channel = ? AND id = ?", channel, coversThrough)
+            .toArray().length)
+      )
+        throw new HttpError(
+          400,
+          "invalid_coverage",
+          "coversThrough must be a channel message id and cannot regress.",
+        );
+      const count = this.ctx.storage.sql
+        .exec<{ count: number }>("SELECT COUNT(*) AS count FROM snapshots")
+        .one().count;
+      const bytes = new TextEncoder().encode(username + content).length;
+      const used = this.ctx.storage.sql.exec<{ bytes: number }>("SELECT bytes FROM usage").one().bytes;
+      if (count >= MAX_SNAPSHOTS || used + bytes > MAX_CONTENT_BYTES)
+        throw new HttpError(
+          409,
+          "storage_quota",
+          "Snapshot quota reached (1,000 lifetime snapshots or 128 MiB active content per tenant).",
+        );
+      const row = this.ctx.storage.sql
+        .exec<SnapshotRow>(
+          `INSERT INTO snapshots(channel, version, username, text, coversThrough, historyRevision, createdAt, key, digest, bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${SNAPSHOT_COLUMNS}`,
+          channel,
+          baseVersion + 1,
+          username,
+          content,
+          coversThrough,
+          historyRevision,
+          new Date().toISOString(),
+          key,
+          hash,
+          bytes,
+        )
+        .one();
+      this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes + ? WHERE singleton = 1", bytes);
+      return { snapshot: toSnapshot(row, tenant), replayed: false };
+    });
+    return json(result, result.replayed ? 200 : 201);
+  }
+
+  /** All reads stay synchronous: checkpoint, head and tail describe one consistent storage view. */
+  private catchup(tenant: string, channel: string, url: URL): Response {
+    this.requireChannel(channel);
+    const limit = integer(url.searchParams.get("limit"), 20, 100);
+    const maxBytes = integer(url.searchParams.get("maxBytes"), 32768, 262144);
+    if (!limit || maxBytes < 1024)
+      throw new HttpError(400, "invalid_query", "limit must be positive and maxBytes must be at least 1024.");
+    const latest = this.latestSnapshot(channel);
+    const usable = latest && !latest.invalidated ? latest : null;
+    // An explicit continuation cursor must never be advanced by a newer checkpoint.
+    const snapshot = url.searchParams.has("after") ? null : usable;
+    const after = url.searchParams.has("after")
+      ? integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER)
+      : (snapshot?.coversThrough ?? 0);
+    const headCursor = this.ctx.storage.sql
+      .exec<{ head: number }>("SELECT COALESCE(MAX(id), 0) AS head FROM messages WHERE channel = ?", channel)
+      .one().head;
+    if (after > headCursor)
+      throw new HttpError(400, "invalid_cursor", "after exceeds this channel's current head.");
+    const pendingMessages = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM messages WHERE channel = ? AND deleted = 0 AND id > ?",
+        channel,
+        after,
+      )
+      .one().count;
+    const pendingBytes = this.ctx.storage.sql
+      .exec<{ bytes: number }>(
+        "SELECT COALESCE(SUM(bytes), 0) AS bytes FROM messages WHERE channel = ? AND deleted = 0 AND id > ?",
+        channel,
+        after,
+      )
+      .one().bytes;
+    const snapshotPending = this.ctx.storage.sql
+      .exec<{ count: number; bytes: number }>(
+        "SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM messages WHERE channel = ? AND deleted = 0 AND id > ?",
+        channel,
+        usable?.coversThrough ?? 0,
+      )
+      .one();
+    const sinceSnapshot = snapshotPending.count;
+    const messages = this.page(tenant, channel, after, limit).messages;
+    const snapshotDueReasons = [
+      ...(!usable ? ["no_snapshot"] : []),
+      ...(snapshotPending.bytes >= 16384 ? ["byte_threshold"] : []),
+      ...(sinceSnapshot >= 20 ? ["message_threshold"] : []),
+      ...(usable && sinceSnapshot > 0 && Date.now() - Date.parse(usable.createdAt) >= 86400000
+        ? ["age_threshold"]
+        : []),
+    ];
+    const result = {
+      snapshot: snapshot ? toSnapshot(snapshot, tenant) : null,
+      snapshotVersion: latest?.version ?? 0,
+      historyRevision: this.historyRevision(channel),
+      messages,
+      nextCursor: messages.at(-1)?.id ?? after,
+      hasMore: pendingMessages > messages.length,
+      incomplete: pendingMessages > messages.length,
+      headCursor,
+      pendingMessages,
+      pendingBytes,
+      snapshotPendingMessages: snapshotPending.count,
+      snapshotPendingBytes: snapshotPending.bytes,
+      snapshotDue: snapshotDueReasons.length > 0,
+      snapshotDueReasons,
+      snapshotPolicy: { messageThreshold: 20, byteThreshold: 16384, maxAgeSeconds: 86400 },
+      byteLimitReached: false,
+    };
+    const minimum = {
+      ...result,
+      messages: messages.slice(0, 1),
+      nextCursor: messages[0]?.id ?? after,
+      hasMore: pendingMessages > 1,
+      incomplete: pendingMessages > 1,
+      byteLimitReached: false,
+    };
+    const requiredBytes = new TextEncoder().encode(JSON.stringify(minimum)).length;
+    // Encode each row once; repeated shrinking must not reserialize a megabyte-sized tail.
+    const encoder = new TextEncoder();
+    const messageSizes = messages.map((message) => encoder.encode(JSON.stringify(message)).length);
+    let contentBytes = messageSizes.reduce((sum, bytes) => sum + bytes, 0);
+    const size = () =>
+      encoder.encode(JSON.stringify({ ...result, messages: [] })).length +
+      contentBytes +
+      Math.max(0, result.messages.length - 1);
+    while (size() > maxBytes && result.messages.length) {
+      result.messages.pop();
+      contentBytes -= messageSizes.pop() ?? 0;
+      result.nextCursor = result.messages.at(-1)?.id ?? after;
+      result.hasMore = result.incomplete = result.byteLimitReached = true;
+    }
+    if (size() > maxBytes || (pendingMessages > 0 && result.messages.length === 0))
+      return json(
+        {
+          error: {
+            code: "catchup_budget_too_small",
+            message: `Increase maxBytes to at least ${requiredBytes} to fit the checkpoint and first pending message (maximum 262144).`,
+            requiredBytes,
+          },
+        },
+        413,
+      );
+    return json(result);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -495,10 +756,28 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, bytes = 0 WHERE id = ?",
               id,
             );
-            this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes - ? WHERE singleton = 1", row.bytes);
+            const snapshotBytes = this.ctx.storage.sql
+              .exec<{ bytes: number }>(
+                "SELECT COALESCE(SUM(bytes), 0) AS bytes FROM snapshots WHERE channel = ?",
+                channel,
+              )
+              .one().bytes;
+            // Summaries may quote earlier summaries or messages beyond claimed coverage. Scrub all.
+            this.ctx.storage.sql.exec(
+              "UPDATE snapshots SET text = '', username = '', bytes = 0, invalidated = 1 WHERE channel = ?",
+              channel,
+            );
+            this.ctx.storage.sql.exec(
+              "INSERT INTO channel_history(channel, revision) VALUES (?, 1) ON CONFLICT(channel) DO UPDATE SET revision = revision + 1",
+              channel,
+            );
+            this.ctx.storage.sql.exec(
+              "UPDATE usage SET bytes = bytes - ? WHERE singleton = 1",
+              row.bytes + snapshotBytes,
+            );
           });
           return new Response(null, { status: 204 });
         }
@@ -513,9 +792,27 @@ export class MsnDurableObject extends DurableObject<Env> {
         const content = input ? text(input.text, "text", 16384) : "";
         const type = input ? contentType(input.contentType, content) : "text/plain";
         const correlation: Correlation = input
-          ? { replyTo: replyTarget(input.replyTo), correlationId: correlationId(input.correlationId) }
+          ? {
+              replyTo: replyTarget(input.replyTo),
+              correlationId: correlationId(input.correlationId),
+              to: recipient(input.to),
+            }
           : {};
         const payloadHash = input ? await digest(payload(username, content, type, correlation)) : "";
+        const snapshotInput =
+          request.method === "POST" && rest.length === 3 && rest[2] === "snapshots"
+            ? await body(request)
+            : null;
+        const snapshotData = snapshotInput
+          ? {
+              username: text(snapshotInput.username, "username", 128),
+              text: text(snapshotInput.text, "text", 16384, "invalid_snapshot"),
+              coversThrough: snapshotInteger(snapshotInput.coversThrough, "coversThrough"),
+              baseVersion: snapshotInteger(snapshotInput.baseVersion, "baseVersion"),
+              historyRevision: snapshotInteger(snapshotInput.historyRevision, "historyRevision"),
+            }
+          : null;
+        const snapshotHash = snapshotData ? await digest(JSON.stringify(snapshotData)) : "";
         const capability = this.authorize(hash);
         // Bound-name check precedes any transaction: a rejected send stores nothing and wakes nobody.
         if (input) this.requireBoundName(capability, username);
@@ -543,6 +840,70 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 2 && request.method === "PUT") {
             const created = this.createChannel(channel);
             return json({ channel, created }, created ? 201 : 200);
+          }
+          if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
+            return this.catchup(tenant, channel, url);
+          if (rest[2] === "snapshots") {
+            this.requireChannel(channel);
+            if (rest.length === 3 && request.method === "POST" && snapshotData) {
+              this.requireBoundName(capability, snapshotData.username);
+              const key = idempotencyKey(request, true) as string;
+              return this.publishSnapshot(
+                tenant,
+                channel,
+                snapshotData.username,
+                snapshotData.text,
+                snapshotData.coversThrough,
+                snapshotData.baseVersion,
+                snapshotData.historyRevision,
+                key,
+                snapshotHash,
+              );
+            }
+            if (rest.length === 3 && request.method === "GET") {
+              const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
+              const limit = integer(url.searchParams.get("limit"), 20, 100);
+              if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+              const rows = this.ctx.storage.sql
+                .exec<Omit<SnapshotRow, "text">>(
+                  "SELECT channel, version, username, coversThrough, historyRevision, createdAt, invalidated FROM snapshots WHERE channel = ? AND version > ? ORDER BY version LIMIT ?",
+                  channel,
+                  after,
+                  limit + 1,
+                )
+                .toArray();
+              const snapshots = rows
+                .slice(0, limit)
+                .map(({ invalidated, ...row }) => ({ ...row, tenant, invalidated: Boolean(invalidated) }));
+              return json({
+                snapshots,
+                nextCursor: snapshots.at(-1)?.version ?? after,
+                hasMore: rows.length > limit,
+                snapshotVersion: this.latestSnapshot(channel)?.version ?? 0,
+                historyRevision: this.historyRevision(channel),
+              });
+            }
+            if (rest.length === 4 && request.method === "GET") {
+              const version = integer(rest[3], 0, Number.MAX_SAFE_INTEGER);
+              const row = this.ctx.storage.sql
+                .exec<SnapshotRow>(
+                  `SELECT ${SNAPSHOT_COLUMNS} FROM snapshots WHERE channel = ? AND version = ?`,
+                  channel,
+                  version,
+                )
+                .toArray()[0];
+              if (!row) throw new HttpError(404, "snapshot_not_found", "Snapshot not found.");
+              if (row.invalidated)
+                throw new HttpError(
+                  410,
+                  "snapshot_invalidated",
+                  "Snapshot invalidated by history redaction.",
+                );
+              return json({
+                snapshot: toSnapshot(row, tenant),
+                historyRevision: this.historyRevision(channel),
+              });
+            }
           }
           if (rest.length === 3 && rest[2] === "messages") {
             if (request.method === "POST") {

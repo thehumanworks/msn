@@ -1,0 +1,166 @@
+{
+  "channel": "gn-r2-bounds",
+  "steps": [
+    {
+      "name": "create",
+      "exit": 0,
+      "stdout": "{\"channel\":\"gn-r2-bounds\",\"created\":true}\n"
+    },
+    {
+      "name": "empty_catchup",
+      "exit": 0,
+      "snapshotDue": true,
+      "reasons": [
+        "no_snapshot"
+      ],
+      "policy": {
+        "messageThreshold": 20,
+        "byteThreshold": 16384,
+        "maxAgeSeconds": 86400
+      },
+      "pendingMessages": 0,
+      "pendingBytes": 0,
+      "bytes": 393
+    },
+    {
+      "name": "cli_default_vs_explicit",
+      "default_exit": 0,
+      "default_bytes": 31950,
+      "default_count": 10,
+      "default_byteLimitReached": true,
+      "default_hasMore": true,
+      "e32_bytes": 31950,
+      "e32_count": 10,
+      "e32_byteLimitReached": true,
+      "e64_bytes": 38259,
+      "e64_count": 12,
+      "e64_byteLimitReached": false,
+      "default_matches_32": true,
+      "default_matches_64": false
+    },
+    {
+      "name": "count_bound_default_limit20",
+      "exit": 0,
+      "returned": 10,
+      "pending": 22,
+      "hasMore": true,
+      "incomplete": true,
+      "snapshotDue": true,
+      "reasons": [
+        "no_snapshot",
+        "byte_threshold",
+        "message_threshold"
+      ],
+      "pendingBytes": 36280
+    },
+    {
+      "name": "to_not_filtered",
+      "addressed_id": 166,
+      "in_first_page": false,
+      "to_field": null,
+      "hasMore": true,
+      "nextCursor": 153
+    },
+    {
+      "name": "to_not_filtered_page2",
+      "snapshot_is_null": true,
+      "addressed_id": 166,
+      "in_page": true,
+      "to_field": "sol-cli"
+    },
+    {
+      "name": "catchup_does_not_mutate_read_cursor",
+      "first_next": 166,
+      "first_count": 23,
+      "second_next": 166,
+      "second_count": 0,
+      "second_empty": true
+    },
+    {
+      "name": "unicode_413_tiny_budget",
+      "exit": 1,
+      "stderr": "413: Increase maxBytes to fit the checkpoint and at least the first pending message (maximum 262144).\n",
+      "stdout": "",
+      "requiredBytes_in_stderr": false,
+      "requiredBytes_in_stdout": false
+    },
+    {
+      "name": "unicode_one_row_success",
+      "exit": 0,
+      "bytes": 1251,
+      "pendingBytes": 588,
+      "first_text_utf8": 578,
+      "first_json_utf8": 823,
+      "byteLimitReached": false
+    },
+    {
+      "name": "requiredBytes_retry_boundary",
+      "computed_required": 1251,
+      "exact_exit": 0,
+      "exact_ok": true,
+      "exact_byteLimitReached": false,
+      "minus_exit": 0,
+      "minus_is_413_or_fail": false,
+      "minus_stderr": ""
+    },
+    {
+      "name": "cli_offline_rejects",
+      "max_bytes_1023_exit": 2,
+      "max_bytes_1023_err": "max-bytes must be an integer from 1024 to 262144.\n",
+      "max_bytes_262145_exit": 2,
+      "limit_101_exit": 2,
+      "limit_101_err": "Invalid integer: 101\n"
+    },
+    {
+      "name": "publish_snapshot",
+      "exit": 0,
+      "stdout": "{\"snapshot\":{\"channel\":\"gn-r2-bounds\",\"version\":1,\"username\":\"grok-noise\",\"text\":\"## Objective\\nbound probe\\n## Decisions\\n- n/a\\n## Open tasks\\n- none\\n## Blockers\\nNone\\n## Artifacts\\nnone\\n## Next actions\\nnone\\n## Unresolved\\nnone\\n## Evidence\\nprobe\\n\",\"coversThrough\":168,\"historyRevision\":0,\"createdAt\":\"2026-09-17T17:11:10.412Z\",\"tenant\":\"swarm\",\"invalidated\":false},\"replayed\":false}\n",
+      "stderr": "Idempotency-Key: gn-r2-snap-1\n"
+    },
+    {
+      "name": "due_after_covering_snapshot",
+      "exit": 0,
+      "snapshotDue": false,
+      "reasons": [],
+      "pending": 0,
+      "pendingBytes": 0
+    },
+    {
+      "name": "due_at_19_uncovered",
+      "pending": 19,
+      "pendingBytes": 266,
+      "snapshotDue": false,
+      "reasons": [],
+      "returned": 19
+    },
+    {
+      "name": "due_at_20_uncovered",
+      "pending": 20,
+      "pendingBytes": 280,
+      "snapshotDue": true,
+      "reasons": [
+        "message_threshold"
+      ]
+    },
+    {
+      "name": "publish_snapshot_v2",
+      "exit": 0,
+      "stdout": "{\"snapshot\":{\"channel\":\"gn-r2-bounds\",\"version\":2,\"username\":\"grok-noise\",\"text\":\"## Objective\\nbound probe\\n## Decisions\\n- n/a\\n## Open tasks\\n- none\\n## Blockers\\nNone\\n## Artifacts\\nnone\\n## Next actions\\nnone\\n## Unresolved\\nnone\\n## Evidence\\nprobe\\n\\nversion2\\n\",\"coversThrough\":189,\"historyRe",
+      "stderr": "Idempotency-Key: gn-r2-snap-2\n"
+    },
+    {
+      "name": "due_byte_threshold_under_20_msgs",
+      "pending": 2,
+      "pendingBytes": 16420,
+      "snapshotDue": true,
+      "reasons": [
+        "byte_threshold"
+      ]
+    },
+    {
+      "name": "cli_help_default_text",
+      "mentions_65536": true,
+      "mentions_32768": false
+    }
+  ]
+}

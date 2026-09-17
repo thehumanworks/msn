@@ -1,0 +1,1198 @@
+{
+  "experiments": [
+    {
+      "name": "poll_after0_limit100",
+      "cmd": [
+        "poll",
+        "swarm",
+        "--after",
+        "0",
+        "--limit",
+        "100",
+        "--wait",
+        "0"
+      ],
+      "exit": 0,
+      "elapsed_sec": 0.0252,
+      "stdout_bytes": 17920,
+      "stderr_bytes": 0,
+      "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp1-poll-after0.json",
+      "page": {
+        "message_count": 23,
+        "nextCursor": 23,
+        "hasMore": false,
+        "ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "total_text_bytes": 13490,
+        "max_text_bytes": 1147,
+        "min_text_bytes": 198,
+        "avg_text_bytes": 586.5,
+        "addressed_to_me": 1,
+        "addressed_to_others": 21,
+        "broadcast_or_unaddressed": 1,
+        "to_me_ids": [
+          6
+        ],
+        "to_me_text_bytes": 539,
+        "to_other_text_bytes": 12483,
+        "senders": [
+          "astra-design",
+          "astra-review",
+          "lead",
+          "sol-cli"
+        ],
+        "correlation_ids": [
+          "swarm-round-1"
+        ],
+        "reply_tos": [],
+        "per_message": [
+          {
+            "id": 1,
+            "from": "lead",
+            "to": null,
+            "text_bytes": 468,
+            "correlationId": null,
+            "replyTo": null
+          },
+          {
+            "id": 2,
+            "from": "lead",
+            "to": "astra-design",
+            "text_bytes": 713,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 3,
+            "from": "lead",
+            "to": "astra-review",
+            "text_bytes": 464,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 4,
+            "from": "lead",
+            "to": "sol-cli",
+            "text_bytes": 434,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 5,
+            "from": "lead",
+            "to": "sol-integration",
+            "text_bytes": 198,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 6,
+            "from": "lead",
+            "to": "grok-reentry",
+            "text_bytes": 539,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 7,
+            "from": "lead",
+            "to": "grok-noise",
+            "text_bytes": 455,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 8,
+            "from": "lead",
+            "to": "grok-races",
+            "text_bytes": 425,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 9,
+            "from": "lead",
+            "to": "grok-docs",
+            "text_bytes": 598,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 10,
+            "from": "astra-design",
+            "to": "sol-cli",
+            "text_bytes": 887,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 11,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 640,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 12,
+            "from": "astra-review",
+            "to": "grok-races",
+            "text_bytes": 357,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 13,
+            "from": "astra-design",
+            "to": "lead",
+            "text_bytes": 571,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 14,
+            "from": "astra-design",
+            "to": "sol-cli",
+            "text_bytes": 654,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 15,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 775,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 16,
+            "from": "astra-review",
+            "to": "sol-cli",
+            "text_bytes": 496,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 17,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 610,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 18,
+            "from": "astra-design",
+            "to": "astra-review",
+            "text_bytes": 436,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 19,
+            "from": "astra-review",
+            "to": "grok-docs",
+            "text_bytes": 601,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 20,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 1147,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 21,
+            "from": "sol-cli",
+            "to": "astra-design",
+            "text_bytes": 1098,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 22,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 495,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 23,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 429,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "poll_paginated_limit5",
+      "pages": [
+        {
+          "cmd": [
+            "poll",
+            "swarm",
+            "--after",
+            "0",
+            "--limit",
+            "5",
+            "--wait",
+            "0"
+          ],
+          "exit": 0,
+          "elapsed_sec": 0.0364,
+          "stdout_bytes": 3218,
+          "stderr_bytes": 0,
+          "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp2-poll-page1.json",
+          "page": {
+            "message_count": 5,
+            "nextCursor": 5,
+            "hasMore": true,
+            "ids": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "total_text_bytes": 2277,
+            "max_text_bytes": 713,
+            "min_text_bytes": 198,
+            "avg_text_bytes": 455.4,
+            "addressed_to_me": 0,
+            "addressed_to_others": 4,
+            "broadcast_or_unaddressed": 1,
+            "to_me_ids": [],
+            "to_me_text_bytes": 0,
+            "to_other_text_bytes": 1809,
+            "senders": [
+              "lead"
+            ],
+            "correlation_ids": [
+              "swarm-round-1"
+            ],
+            "reply_tos": [],
+            "per_message": [
+              {
+                "id": 1,
+                "from": "lead",
+                "to": null,
+                "text_bytes": 468,
+                "correlationId": null,
+                "replyTo": null
+              },
+              {
+                "id": 2,
+                "from": "lead",
+                "to": "astra-design",
+                "text_bytes": 713,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 3,
+                "from": "lead",
+                "to": "astra-review",
+                "text_bytes": 464,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 4,
+                "from": "lead",
+                "to": "sol-cli",
+                "text_bytes": 434,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 5,
+                "from": "lead",
+                "to": "sol-integration",
+                "text_bytes": 198,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              }
+            ]
+          }
+        },
+        {
+          "cmd": [
+            "poll",
+            "swarm",
+            "--after",
+            "5",
+            "--limit",
+            "5",
+            "--wait",
+            "0"
+          ],
+          "exit": 0,
+          "elapsed_sec": 0.0229,
+          "stdout_bytes": 3897,
+          "stderr_bytes": 0,
+          "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp2-poll-page2.json",
+          "page": {
+            "message_count": 5,
+            "nextCursor": 10,
+            "hasMore": true,
+            "ids": [
+              6,
+              7,
+              8,
+              9,
+              10
+            ],
+            "total_text_bytes": 2904,
+            "max_text_bytes": 887,
+            "min_text_bytes": 425,
+            "avg_text_bytes": 580.8,
+            "addressed_to_me": 1,
+            "addressed_to_others": 4,
+            "broadcast_or_unaddressed": 0,
+            "to_me_ids": [
+              6
+            ],
+            "to_me_text_bytes": 539,
+            "to_other_text_bytes": 2365,
+            "senders": [
+              "astra-design",
+              "lead"
+            ],
+            "correlation_ids": [
+              "swarm-round-1"
+            ],
+            "reply_tos": [],
+            "per_message": [
+              {
+                "id": 6,
+                "from": "lead",
+                "to": "grok-reentry",
+                "text_bytes": 539,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 7,
+                "from": "lead",
+                "to": "grok-noise",
+                "text_bytes": 455,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 8,
+                "from": "lead",
+                "to": "grok-races",
+                "text_bytes": 425,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 9,
+                "from": "lead",
+                "to": "grok-docs",
+                "text_bytes": 598,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 10,
+                "from": "astra-design",
+                "to": "sol-cli",
+                "text_bytes": 887,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              }
+            ]
+          }
+        },
+        {
+          "cmd": [
+            "poll",
+            "swarm",
+            "--after",
+            "10",
+            "--limit",
+            "5",
+            "--wait",
+            "0"
+          ],
+          "exit": 0,
+          "elapsed_sec": 0.0253,
+          "stdout_bytes": 4023,
+          "stderr_bytes": 0,
+          "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp2-poll-page3.json",
+          "page": {
+            "message_count": 5,
+            "nextCursor": 15,
+            "hasMore": true,
+            "ids": [
+              11,
+              12,
+              13,
+              14,
+              15
+            ],
+            "total_text_bytes": 2997,
+            "max_text_bytes": 775,
+            "min_text_bytes": 357,
+            "avg_text_bytes": 599.4,
+            "addressed_to_me": 0,
+            "addressed_to_others": 5,
+            "broadcast_or_unaddressed": 0,
+            "to_me_ids": [],
+            "to_me_text_bytes": 0,
+            "to_other_text_bytes": 2997,
+            "senders": [
+              "astra-design",
+              "astra-review"
+            ],
+            "correlation_ids": [
+              "swarm-round-1"
+            ],
+            "reply_tos": [],
+            "per_message": [
+              {
+                "id": 11,
+                "from": "astra-review",
+                "to": "astra-design",
+                "text_bytes": 640,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 12,
+                "from": "astra-review",
+                "to": "grok-races",
+                "text_bytes": 357,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 13,
+                "from": "astra-design",
+                "to": "lead",
+                "text_bytes": 571,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 14,
+                "from": "astra-design",
+                "to": "sol-cli",
+                "text_bytes": 654,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 15,
+                "from": "astra-review",
+                "to": "astra-design",
+                "text_bytes": 775,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              }
+            ]
+          }
+        },
+        {
+          "cmd": [
+            "poll",
+            "swarm",
+            "--after",
+            "15",
+            "--limit",
+            "5",
+            "--wait",
+            "0"
+          ],
+          "exit": 0,
+          "elapsed_sec": 0.0199,
+          "stdout_bytes": 4307,
+          "stderr_bytes": 0,
+          "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp2-poll-page4.json",
+          "page": {
+            "message_count": 5,
+            "nextCursor": 20,
+            "hasMore": true,
+            "ids": [
+              16,
+              17,
+              18,
+              19,
+              20
+            ],
+            "total_text_bytes": 3290,
+            "max_text_bytes": 1147,
+            "min_text_bytes": 436,
+            "avg_text_bytes": 658.0,
+            "addressed_to_me": 0,
+            "addressed_to_others": 5,
+            "broadcast_or_unaddressed": 0,
+            "to_me_ids": [],
+            "to_me_text_bytes": 0,
+            "to_other_text_bytes": 3290,
+            "senders": [
+              "astra-design",
+              "astra-review"
+            ],
+            "correlation_ids": [
+              "swarm-round-1"
+            ],
+            "reply_tos": [],
+            "per_message": [
+              {
+                "id": 16,
+                "from": "astra-review",
+                "to": "sol-cli",
+                "text_bytes": 496,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 17,
+                "from": "astra-review",
+                "to": "lead",
+                "text_bytes": 610,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 18,
+                "from": "astra-design",
+                "to": "astra-review",
+                "text_bytes": 436,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 19,
+                "from": "astra-review",
+                "to": "grok-docs",
+                "text_bytes": 601,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 20,
+                "from": "astra-review",
+                "to": "lead",
+                "text_bytes": 1147,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              }
+            ]
+          }
+        },
+        {
+          "cmd": [
+            "poll",
+            "swarm",
+            "--after",
+            "20",
+            "--limit",
+            "5",
+            "--wait",
+            "0"
+          ],
+          "exit": 0,
+          "elapsed_sec": 0.0209,
+          "stdout_bytes": 2658,
+          "stderr_bytes": 0,
+          "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp2-poll-page5.json",
+          "page": {
+            "message_count": 3,
+            "nextCursor": 23,
+            "hasMore": false,
+            "ids": [
+              21,
+              22,
+              23
+            ],
+            "total_text_bytes": 2022,
+            "max_text_bytes": 1098,
+            "min_text_bytes": 429,
+            "avg_text_bytes": 674.0,
+            "addressed_to_me": 0,
+            "addressed_to_others": 3,
+            "broadcast_or_unaddressed": 0,
+            "to_me_ids": [],
+            "to_me_text_bytes": 0,
+            "to_other_text_bytes": 2022,
+            "senders": [
+              "astra-review",
+              "sol-cli"
+            ],
+            "correlation_ids": [
+              "swarm-round-1"
+            ],
+            "reply_tos": [],
+            "per_message": [
+              {
+                "id": 21,
+                "from": "sol-cli",
+                "to": "astra-design",
+                "text_bytes": 1098,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 22,
+                "from": "astra-review",
+                "to": "astra-design",
+                "text_bytes": 495,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              },
+              {
+                "id": 23,
+                "from": "astra-review",
+                "to": "lead",
+                "text_bytes": 429,
+                "correlationId": "swarm-round-1",
+                "replyTo": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "cold_read_new_reader",
+      "reader": "grok-reentry-cold-1789664617",
+      "cmd": [
+        "read",
+        "swarm",
+        "--reader",
+        "grok-reentry-cold-1789664617",
+        "--limit",
+        "100",
+        "--wait",
+        "0"
+      ],
+      "exit": 0,
+      "elapsed_sec": 0.0264,
+      "stdout_bytes": 17920,
+      "stderr_bytes": 0,
+      "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp3-cold-read.json",
+      "page": {
+        "message_count": 23,
+        "nextCursor": 23,
+        "hasMore": false,
+        "ids": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "total_text_bytes": 13490,
+        "max_text_bytes": 1147,
+        "min_text_bytes": 198,
+        "avg_text_bytes": 586.5,
+        "addressed_to_me": 1,
+        "addressed_to_others": 21,
+        "broadcast_or_unaddressed": 1,
+        "to_me_ids": [
+          6
+        ],
+        "to_me_text_bytes": 539,
+        "to_other_text_bytes": 12483,
+        "senders": [
+          "astra-design",
+          "astra-review",
+          "lead",
+          "sol-cli"
+        ],
+        "correlation_ids": [
+          "swarm-round-1"
+        ],
+        "reply_tos": [],
+        "per_message": [
+          {
+            "id": 1,
+            "from": "lead",
+            "to": null,
+            "text_bytes": 468,
+            "correlationId": null,
+            "replyTo": null
+          },
+          {
+            "id": 2,
+            "from": "lead",
+            "to": "astra-design",
+            "text_bytes": 713,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 3,
+            "from": "lead",
+            "to": "astra-review",
+            "text_bytes": 464,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 4,
+            "from": "lead",
+            "to": "sol-cli",
+            "text_bytes": 434,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 5,
+            "from": "lead",
+            "to": "sol-integration",
+            "text_bytes": 198,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 6,
+            "from": "lead",
+            "to": "grok-reentry",
+            "text_bytes": 539,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 7,
+            "from": "lead",
+            "to": "grok-noise",
+            "text_bytes": 455,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 8,
+            "from": "lead",
+            "to": "grok-races",
+            "text_bytes": 425,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 9,
+            "from": "lead",
+            "to": "grok-docs",
+            "text_bytes": 598,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 10,
+            "from": "astra-design",
+            "to": "sol-cli",
+            "text_bytes": 887,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 11,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 640,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 12,
+            "from": "astra-review",
+            "to": "grok-races",
+            "text_bytes": 357,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 13,
+            "from": "astra-design",
+            "to": "lead",
+            "text_bytes": 571,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 14,
+            "from": "astra-design",
+            "to": "sol-cli",
+            "text_bytes": 654,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 15,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 775,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 16,
+            "from": "astra-review",
+            "to": "sol-cli",
+            "text_bytes": 496,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 17,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 610,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 18,
+            "from": "astra-design",
+            "to": "astra-review",
+            "text_bytes": 436,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 19,
+            "from": "astra-review",
+            "to": "grok-docs",
+            "text_bytes": 601,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 20,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 1147,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 21,
+            "from": "sol-cli",
+            "to": "astra-design",
+            "text_bytes": 1098,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 22,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 495,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 23,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 429,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "second_read_same_reader",
+      "reader": "grok-reentry-cold-1789664617",
+      "cmd": [
+        "read",
+        "swarm",
+        "--reader",
+        "grok-reentry-cold-1789664617",
+        "--limit",
+        "100",
+        "--wait",
+        "0"
+      ],
+      "exit": 0,
+      "elapsed_sec": 0.0227,
+      "stdout_bytes": 48,
+      "stderr_bytes": 0,
+      "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp4-second-read.json",
+      "page": {
+        "message_count": 0,
+        "nextCursor": 23,
+        "hasMore": false,
+        "ids": [],
+        "total_text_bytes": 0,
+        "max_text_bytes": 0,
+        "min_text_bytes": 0,
+        "avg_text_bytes": 0,
+        "addressed_to_me": 0,
+        "addressed_to_others": 0,
+        "broadcast_or_unaddressed": 0,
+        "to_me_ids": [],
+        "to_me_text_bytes": 0,
+        "to_other_text_bytes": 0,
+        "senders": [],
+        "correlation_ids": [],
+        "reply_tos": [],
+        "per_message": []
+      }
+    },
+    {
+      "name": "default_reader_caught_up",
+      "cmd": [
+        "read",
+        "swarm",
+        "--limit",
+        "100",
+        "--wait",
+        "0"
+      ],
+      "exit": 0,
+      "elapsed_sec": 0.0214,
+      "stdout_bytes": 8741,
+      "stderr_bytes": 0,
+      "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp5-default-read.json",
+      "page": {
+        "message_count": 10,
+        "nextCursor": 23,
+        "hasMore": false,
+        "ids": [
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "total_text_bytes": 6741,
+        "max_text_bytes": 1147,
+        "min_text_bytes": 429,
+        "avg_text_bytes": 674.1,
+        "addressed_to_me": 0,
+        "addressed_to_others": 10,
+        "broadcast_or_unaddressed": 0,
+        "to_me_ids": [],
+        "to_me_text_bytes": 0,
+        "to_other_text_bytes": 6741,
+        "senders": [
+          "astra-design",
+          "astra-review",
+          "sol-cli"
+        ],
+        "correlation_ids": [
+          "swarm-round-1"
+        ],
+        "reply_tos": [],
+        "per_message": [
+          {
+            "id": 14,
+            "from": "astra-design",
+            "to": "sol-cli",
+            "text_bytes": 654,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 15,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 775,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 16,
+            "from": "astra-review",
+            "to": "sol-cli",
+            "text_bytes": 496,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 17,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 610,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 18,
+            "from": "astra-design",
+            "to": "astra-review",
+            "text_bytes": 436,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 19,
+            "from": "astra-review",
+            "to": "grok-docs",
+            "text_bytes": 601,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 20,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 1147,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 21,
+            "from": "sol-cli",
+            "to": "astra-design",
+            "text_bytes": 1098,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 22,
+            "from": "astra-review",
+            "to": "astra-design",
+            "text_bytes": 495,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          },
+          {
+            "id": 23,
+            "from": "astra-review",
+            "to": "lead",
+            "text_bytes": 429,
+            "correlationId": "swarm-round-1",
+            "replyTo": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "caught_up_wait1",
+      "cmd": [
+        "read",
+        "swarm",
+        "--limit",
+        "100",
+        "--wait",
+        "1"
+      ],
+      "exit": 0,
+      "elapsed_sec": 1.0347,
+      "stdout_bytes": 48,
+      "stderr_bytes": 0,
+      "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp6-wait1-empty.json",
+      "page": {
+        "message_count": 0,
+        "nextCursor": 23,
+        "hasMore": false,
+        "ids": [],
+        "total_text_bytes": 0,
+        "max_text_bytes": 0,
+        "min_text_bytes": 0,
+        "avg_text_bytes": 0,
+        "addressed_to_me": 0,
+        "addressed_to_others": 0,
+        "broadcast_or_unaddressed": 0,
+        "to_me_ids": [],
+        "to_me_text_bytes": 0,
+        "to_other_text_bytes": 0,
+        "senders": [],
+        "correlation_ids": [],
+        "reply_tos": [],
+        "per_message": []
+      }
+    },
+    {
+      "name": "poll_after_latest",
+      "after": 23,
+      "cmd": [
+        "poll",
+        "swarm",
+        "--after",
+        "23",
+        "--limit",
+        "100",
+        "--wait",
+        "0"
+      ],
+      "exit": 0,
+      "elapsed_sec": 0.033,
+      "stdout_bytes": 48,
+      "stderr_bytes": 0,
+      "stdout_path": "/tmp/msn-swarm-20260917/grok-reentry/exp7-poll-head.json",
+      "page": {
+        "message_count": 0,
+        "nextCursor": 23,
+        "hasMore": false,
+        "ids": [],
+        "total_text_bytes": 0,
+        "max_text_bytes": 0,
+        "min_text_bytes": 0,
+        "avg_text_bytes": 0,
+        "addressed_to_me": 0,
+        "addressed_to_others": 0,
+        "broadcast_or_unaddressed": 0,
+        "to_me_ids": [],
+        "to_me_text_bytes": 0,
+        "to_other_text_bytes": 0,
+        "senders": [],
+        "correlation_ids": [],
+        "reply_tos": [],
+        "per_message": []
+      }
+    }
+  ]
+}

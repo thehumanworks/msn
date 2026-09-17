@@ -45,7 +45,8 @@ function forgetSession(tenant) {
 }
 
 function draft(connection = session, name = channel) {
-  if (!connection.drafts.has(name)) connection.drafts.set(name, { content: "", retry: null, sending: false });
+  if (!connection.drafts.has(name))
+    connection.drafts.set(name, { content: "", recipient: "", retry: null, sending: false });
   return connection.drafts.get(name);
 }
 
@@ -108,6 +109,7 @@ function endSession(connection, message) {
     connection.token = "";
     for (const state of connection.drafts.values()) {
       state.content = "";
+      state.recipient = "";
       state.retry = null;
     }
     connection.drafts.clear();
@@ -124,9 +126,11 @@ function endSession(connection, message) {
   $("live").checked = false;
   $("token").value = "";
   $("message").value = "";
+  $("recipient").value = "";
   $("new-channel").value = "";
   autosize();
   $("messages").replaceChildren();
+  showCheckpoint(null);
   $("channels").replaceChildren();
   for (const id of ["workspace-name", "display-name", "identity-note", "channel-note"])
     $(id).textContent = "";
@@ -136,7 +140,7 @@ function endSession(connection, message) {
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   $("jump").hidden = true;
-  for (const id of ["poll", "reread", "message", "send"]) $(id).disabled = true;
+  for (const id of ["poll", "catchup", "reread", "recipient", "message", "send"]) $(id).disabled = true;
   $("workspace").hidden = true;
   $("welcome").hidden = false;
   view("channels");
@@ -225,6 +229,7 @@ function appendMessage(message) {
   content.textContent = structured ? pretty(message.text) : message.text;
   article.append(meta);
   for (const [field, label] of [
+    ["to", "To"],
     ["replyTo", "Reply to"],
     ["correlationId", "Correlation"],
   ]) {
@@ -240,6 +245,83 @@ function appendMessage(message) {
 
 function showJump(state) {
   $("jump").hidden = !state.newMessages;
+}
+
+function showCheckpoint(state) {
+  const context = state?.context;
+  $("checkpoint").hidden = !context;
+  const snapshot = context?.snapshot;
+  $("checkpoint").querySelector("details").hidden = !snapshot;
+  $("checkpoint-title").textContent = snapshot
+    ? `Snapshot v${snapshot.version} · through #${snapshot.coversThrough} · ${snapshot.username}`
+    : "Channel snapshot";
+  $("checkpoint-note").textContent = snapshot
+    ? "Participant-authored summary. Verify important claims against the original messages and artifacts."
+    : "";
+  $("checkpoint-text").textContent = snapshot?.text ?? "";
+  $("catchup-note").textContent = context
+    ? `${snapshot ? "Messages after the snapshot appear below." : "No snapshot loaded; showing original messages."} ${state.hasMore ? "More messages remain. Load the next page to continue." : "Caught up at this request."}${context.snapshotDue ? " A new snapshot is due." : ""}`
+    : "";
+}
+
+// A deliberate one-page re-entry view. It pauses Live so opening a long channel stays bounded.
+async function catchup(continuation = false) {
+  if (!session || !channel) return;
+  stopPolling();
+  $("live").checked = false;
+  const epoch = generation;
+  const connection = session;
+  const selected = channel;
+  const state = connection.channels.get(selected);
+  const controller = new AbortController();
+  polling = controller;
+  try {
+    const data = await api(
+      `/channels/${selected}/catchup?limit=20&maxBytes=65536${continuation ? `&after=${state.cursor}` : ""}`,
+      { signal: controller.signal },
+      connection,
+    );
+    if (generation !== epoch) return;
+    if (continuation && data.historyRevision !== state.context?.historyRevision) {
+      state.messages = [];
+      state.seen.clear();
+      state.context = null;
+      state.hasMore = false;
+      $("messages").replaceChildren();
+      $("more").hidden = true;
+      showCheckpoint(state);
+      status("Channel history changed. Click Catch up again to load a current snapshot and messages.", true);
+      return;
+    }
+    if (!continuation) {
+      state.messages = [];
+      state.seen.clear();
+      state.anchor = null;
+      state.atBottom = false;
+      state.scrollTop = 0;
+      state.newMessages = false;
+      $("messages").replaceChildren();
+    }
+    state.context = {
+      snapshot: continuation ? state.context?.snapshot : data.snapshot,
+      snapshotDue: data.snapshotDue,
+      historyRevision: data.historyRevision,
+    };
+    state.cursor = data.nextCursor;
+    state.hasMore = data.hasMore;
+    render(data.messages, state);
+    if (!continuation) {
+      $("messages").scrollTop = 0;
+      savePosition();
+    }
+    showCheckpoint(state);
+    $("cursor").textContent = `Cursor ${state.cursor}`;
+    $("more").hidden = !state.hasMore;
+    status(`Catch-up loaded for #${selected} · Live paused`);
+  } catch (error) {
+    if (generation !== epoch || error.name === "AbortError") return;
+    status(error.message, true);
+  }
 }
 
 function render(messages, state) {
@@ -272,6 +354,10 @@ async function poll(live = false) {
   const connection = session;
   const selected = channel;
   const state = connection.channels.get(selected);
+  // Raw message polling does not report the history revision. Stop displaying a cached
+  // authored snapshot when leaving catch-up mode; it may have been invalidated meanwhile.
+  state.context = null;
+  showCheckpoint(state);
   const controller = new AbortController();
   polling = controller;
   let backoff = 1000;
@@ -286,6 +372,7 @@ async function poll(live = false) {
       render(data.messages, state);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
+      if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
       $("more").hidden = !data.hasMore;
       status(live ? `Live in #${selected}` : `Polled #${selected} · ${data.messages.length} new`);
@@ -325,9 +412,12 @@ function selectChannel(name, { reset = false } = {}) {
   cache.delete(name);
   cache.set(name, state);
   trimCache();
-  $("message").value = draft().content;
+  const selectedDraft = draft();
+  $("message").value = selectedDraft.content;
+  $("recipient").value = selectedDraft.recipient;
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
+  showCheckpoint(state);
   $("channel-title").textContent = `# ${name}`;
   $("channel-note").textContent =
     "Delivery cursor only · not a read acknowledgment. Recent history is cached in memory.";
@@ -336,7 +426,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("cursor").textContent = `Cursor ${state.cursor}`;
   $("more").hidden = !state.hasMore;
   showJump(state);
-  for (const id of ["poll", "reread", "message"]) $(id).disabled = false;
+  for (const id of ["poll", "catchup", "reread", "recipient", "message"]) $(id).disabled = false;
   $("send").disabled = draft().sending;
   for (const button of $("channels").children)
     button.setAttribute("aria-current", String(button.dataset.channel === name));
@@ -473,12 +563,22 @@ $("send-form").addEventListener("submit", async (event) => {
   const state = draft();
   if (state.sending) return;
   const content = $("message").value;
+  const recipient = $("recipient").value;
   state.content = content;
+  state.recipient = recipient;
   if (!content.trim() || new TextEncoder().encode(content).length > 16384) {
     status("Message must be 1–16,384 UTF-8 bytes.", true);
     return;
   }
-  const payload = JSON.stringify({ username: connection.username, text: content });
+  if (new TextEncoder().encode(recipient).length > 128) {
+    status("Recipient must be at most 128 UTF-8 bytes.", true);
+    return;
+  }
+  const payload = JSON.stringify({
+    username: connection.username,
+    text: content,
+    ...(recipient.trim() ? { to: recipient } : {}),
+  });
   if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
   const attempt = state.retry;
   state.sending = true;
@@ -493,10 +593,14 @@ $("send-form").addEventListener("submit", async (event) => {
       },
       connection,
     );
-    if (state.content === content) state.content = "";
+    if (state.content === content && state.recipient === recipient) {
+      state.content = "";
+      state.recipient = "";
+    }
     if (state.retry === attempt) state.retry = null;
     if (session !== connection || selected !== channel) return;
     $("message").value = state.content;
+    $("recipient").value = state.recipient;
     autosize();
     poll($("live").checked); // Read from the last cursor, not the sent ID: no skipped concurrent replies.
   } catch (error) {
@@ -512,6 +616,9 @@ $("message").addEventListener("input", () => {
   if (session && channel) draft().content = $("message").value;
   autosize();
 });
+$("recipient").addEventListener("input", () => {
+  if (session && channel) draft().recipient = $("recipient").value;
+});
 $("message").addEventListener("keydown", (event) => {
   // Enter sends; Shift+Enter inserts a newline. Ctrl/⌘+Enter always sends.
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey || !event.shiftKey)) {
@@ -523,7 +630,11 @@ $("poll").addEventListener("click", () => {
   $("live").checked = false;
   poll(false);
 });
-$("more").addEventListener("click", () => poll($("live").checked));
+$("catchup").addEventListener("click", () => catchup());
+$("more").addEventListener("click", () => {
+  if (session?.channels.get(channel)?.context && !$("live").checked) catchup(true);
+  else poll($("live").checked);
+});
 $("reread").addEventListener("click", () => selectChannel(channel, { reset: true }));
 $("live").addEventListener("change", () => {
   if ($("live").checked) poll(true);

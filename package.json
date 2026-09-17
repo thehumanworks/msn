@@ -10,6 +10,7 @@
     "cf-typegen": "wrangler types",
     "test": "vitest run && node --test tests/cli.test.mjs",
     "test:participants": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/participants.integration.mjs",
+    "test:swarm": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/swarm.integration.mjs",
     "test:browser": "playwright test --config tests/playwright.config.mjs",
     "lint": "biome check .",
     "format": "biome check --write .",
