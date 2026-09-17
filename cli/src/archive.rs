@@ -1012,4 +1012,56 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn verify_archive_rejects_a_second_manifest_and_counts_invalidated_snapshots() {
+        let manifest = manifest_json(0, 1, 0);
+        let mut two = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&manifest).unwrap(),
+            serde_json::to_string(&manifest).unwrap()
+        );
+        let hash = content_hash(two.as_bytes());
+        two.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "record": "completion",
+                "status": "complete",
+                "messageCount": 0,
+                "snapshotCount": 0,
+                "invalidatedSnapshotCount": 0,
+                "boundary": { "headCursor": 1, "historyRevision": 0, "snapshotVersion": 0 },
+                "contentHash": hash,
+            }))
+            .unwrap(),
+        );
+        two.push('\n');
+        assert!(
+            verify_archive(two.as_bytes(), |_| Ok(()))
+                .unwrap_err()
+                .to_string()
+                .contains("manifest")
+        );
+
+        let mut body = serde_json::to_string(&manifest_json(0, 1, 1)).unwrap();
+        body.push('\n');
+        body.push_str(&serde_json::to_string(&snapshot_json(1, true, None)).unwrap());
+        body.push('\n');
+        let hash = content_hash(body.as_bytes());
+        body.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "record": "completion",
+                "status": "complete",
+                "messageCount": 0,
+                "snapshotCount": 1,
+                "invalidatedSnapshotCount": 1,
+                "boundary": { "headCursor": 1, "historyRevision": 0, "snapshotVersion": 1 },
+                "contentHash": hash,
+            }))
+            .unwrap(),
+        );
+        body.push('\n');
+        let verified = verify_archive(body.as_bytes(), |_| Ok(())).unwrap();
+        assert_eq!(verified.completion["invalidatedSnapshotCount"], 1);
+        assert_eq!(verified.completion["snapshotCount"], 1);
+    }
 }
