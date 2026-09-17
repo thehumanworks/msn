@@ -64,6 +64,7 @@ try {
   );
   const start = await cli(["start", channel, "--max-bytes", "8192"], worker);
   assert.equal(start.identity.username, "smoke-worker");
+  assert.equal(start.identity.origin, url);
   assert.equal(start.protocolVersion, 1);
   const first = await cli(["peek", channel], worker);
   assert.equal(first.committedThrough, 0);

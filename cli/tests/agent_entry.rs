@@ -51,9 +51,13 @@ fn start_validates_identity_and_keeps_one_bounded_page_without_local_state() {
         String::from_utf8_lossy(&out.stderr)
     );
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let origin = url::Url::parse(&server.url())
+        .unwrap()
+        .origin()
+        .ascii_serialization();
     assert_eq!(
         value["identity"],
-        json!({"tenant":"team","username":"alice","reader":"worker-a"})
+        json!({"tenant":"team","username":"alice","reader":"worker-a","origin":origin})
     );
     assert_eq!(value["protocolVersion"], 1);
     assert_eq!(value["nextCursor"], 4);
@@ -225,6 +229,74 @@ fn start_rejects_wrong_stream_and_bad_continuation_without_stdout() {
         assert_eq!(out.status.code(), Some(1), "{defect}");
         assert!(out.stdout.is_empty());
     }
+}
+
+#[test]
+fn start_budget_accounts_for_origin_in_the_larger_extra_payload() {
+    let server = MockServer::spawn(vec![identity(), catchup(0)]);
+    let max_bytes = 4096_u64;
+    let out = bin(&server)
+        .args(["start", "general", "--max-bytes", &max_bytes.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let origin = url::Url::parse(&server.url())
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    assert_eq!(value["identity"]["origin"], origin);
+    assert_eq!(value["protocolVersion"], 1);
+    let extra = json!({
+        "protocolVersion": value["protocolVersion"],
+        "identity": value["identity"],
+        "workflow": value["workflow"],
+        "warnings": value["warnings"]
+    });
+    let overhead = serde_json::to_vec(&extra).unwrap().len() as u64;
+    assert!(
+        overhead > 846,
+        "origin must increase the measured extra payload ({overhead})"
+    );
+    let requests = server.recorded();
+    let url = url::Url::parse(&format!("http://test{}", requests[1].path)).unwrap();
+    let sent_budget: u64 = url
+        .query_pairs()
+        .find(|(k, _)| k == "maxBytes")
+        .unwrap()
+        .1
+        .parse()
+        .unwrap();
+    assert_eq!(sent_budget, max_bytes - overhead);
+    assert!(sent_budget >= 1024);
+    assert!(out.stdout.len() as u64 <= max_bytes);
+}
+
+#[test]
+fn start_minimum_budget_still_fits_identity_with_origin() {
+    let server = MockServer::spawn(vec![identity(), catchup(0)]);
+    let out = bin(&server)
+        .args(["start", "general", "--max-bytes", "2048"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        value["identity"]["origin"],
+        url::Url::parse(&server.url())
+            .unwrap()
+            .origin()
+            .ascii_serialization()
+    );
+    assert!(out.stdout.len() <= 2048);
 }
 
 #[test]

@@ -8,6 +8,103 @@ Use one MSN workspace for one project. Create a channel for each workstream that
 
 Give every participant its own named credential. Exact-name participant keys are the simplest choice: the server then enforces the sender name, and one agent can be revoked without disconnecting everyone else. Keep the administrator token and any unbound workspace key away from participant shells.
 
+### Deploying code does not move a workspace
+
+`wrangler deploy` / `bun run deploy` publishes Worker **code**. It does not copy channel history, snapshots, participant keys, or local profile files. A token issued against `http://localhost:8787` does not authenticate at the production origin. After a deploy, the production Durable Object is a different store: the human at the production URL cannot see a discussion that only existed locally.
+
+One-way channel copy is specified by [archive-format.md](archive-format.md) and tracked as issues #11 (export) and #12 (import). Those commands are not implemented in this checkout. Do not assume history or credentials appear at the production URL after a deploy, and do not claim `msn export` / `msn import` exist until those issues land.
+
+### Recommended coordination shape
+
+1. **Persistent remote channel** for coordination: the deployed Worker, a production workspace, and named participant keys. This is the default for multi-agent work a human should be able to follow.
+2. **Isolated local Workers** for implementation tests: `bun run dev`, a throwaway tenant, and keys that never leave that origin.
+3. **Local-only coordination** is an explicit, named choice. Save a profile such as `local-swarm` pointed at localhost, say so in the handoff, and accept that deploying the Worker will not publish that history.
+
+Keep the test workspace separate from the coordination workspace. Do not reuse a coordination token against a local Worker, and do not reuse a local token against production.
+
+### Select local vs remote per shell
+
+A saved profile is a complete connection: origin, workspace, token, username, and reader. Activate a different named profile in each terminal. Scripts and fresh agent shells use `--profile` without shell integration.
+
+```sh
+# Coordination (remote). Token was imported out of band, then:
+msn profile save planner
+eval "$(msn shell-init bash)"
+msn activate planner
+msn whoami
+msn start collaboration          # identity.origin must be the remote Worker
+
+# Implementation tests (another shell; different origin, tenant, and keys):
+export MSN_URL=http://localhost:8787
+export MSN_WORKSPACE_TENANT=dev-team
+# import a local-only participant key, then:
+msn profile save local-tester
+msn --profile local-tester start lab
+```
+
+`profile save` refuses to overwrite. Never silently retarget an existing profile at production: save a new name. `activate` / `MSN_PROFILE` / `--profile` select among already-saved connections; they do not migrate history.
+
+Confirm the environment with `start`. The returned `identity.origin` is the normalised origin the CLI actually calls (`crate::config::origin_base`). If it is not the advertised server, stop.
+
+```sh
+bun run onboarding-check -- --origin https://YOUR-WORKER.workers.dev \
+  --tenant team --channel collaboration --profile planner
+```
+
+The check verifies health, the key's workspace binding, and that the named channel is readable. It refuses to print tokens. See [onboarding-check.mjs](../scripts/onboarding-check.mjs).
+
+### Access handoff
+
+An orchestrator gives a participant these fields, and **not** a token in the same channel or URL:
+
+| Field | Meaning |
+| --- | --- |
+| Server origin | Bare origin the CLI will call (`https://…` or localhost HTTP) |
+| Workspace / tenant | Tenant slug |
+| Participant display name | Exact-name bind the key will send as |
+| Channel | Coordination channel to `start` |
+| Local process required | `no` for a deployed Worker; `yes` if access depends on `wrangler dev` still running |
+
+Deliver the participant token out of band (secret store, private shell, `read -rs`). Never put a token in a URL, query string, or channel message.
+
+Worked example (remote coordination; token omitted on purpose):
+
+```
+origin: https://msn.example.workers.dev
+tenant: team
+username: reviewer
+channel: collaboration
+local-process-required: no
+profile-to-save: reviewer
+# token: delivered via 1Password / fnox, then:
+#   export MSN_URL=https://msn.example.workers.dev
+#   export MSN_WORKSPACE_TENANT=team
+#   read -rs -p 'Participant key: ' MSN_WORKSPACE_TOKEN; echo; export MSN_WORKSPACE_TOKEN
+#   msn profile save reviewer
+#   unset MSN_WORKSPACE_TOKEN
+#   msn --profile reviewer start collaboration
+#   bun run onboarding-check -- --origin https://msn.example.workers.dev \
+#     --tenant team --channel collaboration --profile reviewer
+```
+
+Worked example (explicit local-only coordination):
+
+```
+origin: http://127.0.0.1:8787
+tenant: swarm-dev
+username: planner
+channel: swarm
+local-process-required: yes (wrangler dev on 127.0.0.1:8787)
+profile-to-save: local-swarm
+```
+
+### Isolation rules
+
+- Never silently switch an existing profile to production.
+- Never publish local history to a remote origin unless performing an explicit, documented one-way copy (#11/#12). A deploy is not that copy.
+- Never reuse credentials across origins. A local participant token is not a production token.
+- Remote use requires an explicitly configured destination: `MSN_URL` set to that origin **before** `profile save`, or `--url` on a one-off command without a profile. Do not combine `--profile` with `--url` / `--tenant` / `--token`.
+
 An agent needs the server URL, workspace, participant key, and a stable reader identity. Check the configured credential before starting:
 
 ```sh
@@ -35,7 +132,7 @@ A saved profile contains the connection, validated sender identity, and reader i
 
 ## Start a session
 
-`msn start CHANNEL` is the one-command entry: it validates identity and returns one bounded catch-up page plus `identity` (`username`, `reader`, `tenant`), `protocolVersion: 1`, `workflow` (`work`, `tasks`, `evidence`, `continuation`, `send`), and `warnings`. Existing catch-up fields stay at the top level. It does **not** read or write the eager `read`/`wait` cursor or the processing cursor, and it does not scan the task ledger. `--max-bytes` is 2048–262144 (default 32768) so identity and workflow metadata fit.
+`msn start CHANNEL` is the one-command entry: it validates identity and returns one bounded catch-up page plus `identity` (`username`, `reader`, `tenant`, `origin`), `protocolVersion: 1`, `workflow` (`work`, `tasks`, `evidence`, `continuation`, `send`), and `warnings`. `identity.origin` is the normalised server origin the client talks to — inspect it instead of ambient `MSN_URL`. Existing catch-up fields stay at the top level. Adding `origin` is additive; `protocolVersion` stays `1` (see [ADR 0012](adr/0012-remote-first-agent-collaboration.md)). It does **not** read or write the eager `read`/`wait` cursor or the processing cursor, and it does not scan the task ledger. `--max-bytes` is 2048–262144 (default 32768) so identity and workflow metadata fit. The extra JSON (now including origin) is measured and subtracted from that budget; the catch-up body still needs at least 1024 bytes.
 
 ```sh
 msn start collaboration
