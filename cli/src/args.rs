@@ -41,6 +41,8 @@ EXAMPLES:
   msn snapshot show general 2
   msn catchup general --limit 20 --max-bytes 32768
   msn catchup general --after 42    # exact continuation; snapshot is omitted
+  msn export general --out ./general.msnarchive.jsonl
+  msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100 --force
   msn send general --text - --key retry-1 < message.txt
   msn send general --text 'pong' --reply-to 42 --correlation-id task-7
   msn send general --json '{\"op\":\"ping\"}'       # contentType application/json
@@ -291,6 +293,23 @@ pub enum Command {
         /// Maximum complete response size in bytes, 1024–262144 (default 32768)
         #[arg(long = "max-bytes")]
         max_bytes: Option<String>,
+    },
+    /// Write a portable one-way archive of a channel's readable history
+    Export {
+        /// Channel slug
+        channel: String,
+        /// Destination path; written as FILE.partial then renamed after the completion line
+        #[arg(long)]
+        out: String,
+        /// Exclusive lower-bound message id (default 0)
+        #[arg(long)]
+        after: Option<String>,
+        /// Message and snapshot page size, 1–100 (default 100)
+        #[arg(long)]
+        limit: Option<String>,
+        /// Overwrite an existing FILE
+        #[arg(long)]
+        force: bool,
     },
     /// Fetch unread messages once, print the page, and persist the reader cursor
     Read {

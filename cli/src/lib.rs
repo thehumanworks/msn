@@ -1,9 +1,11 @@
 pub mod agent;
+pub mod archive;
 pub mod args;
 pub mod client;
 pub mod config;
 pub mod cursor;
 pub mod error;
+pub mod export;
 pub mod identity;
 pub mod processing;
 pub mod profile;
@@ -382,6 +384,32 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 ));
             }
             catchup(&url, &tenant, &token, channel, after, limit, max_bytes)
+        }
+        Command::Export {
+            channel,
+            out,
+            after,
+            limit,
+            force,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let after = parse_optional_int(after.as_deref(), 0, MAX_SAFE_INTEGER)?;
+            let limit = parse_optional_int(limit.as_deref(), 100, MAX_LIMIT)?;
+            require_positive_limit(limit)?;
+            export::export(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                cli.username.as_deref(),
+                Path::new(&out),
+                after,
+                limit,
+                force,
+                &stop,
+            )
         }
         Command::Read {
             channel,
