@@ -1064,6 +1064,7 @@ fn help_lists_commands_and_env() {
         "rotate",
         "delete",
         "export",
+        "import",
         "MSN_URL",
         "MSN_WORKSPACE_TENANT",
         "MSN_WORKSPACE_TOKEN",

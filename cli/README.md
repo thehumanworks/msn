@@ -171,4 +171,21 @@ The command pins `headCursor` / `historyRevision` / `snapshotVersion` from catch
 
 Deleted message bodies, tokens, profiles, admin credentials, and local cursors/acks are never written. Invalidated snapshots are exported as metadata with `"invalidated": true` and no `text`. Message id gaps do not imply a deletion in this channel (ids are tenant-wide; the Worker does not enumerate tombstones).
 
+## Channel import
+
+`msn import` copies one archive into the selected destination profile. It is one-way, authenticates independently at the destination, and never reads credentials from the file. See [archive-format.md](../archive-format.md) §6 and ADR 0013.
+
+```sh
+msn import ./general.msnarchive.jsonl --channel dest
+msn import ./general.msnarchive.jsonl --channel dest --dry-run
+msn import ./general.msnarchive.jsonl --channel dest --trust replay-tasks
+msn import ./general.msnarchive.jsonl --channel dest --allow-existing --state-file ./import.json
+```
+
+`--dry-run` reports source, destination, counts, trust, unsupported records, unresolved references and anticipated losses, and writes nothing. The default destination is a new channel: an existing `DEST` is refused unless `--allow-existing` is given (appending into live history is explicit). A matching import map from an interrupted or completed copy of the same source instance is a continuation and does not need `--allow-existing`.
+
+Every imported message is sent by the authenticated destination participant as `msn.import.v1`. `source.username` is an unverified claim. `--trust provenance` (default) keeps imported `msn.task.v1` events off the destination task board. `--trust replay-tasks` is the only live replay; it warns on stderr and re-attributes actorship to the importer. Idempotency keys are `imp-<16hex>-<sourceId>`. A 409 under that identity with a different payload is exit 5, not a rewrite.
+
+The import map is `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/imports/<instanceId>/<channel>.json` (mode 0600, locked) or `--state-file`. Status is `in-progress` until a completion marker is written. Import never writes read or processing cursors. Invalidated snapshots are recorded as unavailable provenance and are never published as valid. Source redactions are not reconstructible.
+
 Exit codes: 0 ok · 1 generic · 2 usage/config · 3 auth · 4 not found · 5 conflict · 6 network.

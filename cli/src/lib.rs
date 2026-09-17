@@ -7,6 +7,7 @@ pub mod cursor;
 pub mod error;
 pub mod export;
 pub mod identity;
+pub mod import;
 pub mod processing;
 pub mod profile;
 pub mod task_client;
@@ -410,6 +411,31 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 force,
                 &stop,
             )
+        }
+        Command::Import {
+            file,
+            channel,
+            dry_run,
+            trust,
+            state_file,
+            allow_existing,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            import::import(import::ImportRequest {
+                url: &url,
+                tenant: &tenant,
+                token: &token,
+                dest_channel: channel,
+                selected_username: cli.username.as_deref(),
+                archive: Path::new(&file),
+                dry_run,
+                trust,
+                state_file: state_file.as_deref().map(Path::new),
+                allow_existing,
+                stop: &stop,
+            })
         }
         Command::Read {
             channel,
