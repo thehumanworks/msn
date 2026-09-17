@@ -5,7 +5,7 @@
  * Goal: exercise start, peek/commit, show, and task CLI against a local Worker.
  *
  * Invariants:
- *  I1 start returns catchup fields plus identity {username,reader,tenant}, protocolVersion 1,
+ *  I1 start returns catchup fields plus identity {username,reader,tenant,origin}, protocolVersion 1,
  *     workflow, warnings; one page; no read/processing cursor mutation
  *     -> start identity / no-cursor / exact --after
  *  I2 peek exposes committedThrough + highestFetched with the poll page; peek never advances
@@ -216,6 +216,7 @@ function assertStartEnvelope(page) {
   assert.equal(typeof page.identity.username, "string");
   assert.equal(typeof page.identity.reader, "string");
   assert.equal(page.identity.tenant, tenantName);
+  assert.equal(page.identity.origin, url);
   assert.equal(page.protocolVersion, 1);
   assert.equal(typeof page.workflow, "object");
   assert.equal(typeof page.workflow.work, "string");

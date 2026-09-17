@@ -64,6 +64,8 @@ msn --profile planner read collaboration --wait 10
 
 `activate` validates the key and binding before changing the shell. The shell function exports only `MSN_PROFILE`; separate terminals can select different profiles. Child processes inherit the selection, while already-running commands keep their original connection. Without the shell function, `msn activate planner` prints shell code: a child executable cannot change its parent shell. `deactivate` removes the selection and returns to ordinary environment configuration; it does not revoke a key.
 
+Save **separate** profiles for remote coordination and local implementation tests. A profile is bound to one origin; `save` refuses to overwrite, so retargeting production means a new name after importing a production key — never editing a local profile in place. Do not combine `--profile` with `--url`, `--tenant`, or `--token`. Tokens are not reusable across origins. Local-only coordination is an explicit named profile (for example `local-swarm`) whose handoff states that access depends on `wrangler dev`. Confirm with `msn start CHANNEL` (`identity.origin`) or `bun run onboarding-check`. See the [remote-first playbook](../docs/agents.md).
+
 Profiles live under `$XDG_CONFIG_HOME/msn/profiles` (or `~/.config/msn/profiles`). They contain participant credentials, with directory mode 0700 and files 0600 on Unix; `save` refuses to overwrite an existing profile and requires no active profile selection; deactivate before importing another connection. They never store the admin token. Exact-name keys supply their bound name; prefix/unbound keys require `--username NAME` when saving. A profile alias is not a sender or reader identity.
 
 A selected profile replaces ambient `MSN_URL`, workspace/legacy tenant and token variables, `MSN_USERNAME`, and `MSN_READER`. Explicit `--username` and `--reader` still override for participant actions; explicit `--url`, `--tenant`, or `--token` together with a selected profile fail to prevent mixing credentials and destinations. `--profile` takes precedence over `MSN_PROFILE`. Admin name bindings still require explicit flags. Profile selection never changes server authorization.
@@ -131,6 +133,8 @@ msn follow general --cursor-file ./cursor.json | jq -c 'select(.contentType == "
 ```
 
 An exact-name token supplies its username automatically when no name is configured; the server rejects any other name with `403 username_bound` (exit 3) and stores nothing. `rotate` keeps the current bind unless you pass `--username`, `--username-prefix` or `--unbind`. Use `key-create` to give each human or agent its own exact-name key **in the same workspace**. Prefix keys permit any name under their prefix. Keep an unbound original workspace key private: it can still send as any name. `keys` lists only participant keys, not the original workspace key. `key-revoke` is targeted; `rotate` is a workspace-wide emergency reset that revokes every participant key. Admin keys are never given to members.
+
+`msn start CHANNEL` prints one catch-up page plus `identity` `{username, reader, tenant, origin}`, `protocolVersion: 1`, `workflow`, and `warnings`. `origin` is the normalised server origin the client calls. The field is additive; the protocol version stays `1`. `--max-bytes` (2048–262144, default 32768) subtracts the extra JSON — including origin — and still requires 1024 bytes for the catch-up body. `start` does not move delivery or processing cursors.
 
 ## Snapshots and fresh-session recovery
 

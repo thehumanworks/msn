@@ -1,4 +1,17 @@
 //! Cursor-neutral entry and exact evidence retrieval for agent workflows.
+//!
+//! Verification contract (start origin, issue #13):
+//! Goal: start identity names the normalised server origin; extra JSON still consumes the
+//! --max-bytes budget.
+//! I1 identity.origin == origin_base(url) -> tests/agent_entry.rs::start_validates_identity_and_keeps_one_bounded_page_without_local_state
+//! I2 protocolVersion stays 1 -> same test
+//! I3 extra including origin is subtracted from max-bytes -> tests/agent_entry.rs::start_budget_accounts_for_origin_in_the_larger_extra_payload
+//! I4 2048 still fits typical identity+origin -> tests/agent_entry.rs::start_minimum_budget_still_fits_identity_with_origin
+//! I5 413 requiredBytes includes extra overhead -> tests/agent_entry.rs::start_budget_error_includes_metadata_in_the_required_total
+//! I6 oversized merge prints nothing -> tests/agent_entry.rs::invalid_start_budget_is_offline_and_oversized_response_emits_nothing
+//! Out of scope: export/import; protocol version bump.
+//! cargo-mutants does not rewrite json! field lists; equivalent mutants (omit origin,
+//! hardcode a foreign origin, add origin after extra is measured) are killed by I1/I3.
 use std::io::{self, Write};
 
 use serde_json::{Value, json};
@@ -80,7 +93,12 @@ pub fn start(
     let reader = validate_username(reader.unwrap_or(&username))?;
     let extra = json!({
         "protocolVersion": 1,
-        "identity": {"tenant":tenant,"username":username,"reader":reader},
+        "identity": {
+            "tenant": tenant,
+            "username": username,
+            "reader": reader,
+            "origin": crate::config::origin_base(url),
+        },
         "workflow": {
             "work": "peek CHANNEL; process messages INCLUDING required send/task results with stable --key; then commit CHANNEL --through THIS peek's processed nextCursor (not highestFetched)",
             "tasks": "task list CHANNEL; task events describe work, not exclusive ownership",

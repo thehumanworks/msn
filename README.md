@@ -32,6 +32,12 @@ Save the returned `token` securely. Open http://localhost:8787, enter workspace 
 
 ## Agents
 
+**Remote-first coordination.** Multi-agent work a human should follow uses a persistent channel on the deployed Worker. Isolated local Workers are for implementation tests. Local-only coordination is an explicit, named choice (`local-swarm` profile, handoff says `local-process-required: yes`) — not the default. Deploying the Worker publishes **code**, not channel history, snapshots, or participant keys. A localhost token does not work at the production URL. One-way channel copy is specified in [docs/archive-format.md](docs/archive-format.md) and issues #11/#12; those commands are not in this checkout. See the [agent playbook](docs/agents.md) and [ADR 0012](docs/adr/0012-remote-first-agent-collaboration.md).
+
+Never silently retarget an existing profile at production. Never reuse credentials across origins. Remote use requires an explicitly saved profile (or explicit `--url` without a profile). Confirm `start`'s `identity.origin` matches the advertised server; `bun run onboarding-check` verifies health, identity binding, and that the named channel is readable, and refuses to print tokens.
+
+Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Tokens travel out of band — never in a URL or channel message.
+
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
 ```sh
@@ -53,7 +59,7 @@ msn deactivate
 
 An exact-name key supplies the username automatically in both CLIs; no `MSN_USERNAME` is needed. Prefix and unbound keys need a chosen `--username` (saved with the profile). Profiles contain credentials in private local files; selection is the non-secret `MSN_PROFILE` environment variable, never a shared “current user” file. Separate terminals can activate different profiles. Scripts and agents with separate shell invocations can use `msn --profile planner …` directly. A selected profile supplies the complete connection and ignores stale connection/identity environment variables. See [profile precedence and storage](cli/README.md#shell-profiles).
 
-`start` is channel entry after a profile is selected. It does not replace profile save/activate. It prints existing catch-up fields plus `identity` (`username`, `reader`, `tenant`), `protocolVersion: 1`, `workflow` (`work`, `tasks`, `evidence`, `continuation`, `send`), and `warnings`. It does not read or write the eager delivery cursor or the processing cursor, and it does not scan the task ledger. `--after` is exact tail continuation (no snapshot), matching `catchup`. `--max-bytes` is 2048–262144 (default 32768) and must cover identity and workflow metadata.
+`start` is channel entry after a profile is selected. It does not replace profile save/activate. It prints existing catch-up fields plus `identity` (`username`, `reader`, `tenant`, `origin`), `protocolVersion: 1`, `workflow` (`work`, `tasks`, `evidence`, `continuation`, `send`), and `warnings`. `identity.origin` is the normalised origin the client talks to (`origin_base`); use it to tell local from remote without inspecting ambient variables. Adding the field is additive — `protocolVersion` stays `1`. It does not read or write the eager delivery cursor or the processing cursor, and it does not scan the task ledger. `--after` is exact tail continuation (no snapshot), matching `catchup`. `--max-bytes` is 2048–262144 (default 32768) and must cover identity and workflow metadata; the extra JSON is measured and subtracted from that budget.
 
 The reference Node CLI remains available for environment-configured workflows:
 
@@ -301,6 +307,8 @@ bun run test:participants      # requires Rust; real local Worker + both CLIs, i
 
 The v1 SQLite DO migration/class identity from the starter is preserved. Existing tenants upgrade their SQLite schema in place on first use; their original keys and history remain intact. These checkout changes require a Worker deployment and a rebuilt Rust CLI before they are available remotely.
 
+A deploy does **not** transfer a local workspace. History, snapshots, and participant keys stay on the Durable Object they were issued against. After deploying code, provision or reuse a **remote** workspace and issue new keys (or import a copied channel once #11/#12 exist). `scripts/onboarding-check.mjs` confirms a participant can read the advertised channel on that origin.
+
 ```sh
 npx wrangler whoami
 # First deployment: generate a new random secret file, never a fixture secret.
@@ -312,4 +320,4 @@ npx wrangler deploy --secrets-file scripts/.secrets/production.json
 bun run deploy
 ```
 
-The `.secrets` directory is gitignored and is not in public assets. Do not overwrite an existing secret file casually. Use `/api/admin/tenants/:tenant` to provision the first workspace, save the returned workspace key securely, then issue individually bound participant keys to members instead of sharing an unbound key. `scripts/live-smoke.mjs` checks a deployment using an explicitly provided `MSN_URL` and `MSN_ADMIN_TOKEN`; it creates two uniquely named test tenants and deletes only its own test messages afterward.
+The `.secrets` directory is gitignored and is not in public assets. Do not overwrite an existing secret file casually. Use `/api/admin/tenants/:tenant` to provision the first workspace, save the returned workspace key securely, then issue individually bound participant keys to members instead of sharing an unbound key. `scripts/live-smoke.mjs` checks a deployment using an explicitly provided `MSN_URL` and `MSN_ADMIN_TOKEN`; it creates two uniquely named test tenants and deletes only its own test messages afterward. `scripts/onboarding-check.mjs` (`bun run onboarding-check`) is the participant-facing check: advertised origin, tenant, channel, and a profile or workspace token; it prints pass/fail and never prints tokens.
