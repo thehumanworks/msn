@@ -52,7 +52,12 @@ type MessageRow = {
 };
 const MESSAGE_COLUMNS =
   "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient";
-type TenantRow = { token_hash: string; bound_username: string | null; bound_prefix: string | null };
+type TenantRow = {
+  token_hash: string;
+  bound_username: string | null;
+  bound_prefix: string | null;
+  channel_scope?: string | null;
+};
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
 type Waiter = { channel: string; wake: () => void };
@@ -61,7 +66,15 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
+type InviteRow = {
+  id: string;
+  code_hash: string;
+  creator_hash: string;
+  channel: string | null;
+  expiresAt: number;
+  remaining: number;
+};
 const MAX_SNAPSHOTS = 1000;
 const SNAPSHOT_COLUMNS =
   "channel, version, username, text, coversThrough, historyRevision, createdAt, invalidated";
@@ -155,12 +168,24 @@ export class MsnDurableObject extends DurableObject<Env> {
           PRIMARY KEY(channel, version), UNIQUE(channel, key)
         );
         CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS invites (
+          id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, creator_hash TEXT NOT NULL,
+          channel TEXT, expiresAt INTEGER NOT NULL, remaining INTEGER NOT NULL
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
       const version = ctx.storage.sql
         .exec<{ version: number | null }>("SELECT MAX(version) AS version FROM schema_version")
         .one().version;
+      // Inspect columns so constructor migrations also handle restored pre-v8 databases.
+      if (
+        !ctx.storage.sql
+          .exec<{ name: string }>("PRAGMA table_info(access_keys)")
+          .toArray()
+          .some((column) => column.name === "channel_scope")
+      )
+        ctx.storage.sql.exec("ALTER TABLE access_keys ADD COLUMN channel_scope TEXT");
       if (version === null) {
         for (let applied = 1; applied <= SCHEMA_VERSION; applied++)
           ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", applied);
@@ -193,6 +218,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           ctx.storage.sql.exec("INSERT INTO schema_version VALUES (6)");
         }
         if (version < 7) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (7)");
+        if (version < 8) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (8)");
       }
     });
   }
@@ -233,6 +259,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       ...(token === undefined ? {} : { token }),
       username: row.bound_username,
       usernamePrefix: row.bound_prefix,
+      ...(row.channel_scope ? { channel: row.channel_scope } : {}),
     };
   }
 
@@ -653,6 +680,148 @@ export class MsnDurableObject extends DurableObject<Env> {
     return json(result);
   }
 
+  private requireScope(capability: TenantRow, channel: string | null): void {
+    if (capability.channel_scope && capability.channel_scope !== channel)
+      throw new HttpError(
+        403,
+        "channel_forbidden",
+        "This access key only grants access to its invited channel.",
+      );
+  }
+
+  private requireKeyCapacity(): void {
+    if (
+      this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM access_keys").one().count >=
+      MAX_KEYS
+    )
+      throw new HttpError(409, "key_quota", "Tenant participant key limit reached (1,000).");
+  }
+
+  private async provision(tenant: string, bind: Binding, channel?: string): Promise<Response> {
+    const token = newToken();
+    const hash = await digest(token);
+    return this.ctx.storage.transactionSync(() => {
+      if (this.tenantRow())
+        throw new HttpError(
+          409,
+          "tenant_exists",
+          "Workspace already exists. Connect with an access key or invitation.",
+        );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO tenant (singleton, token_hash, bound_username, bound_prefix) VALUES (1, ?, ?, ?)",
+        hash,
+        bind.username,
+        bind.prefix,
+      );
+      if (channel) this.createChannel(channel);
+      return json(
+        {
+          ...this.identity(tenant, { bound_username: bind.username, bound_prefix: bind.prefix }, token),
+          ...(channel ? { initialChannel: channel } : {}),
+        },
+        201,
+      );
+    });
+  }
+
+  private async createInvite(request: Request, tenant: string, hash: string): Promise<Response> {
+    const input = await body(request);
+    const channel = input.channel == null ? null : slug(text(input.channel, "channel", 64));
+    const maxUses = input.maxUses === undefined ? 25 : snapshotInteger(input.maxUses, "maxUses");
+    const expiresIn = input.expiresIn === undefined ? 86400 : snapshotInteger(input.expiresIn, "expiresIn");
+    if (maxUses < 1 || maxUses > 100 || expiresIn < 60 || expiresIn > 604800)
+      throw new HttpError(400, "invalid_invite", "Use 1–100 recipients and an expiry of 60–604800 seconds.");
+    const code = newToken();
+    const codeHash = await digest(code);
+    const capability = this.authorize(hash); // Final check after every await.
+    this.requireScope(capability, channel);
+    if (channel) this.requireChannel(channel);
+    const now = Date.now();
+    this.ctx.storage.sql.exec("DELETE FROM invites WHERE expiresAt <= ? OR remaining = 0", now);
+    if (
+      this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM invites").one().count >=
+      1000
+    )
+      throw new HttpError(409, "invite_quota", "Workspace invitation limit reached.");
+    const id = crypto.randomUUID();
+    const expiresAt = now + expiresIn * 1000;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO invites VALUES (?, ?, ?, ?, ?, ?)",
+      id,
+      codeHash,
+      hash,
+      channel,
+      expiresAt,
+      maxUses,
+    );
+    const accessCode = `${tenant}.${code}`;
+    return json(
+      {
+        id,
+        tenant,
+        channel,
+        code: accessCode,
+        url: `${new URL(request.url).origin}/#invite=${accessCode}`,
+        expiresAt: new Date(expiresAt).toISOString(),
+        maxUses,
+      },
+      201,
+    );
+  }
+
+  private async redeemInvite(request: Request, tenant: string): Promise<Response> {
+    const input = await body(request);
+    const username = text(input.username, "username", 128);
+    const code = text(input.code, "code", 256);
+    if (!new RegExp(`^${tenant}\\.[a-f0-9]{64}$`).test(code))
+      throw new HttpError(400, "invalid_invite", "Use the invitation code for this workspace.");
+    const codeHash = await digest(code.slice(tenant.length + 1));
+    const token = newToken();
+    const hash = await digest(token);
+    return this.ctx.storage.transactionSync(() => {
+      const invite = this.ctx.storage.sql
+        .exec<InviteRow>("SELECT * FROM invites WHERE code_hash = ?", codeHash)
+        .toArray()[0];
+      if (!invite || invite.expiresAt <= Date.now() || !invite.remaining)
+        throw new HttpError(
+          410,
+          "invite_unavailable",
+          "Invitation expired, revoked or fully used. Ask for a new invitation.",
+        );
+      try {
+        this.requireScope(this.authorize(invite.creator_hash), invite.channel);
+      } catch {
+        throw new HttpError(
+          410,
+          "invite_unavailable",
+          "The inviter no longer has access. Ask for a new invitation.",
+        );
+      }
+      this.requireKeyCapacity();
+      const id = crypto.randomUUID();
+      this.ctx.storage.sql.exec(
+        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope) VALUES (?, ?, ?, NULL, ?, ?)",
+        id,
+        hash,
+        username,
+        new Date().toISOString(),
+        invite.channel,
+      );
+      this.ctx.storage.sql.exec("UPDATE invites SET remaining = remaining - 1 WHERE id = ?", invite.id);
+      return json(
+        {
+          ...this.identity(
+            tenant,
+            { bound_username: username, bound_prefix: null, channel_scope: invite.channel },
+            token,
+          ),
+          keyId: id,
+        },
+        201,
+      );
+    });
+  }
+
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -661,24 +830,19 @@ export class MsnDurableObject extends DurableObject<Env> {
       const tenantIndex = isAdmin ? 3 : 2;
       const tenant = slug(parts[tenantIndex] ?? "");
       const rest = parts.slice(tenantIndex + 1);
+      if (!isAdmin && !rest.length && request.method === "PUT") {
+        const input = await body(request);
+        const username = text(input.username, "username", 128);
+        const channel = input.channel === undefined ? "general" : slug(text(input.channel, "channel", 64));
+        return await this.provision(tenant, { username, prefix: null }, channel);
+      }
+      if (!isAdmin && rest.join("/") === "invites/redeem" && request.method === "POST")
+        return await this.redeemInvite(request, tenant);
       if (isAdmin) {
         await admin(request, this.env);
         if (!rest.length && request.method === "PUT") {
           const bind: Binding = binding(await optionalBody(request)) ?? { username: null, prefix: null };
-          const token = newToken();
-          const hash = await digest(token);
-          if (this.ctx.storage.sql.exec("SELECT singleton FROM tenant").toArray().length)
-            throw new HttpError(409, "tenant_exists", "Tenant already exists. Rotate its key instead.");
-          this.ctx.storage.sql.exec(
-            "INSERT INTO tenant (singleton, token_hash, bound_username, bound_prefix) VALUES (1, ?, ?, ?)",
-            hash,
-            bind.username,
-            bind.prefix,
-          );
-          return json(
-            this.identity(tenant, { bound_username: bind.username, bound_prefix: bind.prefix }, token),
-            201,
-          );
+          return await this.provision(tenant, bind);
         }
         this.requireTenant();
         if (rest.length === 1 && rest[0] === "token" && request.method === "POST") {
@@ -699,6 +863,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             }
             // Rotation remains a workspace-wide emergency reset, not a partial revocation.
             this.ctx.storage.sql.exec("DELETE FROM access_keys");
+            this.ctx.storage.sql.exec("DELETE FROM invites");
           });
           for (const waiter of this.waiters) waiter.wake();
           return json(this.identity(tenant, this.authorize(hash), token));
@@ -707,8 +872,12 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 1 && request.method === "GET") {
             return json({
               keys: this.ctx.storage.sql
-                .exec(`SELECT ${KEY_METADATA} FROM access_keys ORDER BY id`)
-                .toArray(),
+                .exec(`SELECT ${KEY_METADATA}, channel_scope FROM access_keys ORDER BY id`)
+                .toArray()
+                .map(({ channel_scope, ...key }) => ({
+                  ...key,
+                  ...(channel_scope ? { channel: channel_scope } : {}),
+                })),
             });
           }
           if (rest.length === 2) {
@@ -730,12 +899,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                     "key_exists",
                     "Key already exists. Revoke it before issuing a replacement.",
                   );
-                if (
-                  this.ctx.storage.sql
-                    .exec<{ count: number }>("SELECT COUNT(*) AS count FROM access_keys")
-                    .one().count >= MAX_KEYS
-                )
-                  throw new HttpError(409, "key_quota", "Tenant participant key limit reached (1,000).");
+                this.requireKeyCapacity();
                 return this.ctx.storage.sql
                   .exec(
                     `INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt) VALUES (?, ?, ?, ?, ?) RETURNING ${KEY_METADATA}`,
@@ -806,6 +970,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
       } else {
         const hash = await digest(bearer(request));
+        if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
+          return await this.createInvite(request, tenant, hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.
         const input =
           request.method === "POST" && rest.length === 3 && rest[2] === "messages"
@@ -840,6 +1006,18 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Bound-name check precedes any transaction: a rejected send stores nothing and wakes nobody.
         if (input) this.requireBoundName(capability, username);
         if (!rest.length && request.method === "GET") return json(this.identity(tenant, capability));
+        if (rest[0] === "invites" && rest.length === 2 && request.method === "DELETE") {
+          const deleted = this.ctx.storage.sql
+            .exec("DELETE FROM invites WHERE id = ? AND creator_hash = ? RETURNING id", rest[1], hash)
+            .toArray();
+          if (!deleted.length)
+            throw new HttpError(
+              404,
+              "invite_not_found",
+              "Invitation not found or belongs to another participant.",
+            );
+          return new Response(null, { status: 204 });
+        }
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
           if (after) slug(after);
@@ -847,8 +1025,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
           const channels = this.ctx.storage.sql
             .exec<{ name: string; createdAt: string }>(
-              "SELECT name, createdAt FROM channels WHERE name > ? ORDER BY name LIMIT ?",
+              `SELECT c.name, c.createdAt, COUNT(m.id) AS messageCount, MAX(m.createdAt) AS lastActivityAt,
+               COUNT(DISTINCT m.username) AS participantCount
+               FROM channels c LEFT JOIN messages m ON m.channel = c.name AND m.deleted = 0
+               WHERE c.name > ? AND (? IS NULL OR c.name = ?) GROUP BY c.name ORDER BY c.name LIMIT ?`,
               after,
+              capability.channel_scope ?? null,
+              capability.channel_scope ?? null,
               limit + 1,
             )
             .toArray();
@@ -860,6 +1043,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         if (rest[0] === "channels" && rest[1]) {
           const channel = slug(rest[1]);
+          this.requireScope(capability, channel);
           if (rest.length === 2 && request.method === "PUT") {
             const created = this.createChannel(channel);
             return json({ channel, created }, created ? 201 : 200);

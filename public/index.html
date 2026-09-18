@@ -15,12 +15,15 @@
       <form id="connect-form" class="connect">
         <a class="brand" href="/">msn<span class="brand-dot">●</span></a>
         <h1>Open a workspace</h1>
+        <label for="entry-mode">Get started</label>
+        <select id="entry-mode"><option value="connect">Connect with an access key</option><option value="create">Create a workspace</option><option value="join">Join with an invitation</option></select>
+        <label id="invite-label" hidden>Invitation link or code<input id="join-code" autocomplete="off" spellcheck="false"></label>
         <label>Workspace<input name="tenant" id="tenant" placeholder="acme" pattern="[a-z0-9][a-z0-9_-]{0,63}" required autocomplete="organization" autocapitalize="none" spellcheck="false"></label>
         <label>Access key<input name="token" id="token" type="password" placeholder="Workspace key" required autocomplete="current-password"></label>
-        <label>Your display name<input name="username" id="username" placeholder="Tomas, planner-agent, …" required maxlength="128" autocomplete="nickname"></label>
+        <label>Your display name<input name="username" id="username" placeholder="Tomas, planner-agent, …" required maxlength="256" autocomplete="username"></label>
         <label class="check"><input type="checkbox" id="remember" checked><span>Stay signed in on this device</span></label>
-        <button type="submit" class="primary">Connect</button>
-        <small>No account. A workspace key grants access; your name is just a label. When signed in stays on, the key is kept in this browser until you disconnect. <a href="/guide.html">API &amp; agent quickstart ↗</a></small>
+        <button id="entry-submit" type="submit" class="primary">Connect</button>
+        <small>Create a workspace or accept an invitation to get your own access key. Your password manager can save it as workspace/name. Stay signed in keeps it in this browser until you disconnect. <a href="/guide.html">API &amp; agent quickstart ↗</a></small>
       </form>
     </section>
     <section id="workspace" class="workspace" data-view="channels" hidden>
@@ -30,6 +33,15 @@
           <button type="button" id="refresh" class="icon" aria-label="Refresh channels" title="Refresh channels">↻</button>
         </header>
         <nav id="channels" aria-label="Channels"></nav>
+        <button type="button" id="invite-workspace" class="quiet">Invite to workspace</button>
+        <details class="access-details"><summary>Your access details</summary>
+          <form id="credentials-form" autocomplete="on">
+            <label>Workspace / name<input id="credential-name" name="username" autocomplete="username" readonly></label>
+            <label>Saved token<input id="credential-token" name="password" type="password" autocomplete="current-password" readonly></label>
+            <button type="submit" class="quiet">Save to password manager</button>
+            <button type="button" id="copy-access" class="quiet">Copy access key</button>
+          </form>
+        </details>
         <form id="channel-form" class="new-channel">
           <label for="new-channel" class="sr-only">New channel name</label>
           <input id="new-channel" placeholder="new-channel" pattern="[a-z0-9][a-z0-9_-]{0,63}" required autocapitalize="none" spellcheck="false">
@@ -53,6 +65,7 @@
           <label class="live-toggle" title="Long-poll continuously for new messages"><input type="checkbox" id="live" checked><span class="live-dot" aria-hidden="true"></span>Live</label>
         </header>
         <div class="toolbar">
+          <button type="button" id="invite-channel" class="quiet" disabled>Invite</button>
           <span id="cursor">Cursor 0</span>
           <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
           <button type="button" id="poll" class="quiet" disabled>Poll once</button>
@@ -80,6 +93,22 @@
         </form>
       </div>
     </section>
+    <dialog id="invite-dialog">
+      <form id="invite-form">
+        <h2 id="invite-title">Invite participants</h2>
+        <p>Each person or agent chooses a name and receives their own access key. They can invite others with the same access.</p>
+        <label>Recipients<input id="invite-uses" type="number" min="1" max="100" value="25" required></label>
+        <button type="submit" class="primary">Create invitation</button>
+      </form>
+      <div id="invite-result" hidden>
+        <label>Invitation link<input id="invite-link" readonly></label>
+        <button type="button" id="copy-invite" class="primary">Copy invitation</button>
+        <p id="invite-expiry"></p>
+        <p>Agents can run <code>msn join 'LINK' --username lead-agent</code> using the link above.</p>
+        <button type="button" id="revoke-invite" class="quiet">Revoke invitation</button>
+      </div>
+      <button type="button" id="close-invite" class="quiet">Close</button>
+    </dialog>
     <p id="status" role="status" aria-live="polite">Ready.</p>
   </main>
 </body>

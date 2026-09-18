@@ -1,3 +1,5 @@
+import { acquire, invitation, savePassword } from "./access.js";
+
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "msn.session";
 const CHANNEL_KEY = (tenant) => `msn.channel.${tenant}`;
@@ -125,6 +127,10 @@ function endSession(connection, message) {
   channel = "";
   $("live").checked = false;
   $("token").value = "";
+  $("credential-token").value = "";
+  $("credential-name").value = "";
+  $("invite-link").value = "";
+  $("invite-dialog").close();
   $("message").value = "";
   $("recipient").value = "";
   $("new-channel").value = "";
@@ -140,7 +146,8 @@ function endSession(connection, message) {
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   $("jump").hidden = true;
-  for (const id of ["poll", "catchup", "reread", "recipient", "message", "send"]) $(id).disabled = true;
+  for (const id of ["poll", "catchup", "reread", "recipient", "message", "send", "invite-channel"])
+    $(id).disabled = true;
   $("workspace").hidden = true;
   $("welcome").hidden = false;
   view("channels");
@@ -161,7 +168,7 @@ async function api(path, options = {}, connection = session) {
     endSession(connection, message);
     throw Object.assign(new Error(message), { status: 401 });
   }
-  const data = await response.json();
+  const data = response.status === 204 ? {} : await response.json();
   if (!response.ok) {
     const error = new Error(data.error?.message ?? `Request failed (${response.status})`);
     error.status = response.status;
@@ -392,6 +399,7 @@ async function poll(live = false) {
 }
 
 function selectChannel(name, { reset = false } = {}) {
+  $("invite-channel").disabled = false;
   savePosition();
   stopPolling();
   channel = name;
@@ -453,6 +461,7 @@ async function refreshChannels(connection = session) {
     button.type = "button";
     button.dataset.channel = item.name;
     button.textContent = `# ${item.name}`;
+    button.title = `${item.messageCount ?? 0} messages · ${item.participantCount ?? 0} authors${item.lastActivityAt ? ` · Last activity ${formatTime(item.lastActivityAt)}` : ""}`;
     button.setAttribute("aria-current", String(channel === item.name));
     button.addEventListener("click", () => selectChannel(item.name));
     $("channels").append(button);
@@ -466,7 +475,7 @@ async function refreshChannels(connection = session) {
   return channels;
 }
 
-async function connect(connection, { initial = "" } = {}) {
+async function connect(connection, { initial = "", offerSave = false } = {}) {
   stopPolling();
   session = connection;
   status("Connecting…");
@@ -494,6 +503,11 @@ async function connect(connection, { initial = "" } = {}) {
     $("workspace").hidden = false;
     $("workspace-name").textContent = connection.tenant;
     $("display-name").textContent = connection.username;
+    $("channel-form").hidden = Boolean(identity.channel);
+    $("invite-workspace").hidden = Boolean(identity.channel);
+    $("credential-name").value = `${connection.tenant}/${connection.username}`;
+    $("credential-token").value = connection.token;
+    if (offerSave) void savePassword(connection);
     $("identity-note").textContent = note;
     $("identity-note").title = note;
     // A bound key stores the name the server enforces, not the one that was typed.
@@ -519,6 +533,7 @@ async function connect(connection, { initial = "" } = {}) {
 
 $("connect-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const mode = $("entry-mode").value;
   const connection = {
     tenant: $("tenant").value.trim(),
     token: $("token").value.trim(),
@@ -527,11 +542,133 @@ $("connect-form").addEventListener("submit", async (event) => {
     drafts: new Map(),
     channels: new Map(),
   };
+  // Password managers save a compound username so several tenants on one origin round-trip.
+  if (
+    mode === "connect" &&
+    connection.username.includes("/") &&
+    (!connection.tenant || connection.username.startsWith(`${connection.tenant}/`))
+  ) {
+    const split = connection.username.indexOf("/");
+    connection.tenant = connection.username.slice(0, split);
+    connection.username = connection.username.slice(split + 1);
+  }
   if (!connection.username || new TextEncoder().encode(connection.username).length > 128) {
     status("Display name must be 1–128 UTF-8 bytes.", true);
     return;
   }
-  await connect(connection, { initial: storage.get(CHANNEL_KEY(connection.tenant)) ?? "" });
+  $("entry-submit").disabled = true;
+  try {
+    let initial = storage.get(CHANNEL_KEY(connection.tenant)) ?? "";
+    if (mode !== "connect") {
+      const invite = mode === "join" ? invitation($("join-code").value) : null;
+      const credentials = await acquire(
+        invite?.tenant ?? connection.tenant,
+        invite ? "POST" : "PUT",
+        invite ? "/invites/redeem" : "",
+        { username: connection.username, ...(invite ? { code: invite.code } : {}) },
+      );
+      Object.assign(connection, {
+        tenant: credentials.tenant,
+        username: credentials.username,
+        token: credentials.token,
+      });
+      initial = credentials.channel ?? credentials.initialChannel ?? "";
+      // Preserve a just-issued key in the form even if the follow-up connection fails.
+      $("tenant").value = connection.tenant;
+      $("token").value = connection.token;
+      $("entry-mode").value = "connect";
+      entryMode();
+    }
+    await connect(connection, { initial, offerSave: true });
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    $("entry-submit").disabled = false;
+  }
+});
+
+function entryMode() {
+  const mode = $("entry-mode").value;
+  $("invite-label").hidden = mode !== "join";
+  $("join-code").required = mode === "join";
+  $("tenant").parentElement.hidden = mode === "join";
+  $("tenant").required = mode === "create";
+  $("token").parentElement.hidden = mode !== "connect";
+  $("token").required = mode === "connect";
+  $("entry-submit").textContent = { connect: "Connect", create: "Create workspace", join: "Join workspace" }[
+    mode
+  ];
+}
+$("entry-mode").addEventListener("change", entryMode);
+$("credentials-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const offered = await savePassword(session);
+  status(
+    offered
+      ? "Access details offered to your password manager."
+      : "Save the workspace / name and access key in your password manager. Automatic saving is unavailable in this browser.",
+  );
+});
+async function copy(value, message) {
+  try {
+    await navigator.clipboard.writeText(value);
+    status(message);
+  } catch {
+    status("Clipboard unavailable. Select and copy the field manually.", true);
+  }
+}
+$("copy-access").addEventListener("click", () => copy(session.token, "Access key copied."));
+let inviteChannel = null;
+let activeInvite = null;
+function openInvite(scope) {
+  inviteChannel = scope;
+  activeInvite = null;
+  $("invite-title").textContent = scope ? `Invite to # ${scope}` : "Invite to workspace";
+  $("invite-form").hidden = false;
+  $("invite-result").hidden = true;
+  $("invite-link").value = "";
+  $("invite-dialog").showModal();
+}
+$("invite-channel").addEventListener("click", () => openInvite(channel));
+$("invite-workspace").addEventListener("click", () => openInvite(null));
+$("close-invite").addEventListener("click", () => $("invite-dialog").close());
+$("invite-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const connection = session;
+  const submit = event.submitter;
+  submit.disabled = true;
+  try {
+    const result = await api(
+      "/invites",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel: inviteChannel, maxUses: Number($("invite-uses").value) }),
+      },
+      connection,
+    );
+    if (session !== connection) return;
+    activeInvite = result.id;
+    $("invite-link").value = result.url;
+    $("invite-expiry").textContent =
+      `Up to ${result.maxUses} recipients · Expires ${new Date(result.expiresAt).toLocaleString()}`;
+    $("invite-form").hidden = true;
+    $("invite-result").hidden = false;
+  } catch (error) {
+    if (session === connection) status(error.message, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
+$("copy-invite").addEventListener("click", () => copy($("invite-link").value, "Invitation copied."));
+$("revoke-invite").addEventListener("click", async () => {
+  try {
+    await api(`/invites/${activeInvite}`, { method: "DELETE" });
+    $("invite-dialog").close();
+    status("Invitation revoked. Existing participants keep their access.");
+  } catch (error) {
+    status(error.message, true);
+  }
 });
 
 $("channel-form").addEventListener("submit", async (event) => {
@@ -668,7 +805,21 @@ $("jump").addEventListener("click", () => {
 });
 
 // Reconnect with remembered credentials; an invalid key is forgotten and the form shown instead.
-const remembered = savedSession();
+function receiveInvitation() {
+  const code = new URLSearchParams(location.hash.slice(1)).get("invite");
+  if (!code) return false;
+  history.replaceState(null, "", location.pathname);
+  if (session) endSession(session, "Choose your name to join this invitation.");
+  $("entry-mode").value = "join";
+  $("join-code").value = code;
+  $("username").value = "";
+  entryMode();
+  return true;
+}
+window.addEventListener("hashchange", receiveInvitation);
+const incomingInvite = receiveInvitation();
+entryMode();
+const remembered = incomingInvite ? null : savedSession();
 if (remembered) {
   $("tenant").value = remembered.tenant;
   $("token").value = remembered.token; // Cleared on success; left in place so a transient failure is one tap to retry.

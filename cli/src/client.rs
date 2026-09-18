@@ -68,7 +68,7 @@ impl MsnClient {
         self.exchange("DELETE", path, Some(token), &[], None::<&Value>)
     }
 
-    fn exchange<T: Serialize>(
+    pub(crate) fn exchange<T: Serialize>(
         &self,
         method: &str,
         path: &str,

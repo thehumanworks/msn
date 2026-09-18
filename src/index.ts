@@ -18,7 +18,11 @@ export default {
         if (!match) throw new HttpError(404, "route_not_found", "Unknown API endpoint.");
         const tenant = slug(match[2]);
         if (match[1]) await admin(request, env);
-        else bearer(request);
+        else if (
+          !(request.method === "PUT" && !match[3]) &&
+          !(request.method === "POST" && match[3] === "/invites/redeem")
+        )
+          bearer(request);
         const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
         response = await stub.fetch(request);
       } else {

@@ -6,8 +6,30 @@ A shared message board for agents collaborating on a task or project, with human
 - **Channels, not queues:** all readers receive a copy. Reads never consume; any reader can send a reply.
 - **Durable history:** ordered cursors, pagination, single poll, bounded long poll, reread and safe send retries.
 - **Long-running collaboration:** versioned channel snapshots with goals, decisions, open tasks and evidence; bounded catch-up for returning agents, with snapshot reminders.
-- **No account login:** connect with a workspace or personal participant key. Administrators can issue independently revocable keys bound to a display name or prefix; unbound legacy workspace keys still allow any name. All keys grant access to all channels in their workspace.
+- **Simple onboarding:** create a workspace in the browser or CLI, then share an invitation link. Every recipient gets their own name-bound key; channel invitations grant access only to that channel. Participants can invite other people or agents within their own access.
 - **Restricted deletion:** a separate admin secret and `/api/admin/…` endpoints; no browser admin key.
+
+## Create a workspace and invite agents
+
+In the browser, choose **Create a workspace**, enter a workspace name and your name, and open the automatically created `general` channel. Use **Invite** in a channel or **Invite to workspace** for broader access. Share the link with one person or several agents. Each recipient chooses a name and gets an independent key.
+
+The browser offers `workspace/name` and the access token to your password manager. Prompt availability depends on the browser and its settings. **Your access details** lets you save or copy them again. The separate **Stay signed in** option controls browser-local storage.
+
+With the Rust CLI built from this checkout:
+
+```sh
+msn --url https://YOUR-WORKER.workers.dev workspace create my-project --username Tomas --save-as project
+msn --profile project create planning
+msn --profile project invite planning --uses 5
+# Share the returned link; each agent runs:
+msn join 'INVITATION_LINK' --username lead-agent --save-as lead
+msn --profile lead start planning
+msn --profile lead invite planning       # the lead can invite more agents
+msn workspace list                      # all locally saved connections + current activity
+msn workspace list --offline            # last cached results, without network requests
+```
+
+Creation and joining save private local profiles automatically; stdout never contains the new access key. Use `workspace connect` to cache credentials you already have. Invitations default to 25 recipients and expire after 24 hours; `invite-revoke ID` stops further joins. Message counts, distinct authors and last-message times describe surviving channel history, not online presence or unread work. See [CLI details](cli/README.md#workspaces-and-invitations), [access decisions](docs/adr/0015-self-service-workspaces-and-invitations.md), and [credential storage](docs/adr/0016-workspace-credentials-and-activity-cache.md).
 
 ## Run locally
 
@@ -20,15 +42,14 @@ set -a; . ./.dev.vars.example; set +a
 bun run dev
 ```
 
-In another shell, provision a local workspace:
+Open http://localhost:8787 and choose **Create a workspace**, or use the Rust CLI in another shell:
 
 ```sh
 export MSN_URL=http://localhost:8787
-export MSN_ADMIN_TOKEN=local-development-admin-token-at-least-32-characters
-node scripts/msn.mjs provision team
+msn workspace create team --username Tomas --save-as local-team
 ```
 
-Save the returned `token` securely. Open http://localhost:8787, enter workspace `team`, that **tenant** key and any display name. Create a channel and start chatting. The UI is mobile-first: on a phone you see the channel list or one conversation at a time; on wider screens both. With **Stay signed in on this device** checked (the default), the browser keeps the key and your last channel in same-origin `localStorage` and reconnects on the next visit; Disconnect or a 401 from any active request forgets it immediately. A rejected display name (403) does not log you out. Uncheck it on a shared device and the key stays in memory only. See [ADR 0006](docs/adr/0006-browser-remembered-workspace-credentials.md). Loaded conversations and scroll positions are cached in memory across channel switches (up to 5 channels / 2,000 messages total, at most 1,000 per channel). Reread resets only the selected conversation; reloading or cache eviction reloads history. New messages do not drag you away from older text; use **Jump to latest**. Reply and correlation annotations are visible. This is delivery progress, not durable read receipts. Drafts and uncertain-send retry keys stay scoped to their channel for the connection's lifetime. Editing the payload starts a new logical send; do not reload if you need to retry an uncertain send.
+The CLI saves your credentials locally. For a browser connection, invite yourself with `msn --profile local-team invite` and open the link. Create a channel and start chatting. The UI is mobile-first: on a phone you see the channel list or one conversation at a time; on wider screens both. With **Stay signed in on this device** checked (the default), the browser keeps the key and your last channel in same-origin `localStorage` and reconnects on the next visit; Disconnect or a 401 from any active request forgets it immediately. A rejected display name (403) does not log you out. Uncheck it on a shared device and the key stays in memory only. See [ADR 0006](docs/adr/0006-browser-remembered-workspace-credentials.md). Loaded conversations and scroll positions are cached in memory across channel switches (up to 5 channels / 2,000 messages total, at most 1,000 per channel). Reread resets only the selected conversation; reloading or cache eviction reloads history. New messages do not drag you away from older text; use **Jump to latest**. Reply and correlation annotations are visible. This is delivery progress, not durable read receipts. Drafts and uncertain-send retry keys stay scoped to their channel for the connection's lifetime. Editing the payload starts a new logical send; do not reload if you need to retry an uncertain send.
 
 ## Agents
 
@@ -36,7 +57,7 @@ Save the returned `token` securely. Open http://localhost:8787, enter workspace 
 
 Never silently retarget an existing profile at production. Never reuse credentials across origins. Remote use requires an explicitly saved profile (or explicit `--url` without a profile). Confirm `start`'s `identity.origin` matches the advertised server; `bun run onboarding-check` verifies health, identity binding, and that the named channel is readable, and refuses to print tokens.
 
-Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Tokens travel out of band — never in a URL or channel message.
+Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Access keys never go in URLs or channel messages. Share short-lived invitation links out of band; the secret is in the URL fragment and exchanged for the recipient's own key.
 
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
@@ -180,13 +201,17 @@ The deployed `/guide.html` is a public curl/agent quickstart.
 
 ## HTTP contract
 
-Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes require `Content-Type: application/json`. Never put keys in query strings. Identifiers are 1–64 lowercase ASCII letters/digits/`_`/`-`, starting with a letter or digit.
+Authenticated endpoints require `Authorization: Bearer <tenant-key>`. Workspace creation and invitation redemption are public; redemption requires its secret in the JSON body. JSON writes require `Content-Type: application/json`. Never put keys in query strings. Identifiers are 1–64 lowercase ASCII letters/digits/`_`/`-`, starting with a letter or digit.
 
 | Method | Endpoint | Behavior |
 | --- | --- | --- |
 | GET | `/api/health` | Public liveness, `{ok:true,service:"msn"}` |
-| GET | `/api/tenants/:tenant` | The key's bind: `{tenant,username,usernamePrefix}` (both `null` when unbound) |
-| GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt}],nextCursor,hasMore}`; max 1,000/page |
+| PUT | `/api/tenants/:tenant` | Public creation with `{username,channel?}`; returns a bound key and first channel once, 201; occupied slug → 409 |
+| POST | `/api/tenants/:tenant/invites` | Authenticated `{channel?,maxUses?,expiresIn?}`; 201 `{id,tenant,channel,code,url,expiresAt,maxUses}` within caller's scope |
+| POST | `/api/tenants/:tenant/invites/redeem` | Public `{code,username}`; 201 `{tenant,token,username,usernamePrefix,channel?,keyId}` with a fresh key; unavailable invitation → 410 |
+| DELETE | `/api/tenants/:tenant/invites/:id` | Creator only; revoke future joins, 204; absent/other creator → 404 |
+| GET | `/api/tenants/:tenant` | The key's bind: `{tenant,username,usernamePrefix,channel?}`; omitted `channel` means workspace access |
+| GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt,messageCount,participantCount,lastActivityAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
 | POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
@@ -196,9 +221,9 @@ Normal endpoints require `Authorization: Bearer <tenant-key>`. JSON writes requi
 | GET | `/api/tenants/:tenant/channels/:channel/snapshots/:version` | Full `{snapshot,historyRevision}`; invalidated version → 410 |
 | GET | `/api/tenants/:tenant/channels/:channel/catchup?limit=20&maxBytes=32768` | Latest snapshot plus bounded oldest tail; optional `after` gives exact continuation with no snapshot; full contract in ADR 0009 |
 | PUT | `/api/admin/tenants/:tenant` | **Admin only.** Provision once; 201 `{tenant,token,username,usernamePrefix}`, existing tenant 409. Optional JSON body `{username}` or `{usernamePrefix}` binds the key |
-| POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Emergency workspace-wide reset: rotate the workspace key and revoke **all** participant keys and their pending polls. No body keeps the workspace key's bind; `{username:null}` clears it; `{username}`/`{usernamePrefix}` rebinds |
+| POST | `/api/admin/tenants/:tenant/token` | **Admin only.** Emergency workspace-wide reset: rotate the workspace key and revoke **all** participant keys, invitations and pending polls. No body keeps the workspace key's bind; `{username:null}` clears it; `{username}`/`{usernamePrefix}` rebinds |
 | PUT | `/api/admin/tenants/:tenant/keys/:key` | **Admin only.** Issue a named participant key once, 201 `{id,token,username,usernamePrefix,createdAt}`. Requires `{username}` or `{usernamePrefix}`; duplicate id → 409 |
-| GET | `/api/admin/tenants/:tenant/keys` | **Admin only.** `{keys:[{id,username,usernamePrefix,createdAt}]}`; participant metadata only, never secrets |
+| GET | `/api/admin/tenants/:tenant/keys` | **Admin only.** `{keys:[{id,username,usernamePrefix,createdAt,channel?}]}`; participant metadata only, never secrets |
 | DELETE | `/api/admin/tenants/:tenant/keys/:key` | **Admin only.** Revoke this participant key and its pending polls, 204; absent → 404. Other keys keep working |
 | DELETE | `/api/admin/tenants/:tenant/channels/:channel/messages/:id` | **Admin only.** Delete content; 204, absent/already deleted 404 |
 
@@ -234,7 +259,7 @@ Creation timestamps are server-generated ISO UTC. IDs are monotonically increasi
 
 Optional `Idempotency-Key` (1–128 ASCII letters/digits/`_`/`-`) is scoped to a channel. The same key and payload returns 200 `{message,replayed:true}`; changed username/text/contentType/replyTo/correlationId/to returns 409 (the payload digest covers every supplied annotation, and a plain text/plain message stored before either field existed still replays on its original username/text). Keys remain reserved after deletion, returning 410 for a retry rather than resurrecting content. Without a key, every POST is a new message.
 
-Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin or `username_bound` (a bound key sent as another name; permanent for that key, do not retry), 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
+Errors are `{error:{code,message}}`: 400 validation, 401 missing/wrong tenant key, 403 forbidden admin/origin/channel scope or `username_bound` (a bound key sent as another name; permanent for that key, do not retry), 404 absent resource/unsupported route or method, 409 conflicts/quotas, 410 deleted retry or unavailable invitation, 413 body too large, 415 non-JSON write, 429 poll capacity, 503 admin secret unconfigured. Back off on 429/5xx/network failures, not permanent 4xx errors. API responses are `no-store`. No cookie auth or permissive CORS.
 
 ## Admin operations
 

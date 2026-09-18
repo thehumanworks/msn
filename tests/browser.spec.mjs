@@ -973,3 +973,152 @@ for (const transition of ["Poll once", "Live", "channel return"]) {
     await expect(page.locator("#checkpoint-text")).toHaveText("");
   });
 }
+
+test("self-service web creation invites a CLI lead who can invite another web participant", async ({
+  page,
+  baseURL,
+}, testInfo) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = await mkdtemp(join(tmpdir(), "msn-invite-browser-"));
+  const binary = fileURLToPath(new URL("../cli/target/debug/msn", import.meta.url));
+  const run = async (args) => {
+    const { stdout } = await promisify(execFile)(binary, args, {
+      env: { HOME: home, XDG_CONFIG_HOME: join(home, "config"), MSN_URL: baseURL },
+    });
+    return JSON.parse(stdout);
+  };
+  await page.addInitScript(() => {
+    window.savedPasswords = [];
+    window.PasswordCredential = class {
+      constructor(data) {
+        Object.assign(this, data);
+      }
+    };
+    Object.defineProperty(navigator, "credentials", {
+      value: {
+        store: async (credential) => {
+          window.savedPasswords.push(credential);
+        },
+      },
+    });
+  });
+  try {
+    const tenant = `web-${crypto.randomUUID()}`;
+    await page.goto("/");
+    await page.getByLabel("Get started").selectOption("create");
+    await page.getByLabel("Workspace", { exact: true }).fill(tenant);
+    await page.getByLabel("Your display name").fill("Tomas");
+    await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+    await expect(page.locator("#channel-title")).toHaveText("# general");
+    await expect.poll(() => page.evaluate(() => window.savedPasswords.length)).toBe(1);
+    const credential = await page.evaluate(() => window.savedPasswords[0]);
+    expect(credential.id).toBe(`${tenant}/Tomas`);
+    expect(credential.password).toHaveLength(64);
+    await page.getByRole("button", { name: "Invite", exact: true }).click();
+    await page.getByLabel("Recipients", { exact: true }).fill("2");
+    await page.getByRole("button", { name: "Create invitation", exact: true }).click();
+    await expect(page.locator("#invite-result")).toBeVisible();
+    const link = await page.getByLabel("Invitation link", { exact: true }).inputValue();
+    expect(link).not.toContain(credential.password);
+    await page.screenshot({ path: testInfo.outputPath("invitation.png") });
+    const lead = await run(["join", link, "--username", "lead-agent", "--save-as", "lead"]);
+    expect(lead.activity.channels.map((channel) => channel.name)).toEqual(["general"]);
+    const delegated = await run(["--profile", "lead", "invite", "general", "--uses", "1"]);
+    await run(["--profile", "lead", "send", "general", "--text", "Lead is ready"]);
+    const summary = await run(["workspace", "list"]);
+    expect(summary.workspaces[0].activity.channels[0].messageCount).toBe(1);
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByText("Lead is ready", { exact: true })).toBeVisible();
+    // Incoming links must take priority over the owner's remembered browser session.
+    await page.goto(delegated.url);
+    await expect(page.locator("#entry-mode")).toHaveValue("join");
+    expect(new URL(page.url()).hash).toBe("");
+    await page.getByLabel("Your display name").fill("worker-agent");
+    await page.getByRole("button", { name: "Join workspace", exact: true }).click();
+    await expect(page.locator("#channel-title")).toHaveText("# general");
+    await page.getByLabel("Message", { exact: true }).fill("Worker is ready");
+    await page.getByRole("button", { name: "Send message" }).click();
+    await expect(page.getByText("Worker is ready", { exact: true })).toBeVisible();
+    await channelsPane(page);
+    await expect(page.locator("#channel-form")).toBeHidden();
+    await expect(page.locator("#invite-workspace")).toBeHidden();
+    await page.reload();
+    await expect(page.locator("#display-name")).toHaveText("worker-agent");
+    const cached = await run(["workspace", "list", "--offline"]);
+    expect(cached.workspaces[0].status).toBe("cached");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI creates a workspace and a web recipient joins by code when password saving is unavailable", async ({
+  page,
+  baseURL,
+}) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = await mkdtemp(join(tmpdir(), "msn-create-browser-"));
+  const binary = fileURLToPath(new URL("../cli/target/debug/msn", import.meta.url));
+  const run = async (args) =>
+    JSON.parse(
+      (
+        await promisify(execFile)(binary, args, {
+          env: { HOME: home, XDG_CONFIG_HOME: join(home, "config"), MSN_URL: baseURL },
+        })
+      ).stdout,
+    );
+  await page.addInitScript(() => {
+    window.PasswordCredential = undefined;
+  });
+  try {
+    const tenant = `cli-${crypto.randomUUID()}`;
+    await run(["workspace", "create", tenant, "--username", "owner", "--save-as", "owner"]);
+    const invite = await run(["--profile", "owner", "invite", "--uses", "2"]);
+    await page.goto("/");
+    await page.getByLabel("Get started").selectOption("join");
+    await page.getByLabel("Invitation link or code").fill(invite.code);
+    await page.getByLabel("Your display name").fill("human");
+    await page.getByRole("button", { name: "Join workspace", exact: true }).click();
+    await expect(page.locator("#workspace")).toBeVisible();
+    await channelsPane(page);
+    await page.getByLabel("New channel name").fill("planning");
+    await page.getByRole("button", { name: "Create channel", exact: true }).click();
+    await expect(page.locator("#channel-title")).toHaveText("# planning");
+    await channelsPane(page);
+    await page.getByText("Your access details", { exact: true }).click();
+    await page.getByRole("button", { name: "Save to password manager" }).click();
+    await expect(page.locator("#status")).toContainText("Automatic saving is unavailable");
+    await page.getByRole("button", { name: "Invite to workspace" }).click();
+    await page.getByRole("button", { name: "Create invitation", exact: true }).click();
+    await expect(page.locator("#invite-result")).toBeVisible();
+    const issued = await page.getByLabel("Invitation link", { exact: true }).inputValue();
+    await page.getByRole("button", { name: "Revoke invitation", exact: true }).click();
+    await expect(page.locator("#invite-dialog")).not.toBeVisible();
+    await page.goto(issued);
+    await page.getByLabel("Your display name").fill("late-agent");
+    await page.getByRole("button", { name: "Join workspace", exact: true }).click();
+    await expect(page.locator("#status")).toContainText("expired, revoked or fully used");
+    await expect(page.locator("#welcome")).toBeVisible();
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("password-manager usernames restore the workspace and preserve names containing slashes", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request, { username: "agent/reviewer" });
+  await connect(page, t, "agent/reviewer", { live: false });
+  await expect(page.locator("#display-name")).toHaveText("agent/reviewer");
+  await disconnect(page);
+  await page.getByLabel("Workspace", { exact: true }).fill("");
+  await page.getByLabel("Your display name").fill(`${t.tenant}/agent/reviewer`);
+  await page.getByLabel("Access key", { exact: true }).fill(t.token);
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.locator("#workspace-name")).toHaveText(t.tenant);
+  await expect(page.locator("#display-name")).toHaveText("agent/reviewer");
+});

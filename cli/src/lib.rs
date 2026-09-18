@@ -12,6 +12,7 @@ pub mod processing;
 pub mod profile;
 pub mod task_client;
 pub mod tasks;
+pub mod workspace;
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -44,6 +45,15 @@ const BACKOFF_MAX_MS: u64 = 15000;
 pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     if matches!(
         &cli.command,
+        Command::Workspace { .. }
+            | Command::Invite { .. }
+            | Command::Join { .. }
+            | Command::InviteRevoke { .. }
+    ) {
+        return workspace::execute(&cli);
+    }
+    if matches!(
+        &cli.command,
         Command::Snapshot {
             command: SnapshotCommand::Template
         }
@@ -52,6 +62,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
+        Command::Workspace { .. }
+        | Command::Invite { .. }
+        | Command::Join { .. }
+        | Command::InviteRevoke { .. } => unreachable!(),
         Command::Start {
             channel,
             after,

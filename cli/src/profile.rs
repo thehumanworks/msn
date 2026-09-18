@@ -15,12 +15,14 @@ use crate::identity::{fetch_identity, validate_username};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Profile {
-    url: String,
-    tenant: String,
-    token: String,
-    username: String,
-    reader: String,
+pub(crate) struct Profile {
+    pub(crate) url: String,
+    pub(crate) tenant: String,
+    pub(crate) token: String,
+    pub(crate) username: String,
+    pub(crate) reader: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) activity: Option<serde_json::Value>,
 }
 
 /// Apply the selected profile or handle a local profile/shell command.
@@ -100,6 +102,7 @@ fn save(cli: &Cli, name: &str) -> Result<(), CliError> {
         token,
         username,
         reader,
+        activity: None,
     };
     write_new(name, &profile)?;
     print_public(name, &profile)
@@ -125,10 +128,14 @@ fn activate(name: &str) -> Result<(), CliError> {
 }
 
 fn list() -> Result<(), CliError> {
+    println!("{}", json!({ "profiles": names()? }));
+    Ok(())
+}
+
+pub(crate) fn names() -> Result<Vec<String>, CliError> {
     let directory = profile_directory()?;
     if !directory.exists() {
-        println!("{{\"profiles\":[]}}");
-        return Ok(());
+        return Ok(Vec::new());
     }
     check_directory(&directory)?;
     let mut names = Vec::new();
@@ -147,8 +154,27 @@ fn list() -> Result<(), CliError> {
         }
     }
     names.sort();
-    println!("{}", json!({ "profiles": names }));
-    Ok(())
+    Ok(names)
+}
+
+/// Replace one profile atomically while its caller holds the per-profile lock.
+pub(crate) fn replace(name: &str, profile: &Profile) -> Result<(), CliError> {
+    let path = profile_path(name)?;
+    check_file(&path)?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        set_create_mode(&mut options, 0o600);
+        let mut file = options.open(&temp)?;
+        serde_json::to_writer(&mut file, profile)
+            .map_err(|_| CliError::generic("Could not serialize profile."))?;
+        file.sync_all()?;
+        fs::rename(&temp, &path)?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(temp);
+    result
 }
 
 fn show(name: &str) -> Result<(), CliError> {
@@ -189,7 +215,7 @@ msn() {{
     );
 }
 
-fn resolve_username(
+pub(crate) fn resolve_username(
     url: &url::Url,
     tenant: &str,
     token: &str,
@@ -228,7 +254,7 @@ fn resolve_username(
     }
 }
 
-fn validate_name(name: &str) -> Result<(), CliError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), CliError> {
     if crate::config::is_slug(name) {
         Ok(())
     } else {
@@ -238,7 +264,7 @@ fn validate_name(name: &str) -> Result<(), CliError> {
     }
 }
 
-fn profile_directory() -> Result<PathBuf, CliError> {
+pub(crate) fn profile_directory() -> Result<PathBuf, CliError> {
     if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path).join("msn/profiles"));
     }
@@ -248,11 +274,11 @@ fn profile_directory() -> Result<PathBuf, CliError> {
     Ok(PathBuf::from(home).join(".config/msn/profiles"))
 }
 
-fn profile_path(name: &str) -> Result<PathBuf, CliError> {
+pub(crate) fn profile_path(name: &str) -> Result<PathBuf, CliError> {
     Ok(profile_directory()?.join(format!("{name}.json")))
 }
 
-fn ensure_directory(path: &Path) -> Result<(), CliError> {
+pub(crate) fn ensure_directory(path: &Path) -> Result<(), CliError> {
     if path.exists() {
         return check_directory(path);
     }
@@ -281,7 +307,7 @@ fn check_file(path: &Path) -> Result<(), CliError> {
     check_mode(&metadata, 0o600, "profile file")
 }
 
-fn write_new(name: &str, profile: &Profile) -> Result<(), CliError> {
+pub(crate) fn write_new(name: &str, profile: &Profile) -> Result<(), CliError> {
     let path = profile_path(name)?;
     let parent = path.parent().expect("profile has parent");
     ensure_directory(parent)?;
@@ -303,7 +329,7 @@ fn write_new(name: &str, profile: &Profile) -> Result<(), CliError> {
     check_file(&path)
 }
 
-fn reject_existing(name: &str) -> Result<(), CliError> {
+pub(crate) fn reject_existing(name: &str) -> Result<(), CliError> {
     let path = profile_path(name)?;
     match fs::symlink_metadata(path) {
         Ok(_) => Err(CliError::conflict(format!(
@@ -314,7 +340,7 @@ fn reject_existing(name: &str) -> Result<(), CliError> {
     }
 }
 
-fn load(name: &str) -> Result<Profile, CliError> {
+pub(crate) fn load(name: &str) -> Result<Profile, CliError> {
     let path = profile_path(name)?;
     let parent = path.parent().expect("profile has parent");
     check_directory(parent).map_err(|error| {

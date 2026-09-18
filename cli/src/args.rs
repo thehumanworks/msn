@@ -181,6 +181,27 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Create, cache and inspect accessible workspaces
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+    /// Invite people or agents (omit CHANNEL for workspace access)
+    Invite {
+        channel: Option<String>,
+        #[arg(long, default_value_t = 25)]
+        uses: u32,
+        #[arg(long, default_value_t = 86400)]
+        expires_in: u32,
+    },
+    /// Redeem an invitation link or code and cache your own access key
+    Join {
+        invitation: String,
+        #[arg(long)]
+        save_as: Option<String>,
+    },
+    /// Revoke an invitation you created; joined participants keep their keys
+    InviteRevoke { id: String },
     /// Agent entry: validated identity + one bounded checkpoint/tail page; never moves a cursor
     Start {
         channel: String,
@@ -419,6 +440,28 @@ pub enum Command {
     },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Create a workspace with a first channel and save its credentials locally
+    Create {
+        tenant: String,
+        #[arg(long, default_value = "general")]
+        channel: String,
+        #[arg(long)]
+        save_as: Option<String>,
+    },
+    /// Cache an existing connection, including its accessible channels
+    Connect {
+        #[arg(long)]
+        save_as: Option<String>,
+    },
+    /// List cached connections and refresh channel activity (no keys in output)
+    List {
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -18,6 +18,7 @@ const SCHEMA_HISTORY = [
   { version: 5 },
   { version: 6 },
   { version: 7 },
+  { version: 8 },
 ];
 /**
  * Rewinds a live database to an older schema version — dropping every column added after it —
@@ -27,7 +28,9 @@ function rewind(state: DurableObjectState, version: 1 | 2 | 3 | 4 | 5): void {
   state.storage.transactionSync(() => {
     state.storage.sql.exec("DROP TABLE snapshots");
     state.storage.sql.exec("DROP TABLE channel_history");
+    state.storage.sql.exec("DROP TABLE invites");
     if (version < 5) state.storage.sql.exec("DROP TABLE access_keys");
+    else state.storage.sql.exec("ALTER TABLE access_keys DROP COLUMN channel_scope");
     if (version < 6) state.storage.sql.exec("ALTER TABLE messages DROP COLUMN recipient");
     if (version < 4) {
       state.storage.sql.exec("ALTER TABLE tenant DROP COLUMN bound_username");
@@ -1080,7 +1083,7 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
       state.storage.transactionSync(() => {
         for (let i = 0; i < 1000; i++)
           state.storage.sql.exec(
-            "INSERT INTO access_keys VALUES (?, ?, ?, NULL, ?)",
+            "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt) VALUES (?, ?, ?, NULL, ?)",
             `key-${i}`,
             `hash-${i}`,
             `agent-${i}`,
