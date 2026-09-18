@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { onViewportChange } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "msn.session";
@@ -689,7 +690,9 @@ $("channel-form").addEventListener("submit", async (event) => {
 function autosize() {
   const box = $("message");
   box.style.height = "auto";
-  box.style.height = `${Math.min(box.scrollHeight, 160)}px`;
+  // The cap lives in CSS, where it also shrinks with the viewport an open keyboard leaves.
+  const limit = Number.parseFloat(getComputedStyle(box).maxHeight) || 160;
+  box.style.height = `${Math.min(box.scrollHeight, limit)}px`;
 }
 
 $("send-form").addEventListener("submit", async (event) => {
@@ -793,10 +796,22 @@ $("disconnect").addEventListener("click", () => {
   endSession(session, "Disconnected. Access key cleared from this browser.");
   $("status").classList.remove("error");
 });
+// A keyboard opening shortens the log without the reader scrolling. Scroll events it
+// provokes must not be read as "scrolled away from the newest message", so they are ignored
+// until the viewport settles and the saved reading position has been restored.
+let settlingUntil = 0;
 $("messages").addEventListener("scroll", () => {
+  if (Date.now() < settlingUntil) return;
   savePosition();
   const state = session?.channels.get(channel);
   if (state) showJump(state);
+});
+onViewportChange(() => {
+  settlingUntil = Date.now() + 400;
+  const state = session?.channels.get(channel);
+  if (!state || !chatVisible()) return;
+  restorePosition(state);
+  autosize();
 });
 $("jump").addEventListener("click", () => {
   $("messages").scrollTop = $("messages").scrollHeight;

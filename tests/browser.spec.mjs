@@ -1122,3 +1122,147 @@ test("password-manager usernames restore the workspace and preserve names contai
   await expect(page.locator("#workspace-name")).toHaveText(t.tenant);
   await expect(page.locator("#display-name")).toHaveText("agent/reviewer");
 });
+
+// A phone is the primary target: nothing may scroll sideways, focusing a field must not zoom
+// the page away from the layout, and an open keyboard must not cover the composer.
+test("the interface fits a phone, refuses zoom, and stays usable behind the keyboard", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone viewport only");
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  const token = "unbreakable-token-0123456789abcdefghijklmnopqrstuvwxyz-0123456789abcdefghij";
+  for (const text of [`a link ${token}${token}`, "short"]) {
+    await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username: `agent-${token}`, text, to: token, correlationId: token },
+    });
+  }
+  await connect(page, t);
+  await openChannel(page, "general");
+  await expect(page.locator(".message")).toHaveCount(2);
+
+  // Zoom is refused at the document level, so a stray pinch or double tap cannot strand the layout.
+  expect(await page.locator('meta[name="viewport"]').getAttribute("content")).toContain("user-scalable=no");
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).touchAction)).toBe(
+    "pan-x pan-y",
+  );
+
+  // iOS Safari zooms instead when a focused control is under 16px, whatever the meta tag says.
+  const small = await page.evaluate(() =>
+    [...document.querySelectorAll("input:not([type=checkbox]), select, textarea")]
+      .filter((el) => el.offsetParent !== null)
+      .filter((el) => Number.parseFloat(getComputedStyle(el).fontSize) < 16)
+      .map((el) => el.id),
+  );
+  expect(small).toEqual([]);
+
+  const sideways = () =>
+    page.evaluate(() => {
+      const wide = [...document.querySelectorAll("body *")].filter((el) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        if (rect.right <= window.innerWidth + 0.5) return false;
+        // An element inside a scroller (the toolbar strip) is reachable, not overflowing.
+        for (let p = el.parentElement; p; p = p.parentElement)
+          if (getComputedStyle(p).overflowX !== "visible") return false;
+        return true;
+      });
+      return {
+        docWidth: document.documentElement.scrollWidth,
+        innerWidth: window.innerWidth,
+        wide: wide.map((el) => el.tagName + (el.id ? `#${el.id}` : "")),
+      };
+    });
+  let box = await sideways();
+  expect(box.wide).toEqual([]);
+  expect(box.docWidth).toBeLessThanOrEqual(box.innerWidth);
+
+  // The keyboard takes the bottom of the visual viewport; the shell follows it.
+  const resizeViewport = (height) =>
+    page.evaluate((value) => {
+      Object.defineProperty(window.visualViewport, "height", { value, configurable: true });
+      window.visualViewport.dispatchEvent(new Event("resize"));
+    }, height);
+  const full = await page.evaluate(() => window.innerHeight);
+  const visible = Math.round(full * 0.55);
+  await resizeViewport(visible);
+  await expect
+    .poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().height)))
+    .toBe(visible);
+  const behindKeyboard = await page.evaluate(() => ({
+    compose: Math.round(document.querySelector(".compose").getBoundingClientRect().bottom),
+    status: Math.round(document.querySelector("#status").getBoundingClientRect().bottom),
+    log: Math.round(document.querySelector("#messages").getBoundingClientRect().height),
+    atBottom: (() => {
+      const m = document.querySelector("#messages");
+      return m.scrollHeight - m.clientHeight - m.scrollTop < 2;
+    })(),
+  }));
+  expect(behindKeyboard.compose).toBeLessThanOrEqual(visible);
+  expect(behindKeyboard.status).toBeLessThanOrEqual(visible);
+  expect(behindKeyboard.log).toBeGreaterThan(0);
+  // Shrinking the log is not the reader scrolling away from the newest message.
+  expect(behindKeyboard.atBottom).toBe(true);
+  box = await sideways();
+  expect(box.wide).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("keyboard-open.png") });
+
+  await resizeViewport(full);
+  await expect
+    .poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().height)))
+    .toBe(full);
+
+  // The channels pane and the dialogs are phone-sized too.
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Invite to workspace" }).click();
+  await page.getByRole("button", { name: "Create invitation" }).click();
+  await expect(page.locator("#invite-link")).not.toHaveValue("");
+  box = await sideways();
+  expect(box.wide).toEqual([]);
+  expect(box.docWidth).toBeLessThanOrEqual(box.innerWidth);
+  await page.getByRole("button", { name: "Close" }).click();
+
+  await page.goto("/guide.html");
+  box = await sideways();
+  expect(box.wide).toEqual([]);
+  expect(box.docWidth).toBeLessThanOrEqual(box.innerWidth);
+});
+
+// The shell is pinned to the visual viewport, so any region that can grow past a short screen
+// needs its own scroll. Landscape is where that bites first.
+test("every control stays reachable on a landscape phone", async ({ page, request }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone viewport only");
+  const t = await provision(request);
+  for (const name of ["general", "alpha", "beta", "gamma", "delta"])
+    await request.put(`${t.path}/channels/${name}`, { headers: t.headers });
+  await page.setViewportSize({ width: 667, height: 375 });
+
+  // The connect form is taller than a landscape phone before anything is even typed.
+  await page.goto("/");
+  await page.getByLabel("Workspace", { exact: true }).fill(t.tenant);
+  await page.getByLabel("Access key").fill(t.token);
+  await page.getByLabel("Your display name").fill("Tomas");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.locator("#workspace")).toBeVisible();
+
+  await channelsPane(page);
+  // The access disclosure is the region that grows; everything below it must still be usable.
+  await page.getByText("Your access details").click();
+  await expect(page.locator("#copy-access")).toBeVisible();
+  const onScreen = async (selector) => {
+    await page.locator(selector).scrollIntoViewIfNeeded();
+    return page.evaluate((sel) => {
+      const rect = document.querySelector(sel).getBoundingClientRect();
+      return rect.top >= -0.5 && rect.bottom <= window.innerHeight + 0.5 && rect.height > 0;
+    }, selector);
+  };
+  for (const selector of ["#invite-workspace", "#copy-access", "#new-channel", "#disconnect"])
+    expect(await onScreen(selector), `${selector} is reachable`).toBe(true);
+  // The channel list keeps a usable height rather than collapsing to make room.
+  expect(await page.evaluate(() => document.querySelector("#channels").clientHeight)).toBeGreaterThan(80);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(page.locator("#welcome")).toBeVisible();
+  expect(await onScreen("#entry-submit")).toBe(true);
+});

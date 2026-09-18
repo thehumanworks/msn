@@ -16,6 +16,11 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  /* viewport.js narrows this to the visual viewport, so an open keyboard shrinks the
+     app shell instead of pushing the composer under the keyboard. */
+  --app-height: 100dvh;
 }
 * {
   box-sizing: border-box;
@@ -24,11 +29,34 @@ html,
 body {
   height: 100%;
 }
+html {
+  /* One-finger panning still works; double-tap and pinch zoom do not. */
+  touch-action: pan-x pan-y;
+  /* A phone rotated to landscape must not inflate text and reflow past the screen. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 body {
   margin: 0;
   display: flex;
   flex-direction: column;
   min-height: 100dvh;
+  touch-action: pan-x pan-y;
+  /* A notch or rounded corner in landscape must not clip the interface. */
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  /* Nothing here is wide enough to pan sideways; a long token must wrap, not overflow. */
+  overflow-x: clip;
+}
+/* The workspace is an app shell, not a document: only its own panes scroll. Pinning it to
+   the visual viewport keeps the composer on screen while the keyboard is open. */
+body.app {
+  position: fixed;
+  inset: 0;
+  height: var(--app-height);
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 /* Hidden panels must override their layout display, including on mobile. */
 [hidden] {
@@ -49,6 +77,7 @@ textarea {
   font: inherit;
   color: inherit;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 button {
   cursor: pointer;
@@ -73,11 +102,15 @@ input:not([type="checkbox"]),
 select,
 textarea {
   width: 100%;
+  max-width: 100%;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
   min-height: 44px;
+  /* Labels set 13px, which iOS Safari answers by zooming the page on focus. Every control
+     the user can focus therefore overrides the inherited size back up to 16px. */
+  font-size: max(16px, 1rem);
 }
 dialog {
   color: var(--text);
@@ -85,7 +118,10 @@ dialog {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 24px;
-  width: min(480px, calc(100vw - 32px));
+  width: min(480px, calc(100vw - 32px - var(--safe-left) - var(--safe-right)));
+  max-height: calc(var(--app-height) - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 dialog::backdrop {
   background: #000a;
@@ -144,6 +180,11 @@ small {
 }
 small {
   font-size: 12px;
+}
+/* An invitation link or a command is one long unbreakable token on a phone. */
+dialog p,
+dialog code {
+  overflow-wrap: anywhere;
 }
 h1,
 h2 {
@@ -217,7 +258,12 @@ main {
   flex: 1;
   display: grid;
   place-items: center;
-  padding: calc(24px + var(--safe-top)) 16px 24px;
+  padding: calc(24px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
+  /* The shell no longer scrolls, so this form carries its own: it is taller than a phone
+     in landscape, and the submit button must stay reachable. */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .connect {
   width: min(100%, 360px);
@@ -247,6 +293,12 @@ main {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+/* Expanding the access disclosure on a short screen must not push Disconnect or the new
+   channel form out of reach: the shell itself no longer scrolls. */
+.pane-channels {
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .workspace[data-view="channels"] .pane-chat,
 .workspace[data-view="chat"] .pane-channels {
@@ -278,6 +330,9 @@ main {
 nav {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Landscape leaves little height; the list still has to show channels. */
+  min-height: 120px;
   padding: 8px;
   display: grid;
   align-content: start;
@@ -388,6 +443,12 @@ nav button[aria-current="true"] {
   color: var(--muted);
   overflow-x: auto;
   white-space: nowrap;
+  /* Swiping this strip must not hand the gesture to the browser's back navigation. */
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.toolbar::-webkit-scrollbar {
+  display: none;
 }
 .toolbar span {
   flex: 1;
@@ -423,6 +484,9 @@ nav button[aria-current="true"] {
 }
 #messages {
   flex: 1;
+  /* Without this the log refuses to shrink past its content and pushes the composer off a
+     short screen instead of scrolling. */
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
   overscroll-behavior: contain;
@@ -519,14 +583,15 @@ nav .empty {
   display: grid;
   gap: 6px;
 }
+/* Kept compact, but never below the size that makes iOS zoom when it takes focus. */
 .compose-fields #recipient {
-  min-height: 34px;
+  min-height: 38px;
   padding-block: 6px;
-  font-size: 13px;
 }
 .compose textarea {
   resize: none;
-  max-height: 160px;
+  /* On a short viewport — landscape, or an open keyboard — the composer yields to the log. */
+  max-height: min(160px, calc(var(--app-height) * 0.3));
   min-height: 44px;
   line-height: 1.4;
 }
@@ -547,6 +612,16 @@ nav .empty {
 }
 #status.error {
   color: var(--error);
+}
+/* A finger needs a larger target than a cursor; the dense toolbar is the reason .quiet exists. */
+@media (pointer: coarse) {
+  .quiet {
+    min-height: 40px;
+    padding: 8px 10px;
+  }
+  .toolbar .quiet {
+    min-height: 36px;
+  }
 }
 .sr-only {
   position: absolute;
@@ -603,6 +678,8 @@ body > footer {
 }
 .guide code {
   color: var(--accent);
+  /* Inline identifiers and URLs wrap; inside a pre, white-space: pre still wins. */
+  overflow-wrap: anywhere;
 }
 
 @media (min-width: 760px) {
