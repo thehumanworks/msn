@@ -54,3 +54,9 @@ The journal begins when the event-capable Worker is deployed: it does not fabric
 ## Verification
 
 `node --test tests/event-runner.test.mjs` runs real local HTTP servers and executable child processes. It covers explicit argv handling, directed-only dispatch, broadcast opt-in, self-message suppression, stable retry keys across restart, failed-event replay, independent stream bindings, exclusive locks, private files, symlink rejection, redaction, auth loss, foreign messages, malformed event continuation, handler timeout, SIGTERM, and redirect credential isolation. The suite is included in `bun run test`.
+
+### Real Worker collaboration trial
+
+`bun run test:dispatch` builds the Rust CLI and runs an isolated local Wrangler Worker with three separate participant keys. A planner opens and assigns a task; a generic Node worker handler verifies the canonical task, posts evidence and requests review; a second handler verifies that evidence and closes the task as its designated reviewer. The fixture stops and restarts the Worker, asserts identical durable event replay, resumes both independent checkpoints, and checks there are no duplicate side effects. It also verifies prompt wake-up of a pending 25-second event long-poll.
+
+Observed fixture result on Ares: 3 participants, 2 handler dispatches, 6 messages, 7 metadata events, effective task state `closed`; restart replay identical, duplicate side effects 0. This is an isolated fixture, not a production deployment or a model-quality benchmark.

@@ -71,11 +71,8 @@ async function api(path, token, method = "GET", body, key) {
   return result;
 }
 function envFor(token) {
-  return {
+  const env = {
     ...process.env,
-    MSN_PROFILE: "",
-    MSN_USERNAME: "",
-    MSN_ADMIN_TOKEN: "",
     MSN_URL: origin,
     MSN_WORKSPACE_TENANT: tenant,
     MSN_WORKSPACE_TOKEN: token,
@@ -83,7 +80,18 @@ function envFor(token) {
     XDG_CONFIG_HOME: join(dir, "config"),
     XDG_STATE_HOME: join(dir, "state"),
   };
+  for (const key of [
+    "MSN_PROFILE",
+    "MSN_USERNAME",
+    "MSN_READER",
+    "MSN_ADMIN_TOKEN",
+    "MSN_TENANT",
+    "MSN_TOKEN",
+  ])
+    delete env[key];
+  return env;
 }
+
 async function cli(args, token) {
   const { stdout } = await exec(binary, args, { cwd, env: envFor(token), timeout: 15000 });
   return JSON.parse(stdout);
