@@ -241,11 +241,33 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_path() -> PathBuf {
+        // Clock precision differs across platforms: concurrent macOS tests can observe the
+        // same timestamp. A per-process counter isolates directory and file fixtures reliably.
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        std::env::temp_dir().join(format!("msn-cursor-unit-{nanos}.json"))
+        std::env::temp_dir().join(format!(
+            "msn-cursor-unit-{}-{sequence}-{nanos}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn temporary_paths_are_unique_under_parallel_fixture_creation() {
+        let paths: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| (0..128).map(|_| tmp_path()).collect::<Vec<_>>()))
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect()
+        });
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len());
     }
 
     #[test]

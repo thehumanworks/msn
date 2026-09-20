@@ -9,7 +9,7 @@
     "start": "wrangler dev",
     "cf-typegen": "wrangler types",
     "onboarding-check": "node scripts/onboarding-check.mjs",
-    "test": "vitest run && node --test tests/cli.test.mjs tests/onboarding-check.test.mjs",
+    "test": "vitest run && node --test tests/cli.test.mjs tests/onboarding-check.test.mjs tests/event-runner.test.mjs",
     "test:participants": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/participants.integration.mjs",
     "test:swarm": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/swarm.integration.mjs",
     "test:browser": "cargo build --manifest-path cli/Cargo.toml --locked && playwright test --config tests/playwright.config.mjs",
@@ -19,7 +19,10 @@
     "check": "bun run typecheck && bun run lint && bun run test && bun run test:browser",
     "msn": "node scripts/msn.mjs",
     "test:critical": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/critical.integration.mjs",
-    "test:transfer": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/transfer.integration.mjs"
+    "test:transfer": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/transfer.integration.mjs",
+    "events:run": "node scripts/event-runner.mjs",
+    "test:events": "node --test tests/event-runner.test.mjs",
+    "test:dispatch": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/event-dispatch.integration.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.13",

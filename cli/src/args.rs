@@ -51,6 +51,10 @@ EXAMPLES:
   msn send general --text 'pong' --reply-to 42 --correlation-id task-7
   msn send general --json '{\"op\":\"ping\"}'       # contentType application/json
   msn poll general --after 0 --wait 25 --limit 100
+  msn events --after 0 --wait 25 --limit 100
+  msn events --channel general --after 0
+  msn watch --channel general
+  msn watch
   msn read general --reader reviewer
   msn wait general --reader reviewer
   msn whoami
@@ -101,6 +105,17 @@ result. catchup without --after returns the latest valid snapshot plus the oldes
 --after is an exact continuation and omits the snapshot. catchup is read-only and never
 reads or writes the automatic read cursor. Continue deliberately from nextCursor while
 hasMore/incomplete is true.
+
+events/watch read the durable coordination event journal (channel.created, message.created,
+message.deleted, snapshot.published): metadata only, never message or snapshot text, usernames
+or tokens. Event ids are a separate counter from message ids; --after on events/watch is an
+event-id cursor and is never interchangeable with a message --after. Without --channel, an
+unscoped token sees every channel; a scoped key always sees only its granted channel, silently
+filtered even without --channel, and a conflicting --channel is rejected. events makes one
+bounded request and prints its page. watch reconnects automatically on a retryable error or
+disconnect, resuming from the last delivered event id, and prints one JSON event per line; it
+never persists a cursor file and never implies that any event was processed. Transport delivery,
+including of a task event, never implies task completion.
 
 msn import copies one archive into the selected destination profile. Nothing in the
 file grants access; destination authentication is independent. The safe default is a
@@ -313,6 +328,30 @@ pub enum Command {
         /// Page size, 1–100 (default 100)
         #[arg(long)]
         limit: Option<String>,
+    },
+    /// GET …/events (single page; wait defaults to 0; metadata only, never message/snapshot text)
+    Events {
+        /// Restrict to one channel (a scoped key is always restricted to its granted channel)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Exclusive event id cursor (a distinct counter from message ids)
+        #[arg(long)]
+        after: Option<String>,
+        /// Seconds to long-poll, 0–25 (default 0)
+        #[arg(long)]
+        wait: Option<String>,
+        /// Page size, 1–100 (default 100)
+        #[arg(long)]
+        limit: Option<String>,
+    },
+    /// Long-poll the event journal and reconnect; one JSON event per line; never acknowledges processing
+    Watch {
+        /// Restrict to one channel (a scoped key is always restricted to its granted channel)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Exclusive event id cursor (default 0; a distinct counter from message ids)
+        #[arg(long)]
+        after: Option<String>,
     },
     /// Publish, list, or show authored channel snapshots
     Snapshot {

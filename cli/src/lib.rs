@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod cursor;
 pub mod error;
+pub mod events;
 pub mod export;
 pub mod identity;
 pub mod import;
@@ -314,6 +315,30 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 return Err(CliError::usage("limit must be an integer from 1 to 100."));
             }
             poll(&url, &tenant, &token, channel, after, wait, limit)
+        }
+        Command::Events {
+            channel,
+            after,
+            wait,
+            limit,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = channel.as_deref().map(slug).transpose()?;
+            let after = parse_optional_int(after.as_deref(), 0, MAX_SAFE_INTEGER)?;
+            let wait = parse_optional_int(wait.as_deref(), 0, MAX_WAIT)?;
+            let limit = parse_optional_int(limit.as_deref(), 100, MAX_LIMIT)?;
+            if limit < 1 {
+                return Err(CliError::usage("limit must be an integer from 1 to 100."));
+            }
+            events(&url, &tenant, &token, channel, after, wait, limit)
+        }
+        Command::Watch { channel, after } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = channel.as_deref().map(slug).transpose()?;
+            let after = parse_optional_int(after.as_deref(), 0, MAX_SAFE_INTEGER)?;
+            watch(&url, &tenant, &token, channel, after, stop)
         }
         Command::Snapshot { command } => match command {
             SnapshotCommand::Template => unreachable!("handled before connection parsing"),
@@ -853,6 +878,102 @@ fn poll(
         "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}"
     );
     finish(&client.get(&path, Some(token))?)
+}
+
+fn events_path(tenant: &str, channel: Option<&str>, after: u64, wait: u64, limit: u64) -> String {
+    let channel_param = channel
+        .map(|value| format!("&channel={value}"))
+        .unwrap_or_default();
+    format!("/api/tenants/{tenant}/events?after={after}&wait={wait}&limit={limit}{channel_param}")
+}
+
+fn events(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: Option<&str>,
+    after: u64,
+    wait: u64,
+    limit: u64,
+) -> Result<(), CliError> {
+    let client = MsnClient::new(url)?;
+    let path = events_path(tenant, channel, after, wait, limit);
+    let response = client.get(&path, Some(token))?;
+    classify(response.status, &response.body)?;
+    // Fail closed: an unrecognized or malformed event page is rejected, never passed through.
+    events::validate_events_page(&response.body, tenant, channel, after, limit)?;
+    print_success(response.status, &response.body)
+}
+
+const WATCH_WAIT_SECONDS: u64 = 25;
+const WATCH_PAGE_LIMIT: u64 = 100;
+
+/// Long-poll reconnect loop over the event journal. Never writes a cursor file and never
+/// acknowledges processing: it only prints what the server durably recorded.
+fn watch(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: Option<&str>,
+    after: u64,
+    stop: Arc<AtomicBool>,
+) -> Result<(), CliError> {
+    let client = Arc::new(MsnClient::new(url)?);
+    let mut after = after;
+    let mut backoff_ms = BACKOFF_START_MS;
+    while !stop.load(Ordering::SeqCst) {
+        let path = events_path(tenant, channel, after, WATCH_WAIT_SECONDS, WATCH_PAGE_LIMIT);
+        let Some(response) =
+            get_interruptible(Arc::clone(&client), path, token.to_string(), &stop)?
+        else {
+            return Ok(());
+        };
+        match response {
+            Ok(response) if (200..300).contains(&response.status) => {
+                let (raw_events, next_cursor) = events::validate_events_page(
+                    &response.body,
+                    tenant,
+                    channel,
+                    after,
+                    WATCH_PAGE_LIMIT,
+                )?;
+                for event in &raw_events {
+                    writeln!(
+                        io::stdout().lock(),
+                        "{}",
+                        serde_json::to_string(event)
+                            .map_err(|e| CliError::generic(e.to_string()))?
+                    )?;
+                }
+                io::stdout()
+                    .flush()
+                    .map_err(|error| CliError::generic(error.to_string()))?;
+                if !raw_events.is_empty() {
+                    after = next_cursor;
+                }
+                backoff_ms = BACKOFF_START_MS;
+            }
+            Ok(response) if (300..400).contains(&response.status) => {
+                return Err(CliError::network("Redirects are not allowed"));
+            }
+            Ok(response) if is_retryable_status(response.status) => {
+                let message = error_message(response.status, &response.body);
+                if interruptible_sleep(backoff_ms, &stop, &message, after) {
+                    return Ok(());
+                }
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(BACKOFF_MAX_MS);
+            }
+            Ok(response) => return Err(status_error(response.status, &response.body)),
+            Err(error) => {
+                // MsnClient maps transport failures to exit 6; retry those.
+                if interruptible_sleep(backoff_ms, &stop, &error.to_string(), after) {
+                    return Ok(());
+                }
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(BACKOFF_MAX_MS);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

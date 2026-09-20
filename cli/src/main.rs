@@ -35,6 +35,7 @@ fn main() {
             | Command::Read { .. }
             | Command::Peek { .. }
             | Command::Export { .. }
+            | Command::Watch { .. }
     ) {
         install_stop_signals().unwrap_or_else(|error| {
             write_err(&error);

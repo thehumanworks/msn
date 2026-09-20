@@ -35,6 +35,15 @@
 //! F1 follow_once_exits_after_first_non_empty_page
 //! H1 help_lists_commands_and_env (adds `wait`)
 //!
+//! Addendum (2026-09-20): coordination event journal (`msn events` / `msn watch`, ADR 0017)
+//! J1 events_query_params / events_without_channel_omits_the_query_param
+//!    / events_rejects_invalid_wait_limit
+//! J2 events_fails_closed_on_a_malformed_page (event cursor vs. message cursor never confused)
+//! J3 watch_prints_one_json_event_per_line_and_reconnects_from_the_last_cursor
+//! J4 watch_retries_503_then_continues_from_the_same_cursor / watch_fatal_404
+//! J5 watch_sigint_exits_0
+//! H2 help_lists_commands_and_env (adds `events`, `watch`)
+//!
 //! Reader/key workflow addendum:
 //! R1 automatic cursors require a reader, stay independent under shared HOME, and survive token rotation
 //! R2 cursor sidecar exclusion; ordinary/signal cleanup; SIGKILL/stale-lock manual recovery
@@ -2444,4 +2453,185 @@ fn automatic_same_reader_is_locked_and_sigkill_requires_manual_recovery() {
     assert!(lock_path(&file).exists());
     assert_eq!(server.recorded().len(), 1);
     assert!(!file.exists(), "undelivered response advanced cursor");
+}
+
+#[test]
+fn events_query_params() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"events":[],"nextCursor":5,"hasMore":false}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "events",
+        "--after",
+        "5",
+        "--wait",
+        "3",
+        "--limit",
+        "10",
+        "--channel",
+        "general",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(
+        server.recorded()[0].path,
+        "/api/tenants/team/events?after=5&wait=3&limit=10&channel=general"
+    );
+}
+
+#[test]
+fn events_without_channel_omits_the_query_param() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"events":[],"nextCursor":0,"hasMore":false}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.push("events");
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert_eq!(
+        server.recorded()[0].path,
+        "/api/tenants/team/events?after=0&wait=0&limit=100"
+    );
+}
+
+#[test]
+fn events_rejects_invalid_wait_limit() {
+    let server = MockServer::spawn(vec![Scripted::json(200, r#"{}"#)]);
+    let url = server.url();
+    for extra in [["events", "--wait", "26"], ["events", "--limit", "0"]] {
+        let mut args = tenant_args(&url).to_vec();
+        args.extend(extra);
+        let out = output_of(&args);
+        assert_eq!(out.status.code(), Some(2), "{extra:?} {}", stderr_str(&out));
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn events_fails_closed_on_a_malformed_page() {
+    // A message page shape (`messages`, not `events`) must be rejected, not silently accepted:
+    // the event cursor and the message cursor must never be confused.
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"messages":[],"nextCursor":0,"hasMore":false}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.push("events");
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
+}
+
+#[test]
+fn watch_prints_one_json_event_per_line_and_reconnects_from_the_last_cursor() {
+    let page = r#"{"events":[{"id":7,"tenant":"team","channel":"general","type":"message.created","resourceId":3,"historyRevision":0,"createdAt":"2026-09-20T00:00:00.000Z"},{"id":8,"tenant":"team","channel":"general","type":"message.created","resourceId":4,"historyRevision":0,"createdAt":"2026-09-20T00:00:01.000Z"}],"nextCursor":8,"hasMore":false}"#;
+    let server = MockServer::spawn(vec![Scripted::json(200, page)]);
+    let url = server.url();
+    let mut child = bin()
+        .args(tenant_args(&url))
+        .args(["watch", "--channel", "general"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn watch");
+    let stdout = child.stdout.take().expect("stdout");
+    let lines = read_lines_timeout(stdout, 2, Duration::from_secs(3));
+    assert_eq!(lines.len(), 2, "watch printed {:?}", lines);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&lines[0]).unwrap()["id"],
+        7
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&lines[1]).unwrap()["id"],
+        8
+    );
+    interrupt(child.id());
+    let status = child.wait().expect("wait");
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(
+        server.recorded()[0].path,
+        "/api/tenants/team/events?after=0&wait=25&limit=100&channel=general"
+    );
+}
+
+#[test]
+fn watch_retries_503_then_continues_from_the_same_cursor() {
+    let page = r#"{"events":[{"id":1,"tenant":"team","channel":"general","type":"channel.created","resourceId":null,"historyRevision":0,"createdAt":"2026-09-20T00:00:00.000Z"}],"nextCursor":1,"hasMore":false}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(503, r#"{"error":{"code":"x","message":"busy"}}"#),
+        Scripted::json(200, page),
+    ]);
+    let url = server.url();
+    let mut child = bin()
+        .args(tenant_args(&url))
+        .args(["watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let stdout = child.stdout.take().expect("stdout");
+    let lines = read_lines_timeout(stdout, 1, Duration::from_secs(5));
+    assert_eq!(lines.len(), 1, "watch printed {:?}", lines);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&lines[0]).unwrap()["id"],
+        1
+    );
+    interrupt(child.id());
+    let waited = child.wait_with_output().expect("wait");
+    assert_eq!(waited.status.code(), Some(0));
+    let rec = server.recorded();
+    assert!(rec.len() >= 2, "expected retry, got {}", rec.len());
+    assert!(rec[0].path.contains("after=0"));
+    let gap = rec[1].at.duration_since(rec[0].at);
+    assert!(gap >= Duration::from_millis(900), "backoff was {gap:?}");
+}
+
+#[test]
+fn watch_fatal_404() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        404,
+        r#"{"error":{"code":"tenant_not_found","message":"Tenant not found."}}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.push("watch");
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(server.recorded().len(), 1);
+    assert!(stderr_str(&out).contains("Tenant not found"));
+}
+
+#[test]
+fn watch_sigint_exits_0() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, r#"{"events":[],"nextCursor":0,"hasMore":false}"#)
+            .delayed(Duration::from_secs(20)),
+    ]);
+    let url = server.url();
+    let mut child = bin()
+        .args(tenant_args(&url))
+        .args(["watch"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    interrupt(child.id());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn help_lists_events_and_watch() {
+    let out = output_of(&["--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = format!("{}{}", stdout_str(&out), stderr_str(&out));
+    for needle in ["events", "watch", "channel.created", "message.created"] {
+        assert!(text.contains(needle), "help missing {needle}\n{text}");
+    }
 }

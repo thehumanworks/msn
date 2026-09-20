@@ -108,6 +108,8 @@ msn send general --to reviewer --text 'pong' --reply-to 42 --correlation-id task
 msn send general --json '{"op":"ping"}'    # contentType application/json; invalid JSON exits 2 before any request
 msn send general --json - < command.json   # read stdin (must be UTF-8 JSON)
 msn poll general --after 0 --wait 25 --limit 100
+msn events --channel general --after 0 --wait 25   # one page of the durable event feed (metadata only)
+msn watch --channel general                # JSONL event feed; reconnects; never acknowledges processing
 msn read general                          # unread page now, empty page when caught up
 msn read general --wait 10                 # one long-poll, no reconnect loop
 msn wait general --reader planner          # reader-scoped progress; blocks until a nonempty page
@@ -160,6 +162,10 @@ msn follow general --cursor-file ./cursor.json | jq -c 'select(.contentType == "
 An exact-name token supplies its username automatically when no name is configured; the server rejects any other name with `403 username_bound` (exit 3) and stores nothing. `rotate` keeps the current bind unless you pass `--username`, `--username-prefix` or `--unbind`. Use `key-create` to give each human or agent its own exact-name key **in the same workspace**. Prefix keys permit any name under their prefix. Keep an unbound original workspace key private: it can still send as any name. `keys` lists only participant keys, not the original workspace key. `key-revoke` is targeted; `rotate` is a workspace-wide emergency reset that revokes every participant key. Admin keys are never given to members.
 
 `msn start CHANNEL` prints one catch-up page plus `identity` `{username, reader, tenant, origin}`, `protocolVersion: 1`, `workflow`, and `warnings`. `origin` is the normalised server origin the client calls. The field is additive; the protocol version stays `1`. `--max-bytes` (2048–262144, default 32768) subtracts the extra JSON — including origin — and still requires 1024 bytes for the catch-up body. `start` does not move delivery or processing cursors.
+
+### Event feed: `msn events` and `msn watch`
+
+`events` makes one request to `GET /api/tenants/:tenant/events` and prints `{events,nextCursor,hasMore}`. `--after` is an **event id** cursor, a separate counter from message ids, so never pass one where the other is expected. `--wait` is 0–25 (default 0), `--limit` 1–100 (default 100), and `--channel` narrows to one channel; a channel-scoped key is always restricted to its own channel and a different `--channel` is rejected (exit 3). `watch` loops with `wait=25`, prints one JSON event per line, reconnects with the same 1s→15s backoff as `follow`, and exits 0 on SIGINT/SIGTERM. Neither command stores a cursor or acknowledges processing, and delivery of an event, task events included, never implies the work was done. To resume after a restart, record the id of the last event you handled and pass it as `--after`. Events carry metadata only (`channel.created`, `message.created`, `message.deleted`, `snapshot.published`); fetch content with `show`, `catchup` or `snapshot show`. Any response that does not match the documented event shape is rejected (exit 1). The journal begins when the Worker is upgraded; an older Worker answers 404 (exit 4). Protocol, bootstrap and limits: [docs/events.md](../docs/events.md).
 
 ## Snapshots and fresh-session recovery
 
