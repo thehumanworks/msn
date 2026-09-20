@@ -36,6 +36,7 @@ fn run_gui() -> ExitCode {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("msn desktop")
             .with_app_id("msn-desktop")
+            .with_transparent(true)
             .with_inner_size([980.0, 640.0])
             .with_min_inner_size([560.0, 360.0]),
         ..Default::default()

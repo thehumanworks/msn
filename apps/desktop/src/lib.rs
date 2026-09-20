@@ -6,3 +6,4 @@ pub mod net;
 pub mod profile;
 pub mod smoke;
 pub mod state;
+mod theme;

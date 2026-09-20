@@ -332,6 +332,9 @@ impl AppState {
                 if self.generation() == Some(generation) {
                     self.events_notice = notice;
                     self.events_stopped = stopped;
+                    if stopped {
+                        self.status = None;
+                    }
                 }
                 Vec::new()
             }

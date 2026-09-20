@@ -6,6 +6,7 @@ Design and trade-offs: [ADR 0018](../../docs/adr/0018-native-desktop-client.md).
 
 ## What it does
 
+- **Glass interface**: translucent, rounded cards with subtle blue/violet highlights. Desktop blur is supplied by the compositor when available; the tinted surfaces remain readable without it. The message composer stays at the bottom of the conversation card while history and pending-send notices scroll above it.
 - **Connect** with origin, workspace, access token and optional username, or pick an existing `msn profile` (read-only reuse). Connecting always authenticates against the workspace identity endpoint, even when you type a username, and checks the name against the key's binding.
 - **Channels**: list, create, select. Names come from the server's `name` field and are validated as slugs before they reach a URL.
 - **Chat**: canonical history, live refresh, directed recipient (`to`) and reply (`replyTo`), Enter to send. Every send has a stable `Idempotency-Key`; a failed or uncertain send keeps its key and payload and is retried with the same bytes. Editing the text creates a new send with a new key.
@@ -14,6 +15,8 @@ Design and trade-offs: [ADR 0018](../../docs/adr/0018-native-desktop-client.md).
 - **Live updates** come from `GET /api/tenants/:tenant/events` (server long-poll, no periodic scans). Events are metadata only; every relevant event triggers a canonical re-read.
 
 ## Build and run
+
+Deploy the coordination API to the configured server before connecting (`bun run deploy` from the repository root). Merging the source does not deploy the Worker. If live updates stop with HTTP 404, update that server, then **Disconnect** and **Connect** again; a terminal event error does not retry automatically. Initial channel loading waits for the event cursor, so an unsupported server cannot finish synchronising.
 
 Requires Rust 1.95 or newer (eframe/egui 0.36 need it).
 

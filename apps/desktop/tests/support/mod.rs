@@ -67,6 +67,7 @@ pub struct Fake {
     pub bound_username: Mutex<Option<String>>,
     pub fail_next_posts: AtomicUsize,
     pub corrupt_events: AtomicBool,
+    pub missing_events: AtomicBool,
     shutdown: AtomicBool,
 }
 
@@ -83,6 +84,7 @@ impl Fake {
             bound_username: Mutex::new(Some("alice".into())),
             fail_next_posts: AtomicUsize::new(0),
             corrupt_events: AtomicBool::new(false),
+            missing_events: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
         })
     }
@@ -360,6 +362,13 @@ impl Fake {
     }
 
     fn events(&self, query: &HashMap<String, String>) -> (u16, Value) {
+        if self.missing_events.load(Ordering::SeqCst) {
+            return Self::error(
+                404,
+                "not_found",
+                "Unknown endpoint or method. Message deletion is only available under /api/admin/.",
+            );
+        }
         let number = |name: &str, default: u64| {
             query
                 .get(name)

@@ -45,6 +45,48 @@ fn send(server: &MockServer, key: &str, text: &str) -> Result<client_ops::SendOu
 // ---------------------------------------------------------------- connect / auth
 
 #[test]
+fn missing_events_endpoint_stops_sync_with_deployment_guidance_and_reconnect_recovers() {
+    let server = MockServer::start();
+    server.fake.missing_events.store(true, Ordering::SeqCst);
+    let r = rig();
+    let mut pump = Pump {
+        rig: &r,
+        state: AppState::default(),
+    };
+    let generation = r.connect(server.url().as_str(), TENANT, TOKEN);
+    pump.state.begin_connect(generation, TENANT.into());
+    assert!(pump.until(5, |s| s.events_stopped));
+    assert!(!pump.state.events_ready);
+    assert!(
+        pump.state.status.is_none(),
+        "a terminal error must stop the synchronising status"
+    );
+    let notice = pump.state.events_notice.as_deref().unwrap();
+    assert!(notice.contains("Deploy the coordination API"));
+    assert!(notice.contains("Disconnect and Connect"));
+    assert!(!notice.contains("Message deletion"));
+    assert!(
+        server
+            .fake
+            .logged("GET", "/api/tenants/acme/channels")
+            .is_empty(),
+        "failed cursor establishment must not release canonical reads"
+    );
+    assert!(
+        r.quiet_for(200).is_empty(),
+        "terminal errors must not spin or retry"
+    );
+
+    // The same connection workflow succeeds after the server is updated.
+    server.fake.missing_events.store(false, Ordering::SeqCst);
+    let generation = r.connect(server.url().as_str(), TENANT, TOKEN);
+    pump.state.begin_connect(generation, TENANT.into());
+    assert!(pump.until(5, |s| s.events_ready));
+    assert!(!pump.state.events_stopped);
+    assert!(pump.state.events_notice.is_none());
+}
+
+#[test]
 fn connect_always_authenticates_even_with_an_explicit_username() {
     let server = MockServer::start();
     server.fake.revoke_token();

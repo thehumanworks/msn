@@ -10,6 +10,7 @@ use msn_cli::identity::validate_username;
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
 use crate::state::{AppState, PendingSend, PendingTaskEvent, Screen};
+use crate::theme;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 80, 80);
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 140, 40);
@@ -63,6 +64,7 @@ enum Action {
 
 impl MsnDesktopApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        theme::install(&cc.egui_ctx);
         let (events_tx, events_rx) = sync_channel(EVENT_QUEUE_CAPACITY);
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(events_tx, move || ctx.request_repaint());
@@ -241,16 +243,29 @@ impl MsnDesktopApp {
     fn workspace_screen(&mut self, ui: &mut egui::Ui) {
         let mut actions: Vec<Action> = Vec::new();
         egui::Panel::left("channels")
-            .default_size(220.0)
-            .min_size(160.0)
+            .default_size(230.0)
+            .min_size(190.0)
+            .frame(theme::glass().outer_margin(egui::Margin {
+                right: 12,
+                ..Default::default()
+            }))
             .show(ui, |ui| self.sidebar(ui, &mut actions));
-        egui::CentralPanel::default().show(ui, |ui| self.main_panel(ui, &mut actions));
+        egui::CentralPanel::default()
+            .frame(theme::glass())
+            .show(ui, |ui| self.main_panel(ui, &mut actions));
         for action in actions {
             self.perform(action);
         }
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.label(
+            egui::RichText::new("msn")
+                .size(28.0)
+                .strong()
+                .color(theme::ACCENT),
+        );
+        ui.add_space(10.0);
         if let Some(connection) = &self.state.connection {
             ui.strong(&connection.tenant);
             ui.weak(format!("signed in as {}", connection.username));
@@ -259,11 +274,16 @@ impl MsnDesktopApp {
             actions.push(Action::Disconnect);
         }
         ui.separator();
+        ui.label(
+            egui::RichText::new("CHANNELS")
+                .size(10.0)
+                .color(theme::MUTED),
+        );
         ui.horizontal(|ui| {
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.new_channel_name)
                     .hint_text("new-channel")
-                    .desired_width(110.0),
+                    .desired_width((ui.available_width() - 80.0).max(50.0)),
             );
             let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Create").clicked() || enter {
@@ -274,7 +294,12 @@ impl MsnDesktopApp {
             ui.colored_label(ERROR_COLOR, error);
         }
         ui.separator();
-        if !self.state.events_ready {
+        if self.state.events_stopped && !self.state.events_ready {
+            ui.colored_label(
+                ERROR_COLOR,
+                "Synchronisation stopped. Disconnect and reconnect after resolving the error.",
+            );
+        } else if !self.state.events_ready {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label("Synchronising…");
@@ -332,7 +357,7 @@ impl MsnDesktopApp {
             });
             return;
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading(&channel);
             ui.separator();
             ui.selectable_value(&mut self.active_tab, Tab::Chat, "Chat");
@@ -351,68 +376,102 @@ impl MsnDesktopApp {
     }
 
     fn chat_tab(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let Some(state) = self.state.channel.as_ref() else {
-            return;
-        };
-        if !state.loaded && state.error.is_none() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Loading history…");
-            });
-        }
-        if let Some(error) = &state.error {
-            ui.colored_label(ERROR_COLOR, error);
-        }
-        let history_height = (ui.available_height() - 130.0).max(80.0);
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .max_height(history_height)
-            .auto_shrink([false, false])
+        // Reserve the composer before laying out the scrollable conversation. Its position
+        // never depends on message count, loading state, or pending-send errors.
+        egui::Panel::bottom("message-composer")
+            .exact_size(
+                124.0
+                    + if ui.available_width() < 360.0 {
+                        40.0
+                    } else {
+                        0.0
+                    }
+                    + if self.composer.error.is_some() {
+                        40.0
+                    } else {
+                        0.0
+                    },
+            )
+            .frame(theme::glass().corner_radius(14).inner_margin(12))
+            .show(ui, |ui| self.composer_panel(ui, actions));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin {
+                bottom: 12,
+                top: 8,
+                ..Default::default()
+            }))
             .show(ui, |ui| {
-                if state.loaded && state.messages.is_empty() {
-                    ui.weak("No messages yet.");
-                }
-                for message in state.messages.values() {
-                    render_message(ui, message);
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("conversation-history")
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(state) = &self.state.channel {
+                            if !state.loaded && state.error.is_none() {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("Loading history…");
+                                });
+                            }
+                            if let Some(error) = &state.error {
+                                ui.colored_label(ERROR_COLOR, error);
+                            }
+                            if state.loaded && state.messages.is_empty() {
+                                ui.weak("Start the conversation.");
+                            }
+                            for message in state.messages.values() {
+                                egui::Frame::new()
+                                    .fill(egui::Color32::from_white_alpha(5))
+                                    .corner_radius(12)
+                                    .inner_margin(12)
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        render_message(ui, message);
+                                    });
+                                ui.add_space(6.0);
+                            }
+                        }
+                        for (key, pending) in &self.state.pending_sends {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.weak(format!("sending: {}", truncate(&pending.text, 60)));
+                                match &pending.error {
+                                    Some(error) => {
+                                        ui.colored_label(ERROR_COLOR, error);
+                                        if pending.retryable && ui.button("Retry").clicked() {
+                                            actions.push(Action::RetrySend(key.clone()));
+                                        }
+                                        if ui.button("Discard").clicked() {
+                                            actions.push(Action::DiscardSend(key.clone()));
+                                        }
+                                    }
+                                    None => {
+                                        ui.spinner();
+                                    }
+                                }
+                            });
+                        }
+                    });
             });
-        ui.separator();
+    }
 
-        for (key, pending) in &self.state.pending_sends {
-            ui.horizontal_wrapped(|ui| {
-                ui.weak(format!("sending: {}", truncate(&pending.text, 60)));
-                match &pending.error {
-                    Some(error) => {
-                        ui.colored_label(ERROR_COLOR, error);
-                        if pending.retryable && ui.button("Retry").clicked() {
-                            actions.push(Action::RetrySend(key.clone()));
-                        }
-                        if ui.button("Discard").clicked() {
-                            actions.push(Action::DiscardSend(key.clone()));
-                        }
-                    }
-                    None => {
-                        ui.spinner();
-                    }
-                }
-            });
-        }
+    fn composer_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if let Some(error) = &self.composer.error {
             ui.colored_label(ERROR_COLOR, error);
         }
-        ui.horizontal(|ui| {
-            ui.label("To:");
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("To").color(theme::MUTED));
             ui.add(
                 egui::TextEdit::singleline(&mut self.composer.to)
                     .hint_text("everyone")
                     .desired_width(110.0),
             );
-            ui.label("Reply to #:");
+            ui.label(egui::RichText::new("Reply to #").color(theme::MUTED));
             ui.add(egui::TextEdit::singleline(&mut self.composer.reply_to).desired_width(60.0));
         });
         ui.horizontal(|ui| {
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.composer.text)
+                    .id(egui::Id::new("message-input"))
                     .hint_text("Message (Enter to send)")
                     .desired_width((ui.available_width() - 70.0).max(80.0)),
             );
@@ -681,19 +740,35 @@ impl MsnDesktopApp {
     }
 }
 
-impl eframe::App for MsnDesktopApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl MsnDesktopApp {
+    fn draw(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
-        match self.state.screen() {
-            Screen::Connect => {
-                egui::CentralPanel::default().show(ui, |ui| self.connect_screen(ui));
-            }
-            Screen::Workspace => {
-                // The token now lives only in the network worker; drop the form's copy.
-                self.connect_form.token.clear();
-                self.workspace_screen(ui);
-            }
-        }
+        theme::backdrop(ui);
+        egui::CentralPanel::default()
+            .frame(theme::outer())
+            .show(ui, |ui| {
+                match self.state.screen() {
+                    Screen::Connect => {
+                        egui::CentralPanel::default()
+                            .frame(theme::glass())
+                            .show(ui, |ui| self.connect_screen(ui));
+                    }
+                    Screen::Workspace => {
+                        // The token now lives only in the network worker; drop the form's copy.
+                        self.connect_form.token.clear();
+                        self.workspace_screen(ui);
+                    }
+                }
+            });
+    }
+}
+
+impl eframe::App for MsnDesktopApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
     }
 }
 
@@ -790,4 +865,85 @@ fn render_task(ui: &mut egui::Ui, task: &Value, actions: &mut Vec<Action>) {
             actions.push(Action::Claim(id.to_string()));
         }
     });
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::state::ChannelState;
+
+    fn fixture(message_count: u64) -> MsnDesktopApp {
+        let (tx, rx) = sync_channel(EVENT_QUEUE_CAPACITY);
+        let mut state = AppState::default();
+        state.begin_connect(1, "design-studio".into());
+        state.apply(UiEvent::Connected {
+            generation: 1,
+            username: "Alex".into(),
+        });
+        state.apply(UiEvent::EventsReady { generation: 1 });
+        state.channels = vec!["general".into(), "design".into()];
+        state.selected_channel = Some("general".into());
+        state.channel = Some(ChannelState {
+            loaded: true,
+            messages: (1..=message_count).map(|id| (id, json!({
+                "id": id, "username": "Jamie", "text": "The glass workspace is ready for review.",
+                "createdAt": "2026-09-20T14:00:00Z"
+            }))).collect(),
+            ..Default::default()
+        });
+        MsnDesktopApp {
+            worker: Worker::spawn(tx, || {}),
+            events_rx: rx,
+            state,
+            connect_form: ConnectForm::default(),
+            composer: Composer::default(),
+            new_channel_name: String::new(),
+            active_tab: Tab::Chat,
+        }
+    }
+
+    #[test]
+    fn composer_stays_visible_at_bottom_for_empty_and_long_conversations() {
+        for size in [egui::vec2(980.0, 640.0), egui::vec2(560.0, 360.0)] {
+            let mut positions = Vec::new();
+            for count in [0, 200] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                let mut app = fixture(count);
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ui| app.draw(ui),
+                    );
+                    output.textures_delta.clear();
+                }
+                let response = ctx.read_response(egui::Id::new("message-input")).unwrap();
+                let rect = response.rect;
+                assert!(
+                    rect.bottom() < size.y,
+                    "composer must fit: {rect:?}, {size:?}"
+                );
+                assert!(
+                    rect.right() < size.x,
+                    "composer must fit horizontally: {rect:?}, {size:?}"
+                );
+                assert!(
+                    rect.bottom() > size.y - 100.0,
+                    "composer must be anchored near the bottom: {rect:?}, {size:?}"
+                );
+                assert!(
+                    response.interact_rect.height() > 10.0,
+                    "composer must not be clipped"
+                );
+                positions.push(rect);
+            }
+            assert_eq!(
+                positions[0], positions[1],
+                "history must not move the input"
+            );
+        }
+    }
 }

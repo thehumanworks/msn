@@ -176,6 +176,9 @@ pub fn fetch_events(
             response.status,
             &response.body,
         ))),
+        404 if channel.is_none() => Err(EventsError::Terminal(CliError::generic(
+            "The server has no workspace events endpoint (HTTP 404). Deploy the coordination API to this origin, then Disconnect and Connect again.",
+        ))),
         status if is_retryable_status(status) => {
             Err(EventsError::Retry(status_error(status, &response.body)))
         }
