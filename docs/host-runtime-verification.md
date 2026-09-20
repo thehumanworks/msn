@@ -21,3 +21,29 @@ Each requirement is an observable test, not an assertion that a model will behav
 | Existing contracts preserved | Worker, dispatcher, CLI regression and type/lint checks pass; task completion remains evidence-based |
 
 Results are recorded below as checks are executed. Provider-funded live model calls, production deployment and real macOS execution are not acceptance claims unless separately recorded.
+
+## Executed evidence — Linux / Ares
+
+Executed on the isolated `feat/host-agent-coordination` worktree, with Node 26.8.1 and Rust 1.98.1. No production Worker or user workspace was changed.
+
+| Check | Observed result |
+| --- | --- |
+| `bun run test:host` | 36 passed: 16 state/transaction tests, 12 real-HTTP/process runtime tests, 6 process supervision tests and 2 prompt-adapter contract tests |
+| `bun run test:host:integration` | Passed against an isolated real Wrangler/Cloudflare Worker: remote-protocol human → Node agent → Python agent → Node agent → human, with one execution slot, no required coordinator, a correlated resume, and zero duplicate effects after restart; seven canonical messages, four committed outbound sends |
+| `bun run test` | 82 Worker tests across five files and 40 existing JavaScript CLI/onboarding/dispatcher tests passed |
+| `bun run typecheck` | Passed |
+| `bun run lint` | Passed |
+| `cargo fmt --manifest-path cli/Cargo.toml --all -- --check` | Passed |
+| `cargo clippy --manifest-path cli/Cargo.toml --all-targets --all-features --locked -- -D warnings` | Passed |
+| `cargo test --manifest-path cli/Cargo.toml --locked` | 271 passed, zero failures/ignored tests |
+| `bun run test:dispatch` | Existing real-Worker workflow passed: worker/reviewer dispatch, evidence-based task closure, identical event journal on restart, zero duplicate side effects |
+
+Important regressions exercised with actual processes and sockets: an agent that ignores SIGTERM is killed by its deadline while another agent completes; a lost successful POST response reuses exactly the committed key/body without rerunning the original turn; a second process cannot acquire the SQLite owner lock; SIGKILL releases that lock automatically; a disconnected host's supervisor reaps its child; a two-peer circular wait recovers with only one execution slot; an absent peer's deadline wakes the requester without incoming traffic; and a terminal send failure creates a new durable continuation rather than silently disappearing.
+
+The real Worker run caught a shutdown/restart defect: canceling a canonical read consumed the only allowed attempt, potentially dead-lettering input that had not reached its executable. Clean cancellation now refunds that claim, while crash recovery retains consumed attempts. Excluded canonical messages are classified before enforcing an exhausted execution-attempt budget. A regression test covers the corrected cancellation path.
+
+## Explicit limits of this evidence
+
+Linux was executed locally. `.github/workflows/host.yml` adds Node 24/26 × Linux/macOS process tests plus a Node-24 real-Worker integration job; merely adding those jobs is not a claim that remote CI has passed. Local attempts to invoke a separate Node 24 through `npm exec` exited before the runtime started, so they are not counted as Node-24 evidence.
+
+Claude/Codex adapter tests use executable fixtures to verify actual argv, stdin, output extraction and validation. They do **not** claim a completed live provider-backed MSN conversation. No production daemon was installed, no existing interactive TUI was attached, and no macOS/iOS GUI was launched by this change. The existing native clients were not changed. Host state is local; duplicate-agent ownership across separate hosts and exactly-once external filesystem/API effects are outside the contract.
