@@ -1,0 +1,99 @@
+name: ios
+
+on:
+  pull_request:
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: apps/ios
+
+jobs:
+  # Linux: everything that does not need Xcode, including a real Metro iOS bundle.
+  js:
+    name: typecheck, tests, metro bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/ios/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run check:deps
+      - run: npx expo config --type public
+      - run: npm run export:ios
+      - run: npm run prebuild:ios
+      - uses: oven-sh/setup-bun@v2
+      - name: Install the local Worker fixture dependencies
+        working-directory: .
+        run: bun install --frozen-lockfile
+      - run: npm run test:worker
+
+  # macOS: unsigned iOS Simulator build. No signing identity, provisioning profile or secret is used.
+  simulator:
+    name: unsigned simulator build
+    runs-on: macos-26
+    timeout-minutes: 45
+    needs: js
+    steps:
+      - uses: actions/checkout@v5
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/ios/package-lock.json
+      - name: Require Xcode 26.4 or newer and an iOS Simulator SDK
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+          version="$(xcodebuild -version | awk '/^Xcode/ {print $2; exit}')"
+          lowest="$(printf '%s\n26.4\n' "$version" | sort -V | head -n1)"
+          if [ "$lowest" != "26.4" ]; then
+            echo "Xcode $version is older than the required 26.4" >&2
+            exit 1
+          fi
+          xcodebuild -showsdks | grep -q "iphonesimulator"
+      - run: npm ci
+      - run: npm run prebuild:ios
+      - name: Install pods
+        working-directory: apps/ios/ios
+        run: pod install
+      - name: Build (Release, unsigned, simulator)
+        working-directory: apps/ios/ios
+        run: |
+          xcodebuild build \
+            -workspace MSN.xcworkspace \
+            -scheme MSN \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Archive unsigned simulator app
+        working-directory: apps/ios/ios
+        run: ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Release-iphonesimulator/MSN.app build/MSN-simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msn-ios-simulator-unsigned
+          path: apps/ios/ios/build/MSN-simulator.zip
