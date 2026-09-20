@@ -61,12 +61,14 @@ type TenantRow = {
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
 type Waiter = { channel: string; wake: () => void };
+/** `channel: null` matches every channel (unscoped tokens polling the whole tenant). */
+type EventWaiter = { channel: string | null; wake: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 type InviteRow = {
   id: string;
   code_hash: string;
@@ -76,6 +78,9 @@ type InviteRow = {
   remaining: number;
 };
 const MAX_SNAPSHOTS = 1000;
+// Exact upper bound: every message can be created and later deleted, every channel and every
+// snapshot emits one event. Fail-closed capacity, never reached while other quotas hold.
+const MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS;
 const SNAPSHOT_COLUMNS =
   "channel, version, username, text, coversThrough, historyRevision, createdAt, invalidated";
 type SnapshotRow = {
@@ -91,6 +96,29 @@ type SnapshotRow = {
 function toSnapshot(row: SnapshotRow, tenant: string) {
   const { invalidated, ...snapshot } = row;
   return { ...snapshot, tenant, invalidated: Boolean(invalidated) };
+}
+
+export type EventType = "channel.created" | "message.created" | "message.deleted" | "snapshot.published";
+export type CoordinationEvent = {
+  id: number;
+  tenant: string;
+  channel: string;
+  type: EventType;
+  resourceId: number | null;
+  historyRevision: number;
+  createdAt: string;
+};
+type EventRow = {
+  id: number;
+  channel: string;
+  type: EventType;
+  resourceId: number | null;
+  historyRevision: number;
+  createdAt: string;
+};
+const EVENT_COLUMNS = "id, channel, type, resourceId, historyRevision, createdAt";
+function toEvent(row: EventRow, tenant: string): CoordinationEvent {
+  return { ...row, tenant };
 }
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
@@ -131,6 +159,7 @@ export function payload(username: string, text: string, type: ContentType, corre
 /** One object per tenant. Channel indexes and message writes share one transaction boundary. */
 export class MsnDurableObject extends DurableObject<Env> {
   private waiters = new Set<Waiter>();
+  private eventWaiters = new Set<EventWaiter>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -172,6 +201,11 @@ export class MsnDurableObject extends DurableObject<Env> {
           id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, creator_hash TEXT NOT NULL,
           channel TEXT, expiresAt INTEGER NOT NULL, remaining INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, type TEXT NOT NULL,
+          resourceId INTEGER, historyRevision INTEGER NOT NULL, createdAt TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS events_channel ON events(channel, id);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -219,6 +253,18 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         if (version < 7) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (7)");
         if (version < 8) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (8)");
+        if (version < 9) {
+          // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
+          // migration point; pre-existing messages/channels/snapshots are not backfilled.
+          ctx.storage.sql.exec(`
+            CREATE TABLE IF NOT EXISTS events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, type TEXT NOT NULL,
+              resourceId INTEGER, historyRevision INTEGER NOT NULL, createdAt TEXT NOT NULL
+            );
+          `);
+          ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS events_channel ON events(channel, id)");
+          ctx.storage.sql.exec("INSERT INTO schema_version VALUES (9)");
+        }
       }
     });
   }
@@ -286,7 +332,123 @@ export class MsnDurableObject extends DurableObject<Env> {
       .one().count;
     if (count >= MAX_CHANNELS) throw new HttpError(409, "channel_quota", "Tenant channel limit reached.");
     this.ctx.storage.sql.exec("INSERT INTO channels VALUES (?, ?)", channel, new Date().toISOString());
+    this.insertEvent(channel, "channel.created", null);
     return true;
+  }
+
+  /**
+   * Always called from inside the caller's own `transactionSync`, so the event row commits or
+   * rolls back atomically with the canonical mutation it describes. Capacity failure throws,
+   * which aborts that whole transaction: no mutation is ever recorded without its event.
+   */
+  private insertEvent(channel: string, type: EventType, resourceId: number | null): void {
+    const count = this.ctx.storage.sql
+      .exec<{ count: number }>("SELECT COUNT(*) AS count FROM events")
+      .one().count;
+    if (count >= MAX_EVENTS)
+      throw new HttpError(409, "event_quota", "Event journal capacity reached. Contact the administrator.");
+    this.ctx.storage.sql.exec(
+      "INSERT INTO events (channel, type, resourceId, historyRevision, createdAt) VALUES (?, ?, ?, ?, ?)",
+      channel,
+      type,
+      resourceId,
+      this.historyRevision(channel),
+      new Date().toISOString(),
+    );
+  }
+
+  /** Wakes pending event polls for this channel, plus unscoped polls watching every channel. */
+  private wakeEvents(channel: string): void {
+    for (const waiter of this.eventWaiters)
+      if (waiter.channel === null || waiter.channel === channel) waiter.wake();
+  }
+
+  /** Rotation and key revocation must recheck every pending poll of both kinds, not just message polls. */
+  private wakeAllWaiters(): void {
+    for (const waiter of this.waiters) waiter.wake();
+    for (const waiter of this.eventWaiters) waiter.wake();
+  }
+
+  private eventsPage(tenant: string, channel: string | null, after: number, limit: number) {
+    const rows = (
+      channel === null
+        ? this.ctx.storage.sql.exec<EventRow>(
+            `SELECT ${EVENT_COLUMNS} FROM events WHERE id > ? ORDER BY id LIMIT ?`,
+            after,
+            limit + 1,
+          )
+        : this.ctx.storage.sql.exec<EventRow>(
+            `SELECT ${EVENT_COLUMNS} FROM events WHERE channel = ? AND id > ? ORDER BY id LIMIT ?`,
+            channel,
+            after,
+            limit + 1,
+          )
+    ).toArray();
+    const events: CoordinationEvent[] = rows.slice(0, limit).map((row) => toEvent(row, tenant));
+    return { events, nextCursor: events.at(-1)?.id ?? after, hasMore: rows.length > limit };
+  }
+
+  /** Same shape as `poll`, but over the event journal; a distinct id space from message ids. */
+  private eventPoll(
+    request: Request,
+    hash: string,
+    tenant: string,
+    channel: string | null,
+    after: number,
+    limit: number,
+    wait: number,
+  ): Promise<Response> | Response {
+    const page = this.eventsPage(tenant, channel, after, limit);
+    if (page.events.length || !wait) return json(page);
+    if (this.eventWaiters.size >= MAX_WAITERS)
+      throw new HttpError(
+        429,
+        "too_many_polls",
+        "At most 128 pending event polls per tenant; retry with backoff.",
+      );
+    // No await between SELECT and registration: new events cannot fall into a lost-wakeup gap.
+    return new Promise((resolve) => {
+      let finished = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.eventWaiters.delete(waiter);
+        request.signal.removeEventListener("abort", abort);
+      };
+      const finish = (aborted = false) => {
+        if (finished) return;
+        try {
+          this.authorize(hash); // Rotation and revocation abort already-pending polls, too.
+          const next = this.eventsPage(tenant, channel, after, limit);
+          finished = true;
+          cleanup();
+          resolve(
+            aborted ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499) : json(next),
+          );
+        } catch (error) {
+          finished = true;
+          cleanup();
+          resolve(failure(error));
+        }
+      };
+      const waiter: EventWaiter = {
+        channel,
+        wake: () => {
+          // Future cursors must not get woken by earlier events.
+          try {
+            this.authorize(hash);
+          } catch {
+            finish();
+            return;
+          }
+          if (this.eventsPage(tenant, channel, after, limit).events.length) finish();
+        },
+      };
+      const abort = () => finish(true);
+      const timer = setTimeout(finish, wait * 1000);
+      this.eventWaiters.add(waiter);
+      request.signal.addEventListener("abort", abort, { once: true });
+      if (request.signal.aborted) abort();
+    });
   }
 
   private page(tenant: string, channel: string, after: number, limit: number) {
@@ -442,10 +604,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         "UPDATE usage SET messages = messages + 1, bytes = bytes + ? WHERE singleton = 1",
         bytes,
       );
+      this.insertEvent(channel, "message.created", message.id);
       return { message: toMessage(message, tenant), replayed: false };
     });
     // transactionSync succeeded; output gates delay network replies until durable commit.
-    if (!result.replayed) for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
+    if (!result.replayed) {
+      for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
+      this.wakeEvents(channel);
+    }
     return json(result, result.replayed ? 200 : 201);
   }
 
@@ -570,8 +736,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         )
         .one();
       this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes + ? WHERE singleton = 1", bytes);
+      this.insertEvent(channel, "snapshot.published", row.version);
       return { snapshot: toSnapshot(row, tenant), replayed: false };
     });
+    if (!result.replayed) this.wakeEvents(channel);
     return json(result, result.replayed ? 200 : 201);
   }
 
@@ -865,7 +1033,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.ctx.storage.sql.exec("DELETE FROM access_keys");
             this.ctx.storage.sql.exec("DELETE FROM invites");
           });
-          for (const waiter of this.waiters) waiter.wake();
+          this.wakeAllWaiters();
           return json(this.identity(tenant, this.authorize(hash), token));
         }
         if (rest[0] === "keys") {
@@ -919,7 +1087,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                 .toArray();
               if (!deleted.length) throw new HttpError(404, "key_not_found", "Participant key not found.");
               // Recheck every pending poll; other participants retain their waiters and access.
-              for (const waiter of this.waiters) waiter.wake();
+              this.wakeAllWaiters();
               return new Response(null, { status: 204 });
             }
           }
@@ -965,7 +1133,10 @@ export class MsnDurableObject extends DurableObject<Env> {
               "UPDATE usage SET bytes = bytes - ? WHERE singleton = 1",
               row.bytes + snapshotBytes,
             );
+            // After the revision bump, so this event's historyRevision is the post-deletion value.
+            this.insertEvent(channel, "message.deleted", id);
           });
+          this.wakeEvents(channel);
           return new Response(null, { status: 204 });
         }
       } else {
@@ -1018,6 +1189,27 @@ export class MsnDurableObject extends DurableObject<Env> {
             );
           return new Response(null, { status: 204 });
         }
+        if (rest.length === 1 && rest[0] === "events" && request.method === "GET") {
+          const channelParam = url.searchParams.get("channel");
+          const channel = channelParam === null ? null : slug(channelParam);
+          // A scoped key sees only its granted channel: silently filtered without a query
+          // parameter, and rejected outright when the query names a different channel.
+          // `channel_scope` may be `undefined` (unselected column) or `null` (unscoped token);
+          // both mean "no scope", matching requireScope's truthy check elsewhere in this file.
+          if (capability.channel_scope && channel !== null && channel !== capability.channel_scope) {
+            throw new HttpError(
+              403,
+              "channel_forbidden",
+              "This access key only grants access to its invited channel.",
+            );
+          }
+          const effectiveChannel = capability.channel_scope || channel;
+          const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
+          const limit = integer(url.searchParams.get("limit"), 100, 100);
+          const wait = integer(url.searchParams.get("wait"), 0, 25);
+          if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+          return await this.eventPoll(request, hash, tenant, effectiveChannel, after, limit, wait);
+        }
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
           if (after) slug(after);
@@ -1045,7 +1237,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           const channel = slug(rest[1]);
           this.requireScope(capability, channel);
           if (rest.length === 2 && request.method === "PUT") {
-            const created = this.createChannel(channel);
+            const created = this.ctx.storage.transactionSync(() => this.createChannel(channel));
+            if (created) this.wakeEvents(channel);
             return json({ channel, created }, created ? 201 : 200);
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
