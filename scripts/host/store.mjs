@@ -312,11 +312,30 @@ export class HostStore {
     });
   }
   outputResult(output, code, retryable, now = Date.now()) {
-    const status = !code ? "sent" : retryable && output.attempts < 10 ? "queued" : "failed";
-    this.db
-      .prepare("UPDATE outbox SET status=?, error=?, available=? WHERE id=?")
-      .run(status, code ?? null, now + Math.min(500 * 2 ** (output.attempts - 1), 30000), output.id);
-    return status;
+    return this.tx(() => {
+      const status = !code ? "sent" : retryable && output.attempts < 10 ? "queued" : "failed";
+      const changed = this.db
+        .prepare("UPDATE outbox SET status=?, error=?, available=? WHERE id=? AND status='sending'")
+        .run(
+          status,
+          code ?? null,
+          now + Math.min(500 * 2 ** (output.attempts - 1), 30000),
+          output.id,
+        ).changes;
+      // Terminal delivery failure is new input, not a reason to regenerate an already-committed turn.
+      // Diagnostics have no conversation id, so failed diagnostic sends cannot recurse.
+      if (changed && status === "failed" && output.body.correlationId) {
+        this.enqueueSignal(output.agent, output.channel, output.body.correlationId, {
+          type: "coordination.delivery_failed",
+          outputId: output.id,
+          to: output.body.to ?? null,
+          reason: code,
+          instruction:
+            "This committed send could not be delivered. Choose an alternative action or report the blocker; do not assume the recipient received it or poll for delivery.",
+        });
+      }
+      return status;
+    });
   }
   expire(now = Date.now()) {
     return this.tx(() => {

@@ -33,7 +33,19 @@ export function inspectState(config) {
   try {
     return {
       hostId: config.hostId,
-      agents: db.prepare("SELECT id, username, cursor, initialized FROM agents ORDER BY id").all(),
+      agents: db
+        .prepare("SELECT id, username, cursor, initialized, channels, waiting FROM agents ORDER BY id")
+        .all()
+        .map((row) => {
+          const waiting = row.waiting ? JSON.parse(row.waiting) : null;
+          return {
+            ...row,
+            channels: JSON.parse(row.channels),
+            waiting: waiting
+              ? { for: waiting.for, deadline: waiting.deadline, channel: waiting.channel }
+              : null,
+          };
+        }),
       jobs: db.prepare("SELECT status, COUNT(*) AS count FROM jobs GROUP BY status").all(),
       outbox: db.prepare("SELECT status, COUNT(*) AS count FROM outbox GROUP BY status").all(),
       failures: db

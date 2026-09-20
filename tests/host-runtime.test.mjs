@@ -130,3 +130,40 @@ test("host stream rejects foreign scope, event counter confusion and malformed c
   ])
     assert.throws(() => validateHostPage(change, connection, 1));
 });
+
+test("two real executable peers recover from a circular wait with one execution slot", async (t) => {
+  const f = await hostFixture(t, { maxConcurrent: 1 });
+  f.post({ to: "alice", text: "cycle-start" });
+  await f.message((m) => m.to === "human" && m.text === "completed");
+  const records = await f.records();
+  const cycle = records.find((r) => r.input.trigger.type === "coordination.cycle");
+  assert.equal(cycle.who, "bob");
+  assert.deepEqual(cycle.input.trigger.path, ["bob", "alice", "bob"]);
+  assert.equal(records.at(-1).input.trigger.resumed, true);
+  assert.equal(f.status().failures.length, 0);
+});
+test("nearest wait deadline wakes an idle agent without an incoming message or polling", async (t) => {
+  const f = await hostFixture(t, { maxConcurrent: 1 });
+  f.post({ to: "alice", text: "wait-missing" });
+  await f.message((m) => m.to === "human" && m.text === "timeout recovered");
+  const records = await f.records();
+  assert.equal(records.length, 2);
+  assert.equal(records[1].input.trigger.type, "coordination.timeout");
+  assert.equal(records[1].input.waiting, null);
+});
+test("permanently failed delivery wakes its sender rather than silently waiting for a reply", async (t) => {
+  const f = await hostFixture(t);
+  f.rejectSend();
+  f.post({ to: "alice", text: "terminal-send-failure" });
+  await f.message((m) => m.to === "human" && m.text === "delivery failure observed");
+  const records = await f.records();
+  assert.equal(records.length, 2);
+  assert.equal(records[1].input.trigger.type, "coordination.delivery_failed");
+  assert.equal(records[1].input.trigger.reason, "http_400");
+  assert.notEqual(records[1].input.idempotencyKey, records[0].input.idempotencyKey);
+  assert.equal(
+    f.messages.some((m) => m.text === "done:terminal-send-failure"),
+    false,
+  );
+  assert.equal(f.status().failedOutputs.length, 1);
+});

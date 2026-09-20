@@ -162,6 +162,7 @@ export class HostRuntime {
         permissionMode: "yolo",
         peers: this.store.roster(),
         channels: state.channels,
+        allowedChannels: agent.allowedChannels,
         conversationId: root,
         idempotencyKey: `msn-turn-${digest(this.config.hostId, agent.id, job.id)}`,
         trigger: job.trigger ?? { type: "message", resumed: activation.resumed, eventId: job.event.id },

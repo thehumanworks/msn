@@ -330,3 +330,24 @@ test("clean cancellation does not spend a retry before the next host can execute
   assert.equal(resumed.id, interrupted.id);
   assert.equal(resumed.attempts, 1);
 });
+
+test("terminal output failure atomically creates one durable continuation, never regenerating the old turn", (t) => {
+  const f = fixture(t),
+    job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", { actions: [{ type: "send", channel: "work", to: "bob", text: "request" }] }),
+    null,
+  );
+  const output = f.store.claimOutput("alice", 10);
+  assert.equal(f.store.outputResult(output, "http_400", false, 10), "failed");
+  f.store.outputResult(output, "http_400", false, 10);
+  f.reopen();
+  const resumed = f.store.claim("alice", 100, 20);
+  assert.notEqual(resumed.id, job.id);
+  assert.equal(resumed.root, "conversation");
+  assert.deepEqual(resumed.trigger.to, "bob");
+  assert.equal(resumed.trigger.type, "coordination.delivery_failed");
+  f.store.ignore(resumed);
+  assert.equal(f.store.claim("alice", 100, 20), null);
+});

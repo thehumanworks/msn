@@ -12,7 +12,13 @@ let raw=''; for await(const chunk of process.stdin) raw+=chunk; const i=JSON.par
 await appendFile(process.env.HOST_TEST_RECORDS, JSON.stringify({who:i.identity.username,input:i,permission:process.env.MSN_PERMISSION_MODE,admin:!!process.env.MSN_ADMIN_TOKEN,other:!!process.env.ALICE_TOKEN||!!process.env.BOB_TOKEN})+'\\n');
 if (i.message?.text==='hang') {process.on('SIGTERM',()=>{}); await new Promise(r=>setTimeout(r,60000));}
 let actions=[],wait;
-if(i.message?.text==='coordinate') {actions=[{type:'send',channel:i.channel,to:'bob',text:'request'}]; wait={for:['bob'],timeoutMs:5000,reason:'peer work'};}
+if(i.message?.text==='cycle-start') {actions=[{type:'send',channel:i.channel,to:'bob',text:'cycle-request'}]; wait={for:['bob'],timeoutMs:3000,reason:'bob'};}
+else if(i.message?.text==='cycle-request') wait={for:['alice'],timeoutMs:3000,reason:'alice'};
+else if(i.trigger.type==='coordination.cycle') actions=[{type:'send',channel:i.channel,to:'alice',text:'reply'}];
+else if(i.message?.text==='wait-missing') wait={for:['absent-peer'],timeoutMs:100,reason:'missing peer'};
+else if(i.trigger.type==='coordination.timeout') actions=[{type:'send',channel:i.channel,to:'human',text:'timeout recovered'}];
+else if(i.trigger.type==='coordination.delivery_failed') actions=[{type:'send',channel:i.channel,to:'human',text:'delivery failure observed'}];
+else if(i.message?.text==='coordinate') {actions=[{type:'send',channel:i.channel,to:'bob',text:'request'}]; wait={for:['bob'],timeoutMs:5000,reason:'peer work'};}
 else if(i.message?.text==='request') actions=[{type:'send',channel:i.channel,to:'alice',text:'reply'}];
 else if(i.message?.text==='reply') actions=[{type:'send',channel:i.channel,to:'human',text:'completed'}];
 else if(i.message) actions=[{type:'send',channel:i.channel,to:'human',text:'done:'+i.message.text}];
@@ -41,7 +47,8 @@ export async function hostFixture(t, options = {}) {
   const retryKeys = new Map(),
     denied = new Set(),
     deleted = new Set();
-  let dropNextReply = false;
+  let dropNextReply = false,
+    rejectNextSend = false;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     const who = { "Bearer alice-secret-fixture": "alice", "Bearer bob-secret-fixture": "bob" }[
@@ -93,6 +100,10 @@ export async function hostFixture(t, options = {}) {
       for await (const chunk of req) raw += chunk;
       const body = JSON.parse(raw);
       assert.equal(body.username, who);
+      if (rejectNextSend) {
+        rejectNextSend = false;
+        return respond({}, 400);
+      }
       const key = `${channel}:${req.headers["idempotency-key"]}`;
       const saved = retryKeys.get(key);
       if (saved) {
@@ -249,6 +260,9 @@ export async function hostFixture(t, options = {}) {
         if (error.code === "ENOENT") return [];
         throw error;
       }
+    },
+    rejectSend: () => {
+      rejectNextSend = true;
     },
     dropReply: () => {
       dropNextReply = true;
