@@ -342,10 +342,13 @@ export class MsnDurableObject extends DurableObject<Env> {
    * which aborts that whole transaction: no mutation is ever recorded without its event.
    */
   private insertEvent(channel: string, type: EventType, resourceId: number | null): void {
-    const count = this.ctx.storage.sql
-      .exec<{ count: number }>("SELECT COUNT(*) AS count FROM events")
-      .one().count;
-    if (count >= MAX_EVENTS)
+    // This journal is append-only. Bound its allocated sequence with an indexed rowid lookup,
+    // rather than counting the entire retained journal on every write. Gaps consume capacity
+    // conservatively; no mutation can bypass the ceiling or silently discard retained events.
+    const allocated = this.ctx.storage.sql
+      .exec<{ allocated: number }>("SELECT COALESCE(MAX(id), 0) AS allocated FROM events")
+      .one().allocated;
+    if (allocated >= MAX_EVENTS)
       throw new HttpError(409, "event_quota", "Event journal capacity reached. Contact the administrator.");
     this.ctx.storage.sql.exec(
       "INSERT INTO events (channel, type, resourceId, historyRevision, createdAt) VALUES (?, ?, ?, ?, ?)",
