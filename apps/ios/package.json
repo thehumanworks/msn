@@ -1,0 +1,33 @@
+{
+  "name": "msn-ios",
+  "version": "1.0.0",
+  "description": "iOS client for msn workspaces (Expo / React Native)",
+  "main": "index.ts",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "node --test --test-timeout=25000 tests/*.test.ts",
+    "check:deps": "expo install --check",
+    "export:ios": "expo export --platform ios --output-dir dist-ios",
+    "prebuild:ios": "expo prebuild --platform ios --no-install",
+    "test:worker": "node tests/lead-worker.integration.mjs"
+  },
+  "dependencies": {
+    "expo": "~57.0.24",
+    "expo-secure-store": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.6",
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  }
+}
