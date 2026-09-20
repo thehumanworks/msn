@@ -28,7 +28,7 @@ Executed on the isolated `feat/host-agent-coordination` worktree, with Node 26.8
 
 | Check | Observed result |
 | --- | --- |
-| `bun run test:host` | 36 passed: 16 state/transaction tests, 12 real-HTTP/process runtime tests, 6 process supervision tests and 2 prompt-adapter contract tests |
+| `bun run test:host` | 37 passed: 17 state/transaction tests, 12 real-HTTP/process runtime tests, 6 process supervision tests and 2 prompt-adapter contract tests |
 | `bun run test:host:integration` | Passed against an isolated real Wrangler/Cloudflare Worker: remote-protocol human → Node agent → Python agent → Node agent → human, with one execution slot, no required coordinator, a correlated resume, and zero duplicate effects after restart; seven canonical messages, four committed outbound sends |
 | `bun run test` | 82 Worker tests across five files and 40 existing JavaScript CLI/onboarding/dispatcher tests passed |
 | `bun run typecheck` | Passed |
@@ -47,3 +47,7 @@ The real Worker run caught a shutdown/restart defect: canceling a canonical read
 Linux was executed locally. `.github/workflows/host.yml` adds Node 24/26 × Linux/macOS process tests plus a Node-24 real-Worker integration job; merely adding those jobs is not a claim that remote CI has passed. Local attempts to invoke a separate Node 24 through `npm exec` exited before the runtime started, so they are not counted as Node-24 evidence.
 
 Claude/Codex adapter tests use executable fixtures to verify actual argv, stdin, output extraction and validation. They do **not** claim a completed live provider-backed MSN conversation. No production daemon was installed, no existing interactive TUI was attached, and no macOS/iOS GUI was launched by this change. The existing native clients were not changed. Host state is local; duplicate-agent ownership across separate hosts and exactly-once external filesystem/API effects are outside the contract.
+
+A final adversarial state-reset test reproduced an idempotency collision between two new state directories sharing host/agent names and local job IDs. Turn, conversation-root and action keys now include a persisted random state generation and the origin/tenant/host binding. The regression rejects cross-generation collisions and verifies stable keys when reopening the same generation.
+
+Two bounded independent Claude Code review invocations (repository-reading and source-only) timed out without returning a report. Neither counts as completed external review or approval. The executable checks and reproduced/fixed defects above are the verification evidence.

@@ -1,4 +1,5 @@
 /** Synchronous, short transactions only. Never hold a work transaction across an await. */
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,6 +8,7 @@ import { digest, HostError, requireValue } from "./protocol.mjs";
 export class HostStore {
   constructor(config, binding, now = Date.now()) {
     this.config = config;
+    this.binding = binding;
     mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
     const stat = lstatSync(config.stateDir);
     requireValue(
@@ -54,6 +56,8 @@ export class HostStore {
         requireValue(!saved || saved.value === serialized, "host_state_binding_mismatch");
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('binding', ?)").run(serialized);
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('version', '1')").run();
+        this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('generation', ?)").run(randomUUID());
+        this.generation = this.db.prepare("SELECT value FROM meta WHERE key='generation'").get().value;
         requireValue(
           this.db.prepare("SELECT value FROM meta WHERE key='version'").get().value === "1",
           "unsupported_host_state_version",
@@ -77,6 +81,9 @@ export class HostStore {
       this.close();
       throw error;
     }
+  }
+  key(...parts) {
+    return digest(this.binding.origin, this.binding.tenant, this.config.hostId, this.generation, ...parts);
   }
   tx(fn) {
     this.db.exec("BEGIN IMMEDIATE");
@@ -226,12 +233,7 @@ export class HostStore {
         if (action.to !== undefined) body.to = action.to;
         if (action.replyTo !== undefined) body.replyTo = action.replyTo;
         else if (message && message.channel === action.channel) body.replyTo = message.id;
-        this.queueOutput(
-          `msn-host-${digest(this.config.hostId, job.agent, job.id, index)}`,
-          job.agent,
-          action.channel,
-          body,
-        );
+        this.queueOutput(`msn-host-${this.key(job.agent, job.id, index)}`, job.agent, action.channel, body);
       }
       if (Object.hasOwn(result, "wait")) {
         this.db.prepare("UPDATE agents SET waiting=NULL WHERE id=?").run(job.agent);
@@ -267,23 +269,18 @@ export class HostStore {
   deadLetter(job, code) {
     this.db.prepare("UPDATE jobs SET status='failed', error=? WHERE id=?").run(code, job.id);
     const agent = this.config.agents.find((a) => a.id === job.agent);
-    this.queueOutput(
-      `msn-host-${digest(this.config.hostId, job.agent, job.id, "failure")}`,
-      job.agent,
-      job.channel,
-      {
-        username: agent.username,
-        text: JSON.stringify({
-          schema: "msn.host.status.v1",
-          hostId: this.config.hostId,
-          agent: agent.username,
-          jobId: job.id,
-          status: "failed",
-          reason: code,
-        }),
-        contentType: "application/json",
-      },
-    );
+    this.queueOutput(`msn-host-${this.key(job.agent, job.id, "failure")}`, job.agent, job.channel, {
+      username: agent.username,
+      text: JSON.stringify({
+        schema: "msn.host.status.v1",
+        hostId: this.config.hostId,
+        agent: agent.username,
+        jobId: job.id,
+        status: "failed",
+        reason: code,
+      }),
+      contentType: "application/json",
+    });
   }
   fail(job, code, maxAttempts, now = Date.now()) {
     return this.tx(() => {

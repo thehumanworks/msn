@@ -351,3 +351,25 @@ test("terminal output failure atomically creates one durable continuation, never
   f.store.ignore(resumed);
   assert.equal(f.store.claim("alice", 100, 20), null);
 });
+
+test("fresh state generations cannot collide with old output keys; restarting a generation preserves keys", (t) => {
+  const left = fixture(t),
+    right = fixture(t);
+  const a = turn(left, "alice", 1),
+    b = turn(right, "alice", 1);
+  left.store.finish(
+    a,
+    result(left.config, "alice", { actions: [{ type: "send", channel: "work", text: "old generation" }] }),
+    null,
+  );
+  right.store.finish(
+    b,
+    result(right.config, "alice", { actions: [{ type: "send", channel: "work", text: "new generation" }] }),
+    null,
+  );
+  const first = left.store.claimOutput("alice", 10),
+    second = right.store.claimOutput("alice", 10);
+  assert.notEqual(first.key, second.key);
+  left.reopen();
+  assert.equal(left.store.claimOutput("alice", 20).key, first.key);
+});

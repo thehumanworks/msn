@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { executeTurn } from "./process.mjs";
-import { diagnostic, digest, HostError, validateMessage, validateResult } from "./protocol.mjs";
+import { diagnostic, HostError, validateMessage, validateResult } from "./protocol.mjs";
 import { request, validateHostPage } from "./transport.mjs";
 
 /** Edge-triggered notification with an epoch to close check/register lost-wakeup races. */
@@ -142,7 +142,7 @@ export class HostRuntime {
       const root =
         job.root ??
         message?.correlationId ??
-        `msn-conversation-${digest(this.config.hostId, job.channel, message?.id).slice(0, 40)}`;
+        `msn-conversation-${this.store.key(job.channel, message?.id).slice(0, 40)}`;
       const activation = this.store.startTurn(job, root, message);
       if (!activation) {
         this.emit("turn.failed", { agent: agent.id, jobId: job.id, reason: "conversation_budget_exhausted" });
@@ -164,7 +164,7 @@ export class HostRuntime {
         channels: state.channels,
         allowedChannels: agent.allowedChannels,
         conversationId: root,
-        idempotencyKey: `msn-turn-${digest(this.config.hostId, agent.id, job.id)}`,
+        idempotencyKey: `msn-turn-${this.store.key(agent.id, job.id)}`,
         trigger: job.trigger ?? { type: "message", resumed: activation.resumed, eventId: job.event.id },
         message,
         state: state.state,
