@@ -90,4 +90,12 @@ cargo test --locked
 - The event cursor is in memory only; a restart re-drains, then reads canonical state.
 - GUI actions are limited: send, create channel, claim task. No snapshot publishing, no other task actions, no attachments, single-line composer.
 - No system tray, notifications, or background operation. The eframe `accesskit` feature is disabled to keep dependencies small, so screen-reader support is not provided.
-- The macOS bundle and macOS build are verified only by CI configuration, not by the author. Windows is not supported.
+- The macOS bundle/build must pass the platform CI job; local Ares verification is Linux-only. Windows is not supported.
+
+## Recorded Linux acceptance
+
+The lead verified the native debug build against an isolated real Worker after integrating the coordination branch. `--smoke` passed authentication, channel creation/listing, idempotent send/retry, exact read-back, bounded canonical history, immediate event wake-up (about 0.53 seconds including the fixture's 0.5-second delay), and no duplicate events. This is a headless HTTP check, not GUI execution.
+
+Separately, the actual native GUI was launched on a private Xvfb display (not the user's desktop), connected through a private fixture profile, loaded channel messages, and sent a message addressed to `worker`. A separate canonical API read confirmed the GUI-authored message and recipient. These operations used only local fake workspace credentials. See `docs/verification/linux-gui.png` for the captured window; all displayed messages are test data.
+
+CI archives the Linux executable and macOS bundle before uploading artifacts, preserving executable permissions. macOS artifacts are ad-hoc signed, not Developer ID signed or notarized. The Linux Xvfb launch is a required check, not an ignored failure.
