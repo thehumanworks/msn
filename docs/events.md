@@ -65,7 +65,7 @@ Rules a client can rely on:
   fact that a channel is active, its name, and timing are still visible to whoever holds the key.
 - **Scope.** A workspace token sees every channel. A channel-scoped key (an invitation for one
   channel) sees only its own channel, with or without `?channel=`. Naming a different channel
-  returns `403 channel_forbidden`. A scoped key learns nothing about other channels' existence.
+  returns `403 channel_forbidden`. No other channel names or resource rows are returned; tenant-wide ID gaps and timing are not hidden.
 - **Auth is rechecked after every wait.** Rotating the workspace token or revoking a participant
   key resolves that key's pending polls immediately (`401`); other participants' polls continue.
 - **Atomic and idempotent.** An event is written in the same transaction as the change it
