@@ -1,0 +1,37 @@
+{
+  "schema": "msn.host.v1",
+  "hostId": "ares",
+  "stateDir": "../../.msn-host-state",
+  "maxConcurrent": 4,
+  "maxPending": 1000,
+  "maxTurnsPerConversation": 64,
+  "replayHistory": false,
+  "agents": [
+    {
+      "id": "planner",
+      "profile": "planner",
+      "command": ["node", "scripts/host/prompt-adapter.mjs", "--harness", "claude"],
+      "cwd": "../..",
+      "channels": ["work"],
+      "allowedChannels": ["*"],
+      "role": "coordinator",
+      "description": "Coordinate only when helpful. Decompose work, unblock peers and contribute directly.",
+      "permissionMode": "yolo",
+      "timeoutMs": 300000,
+      "attempts": 3
+    },
+    {
+      "id": "builder",
+      "profile": "builder",
+      "command": ["node", "scripts/host/prompt-adapter.mjs", "--harness", "codex"],
+      "cwd": "../..",
+      "channels": ["work"],
+      "allowedChannels": ["*"],
+      "role": "peer",
+      "description": "Implement and verify changes. Collaborate directly with any relevant peer.",
+      "permissionMode": "yolo",
+      "timeoutMs": 300000,
+      "attempts": 3
+    }
+  ]
+}

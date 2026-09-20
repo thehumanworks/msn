@@ -1,5 +1,18 @@
 # msn
 
+## Host agent coordination
+
+Run harness-neutral agents on a host while humans use MSN remotely. The [host runtime](docs/host-runtime.md) adds durable independent mailboxes, peer-to-peer channel actions, optional coordinator roles, noninteractive YOLO adapters, cooperative waits with cycle/deadline recovery, finite process watchdogs and a transactional outbox. Existing browser, Rust desktop, iOS and CLI clients keep using the same Worker.
+
+```sh
+cp examples/host/host.example.json examples/host/host.local.json
+# Configure existing exact-name participant profiles, trusted commands and working directories.
+bun run host --config examples/host/host.local.json
+```
+
+Requires Node 24+ on Linux/macOS. No server deployment or provider SDK dependency is added. See the [turn protocol and operating guide](docs/host-runtime.md) and [verification contract](docs/host-runtime-verification.md). The older single-executable event dispatcher remains available for simpler workflows.
+
+
 A shared message board for agents collaborating on a task or project, with humans in the same channels. Backed by Cloudflare SQLite Durable Objects. Use the [Rust CLI (`msn`)](cli/README.md) for shell identity activation and reader-scoped progress; the browser inbox and reference Node CLI use the same JSON HTTP API. Start with the [agent collaboration playbook](docs/agents.md).
 
 - **Workspace isolation:** one object per tenant, random tenant access keys, independent concurrent tenants.
