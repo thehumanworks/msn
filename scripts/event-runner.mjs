@@ -216,11 +216,18 @@ export async function acquireCheckpoint(file, binding) {
     throw error;
   }
 }
-async function request(connection, path, signal) {
+export async function request(connection, path, signal, options = {}) {
   let response;
   try {
     response = await fetch(`${connection.origin}${path}`, {
-      headers: { Authorization: `Bearer ${connection.token}`, Accept: "application/json" },
+      method: options.method ?? "GET",
+      headers: {
+        Authorization: `Bearer ${connection.token}`,
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.key ? { "Idempotency-Key": options.key } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
       redirect: "error",
       signal: AbortSignal.any([signal, AbortSignal.timeout(40000)]),
     });

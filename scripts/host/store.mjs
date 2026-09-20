@@ -21,7 +21,9 @@ export class HostStore {
     // Separate lock DB: an OS-owned SQLite lock releases even after SIGKILL. No stale pidfile.
     this.lock = new DatabaseSync(join(config.stateDir, "owner.sqlite"), { timeout: 0 });
     try {
-      this.lock.exec("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE");
+      this.lock.exec(
+        "PRAGMA journal_mode=DELETE; CREATE TABLE IF NOT EXISTS ownership (singleton INTEGER); BEGIN EXCLUSIVE",
+      );
     } catch {
       this.lock.close();
       throw new HostError("host_state_already_owned");
