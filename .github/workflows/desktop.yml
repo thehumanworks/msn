@@ -1,0 +1,91 @@
+name: desktop
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "cli/**"
+      - ".github/workflows/desktop.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+      - "cli/**"
+      - ".github/workflows/desktop.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux system libraries for winit/glutin
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev \
+            libxrandr-dev libxcb1-dev libgl1-mesa-dev libegl1-mesa-dev \
+            xvfb libgl1-mesa-dri desktop-file-utils
+      # eframe/egui 0.36 require Rust 1.95; stable satisfies that.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop
+            cli
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Validate the Linux desktop entry
+        if: runner.os == 'Linux'
+        run: desktop-file-validate packaging/linux/msn-desktop.desktop
+      # Starts the real native window under a virtual X server (software GL) and requires it to
+      # still be running after 8 seconds. This proves the GUI starts; it does not drive it.
+      - name: GUI starts under Xvfb (required, bounded)
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        run: |
+          set +e
+          env -u WAYLAND_DISPLAY LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1280x800x24" timeout 8 target/release/msn-desktop
+          status=$?
+          [ "$status" -eq 124 ] || { echo "GUI exited early with status $status"; exit 1; }
+      # build-app.sh also runs plutil -lint, ad-hoc codesign and codesign --verify.
+      - name: Build the macOS app bundle
+        if: runner.os == 'macOS'
+        run: packaging/macos/build-app.sh
+      - name: Archive the macOS bundle preserving permissions and bundle metadata
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "target/macos/msn desktop.app" target/macos/msn-desktop-macos.zip
+      - name: Upload macOS bundle (ad-hoc signed, not notarized)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: msn-desktop-macos
+          path: apps/desktop/target/macos/msn-desktop-macos.zip
+      - name: Archive Linux executable with its mode preserved
+        if: runner.os == 'Linux'
+        run: tar -czf target/msn-desktop-linux-x86_64.tar.gz -C target/release msn-desktop -C ../../packaging/linux msn-desktop.desktop
+      - name: Upload Linux binary
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: msn-desktop-linux-x86_64
+          path: apps/desktop/target/msn-desktop-linux-x86_64.tar.gz

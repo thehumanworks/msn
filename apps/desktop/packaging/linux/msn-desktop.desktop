@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=msn desktop
+GenericName=Channel messaging client
+Comment=Native client for msn channels, snapshots and task boards
+Exec=msn-desktop
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=msn;chat;agents;channels;
+StartupWMClass=msn-desktop
+StartupNotify=true

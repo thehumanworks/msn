@@ -1,0 +1,1077 @@
+//! Pure UI state and the reducer that folds [`UiEvent`]s into it.
+//!
+//! `AppState::apply` never touches the network; it mutates state and returns the follow-up
+//! [`Command`]s to dispatch. That keeps generation guards, coalescing, deletion handling and the
+//! history/subscription ordering unit-testable without a server (`tests/mock_server.rs` covers
+//! the same behaviour end to end over real HTTP).
+
+use std::collections::BTreeMap;
+
+use serde_json::Value;
+
+use crate::net::client_ops::SnapshotView;
+use crate::net::events::{CoordinationEvent, EventKind};
+use crate::net::worker::{Command, TaskEventRequest, UiEvent};
+
+/// Bound on how many messages a channel keeps in memory. Oldest are evicted first.
+pub const MAX_CACHED_MESSAGES: usize = 2000;
+/// A sync that keeps landing behind the events we already saw is abandoned after this many tries.
+const MAX_STALE_SYNCS: u32 = 5;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Screen {
+    Connect,
+    Workspace,
+}
+
+/// Deliberately holds no credentials: the token lives only in the network worker.
+#[derive(Debug, Clone)]
+pub struct PendingConnect {
+    pub generation: u64,
+    pub tenant: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Connection {
+    pub generation: u64,
+    pub tenant: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingSend {
+    pub generation: u64,
+    pub channel_generation: u64,
+    pub channel: String,
+    pub text: String,
+    pub reply_to: Option<u64>,
+    pub correlation_id: Option<String>,
+    pub to: Option<String>,
+    pub error: Option<String>,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingTaskEvent {
+    pub generation: u64,
+    pub channel_generation: u64,
+    pub channel: String,
+    pub request: TaskEventRequest,
+    pub error: Option<String>,
+    pub retryable: bool,
+}
+
+/// Coalesces repeated invalidations: at most one request in flight plus one queued rerun.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Flight {
+    pub inflight: bool,
+    pub dirty: bool,
+}
+
+impl Flight {
+    /// `true` if the caller should issue the request now.
+    fn request(&mut self) -> bool {
+        if self.inflight {
+            self.dirty = true;
+            false
+        } else {
+            self.inflight = true;
+            true
+        }
+    }
+
+    /// The request finished; `true` if a rerun was queued meanwhile (it is marked in flight).
+    fn finish(&mut self) -> bool {
+        self.inflight = false;
+        if self.dirty {
+            self.dirty = false;
+            self.inflight = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn fail(&mut self) {
+        self.inflight = false;
+        self.dirty = false;
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ChannelState {
+    pub messages: BTreeMap<u64, Value>,
+    pub head: u64,
+    pub revision: u64,
+    pub loaded: bool,
+    pub error: Option<String>,
+    pub sync: Flight,
+    pub stale_streak: u32,
+    /// Lower bounds implied by events already seen: a sync older than these is rejected.
+    pub required_head: u64,
+    pub required_revision: u64,
+    pub snapshots: SnapshotView,
+    pub snapshots_flight: Flight,
+    pub snapshots_error: Option<String>,
+    pub task_board: Option<Value>,
+    pub task_board_error: Option<String>,
+}
+
+impl ChannelState {
+    fn replace_messages(&mut self, messages: Vec<Value>) {
+        self.messages.clear();
+        for message in messages {
+            if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                self.messages.insert(id, message);
+            }
+        }
+        while self.messages.len() > MAX_CACHED_MESSAGES {
+            let Some(&smallest) = self.messages.keys().next() else {
+                break;
+            };
+            self.messages.remove(&smallest);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AppState {
+    pub pending_connect: Option<PendingConnect>,
+    pub connection: Option<Connection>,
+    pub connect_error: Option<String>,
+    pub events_ready: bool,
+    pub events_notice: Option<String>,
+    pub events_stopped: bool,
+
+    pub channels: Vec<String>,
+    pub channels_flight: Flight,
+    pub channels_error: Option<String>,
+
+    pub selected_channel: Option<String>,
+    pub channel_generation: u64,
+    pub channel: Option<ChannelState>,
+
+    pub pending_sends: BTreeMap<String, PendingSend>,
+    pub pending_task_events: BTreeMap<String, PendingTaskEvent>,
+    deferred: Vec<Command>,
+
+    pub status: Option<String>,
+}
+
+impl AppState {
+    pub fn screen(&self) -> Screen {
+        if self.connection.is_some() {
+            Screen::Workspace
+        } else {
+            Screen::Connect
+        }
+    }
+
+    pub fn begin_connect(&mut self, generation: u64, tenant: String) {
+        *self = AppState {
+            pending_connect: Some(PendingConnect { generation, tenant }),
+            ..AppState::default()
+        };
+    }
+
+    fn generation(&self) -> Option<u64> {
+        self.connection.as_ref().map(|c| c.generation)
+    }
+
+    fn is_current_channel(&self, generation: u64, channel_generation: u64, channel: &str) -> bool {
+        self.generation() == Some(generation)
+            && self.channel_generation == channel_generation
+            && self.selected_channel.as_deref() == Some(channel)
+    }
+
+    fn list_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        self.channels_flight
+            .request()
+            .then_some(Command::ListChannels { generation })
+    }
+
+    fn sync_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        state.sync.request().then_some(Command::SyncChannel {
+            generation,
+            channel_generation,
+            channel,
+        })
+    }
+
+    fn snapshots_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        state
+            .snapshots_flight
+            .request()
+            .then_some(Command::LoadSnapshots {
+                generation,
+                channel_generation,
+                channel,
+            })
+    }
+
+    pub fn request_channels(&mut self) -> Vec<Command> {
+        self.list_command().into_iter().collect()
+    }
+
+    /// Starts (or restarts) a channel: bumps `channel_generation` so any in-flight response for
+    /// the previous channel or earlier load is rejected when it lands, then issues a fresh
+    /// history sync and snapshot load. Refuses until the event cursor is established.
+    pub fn select_channel(&mut self, channel: String) -> Vec<Command> {
+        if self.generation().is_none() || !self.events_ready {
+            return Vec::new();
+        }
+        self.channel_generation += 1;
+        self.selected_channel = Some(channel);
+        self.channel = Some(ChannelState::default());
+        [self.sync_command(), self.snapshots_command()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Commands that could not be queued earlier (worker queue full); retry when convenient.
+    pub fn take_deferred(&mut self) -> Vec<Command> {
+        let generation = self.generation();
+        let channel_generation = self.channel_generation;
+        std::mem::take(&mut self.deferred)
+            .into_iter()
+            .filter(|command| match command {
+                Command::ListChannels { generation: g } => Some(*g) == generation,
+                Command::SyncChannel {
+                    generation: g,
+                    channel_generation: c,
+                    ..
+                }
+                | Command::LoadSnapshots {
+                    generation: g,
+                    channel_generation: c,
+                    ..
+                } => Some(*g) == generation && *c == channel_generation,
+                _ => false,
+            })
+            .collect()
+    }
+
+    /// A command was refused by the bounded queue. Nothing is dropped silently: user intents
+    /// surface a retryable error with their key/payload intact; invalidations are deferred.
+    pub fn on_rejected(&mut self, command: Command) {
+        const BUSY: &str = "The app is busy (request queue full). Try again in a moment.";
+        match command {
+            Command::Connect { .. } => {
+                self.pending_connect = None;
+                self.connect_error = Some(BUSY.into());
+            }
+            Command::SendMessage { key, .. } => {
+                if let Some(pending) = self.pending_sends.get_mut(&key) {
+                    pending.error = Some(BUSY.into());
+                    pending.retryable = true;
+                }
+            }
+            Command::SendTaskEvent { key, .. } => {
+                if let Some(pending) = self.pending_task_events.get_mut(&key) {
+                    pending.error = Some(BUSY.into());
+                    pending.retryable = true;
+                }
+            }
+            Command::CreateChannel { .. } => self.channels_error = Some(BUSY.into()),
+            Command::Disconnect => {}
+            invalidation => {
+                let duplicate = self
+                    .deferred
+                    .iter()
+                    .any(|d| std::mem::discriminant(d) == std::mem::discriminant(&invalidation));
+                if !duplicate {
+                    self.deferred.push(invalidation);
+                }
+            }
+        }
+    }
+
+    /// Folds one background event into state, returning any follow-up commands to issue.
+    pub fn apply(&mut self, event: UiEvent) -> Vec<Command> {
+        match event {
+            UiEvent::Connected {
+                generation,
+                username,
+            } => {
+                let Some(pending) = self.pending_connect.take_if(|p| p.generation == generation)
+                else {
+                    return Vec::new();
+                };
+                self.connection = Some(Connection {
+                    generation,
+                    tenant: pending.tenant,
+                    username,
+                });
+                self.events_ready = false;
+                self.status = Some("Synchronising with the event stream…".into());
+                Vec::new()
+            }
+            UiEvent::EventsReady { generation } => {
+                if self.generation() != Some(generation) {
+                    return Vec::new();
+                }
+                self.events_ready = true;
+                self.status = None;
+                self.request_channels()
+            }
+            UiEvent::EventsStatus {
+                generation,
+                notice,
+                stopped,
+            } => {
+                if self.generation() == Some(generation) {
+                    self.events_notice = notice;
+                    self.events_stopped = stopped;
+                }
+                Vec::new()
+            }
+            UiEvent::Channels {
+                generation,
+                channels,
+            } => {
+                if self.generation() != Some(generation) {
+                    return Vec::new();
+                }
+                self.channels = channels;
+                self.channels_error = None;
+                self.channels_flight
+                    .finish()
+                    .then_some(Command::ListChannels { generation })
+                    .into_iter()
+                    .collect()
+            }
+            UiEvent::ChannelCreated {
+                generation,
+                channel,
+            } => {
+                if self.generation() != Some(generation) {
+                    return Vec::new();
+                }
+                let mut commands = self.request_channels();
+                commands.extend(self.select_channel(channel));
+                commands
+            }
+            UiEvent::ChannelSynced {
+                generation,
+                channel_generation,
+                channel,
+                messages,
+                head,
+                revision,
+                board,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                self.apply_sync(
+                    generation,
+                    channel_generation,
+                    channel,
+                    messages,
+                    head,
+                    revision,
+                    board,
+                )
+            }
+            UiEvent::Snapshots {
+                generation,
+                channel_generation,
+                channel,
+                view,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                let rerun = state.snapshots_flight.finish();
+                state.snapshots = view;
+                state.snapshots_error = None;
+                if rerun {
+                    vec![Command::LoadSnapshots {
+                        generation,
+                        channel_generation,
+                        channel,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::MessageSent {
+                generation,
+                channel_generation,
+                channel,
+                key,
+                id,
+            } => {
+                self.pending_sends.remove(&key);
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                if let Some(state) = self.channel.as_mut() {
+                    state.required_head = state.required_head.max(id);
+                }
+                self.sync_command().into_iter().collect()
+            }
+            UiEvent::TaskEventSent {
+                generation,
+                channel_generation,
+                channel,
+                key,
+            } => {
+                self.pending_task_events.remove(&key);
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                self.sync_command().into_iter().collect()
+            }
+            UiEvent::CoordinationEvents { generation, events } => {
+                self.apply_coordination_events(generation, &events)
+            }
+            UiEvent::Error {
+                generation,
+                channel_generation,
+                context,
+                message,
+                retryable,
+                key,
+            } => {
+                self.apply_error(
+                    generation,
+                    channel_generation,
+                    context,
+                    message,
+                    retryable,
+                    key,
+                );
+                Vec::new()
+            }
+            UiEvent::AuthFailed {
+                generation,
+                message,
+            } => {
+                let pending = self
+                    .pending_connect
+                    .as_ref()
+                    .is_some_and(|p| p.generation == generation);
+                if !pending && self.generation() != Some(generation) {
+                    return Vec::new();
+                }
+                *self = AppState {
+                    connect_error: Some(format!("Session ended: {message}")),
+                    ..AppState::default()
+                };
+                vec![Command::Disconnect]
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_sync(
+        &mut self,
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        messages: Vec<Value>,
+        head: u64,
+        revision: u64,
+        board: Result<Value, String>,
+    ) -> Vec<Command> {
+        let Some(state) = self.channel.as_mut() else {
+            return Vec::new();
+        };
+        let rerun = state.sync.finish();
+        let again = Command::SyncChannel {
+            generation,
+            channel_generation,
+            channel,
+        };
+        if revision < state.required_revision || head < state.required_head {
+            state.stale_streak += 1;
+            if state.stale_streak > MAX_STALE_SYNCS {
+                state.sync.fail();
+                state.error = Some(
+                    "The server's history is behind its own event stream; try reloading.".into(),
+                );
+                return Vec::new();
+            }
+            state.sync.inflight = true;
+            return vec![again];
+        }
+        state.stale_streak = 0;
+        state.replace_messages(messages);
+        state.head = head;
+        state.revision = revision;
+        state.loaded = true;
+        state.error = None;
+        match board {
+            Ok(board) => {
+                state.task_board = Some(board);
+                state.task_board_error = None;
+            }
+            Err(message) => {
+                state.task_board = None;
+                state.task_board_error = Some(message);
+            }
+        }
+        if rerun { vec![again] } else { Vec::new() }
+    }
+
+    fn apply_coordination_events(
+        &mut self,
+        generation: u64,
+        events: &[CoordinationEvent],
+    ) -> Vec<Command> {
+        if self.generation() != Some(generation) || !self.events_ready {
+            return Vec::new();
+        }
+        let mut list = false;
+        let mut sync = false;
+        let mut snapshots = false;
+        for event in events {
+            match event.kind {
+                EventKind::ChannelCreated => list = true,
+                _ if self.selected_channel.as_deref() != Some(event.channel.as_str()) => {}
+                EventKind::MessageCreated => {
+                    if let Some(state) = self.channel.as_mut() {
+                        state.required_head =
+                            state.required_head.max(event.resource_id.unwrap_or(0));
+                        state.required_revision =
+                            state.required_revision.max(event.history_revision);
+                    }
+                    sync = true;
+                }
+                EventKind::MessageDeleted => {
+                    if let Some(state) = self.channel.as_mut() {
+                        // Purge immediately: deleted content must not linger while re-fetching,
+                        // and everything derived from history is invalid until the rescan lands.
+                        if let Some(id) = event.resource_id {
+                            state.messages.remove(&id);
+                        }
+                        state.task_board = None;
+                        state.snapshots = SnapshotView::default();
+                        state.required_revision =
+                            state.required_revision.max(event.history_revision);
+                    }
+                    sync = true;
+                    snapshots = true;
+                }
+                EventKind::SnapshotPublished => snapshots = true,
+            }
+        }
+        let mut commands = Vec::new();
+        if list {
+            commands.extend(self.list_command());
+        }
+        if sync {
+            commands.extend(self.sync_command());
+        }
+        if snapshots {
+            commands.extend(self.snapshots_command());
+        }
+        commands
+    }
+
+    fn apply_error(
+        &mut self,
+        generation: u64,
+        channel_generation: Option<u64>,
+        context: &'static str,
+        message: String,
+        retryable: bool,
+        key: Option<String>,
+    ) {
+        let pending_connect = self
+            .pending_connect
+            .as_ref()
+            .is_some_and(|p| p.generation == generation);
+        if self.generation() != Some(generation) && !pending_connect {
+            return;
+        }
+        if let Some(key) = key {
+            if let Some(pending) = self.pending_sends.get_mut(&key) {
+                pending.error = Some(message);
+                pending.retryable = retryable;
+            } else if let Some(pending) = self.pending_task_events.get_mut(&key) {
+                pending.error = Some(message);
+                pending.retryable = retryable;
+            }
+            return;
+        }
+        match context {
+            "connect" => {
+                self.pending_connect = None;
+                self.connect_error = Some(message);
+            }
+            "list-channels" => {
+                self.channels_flight.fail();
+                self.channels_error = Some(message);
+            }
+            "create-channel" => self.channels_error = Some(message),
+            "sync-channel" | "load-snapshots" => {
+                if channel_generation != Some(self.channel_generation) {
+                    return;
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return;
+                };
+                if context == "sync-channel" {
+                    state.sync.fail();
+                    state.error = Some(message);
+                } else {
+                    state.snapshots_flight.fail();
+                    state.snapshots_error = Some(message);
+                }
+            }
+            _ => self.status = Some(message),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use url::Url;
+
+    fn ready_state(generation: u64) -> AppState {
+        let mut state = AppState::default();
+        state.begin_connect(generation, "acme".into());
+        state.apply(UiEvent::Connected {
+            generation,
+            username: "alice".into(),
+        });
+        state.apply(UiEvent::EventsReady { generation });
+        state
+    }
+
+    fn msg(id: u64, text: &str) -> Value {
+        json!({"id": id, "text": text})
+    }
+
+    fn synced(
+        state: &mut AppState,
+        messages: Vec<Value>,
+        head: u64,
+        revision: u64,
+    ) -> Vec<Command> {
+        let (generation, cg) = (state.generation().unwrap(), state.channel_generation);
+        let channel = state.selected_channel.clone().unwrap();
+        state.apply(UiEvent::ChannelSynced {
+            generation,
+            channel_generation: cg,
+            channel,
+            messages,
+            head,
+            revision,
+            board: Ok(json!({"tasks": [], "warnings": []})),
+        })
+    }
+
+    fn event(
+        kind: EventKind,
+        channel: &str,
+        resource: Option<u64>,
+        revision: u64,
+    ) -> CoordinationEvent {
+        CoordinationEvent {
+            id: 1,
+            tenant: "acme".into(),
+            channel: channel.into(),
+            kind,
+            resource_id: resource,
+            history_revision: revision,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn reads_wait_for_the_event_cursor_so_history_cannot_race_the_subscription() {
+        let mut state = AppState::default();
+        state.begin_connect(1, "acme".into());
+        let commands = state.apply(UiEvent::Connected {
+            generation: 1,
+            username: "alice".into(),
+        });
+        assert!(
+            commands.is_empty(),
+            "no canonical read before the cursor exists"
+        );
+        assert!(state.select_channel("general".into()).is_empty());
+        let commands = state.apply(UiEvent::EventsReady { generation: 1 });
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::ListChannels { .. }]
+        ));
+        assert_eq!(state.select_channel("general".into()).len(), 2);
+    }
+
+    #[test]
+    fn stale_connection_generation_is_dropped() {
+        let mut state = ready_state(2);
+        state.select_channel("general".into());
+        let cg = state.channel_generation;
+        let commands = state.apply(UiEvent::ChannelSynced {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            messages: vec![msg(1, "old")],
+            head: 1,
+            revision: 0,
+            board: Ok(json!({})),
+        });
+        assert!(commands.is_empty());
+        assert!(!state.channel.as_ref().unwrap().loaded);
+    }
+
+    #[test]
+    fn stale_channel_generation_after_switch_is_dropped() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let old = state.channel_generation;
+        state.select_channel("random".into());
+        state.apply(UiEvent::ChannelSynced {
+            generation: 1,
+            channel_generation: old,
+            channel: "general".into(),
+            messages: vec![msg(1, "leak")],
+            head: 1,
+            revision: 0,
+            board: Ok(json!({})),
+        });
+        assert_eq!(state.selected_channel.as_deref(), Some("random"));
+        assert!(state.channel.as_ref().unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn sync_replaces_history_instead_of_merging_old_content() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(&mut state, vec![msg(1, "secret"), msg(2, "b")], 2, 0);
+        synced(&mut state, vec![msg(2, "b")], 2, 1);
+        let messages = &state.channel.as_ref().unwrap().messages;
+        assert_eq!(messages.len(), 1);
+        assert!(
+            !messages.contains_key(&1),
+            "deleted content must not survive a resync"
+        );
+    }
+
+    #[test]
+    fn message_deleted_purges_cache_and_derived_state_then_resyncs() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(&mut state, vec![msg(1, "secret"), msg(2, "b")], 2, 0);
+        state.apply(UiEvent::Snapshots {
+            generation: 1,
+            channel_generation: state.channel_generation,
+            channel: "general".into(),
+            view: SnapshotView {
+                entries: vec![json!({"version": 1})],
+                latest_text: Some((1, "derived from secret".into())),
+            },
+        });
+        let commands = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![event(EventKind::MessageDeleted, "general", Some(1), 1)],
+        });
+        let channel = state.channel.as_ref().unwrap();
+        assert!(!channel.messages.contains_key(&1), "purged immediately");
+        assert!(
+            channel.task_board.is_none(),
+            "derived task board invalidated"
+        );
+        assert!(channel.snapshots.entries.is_empty() && channel.snapshots.latest_text.is_none());
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::SyncChannel { .. }))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadSnapshots { .. }))
+        );
+        // A scan that started before the deletion lands late with the old revision: rejected,
+        // never resurrecting the deleted message.
+        let commands = synced(&mut state, vec![msg(1, "secret"), msg(2, "b")], 2, 0);
+        assert!(matches!(commands.as_slice(), [Command::SyncChannel { .. }]));
+        assert!(!state.channel.as_ref().unwrap().messages.contains_key(&1));
+        assert!(
+            !state.channel.as_ref().unwrap().loaded
+                || state.channel.as_ref().unwrap().messages.len() == 1
+        );
+    }
+
+    #[test]
+    fn message_created_refreshes_history_and_task_board_and_coalesces() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(&mut state, vec![msg(1, "a")], 1, 0);
+        let created = |id| event(EventKind::MessageCreated, "general", Some(id), 0);
+        let commands = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![created(2), created(3), created(4)],
+        });
+        assert_eq!(
+            commands.len(),
+            1,
+            "burst coalesces into one sync (which also rebuilds the board)"
+        );
+        // More events while it is in flight only mark it dirty: no flood of queued commands.
+        let commands = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![created(5)],
+        });
+        assert!(commands.is_empty());
+        // The first result predates event 5 (head 4 < required 5): stale, rerun without applying.
+        let commands = synced(&mut state, vec![msg(1, "a"), msg(4, "d")], 4, 0);
+        assert_eq!(commands.len(), 1);
+        assert!(state.channel.as_ref().unwrap().task_board.is_some());
+        let commands = synced(&mut state, vec![msg(1, "a"), msg(5, "e")], 5, 0);
+        assert!(commands.is_empty());
+        assert_eq!(state.channel.as_ref().unwrap().head, 5);
+    }
+
+    #[test]
+    fn replayed_event_page_is_idempotent() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(&mut state, vec![msg(1, "a")], 1, 0);
+        let page = vec![event(EventKind::MessageCreated, "general", Some(2), 0)];
+        let first = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: page.clone(),
+        });
+        let second = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: page,
+        });
+        assert_eq!(first.len(), 1);
+        assert!(
+            second.is_empty(),
+            "replay while a sync is in flight adds no new command"
+        );
+        synced(&mut state, vec![msg(1, "a"), msg(2, "b")], 2, 0);
+        synced(&mut state, vec![msg(1, "a"), msg(2, "b")], 2, 0);
+        assert_eq!(
+            state.channel.as_ref().unwrap().messages.len(),
+            2,
+            "no duplicate rows"
+        );
+    }
+
+    #[test]
+    fn events_for_other_channels_do_not_refresh_the_selected_one() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let commands = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![event(EventKind::MessageCreated, "random", Some(9), 0)],
+        });
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn retry_key_and_payload_survive_failure() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let cg = state.channel_generation;
+        state.pending_sends.insert(
+            "fixed-key".into(),
+            PendingSend {
+                generation: 1,
+                channel_generation: cg,
+                channel: "general".into(),
+                text: "hello".into(),
+                reply_to: Some(3),
+                correlation_id: None,
+                to: Some("bob".into()),
+                error: None,
+                retryable: false,
+            },
+        );
+        state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: Some(cg),
+            context: "send-message",
+            message: "503: retry".into(),
+            retryable: true,
+            key: Some("fixed-key".into()),
+        });
+        let pending = &state.pending_sends["fixed-key"];
+        assert!(pending.retryable);
+        assert_eq!(
+            (
+                pending.text.as_str(),
+                pending.reply_to,
+                pending.to.as_deref()
+            ),
+            ("hello", Some(3), Some("bob"))
+        );
+    }
+
+    #[test]
+    fn rejected_send_keeps_key_and_payload_and_is_retryable() {
+        let mut state = ready_state(1);
+        state.pending_sends.insert(
+            "k".into(),
+            PendingSend {
+                generation: 1,
+                channel_generation: 0,
+                channel: "general".into(),
+                text: "hello".into(),
+                reply_to: None,
+                correlation_id: None,
+                to: None,
+                error: None,
+                retryable: false,
+            },
+        );
+        state.on_rejected(Command::SendMessage {
+            generation: 1,
+            channel_generation: 0,
+            channel: "general".into(),
+            username: "alice".into(),
+            text: "hello".into(),
+            key: "k".into(),
+            reply_to: None,
+            correlation_id: None,
+            to: None,
+        });
+        let pending = &state.pending_sends["k"];
+        assert!(pending.retryable && pending.error.is_some());
+        assert_eq!(pending.text, "hello");
+    }
+
+    #[test]
+    fn rejected_connect_and_invalidations_are_never_lost() {
+        let mut state = AppState::default();
+        state.begin_connect(1, "acme".into());
+        state.on_rejected(Command::Connect {
+            generation: 1,
+            origin: Url::parse("https://msn.test").unwrap(),
+            tenant: "acme".into(),
+            token: "t".into(),
+            chosen_username: None,
+        });
+        assert!(state.pending_connect.is_none() && state.connect_error.is_some());
+
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let cg = state.channel_generation;
+        let rejected = Command::SyncChannel {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+        };
+        state.on_rejected(rejected);
+        assert_eq!(state.take_deferred().len(), 1, "deferred, then retried");
+        // After a channel switch the deferred stale command is discarded, not resurrected.
+        state.on_rejected(Command::SyncChannel {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+        });
+        state.select_channel("random".into());
+        assert!(state.take_deferred().is_empty());
+    }
+
+    #[test]
+    fn connect_error_clears_pending_connect() {
+        let mut state = AppState::default();
+        state.begin_connect(1, "acme".into());
+        state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: None,
+            context: "connect",
+            message: "nope".into(),
+            retryable: false,
+            key: None,
+        });
+        assert!(state.pending_connect.is_none());
+        assert_eq!(state.connect_error.as_deref(), Some("nope"));
+    }
+
+    #[test]
+    fn auth_failure_tears_down_session_and_requests_generation_advance() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let commands = state.apply(UiEvent::AuthFailed {
+            generation: 1,
+            message: "401: revoked".into(),
+        });
+        assert!(state.connection.is_none() && state.channel.is_none());
+        assert!(state.pending_sends.is_empty());
+        assert!(state.connect_error.as_deref().unwrap().contains("revoked"));
+        assert!(matches!(commands.as_slice(), [Command::Disconnect]));
+        // Anything still in flight for the dead generation is ignored.
+        assert!(
+            state
+                .apply(UiEvent::Channels {
+                    generation: 1,
+                    channels: vec!["x".into()]
+                })
+                .is_empty()
+        );
+        assert!(state.channels.is_empty());
+    }
+
+    #[test]
+    fn invalid_event_stream_status_is_surfaced_and_stale_status_ignored() {
+        let mut state = ready_state(2);
+        state.apply(UiEvent::EventsStatus {
+            generation: 1,
+            notice: Some("stale".into()),
+            stopped: true,
+        });
+        assert!(state.events_notice.is_none());
+        state.apply(UiEvent::EventsStatus {
+            generation: 2,
+            notice: Some("Live updates stopped".into()),
+            stopped: true,
+        });
+        assert!(state.events_stopped);
+    }
+
+    #[test]
+    fn repeated_stale_syncs_give_up_with_an_error() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![event(EventKind::MessageCreated, "general", Some(50), 0)],
+        });
+        let mut last = Vec::new();
+        for _ in 0..=MAX_STALE_SYNCS {
+            last = synced(&mut state, vec![], 1, 0);
+        }
+        assert!(last.is_empty());
+        assert!(state.channel.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn cache_is_bounded() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let many: Vec<Value> = (1..=(MAX_CACHED_MESSAGES as u64 + 10))
+            .map(|i| msg(i, "x"))
+            .collect();
+        let head = many.len() as u64;
+        synced(&mut state, many, head, 0);
+        let channel = state.channel.as_ref().unwrap();
+        assert_eq!(channel.messages.len(), MAX_CACHED_MESSAGES);
+        assert!(channel.messages.contains_key(&head));
+    }
+}
