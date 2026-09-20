@@ -23,7 +23,7 @@ cargo build --release --locked
 target/release/msn-desktop
 ```
 
-Linux build dependencies (Debian/Ubuntu names): `pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev libgl1-mesa-dev libegl1-mesa-dev`. A working OpenGL driver is needed at runtime (Mesa software rendering is enough).
+Linux build dependencies (Debian/Ubuntu names): `pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev libgl1-mesa-dev libegl1-mesa-dev`. A working OpenGL driver is needed at runtime (Mesa software rendering is enough). X11 also needs the dynamically loaded `libxkbcommon-x11.so.0` (`libxkbcommon-x11-0` on Debian/Ubuntu); compiling successfully does not establish that this runtime library is present. The required CI GUI-launch check verifies that dependency.
 
 Install the desktop entry with `install -Dm644 packaging/linux/msn-desktop.desktop ~/.local/share/applications/msn-desktop.desktop` and put the binary on `PATH`. There is no icon yet.
 
@@ -34,7 +34,7 @@ packaging/macos/build-app.sh              # native architecture
 UNIVERSAL=1 packaging/macos/build-app.sh  # arm64 + x86_64
 ```
 
-This produces `target/macos/msn desktop.app`, ad-hoc signed and **not notarized**, so expect macOS to require manual approval on first launch (that behaviour has not been verified by the author). The script and the macOS build run in CI on `macos-latest` (`.github/workflows/desktop.yml`); they have **not** been executed on a Mac by the author of this change. Developer ID signing and notarization are out of scope.
+This produces `target/macos/msn desktop.app`, ad-hoc signed and **not notarized**, so expect macOS to require manual approval on first launch (that behaviour has not been verified by the author). The macOS CI job has passed compilation, release build, `plutil` validation, ad-hoc signature verification and archived bundle upload. Physical-Mac GUI interaction and Gatekeeper behavior have not been tested. Developer ID signing and notarization are out of scope.
 
 ## Security model
 
