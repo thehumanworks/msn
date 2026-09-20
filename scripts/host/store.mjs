@@ -296,7 +296,9 @@ export class HostStore {
   }
   requeue(job) {
     this.db
-      .prepare("UPDATE jobs SET status='queued', available=0, error='host_stopped' WHERE id=?")
+      .prepare(
+        "UPDATE jobs SET status='queued', attempts=MAX(0,attempts-1), available=0, error='host_stopped' WHERE id=?",
+      )
       .run(job.id);
   }
   claimOutput(agent, now = Date.now()) {

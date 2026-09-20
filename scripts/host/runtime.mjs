@@ -112,10 +112,6 @@ export class HostRuntime {
   async dispatch(agent, job, signal) {
     const connection = this.connections.get(agent.id);
     try {
-      if (job.attempts > agent.attempts) {
-        this.store.fail(job, "attempts_exhausted_after_restart", agent.attempts);
-        return;
-      }
       let message = null;
       if (job.event) {
         const result = await request(
@@ -137,6 +133,10 @@ export class HostRuntime {
       }
       if (signal.aborted) {
         this.store.requeue(job);
+        return;
+      }
+      if (job.attempts > agent.attempts) {
+        this.store.fail(job, "attempts_exhausted_after_restart", agent.attempts);
         return;
       }
       const root =

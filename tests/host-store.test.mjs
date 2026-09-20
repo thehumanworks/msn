@@ -318,3 +318,15 @@ test("organic join/send/leave changes live routing, not authority or executable 
   );
   assert.throws(() => result(f.config, "alice", { wait: { for: ["bob"], reason: "forever" } }));
 });
+
+test("clean cancellation does not spend a retry before the next host can execute", (t) => {
+  const f = fixture(t);
+  f.store.ingest("alice", event(1));
+  const interrupted = f.store.claim("alice", 100, 10);
+  assert.equal(interrupted.attempts, 1);
+  f.store.requeue(interrupted);
+  f.reopen();
+  const resumed = f.store.claim("alice", 100, 20);
+  assert.equal(resumed.id, interrupted.id);
+  assert.equal(resumed.attempts, 1);
+});
