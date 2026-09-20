@@ -1,99 +1,52 @@
-//! Read-only reuse of `msn` CLI profiles (`~/.config/msn/profiles/<name>.json`).
+//! Saved connections, shared with the `msn` CLI (`~/.config/msn/profiles/<name>.json`).
 //!
-//! The CLI's own `Profile` type and loader are private to `msn-cli` (`pub(crate)`), so this is a
-//! narrow, compatible reimplementation of the read path only: same directory, same JSON shape,
-//! same permission checks. The desktop app never writes or rotates these files — `msn profile
-//! save` remains the one writer, and this app can then be pointed at an existing profile without
-//! retyping a token.
+//! This is a thin view over `msn_cli::profile::ProfileStore`, the one implementation of the
+//! directory, the JSON shape, the permission checks and the never-replace writer (ADR 0021). The
+//! UI thread only lists summaries and loads a picked profile into the connect form; saving
+//! happens on the network worker, after the identity endpoint has accepted the key, because the
+//! worker is the only holder of the token once a connection exists.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+pub use msn_cli::profile::{Connection, ProfileStore, Saved, Summary};
 
-use serde::Deserialize;
-
-/// The connection fields of a CLI profile; `reader`, `activity` and any future fields are ignored.
-#[derive(Debug, Clone, Deserialize)]
-pub struct StoredProfile {
-    pub url: String,
-    pub tenant: String,
-    pub token: String,
-    pub username: String,
+/// The default store, or `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
+pub fn default_store() -> Option<ProfileStore> {
+    ProfileStore::default_location().ok()
 }
 
-pub fn profile_directory() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(path).join("msn/profiles"));
+/// Summaries for the picker. An unsafe directory yields an explanation instead of profiles.
+pub fn list(store: Option<&ProfileStore>) -> (Vec<Summary>, Option<String>) {
+    match store.map(ProfileStore::summaries) {
+        Some(Ok(summaries)) => (summaries, None),
+        Some(Err(error)) => (
+            Vec::new(),
+            Some(format!("Saved profiles are unavailable: {error}")),
+        ),
+        None => (Vec::new(), None),
     }
-    let home = std::env::var_os("HOME").filter(|value| !value.is_empty())?;
-    Some(PathBuf::from(home).join(".config/msn/profiles"))
 }
 
-/// Lists saved profile names, skipping anything that fails an ownership/permission sanity check
-/// rather than surfacing a partially-trusted profile.
-pub fn list_profiles() -> Vec<String> {
-    let Some(directory) = profile_directory() else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&directory) else {
-        return Vec::new();
-    };
-    if !is_safe_directory(&directory) {
-        return Vec::new();
-    }
-    let mut names = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            && is_safe_file(&path)
-        {
-            names.push(stem.to_string());
+/// What the connect form asks the worker to do once the connection is authenticated.
+#[derive(Debug, Clone)]
+pub struct SaveRequest {
+    pub store: ProfileStore,
+    /// `None` names the profile after the user and workspace.
+    pub name: Option<String>,
+}
+
+/// The outcome shown to the user. Never contains the token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveOutcome {
+    Saved(String),
+    AlreadySaved(String),
+    Failed(String),
+}
+
+impl SaveRequest {
+    pub fn run(&self, connection: &Connection) -> SaveOutcome {
+        match self.store.save(self.name.as_deref(), connection) {
+            Ok(Saved::Created(name)) => SaveOutcome::Saved(name),
+            Ok(Saved::AlreadySaved(name)) => SaveOutcome::AlreadySaved(name),
+            Err(error) => SaveOutcome::Failed(error.to_string()),
         }
     }
-    names.sort();
-    names
-}
-
-pub fn load_profile(name: &str) -> Result<StoredProfile, String> {
-    let directory = profile_directory().ok_or("Set HOME or XDG_CONFIG_HOME to use profiles.")?;
-    let path = directory.join(format!("{name}.json"));
-    if !is_safe_file(&path) {
-        return Err(format!(
-            "Profile \"{name}\" is missing or has unsafe file permissions."
-        ));
-    }
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-    serde_json::from_slice(&bytes).map_err(|_| format!("Profile \"{name}\" is not valid JSON."))
-}
-
-#[cfg(unix)]
-fn is_safe_directory(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::symlink_metadata(path).is_ok_and(|metadata| {
-        !metadata.file_type().is_symlink()
-            && metadata.is_dir()
-            && metadata.permissions().mode() & 0o777 == 0o700
-    })
-}
-
-#[cfg(unix)]
-fn is_safe_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::symlink_metadata(path).is_ok_and(|metadata| {
-        !metadata.file_type().is_symlink()
-            && metadata.is_file()
-            && metadata.permissions().mode() & 0o777 == 0o600
-    })
-}
-
-#[cfg(not(unix))]
-fn is_safe_directory(path: &Path) -> bool {
-    path.is_dir()
-}
-
-#[cfg(not(unix))]
-fn is_safe_file(path: &Path) -> bool {
-    path.is_file()
 }

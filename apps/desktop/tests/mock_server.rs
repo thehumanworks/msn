@@ -15,6 +15,7 @@ use msn_cli::error::CliError;
 use msn_desktop::net::client_ops::{self, SendError};
 use msn_desktop::net::events::{self, EventKind, EventsError};
 use msn_desktop::net::worker::{Command, UiEvent, connect};
+use msn_desktop::profile::{ProfileStore, SaveOutcome, SaveRequest};
 use msn_desktop::state::AppState;
 
 use support::rig::{Pump, rig};
@@ -586,6 +587,7 @@ fn a_full_command_queue_hands_the_command_back_with_its_payload() {
             tenant: TENANT.into(),
             token: TOKEN.into(),
             chosen_username: None,
+            save: None,
         })
         .ok()
         .unwrap();
@@ -626,4 +628,162 @@ fn a_full_command_queue_hands_the_command_back_with_its_payload() {
     assert_eq!(text, format!("payload {accepted}"));
     assert_eq!((reply_to, to.as_deref()), (Some(7), Some("bob")));
     drop(hang);
+}
+
+/// A private, self-cleaning profiles directory so tests never touch the real one.
+struct TempProfiles(std::path::PathBuf);
+
+impl TempProfiles {
+    fn new(label: &str) -> Self {
+        TempProfiles(std::env::temp_dir().join(format!(
+            "msn-desktop-profiles-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        )))
+    }
+
+    fn store(&self) -> ProfileStore {
+        ProfileStore::at(self.0.join("msn/profiles"))
+    }
+}
+
+impl Drop for TempProfiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn an_authenticated_connection_is_saved_as_a_profile_the_cli_can_read() {
+    let server = MockServer::start();
+    let temp = TempProfiles::new("save");
+    let rig = rig();
+    let generation = rig.connect_saving(
+        server.url().as_str(),
+        TENANT,
+        TOKEN,
+        Some(SaveRequest {
+            store: temp.store(),
+            name: None,
+        }),
+    );
+    let Some(UiEvent::ProfileSaved {
+        generation: saved_generation,
+        outcome,
+    }) = rig.until(10, |e| matches!(e, UiEvent::ProfileSaved { .. }))
+    else {
+        panic!("no ProfileSaved event");
+    };
+    assert_eq!(saved_generation, generation);
+    // Named after the identity the server bound the key to, not anything typed locally.
+    assert_eq!(outcome, SaveOutcome::Saved("alice-acme".into()));
+    assert!(
+        !format!("{outcome:?}").contains(TOKEN),
+        "events never carry the token"
+    );
+
+    let stored = temp.store().load("alice-acme").unwrap();
+    assert_eq!(stored.username, "alice");
+    assert_eq!(stored.tenant, TENANT);
+    assert_eq!(stored.token, TOKEN);
+    assert_eq!(
+        stored.url,
+        server.url().origin().ascii_serialization(),
+        "the origin is stored normalised, as the CLI stores it"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let file = temp.0.join("msn/profiles/alice-acme.json");
+        assert_eq!(
+            std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // Connecting again with the same key reports the existing profile instead of duplicating it.
+    rig.connect_saving(
+        server.url().as_str(),
+        TENANT,
+        TOKEN,
+        Some(SaveRequest {
+            store: temp.store(),
+            name: None,
+        }),
+    );
+    let Some(UiEvent::ProfileSaved { outcome, .. }) =
+        rig.until(10, |e| matches!(e, UiEvent::ProfileSaved { .. }))
+    else {
+        panic!("no second ProfileSaved event");
+    };
+    assert_eq!(outcome, SaveOutcome::AlreadySaved("alice-acme".into()));
+    assert_eq!(temp.store().summaries().unwrap().len(), 1);
+}
+
+#[test]
+fn a_rejected_key_is_never_written_to_disk() {
+    let server = MockServer::start();
+    server.fake.revoke_token();
+    let temp = TempProfiles::new("rejected");
+    let rig = rig();
+    rig.connect_saving(
+        server.url().as_str(),
+        TENANT,
+        TOKEN,
+        Some(SaveRequest {
+            store: temp.store(),
+            name: Some("should-not-exist".into()),
+        }),
+    );
+    let outcome = rig.until(10, |e| {
+        matches!(e, UiEvent::Error { .. } | UiEvent::AuthFailed { .. })
+    });
+    assert!(outcome.is_some(), "the connect must fail");
+    assert!(
+        rig.quiet_for(200)
+            .iter()
+            .all(|e| !matches!(e, UiEvent::ProfileSaved { .. } | UiEvent::Connected { .. }))
+    );
+    assert_eq!(temp.store().summaries().unwrap(), Vec::new());
+    assert!(!temp.0.exists(), "not even the directory is created");
+}
+
+#[test]
+fn a_failed_save_keeps_the_connection_and_explains_itself() {
+    let server = MockServer::start();
+    let temp = TempProfiles::new("taken");
+    temp.store()
+        .save(
+            Some("taken"),
+            &msn_desktop::profile::Connection {
+                url: "https://other.example.com".into(),
+                tenant: "other".into(),
+                token: "0123456789abcdef0123456789abcdef".into(),
+                username: "bob".into(),
+            },
+        )
+        .unwrap();
+    let rig = rig();
+    let mut pump = Pump {
+        rig: &rig,
+        state: AppState::default(),
+    };
+    let generation = rig.connect_saving(
+        server.url().as_str(),
+        TENANT,
+        TOKEN,
+        Some(SaveRequest {
+            store: temp.store(),
+            name: Some("taken".into()),
+        }),
+    );
+    pump.state.begin_connect(generation, TENANT.into());
+    assert!(pump.until(10, |s| s.profile_save.is_some()));
+    assert!(pump.state.connection.is_some(), "still connected");
+    assert!(matches!(
+        pump.state.profile_save,
+        Some(SaveOutcome::Failed(ref message)) if message.contains("already exists")
+    ));
+    // The existing profile is untouched.
+    assert_eq!(temp.store().load("taken").unwrap().username, "bob");
 }

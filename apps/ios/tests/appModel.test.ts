@@ -1,6 +1,7 @@
 import { test } from "./support/bounded.ts";
 import assert from "node:assert/strict";
 import { AppModel } from "../src/core/appModel.ts";
+import { ACTIVE_PROFILE_KEY, listProfiles, readProfile, writeProfile } from "../src/core/profileStorage.ts";
 import { SESSION_KEY, forgetSession, isSession, loadSession, saveSession, type SecretStore } from "../src/core/sessionStorage.ts";
 import type { Session } from "../src/core/session.ts";
 import { SCOPED_TOKEN, startMockServer, TEST_TOKEN, type MockServerHandle } from "./support/mockServer.ts";
@@ -16,10 +17,10 @@ function sessionFor(server: MockServerHandle, over: Partial<Session> = {}): Sess
   return { origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", usernamePrefix: null, ...over };
 }
 
-const stored = (store: ReturnType<typeof memoryStore>) => {
-  const raw = store.data.get(SESSION_KEY);
-  return raw ? (JSON.parse(raw) as Session) : null;
-};
+/** The session saved under a profile name, read the way the app reads it. */
+const stored = (store: SecretStore, name: string) => readProfile(store, name);
+const names = async (store: SecretStore) => (await listProfiles(store)).map((profile) => profile.name);
+const active = (store: ReturnType<typeof memoryStore>) => store.data.get(ACTIVE_PROFILE_KEY) ?? null;
 
 function dispose(app: AppModel) {
   const s = app.state.get();
@@ -74,7 +75,7 @@ test("localhost development origins are accepted for storage; other http is not"
 
 // ---- app model ----------------------------------------------------------------------------
 
-test("sign in with a key: remembers when asked and starts one live session", async () => {
+test("sign in with a key: saves a profile named after the user when asked and starts one live session", async () => {
   const server = await startMockServer();
   const store = memoryStore();
   const app = model(store);
@@ -84,7 +85,10 @@ test("sign in with a key: remembers when asked and starts one live session", asy
     await app.settled();
     const state = app.state.get();
     assert.equal(state.kind, "connected");
-    assert.deepEqual(stored(store), sessionFor(server));
+    assert.deepEqual(await names(store), ["tomas-acme"]);
+    assert.deepEqual(await stored(store, "tomas-acme"), sessionFor(server));
+    assert.equal(active(store), "tomas-acme", "reopened on next launch");
+    assert.equal(store.data.has(SESSION_KEY), false, "the legacy single-session slot is no longer written");
     // Trimmed tenant is what reached the API.
     assert.ok(server.requests.every((r) => r.path.startsWith("/api/tenants/acme")));
     await waitFor(() => state.kind === "connected" && state.controller.state.get().ready, "ready");
@@ -94,14 +98,18 @@ test("sign in with a key: remembers when asked and starts one live session", asy
   }
 });
 
-test("without Remember nothing is stored, and an older saved key is removed", async () => {
+test("without Remember nothing new is stored: that user's older profile is removed, other users' are kept", async () => {
   const server = await startMockServer();
-  const store = memoryStore({ [SESSION_KEY]: JSON.stringify(sessionFor(server, { username: "old" })) });
+  const store = memoryStore();
+  await writeProfile(store, "tomas-acme", sessionFor(server));
+  await writeProfile(store, "old-acme", sessionFor(server, { username: "old" }));
+  store.data.set(ACTIVE_PROFILE_KEY, "tomas-acme");
   const app = model(store);
   try {
     assert.equal(await app.signInWithKey({ origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", remember: false }), null);
     await app.settled();
-    assert.equal(store.data.size, 0);
+    assert.deepEqual(await names(store), ["old-acme"]);
+    assert.equal(active(store), null, "an unsaved session is not reopened on launch");
   } finally {
     dispose(app);
     await server.close();
@@ -133,7 +141,8 @@ test("a rejected key returns a message and leaves the previous session untouched
     const error = await app.signInWithKey({ origin: server.url, tenant: "acme", token: "z".repeat(64), username: "x", remember: true });
     assert.match(error!, /not accepted/);
     assert.equal(app.state.get(), before);
-    assert.equal(stored(store)?.token, TEST_TOKEN);
+    assert.equal((await stored(store, "tomas-acme"))?.token, TEST_TOKEN);
+    assert.deepEqual(await names(store), ["tomas-acme"], "a rejected key is never saved");
   } finally {
     dispose(app);
     await server.close();
@@ -188,7 +197,7 @@ test("hydration restores a remembered session; a slow hydration cannot overwrite
 test("hydration with nothing stored, corrupt data or an unreadable keychain ends signed out", async () => {
   const empty = model(memoryStore());
   await empty.hydrate();
-  assert.deepEqual(empty.state.get(), { kind: "signedOut", notice: null });
+  assert.deepEqual(empty.state.get(), { kind: "signedOut", notice: null, profiles: [] });
   const broken = memoryStore();
   broken.failGet = true;
   const app = model(broken);
@@ -212,7 +221,23 @@ test("hydrated sessions connect and go live", async () => {
   }
 });
 
-test("sign out stops the session and removes the token; failure to remove is reported", async () => {
+test("the single remembered session of older versions becomes a profile and stays signed in", async () => {
+  const server = await startMockServer();
+  const store = memoryStore({ [SESSION_KEY]: JSON.stringify(sessionFor(server)) });
+  const app = model(store);
+  try {
+    await app.hydrate();
+    assert.equal(app.state.get().kind, "connected");
+    assert.equal(store.data.has(SESSION_KEY), false, "the legacy slot is removed after the profile is written");
+    assert.deepEqual(await stored(store, "tomas-acme"), sessionFor(server));
+    assert.equal(active(store), "tomas-acme");
+  } finally {
+    dispose(app);
+    await server.close();
+  }
+});
+
+test("sign out keeps the profile for switching back; sign out and forget deletes the key", async () => {
   const server = await startMockServer();
   const store = memoryStore();
   const app = model(store);
@@ -221,23 +246,60 @@ test("sign out stops the session and removes the token; failure to remove is rep
     await app.settled();
     const first = app.state.get();
     await app.signOut();
-    assert.equal(app.state.get().kind, "signedOut");
-    assert.equal(store.data.size, 0);
+    const out = app.state.get();
+    assert.equal(out.kind, "signedOut");
     assert.equal(first.kind === "connected" && first.controller.isTerminal, true);
+    assert.deepEqual(out.kind === "signedOut" && out.profiles.map((p) => p.name), ["tomas-acme"]);
+    assert.equal(active(store), null, "a signed-out profile is not reopened on launch");
+    assert.equal(JSON.stringify(out).includes(TEST_TOKEN), false, "the picker never holds a key");
+
+    // Switch back with one tap, then forget it.
+    assert.equal(await app.connectProfile("tomas-acme"), null);
+    await app.settled();
+    const again = app.state.get();
+    assert.equal(again.kind === "connected" && again.controller.session.token, TEST_TOKEN);
+    assert.equal(active(store), "tomas-acme");
+    await app.signOut(null, { forget: true });
+    assert.equal(store.data.size, 0, "nothing of the profile remains");
+    const gone = app.state.get();
+    assert.deepEqual(gone.kind === "signedOut" && gone.profiles, []);
 
     await app.signInWithKey({ origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", remember: true });
     await app.settled();
     store.failRemove = true;
-    await app.signOut();
+    await app.signOut(null, { forget: true });
     const state = app.state.get();
     assert.match(state.kind === "signedOut" ? state.notice! : "", /could not be removed/);
+    assert.deepEqual(state.kind === "signedOut" && state.profiles.map((p) => p.name), ["tomas-acme"], "still listed, so it can be retried");
   } finally {
     dispose(app);
     await server.close();
   }
 });
 
-test("a slow save that began before sign-out cannot resurrect the credential", async () => {
+test("saved profiles can be forgotten from the sign-in screen; a missing profile reports itself", async () => {
+  const server = await startMockServer();
+  const store = memoryStore();
+  await writeProfile(store, "tomas-acme", sessionFor(server));
+  await writeProfile(store, "asha-acme", sessionFor(server, { username: "asha" }));
+  const app = model(store);
+  try {
+    await app.hydrate();
+    const listed = app.state.get();
+    assert.deepEqual(listed.kind === "signedOut" && listed.profiles.map((p) => p.name), ["asha-acme", "tomas-acme"]);
+    assert.equal(await app.forgetProfile("asha-acme"), null);
+    const after = app.state.get();
+    assert.deepEqual(after.kind === "signedOut" && after.profiles.map((p) => p.name), ["tomas-acme"]);
+    assert.equal(await stored(store, "asha-acme"), null);
+    assert.match((await app.connectProfile("asha-acme"))!, /no longer available/);
+    assert.equal(app.state.get().kind, "signedOut");
+  } finally {
+    dispose(app);
+    await server.close();
+  }
+});
+
+test("a slow save that began before sign-out-and-forget cannot resurrect the credential", async () => {
   const server = await startMockServer();
   const inner = memoryStore();
   let releaseSet: () => void = () => {};
@@ -253,17 +315,17 @@ test("a slow save that began before sign-out cannot resurrect the credential", a
   const app = model(slow);
   try {
     await app.signInWithKey({ origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", remember: true });
-    const signedOut = app.signOut(); // requested while the first save is still in flight
+    const signedOut = app.signOut(null, { forget: true }); // requested while the first save is still in flight
     releaseSet();
     await signedOut;
     await app.settled();
-    assert.equal(inner.data.size, 0, "the newest intent (signed out) wins");
+    assert.equal(inner.data.size, 0, "the newest intent (forgotten) wins");
   } finally {
     await server.close();
   }
 });
 
-test("rapid account swaps end with exactly the last account stored", async () => {
+test("rapid account swaps save both users and end with the last account active", async () => {
   const server = await startMockServer();
   const inner = memoryStore();
   const delays = [40, 5];
@@ -280,8 +342,10 @@ test("rapid account swaps end with exactly the last account stored", async () =>
     await app.signInWithKey({ origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "first", remember: true });
     await app.signInWithKey({ origin: server.url, tenant: "acme", token: SCOPED_TOKEN, username: "second", remember: true });
     await app.settled();
-    assert.equal(stored(inner)?.username, "second");
-    assert.equal(stored(inner)?.token, SCOPED_TOKEN);
+    assert.deepEqual(await names(inner), ["first-acme", "second-acme"]);
+    assert.equal((await stored(inner, "first-acme"))?.token, TEST_TOKEN, "one user's save never overwrites another's");
+    assert.equal((await stored(inner, "second-acme"))?.token, SCOPED_TOKEN);
+    assert.equal(active(inner), "second-acme");
     const state = app.state.get();
     assert.equal(state.kind === "connected" && state.controller.session.username, "second");
   } finally {
@@ -346,7 +410,9 @@ test("revocation of the old account while signing into another does not cancel t
     await app.settled();
     const state = app.state.get();
     assert.equal(state.kind === "connected" && state.controller.session.token, SCOPED_TOKEN);
-    assert.equal(stored(store)?.token, SCOPED_TOKEN);
+    assert.deepEqual(await names(store), ["two-acme"], "the revoked user's profile is deleted, the new one kept");
+    assert.equal((await stored(store, "two-acme"))?.token, SCOPED_TOKEN);
+    assert.equal(active(store), "two-acme");
   } finally {
     dispose(app);
     await server.close();

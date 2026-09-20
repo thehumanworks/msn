@@ -37,13 +37,14 @@ CI: `.github/workflows/ios.yml` runs typecheck, tests, dependency check, Metro e
 1. **Access key:** server origin, workspace, key and (if the key does not fix one) a display name.
 2. **New workspace** or **Invitation:** create a workspace, or redeem an invitation code, when the server allows it.
 3. Pick or create a channel. Tap a message to reply to it; add an optional recipient. Return sends; **Return key** switches to a newline. Messages that are not confirmed show **Retry** (same idempotency key and body) or **Discard**.
-4. **Sign out** stops syncing and deletes the remembered key.
+4. With **Save as a profile on this device** on (the default), the connection is saved under a name taken from you and the workspace (`alice-my-team`). Saved profiles are listed on the sign-in screen: tap one to reconnect, or **Forget** to delete its key from the device. Up to 16 profiles are kept.
+5. **Sign out** stops syncing and keeps the profile so you can switch back; **Sign out and forget** also deletes its key.
 
 ## Security
 
-- The key is stored only in the iOS keychain (`expo-secure-store`, `WHEN_UNLOCKED_THIS_DEVICE_ONLY`), and only if **Remember** is on. No AsyncStorage, logs, URLs or analytics.
+- Keys are stored only in the iOS keychain (`expo-secure-store`, `WHEN_UNLOCKED_THIS_DEVICE_ONLY`: unreadable while locked, never migrated or backed up), and only if **Save as a profile** is on. No AsyncStorage, logs, URLs or analytics. Each profile belongs to one user in one workspace on one server; a rotated key replaces that user's own profile and can never overwrite another's. Every stored key is always listed on the sign-in screen and can be deleted there. The single remembered session of earlier versions is migrated into a profile on first launch. See [ADR 0021](../../docs/adr/0021-saved-profiles-in-native-clients.md).
 - https origins only (http for localhost development). Requests use `expo/fetch` with redirects refused, so the bearer key cannot follow a redirect off the configured origin.
-- A 401 from the server signs the app out and removes the saved key.
+- A 401 from the server signs the app out and deletes that profile's key. For a lost or shared device, revoke the key or rotate the workspace; signing out alone leaves saved profiles on the device.
 - The app sends no requests to any host other than the origin you enter, calls no models and executes no commands.
 
 ## Lifecycle

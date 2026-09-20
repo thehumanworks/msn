@@ -22,6 +22,8 @@ use msn_cli::config::slug;
 use msn_cli::error::CliError;
 use msn_cli::identity::{fetch_identity, validate_username};
 
+use crate::profile::{Connection, SaveOutcome, SaveRequest};
+
 use super::client_ops::{self, SnapshotView};
 use super::events::{self, CoordinationEvent};
 
@@ -47,6 +49,8 @@ pub enum Command {
         tenant: String,
         token: String,
         chosen_username: Option<String>,
+        /// Persist the connection as a profile once it has been authenticated.
+        save: Option<SaveRequest>,
     },
     /// UI-side effect only: the caller invalidates the generation locally; never enqueued.
     Disconnect,
@@ -108,6 +112,11 @@ pub enum UiEvent {
     Connected {
         generation: u64,
         username: String,
+    },
+    /// The outcome of the save requested with `Connect`. Never carries the token.
+    ProfileSaved {
+        generation: u64,
+        outcome: SaveOutcome,
     },
     /// The initial event cursor is established; canonical reads issued from now on cannot miss
     /// a change (any later change produces an event after this cursor).
@@ -255,6 +264,7 @@ fn command_loop(
                 tenant,
                 token,
                 chosen_username,
+                save,
                 ..
             } => match connect(&origin, &tenant, &token, chosen_username.as_deref()) {
                 Ok((client, username)) => {
@@ -267,6 +277,16 @@ fn command_loop(
                         tenant: tenant.clone(),
                         token: token.clone(),
                     });
+                    // Only an authenticated connection is ever written, and only here: the
+                    // worker is the sole holder of the token.
+                    let outcome = save.map(|request| {
+                        request.run(&Connection {
+                            url: origin.to_string(),
+                            tenant: tenant.clone(),
+                            token: token.clone(),
+                            username: username.clone(),
+                        })
+                    });
                     emit(
                         &tx,
                         &wake,
@@ -275,6 +295,16 @@ fn command_loop(
                             username,
                         },
                     );
+                    if let Some(outcome) = outcome {
+                        emit(
+                            &tx,
+                            &wake,
+                            UiEvent::ProfileSaved {
+                                generation,
+                                outcome,
+                            },
+                        );
+                    }
                     spawn_events_subscription(
                         origin,
                         tenant,

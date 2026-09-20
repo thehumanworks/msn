@@ -3,20 +3,37 @@ import { ApiError, InsecureOriginError, isAbortError } from "./errors.ts";
 import { validateOrigin, type FetchLike } from "./httpClient.ts";
 import type { Session } from "./session.ts";
 import { SessionController, type SessionControllerOptions } from "./sessionController.ts";
-import { forgetSession, loadSession, saveSession, type SecretStore } from "./sessionStorage.ts";
+import {
+  listProfiles,
+  migrateLegacySession,
+  planProfileName,
+  readActive,
+  readProfile,
+  removeProfile,
+  writeActive,
+  writeProfile,
+  type ProfileSummary,
+} from "./profileStorage.ts";
+import type { SecretStore } from "./sessionStorage.ts";
 import { Store } from "./store.ts";
 
 export type AppPhase =
   | { kind: "hydrating" }
-  | { kind: "signedOut"; notice: string | null }
+  | { kind: "signedOut"; notice: string | null; profiles: ProfileSummary[] }
   | { kind: "connected"; controller: SessionController; warning: string | null };
 
 export type ConnectInput = {
   origin: string;
   tenant: string;
   username: string;
+  /** Save this connection as a profile on this device (ADR 0021). */
   remember: boolean;
 };
+
+/** A profile belongs to one user in one workspace on one server (and one channel, if scoped). */
+function identityKey(of: { origin: string; tenant: string; username: string; channel?: string }): string {
+  return JSON.stringify([of.origin, of.tenant, of.username, of.channel ?? null]);
+}
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
@@ -27,10 +44,13 @@ const TOKEN = /^[A-Za-z0-9_-]{32,256}$/;
  * after every await, so a slow secure-store hydration, a superseded sign-in or a late response for
  * an old account can never replace the session the user is looking at (no cross-account leak).
  *
- * Secure-storage writes are serialised through one queue and always apply the *newest intended*
- * state (`wanted`) when they run, never the state that was current when they were requested. A
- * slow save that started before a sign-out therefore cannot land after the delete, and two rapid
- * account swaps end with exactly the last account (or nothing) stored.
+ * Secure-storage writes are serialised through one queue and always apply the *newest intent*
+ * when they run, never the state that was current when they were requested. Intents are kept per
+ * identity (`intents`: a session to save, or null to forget) plus one for the profile to reopen on
+ * launch (`wantedActive`). A slow save that started before "sign out and forget" therefore cannot
+ * land after the delete, and rapid account swaps end with the last account active. Profile names
+ * are chosen inside the queue against what is actually stored, so a save can never overwrite a
+ * different user's profile. After every write the saved-profile list is re-read and published.
  */
 export class AppModel {
   readonly state = new Store<AppPhase>({ kind: "hydrating" });
@@ -38,7 +58,9 @@ export class AppModel {
   private readonly fetchImpl: FetchLike | undefined;
   private readonly controllerOptions: SessionControllerOptions;
   private generation = 0;
-  private wanted: Session | null = null;
+  private readonly intents = new Map<string, Session | null>();
+  private wantedActive: string | null = null;
+  private profiles: ProfileSummary[] = [];
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(store: SecretStore, options: { fetchImpl?: FetchLike; controller?: SessionControllerOptions } = {}) {
@@ -52,17 +74,55 @@ export class AppModel {
     let session: Session | null = null;
     let notice: string | null = null;
     try {
-      session = await this.enqueue(() => loadSession(this.store));
+      session = await this.enqueue(async () => {
+        await migrateLegacySession(this.store);
+        const active = await readActive(this.store);
+        const restored = active ? await readProfile(this.store, active) : null;
+        this.profiles = await listProfiles(this.store);
+        return restored;
+      });
     } catch {
       notice = "Secure storage could not be read. Sign in again.";
     }
     if (generation !== this.generation) return;
     if (session) {
-      this.wanted = session;
+      this.wantedActive = identityKey(session);
       this.adopt(session);
     } else {
-      this.state.set({ kind: "signedOut", notice });
+      this.state.set({ kind: "signedOut", notice, profiles: this.profiles });
     }
+  }
+
+  /** Reconnect with a saved profile. Returns an error message, or null on success. */
+  async connectProfile(name: string): Promise<string | null> {
+    const generation = ++this.generation;
+    let session: Session | null;
+    try {
+      session = await this.enqueue(() => readProfile(this.store, name));
+    } catch {
+      return generation === this.generation ? "Secure storage could not be read." : null;
+    }
+    if (generation !== this.generation) return null;
+    if (!session) {
+      void this.sync(); // republish the list without the profile that healed itself away
+      return "That saved profile is no longer available.";
+    }
+    this.disposeCurrent();
+    this.wantedActive = identityKey(session);
+    this.adopt(session);
+    void this.sync().then((result) => this.reportSync(result, generation, true));
+    return null;
+  }
+
+  /** Delete a saved profile from this device. Returns an error message, or null on success. */
+  async forgetProfile(name: string): Promise<string | null> {
+    const profile = this.profiles.find((candidate) => candidate.name === name);
+    if (!profile) return null;
+    const key = identityKey(profile);
+    this.intents.set(key, null);
+    if (this.wantedActive === key) this.wantedActive = null;
+    const result = await this.sync();
+    return result.ok ? null : "The saved key could not be removed from secure storage.";
   }
 
   /** Connect with an existing access key. Returns an error message, or null on success. */
@@ -90,17 +150,27 @@ export class AppModel {
     });
   }
 
-  /** Stop everything and remove the remembered key. */
-  async signOut(notice: string | null = null): Promise<void> {
+  /**
+   * Stop everything. The saved profile is kept so the user can switch back to it; `forget` also
+   * deletes it from this device.
+   */
+  async signOut(notice: string | null = null, options: { forget?: boolean } = {}): Promise<void> {
     const generation = ++this.generation;
+    const current = this.state.get();
+    if (options.forget && current.kind === "connected") {
+      this.intents.set(identityKey(current.controller.session), null);
+    }
     this.disposeCurrent();
-    this.wanted = null;
-    this.state.set({ kind: "signedOut", notice });
+    this.wantedActive = null;
+    this.state.set({ kind: "signedOut", notice, profiles: this.profiles });
     const result = await this.sync();
     if (generation === this.generation && !result.ok) {
       this.state.set({
         kind: "signedOut",
-        notice: "Signed out, but the saved key could not be removed from secure storage.",
+        notice: options.forget
+          ? "Signed out, but the saved key could not be removed from secure storage."
+          : "Signed out, but secure storage could not be updated; this device may reopen the session.",
+        profiles: this.profiles,
       });
     }
   }
@@ -140,7 +210,10 @@ export class AppModel {
         ...(identity.channel ? { channel: identity.channel } : {}),
       };
       this.disposeCurrent();
-      this.wanted = input.remember ? session : null;
+      // Unticking Remember for a user who is already saved removes that profile; other users'
+      // profiles are never touched.
+      this.intents.set(identityKey(session), input.remember ? session : null);
+      this.wantedActive = input.remember ? identityKey(session) : null;
       this.adopt(session);
       void this.sync().then((result) => this.reportSync(result, generation, input.remember));
       return null;
@@ -160,14 +233,16 @@ export class AppModel {
     void controller.start();
   }
 
-  private reportSync(result: { ok: boolean }, generation: number, remember: boolean): void {
+  private reportSync(result: { ok: boolean; full: boolean }, generation: number, remember: boolean): void {
     const current = this.state.get();
     if (result.ok || generation !== this.generation || current.kind !== "connected") return;
     this.state.set({
       ...current,
-      warning: remember
-        ? "Could not save the key to secure storage; you will need to sign in again next time."
-        : "Could not clear an older saved key from secure storage.",
+      warning: result.full
+        ? "This device already holds the maximum number of saved profiles; forget one to save this connection."
+        : remember
+          ? "Could not save the key to secure storage; you will need to sign in again next time."
+          : "Could not clear an older saved key from secure storage.",
     });
   }
 
@@ -176,14 +251,23 @@ export class AppModel {
     const current = this.state.get();
     if (current.kind !== "connected" || current.controller !== controller) return;
     controller.dispose();
-    this.wanted = null;
-    this.state.set({ kind: "signedOut", notice: "Your access key was revoked or reset. Sign in again." });
+    // A revoked key is useless: its profile is deleted, never left behind as a dead entry.
+    const key = identityKey(controller.session);
+    this.intents.set(key, null);
+    if (this.wantedActive === key) this.wantedActive = null;
+    this.profiles = this.profiles.filter((profile) => identityKey(profile) !== key);
+    this.state.set({
+      kind: "signedOut",
+      notice: "Your access key was revoked or reset. Sign in again.",
+      profiles: this.profiles,
+    });
     void this.sync().then((result) => {
       const now = this.state.get();
       if (!result.ok && now.kind === "signedOut") {
         this.state.set({
           kind: "signedOut",
           notice: "Your access key was revoked, but the saved copy could not be removed from secure storage.",
+          profiles: this.profiles,
         });
       }
     });
@@ -195,19 +279,49 @@ export class AppModel {
     return run;
   }
 
-  private sync(): Promise<{ ok: boolean }> {
+  /** Applies every pending intent, then the active pointer, then republishes the profile list. */
+  private sync(): Promise<{ ok: boolean; full: boolean }> {
     return this.enqueue(async () => {
-      const want = this.wanted;
-      try {
-        if (want) {
-          await saveSession(this.store, want);
-          return { ok: true };
+      let ok = true;
+      let full = false;
+      for (const [key, intent] of [...this.intents]) {
+        if (this.intents.get(key) !== intent) continue; // superseded while this op was waiting
+        this.intents.delete(key);
+        try {
+          const stored = await listProfiles(this.store);
+          if (intent === null) {
+            const existing = stored.find((profile) => identityKey(profile) === key);
+            if (existing) await removeProfile(this.store, existing.name);
+          } else {
+            const name = planProfileName(stored, intent);
+            if (name === null) {
+              full = true;
+              ok = false;
+            } else {
+              await writeProfile(this.store, name, intent);
+            }
+          }
+        } catch {
+          ok = false;
         }
-        return { ok: await forgetSession(this.store) };
-      } catch {
-        return { ok: false };
       }
+      try {
+        const stored = await listProfiles(this.store);
+        const want = this.wantedActive;
+        const active = want ? stored.find((profile) => identityKey(profile) === want) : undefined;
+        await writeActive(this.store, active?.name ?? null);
+        this.publish(stored);
+      } catch {
+        ok = false;
+      }
+      return { ok, full };
     });
+  }
+
+  private publish(profiles: ProfileSummary[]): void {
+    this.profiles = profiles;
+    const current = this.state.get();
+    if (current.kind === "signedOut") this.state.set({ ...current, profiles });
   }
 
   private disposeCurrent(): void {

@@ -6,8 +6,9 @@ Design and trade-offs: [ADR 0018](../../docs/adr/0018-native-desktop-client.md).
 
 ## What it does
 
-- **Glass interface**: translucent, rounded cards with subtle blue/violet highlights. Desktop blur is supplied by the compositor when available; the tinted surfaces remain readable without it. The message composer stays at the bottom of the conversation card while history and pending-send notices scroll above it.
-- **Connect** with origin, workspace, access token and optional username, or pick an existing `msn profile` (read-only reuse). Connecting always authenticates against the workspace identity endpoint, even when you type a username, and checks the name against the key's binding.
+- **Glass interface**: translucent, borderless rounded surfaces with subtle blue/violet highlights; hierarchy comes from fill and spacing rather than strokes or dividers. Desktop blur is supplied by the compositor when available; the tinted surfaces remain readable without it. Conversations are chat bubbles in the Messenger tradition ("name says", your own messages on the right, a presence dot that reflects live synchronisation). The pill-shaped message input stays at the bottom of the conversation card at every window size while history and pending-send notices scroll above it. Timestamps are shown as the server sent them (UTC).
+- **Connect** with origin, workspace, access token and optional username, or pick a saved profile (shown as `name — user @ workspace`). Connecting always authenticates against the workspace identity endpoint, even when you type a username, and checks the name against the key's binding.
+- **Save as profile** (opt-in, per connection): tick it on the connect form, optionally name it, and the connection is saved once the server has accepted the key. Left unnamed it is called after the user and workspace (`alice-my-team`). Profiles are the `msn` CLI's own files, so `msn --profile alice-my-team …` works immediately and CLI-saved profiles appear in the app. Saving never replaces an existing profile; an identical connection is reported as already saved. See [ADR 0021](../../docs/adr/0021-saved-profiles-in-native-clients.md).
 - **Channels**: list, create, select. Names come from the server's `name` field and are validated as slugs before they reach a URL.
 - **Chat**: canonical history, live refresh, directed recipient (`to`) and reply (`replyTo`), Enter to send. Every send has a stable `Idempotency-Key`; a failed or uncertain send keeps its key and payload and is retried with the same bytes. Editing the text creates a new send with a new key.
 - **Snapshots**: the snapshot list and the latest valid snapshot text.
@@ -41,10 +42,10 @@ This produces `target/macos/msn desktop.app`, ad-hoc signed and **not notarized*
 
 ## Security model
 
-- The token is entered or read from a profile, kept in memory for the session, and sent only to the configured origin as `Authorization: Bearer`. After connecting, the network worker is the only holder; the form's copy is cleared and UI state holds no credentials. The app never writes tokens or any state to disk and never prints them. Rust `String`s are not zeroized; this is not a defence against a local memory dump.
+- The token is entered or read from a profile, kept in memory for the session, and sent only to the configured origin as `Authorization: Bearer`. After connecting, the network worker is the only holder; the form's copy is cleared and UI state holds no credentials. The token is never printed. It is written to disk only when you tick **Save as profile**, only after the identity endpoint has accepted it, and only as a CLI profile file (below); the worker performs the save and its result event never carries the token. A rejected key writes nothing. Rust `String`s are not zeroized; this is not a defence against a local memory dump.
 - HTTPS is required. Plain `http://` is accepted only for `localhost`, `127.0.0.1` and `::1` (`msn_cli::config::parse_origin`). The origin cannot contain credentials, a path, a query or a fragment.
 - Redirects are never followed, so credentials cannot be forwarded to another host. Environment proxies are ignored. Native requests carry no browser `Origin` header; the Worker's CORS policy is unchanged.
-- Profiles are read from `$XDG_CONFIG_HOME/msn/profiles` or `~/.config/msn/profiles` only if the directory is `0700` and the file is a regular, non-symlink `0600` file, matching the CLI. The app never writes profiles.
+- Profiles live in `$XDG_CONFIG_HOME/msn/profiles` or `~/.config/msn/profiles` and are read and written through the CLI's own `msn_cli::profile::ProfileStore` — one implementation of the rules: the directory must be `0700`, each file a regular, non-symlink `0600` file, and a new profile is written completely under a temporary name and linked into place, so it is never half-written and never replaces an existing one. A saved key is readable by anything running as your Unix user, exactly as for `msn profile save`. The app never edits or deletes profiles.
 - Message, snapshot and task text is only displayed. It is never interpreted or executed as a command.
 - Tenant and channel identifiers are validated with `msn_cli::config::slug` before path interpolation.
 
@@ -91,7 +92,7 @@ cargo test --locked
 - Initial event-cursor establishment drains the journal in pages of 100 (bounded at 2,500 pages, above the server's capacity). A very large journal delays the first channel load.
 - One sequential network worker: a slow request briefly delays later queued commands. Send retries are bounded (3 attempts).
 - The event cursor is in memory only; a restart re-drains, then reads canonical state.
-- GUI actions are limited: send, create channel, claim task. No snapshot publishing, no other task actions, no attachments, single-line composer.
+- GUI actions are limited: send, create channel, claim task, save a profile. Profiles cannot be renamed or deleted from the GUI (remove the file, or use the CLI). No snapshot publishing, no other task actions, no attachments, single-line composer.
 - No system tray, notifications, or background operation. The eframe `accesskit` feature is disabled to keep dependencies small, so screen-reader support is not provided.
 - The macOS bundle/build must pass the platform CI job; local Ares verification is Linux-only. Windows is not supported.
 

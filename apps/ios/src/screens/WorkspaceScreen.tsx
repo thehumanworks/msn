@@ -13,10 +13,11 @@ import { ChannelScreen } from "./ChannelScreen.tsx";
 export function confirmSignOut(model: AppModel): void {
   Alert.alert(
     "Sign out?",
-    "This stops syncing and removes the saved access key from this device. Unsent messages are discarded.",
+    "This stops syncing and discards unsent messages. A saved profile stays on this device so you can switch back to it; choose Forget to delete its access key as well.",
     [
       { text: "Cancel", style: "cancel" },
-      { text: "Sign out", style: "destructive", onPress: () => void model.signOut() },
+      { text: "Sign out", onPress: () => void model.signOut() },
+      { text: "Sign out and forget", style: "destructive", onPress: () => void model.signOut(null, { forget: true }) },
     ],
   );
 }

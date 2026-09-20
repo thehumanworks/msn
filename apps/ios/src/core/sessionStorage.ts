@@ -8,6 +8,10 @@ export type SecretStore = {
   remove(key: string): Promise<void>;
 };
 
+/**
+ * The single remembered session of versions before saved profiles (ADR 0021). It is only read now,
+ * once, by `migrateLegacySession`; new saves go through `profileStorage.ts`.
+ */
 export const SESSION_KEY = "msn.session.v1";
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const TOKEN = /^[A-Za-z0-9_-]{32,256}$/;

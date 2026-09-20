@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { AppModel } from "../core/appModel.ts";
+import type { ProfileSummary } from "../core/profileStorage.ts";
 import { Banner, Button, Field, Segmented, Text } from "../components/ui.tsx";
-import { colors, spacing } from "../components/theme.ts";
+import { colors, radius, spacing } from "../components/theme.ts";
 
 type Mode = "key" | "create" | "invite";
 
@@ -13,7 +14,19 @@ const MODES = [
   { value: "invite", label: "Invitation" },
 ] as const;
 
-export function SignInScreen({ model, notice }: { model: AppModel; notice: string | null }) {
+function host(origin: string): string {
+  return origin.replace(/^https?:\/\//, "");
+}
+
+export function SignInScreen({
+  model,
+  notice,
+  profiles,
+}: {
+  model: AppModel;
+  notice: string | null;
+  profiles: ProfileSummary[];
+}) {
   const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<Mode>("key");
   const [origin, setOrigin] = useState("");
@@ -52,6 +65,34 @@ export function SignInScreen({ model, notice }: { model: AppModel; notice: strin
     if (result) setError(result);
   }
 
+  async function openProfile(name: string) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const result = await model.connectProfile(name);
+    if (!mounted.current) return;
+    setBusy(false);
+    if (result) setError(result);
+  }
+
+  function confirmForget(profile: ProfileSummary) {
+    Alert.alert(
+      `Forget ${profile.username}?`,
+      `This deletes the saved access key for ${profile.tenant} from this device. The key itself keeps working elsewhere.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Forget",
+          style: "destructive",
+          onPress: () =>
+            void model.forgetProfile(profile.name).then((result) => {
+              if (mounted.current && result) setError(result);
+            }),
+        },
+      ],
+    );
+  }
+
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <ScrollView
@@ -72,6 +113,43 @@ export function SignInScreen({ model, notice }: { model: AppModel; notice: strin
         </View>
 
         {notice ? <Banner tone="warning">{notice}</Banner> : null}
+
+        {profiles.length > 0 ? (
+          <View style={{ gap: spacing.sm }}>
+            <Text style={styles.section} accessibilityRole="header">
+              Saved profiles
+            </Text>
+            {profiles.map((profile) => (
+              <View key={profile.name} style={styles.profileRow}>
+                <Pressable
+                  style={({ pressed }) => [{ flex: 1 }, pressed && { opacity: 0.7 }]}
+                  disabled={busy}
+                  onPress={() => void openProfile(profile.name)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Connect as ${profile.username} in ${profile.tenant}`}
+                >
+                  <Text style={{ fontWeight: "700" }}>
+                    {profile.username}
+                    <Text style={{ color: colors.muted, fontWeight: "400" }}> @ {profile.tenant}</Text>
+                  </Text>
+                  <Text style={{ color: colors.muted, fontSize: 13 }}>
+                    {host(profile.origin)}
+                    {profile.channel ? ` · #${profile.channel} only` : ""}
+                  </Text>
+                </Pressable>
+                <Button
+                  label="Forget"
+                  variant="ghost"
+                  onPress={() => confirmForget(profile)}
+                  accessibilityHint={`Deletes the saved key for ${profile.username} from this device`}
+                />
+              </View>
+            ))}
+            <Text style={[styles.section, { marginTop: spacing.sm }]} accessibilityRole="header">
+              New connection
+            </Text>
+          </View>
+        ) : null}
 
         <Segmented options={MODES} value={mode} onChange={(next) => { setMode(next); setError(null); }} />
 
@@ -132,15 +210,15 @@ export function SignInScreen({ model, notice }: { model: AppModel; notice: strin
 
         <View style={styles.rememberRow}>
           <View style={{ flex: 1 }}>
-            <Text accessibilityRole="header">Remember on this device</Text>
+            <Text accessibilityRole="header">Save as a profile on this device</Text>
             <Text style={{ color: colors.muted, fontSize: 13 }}>
-              Stored in the iOS keychain, only while unlocked, never backed up.
+              Named after you and the workspace. Stored in the iOS keychain, only while unlocked, never backed up.
             </Text>
           </View>
           <Switch
             value={remember}
             onValueChange={setRemember}
-            accessibilityLabel="Remember on this device"
+            accessibilityLabel="Save as a profile on this device"
             trackColor={{ true: colors.accent, false: colors.border }}
           />
         </View>
@@ -163,4 +241,14 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   title: { fontSize: 34, fontWeight: "800" },
   rememberRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  section: { color: colors.muted, fontSize: 13, fontWeight: "700", textTransform: "uppercase" },
+  profileRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    paddingLeft: spacing.md,
+    paddingVertical: spacing.sm,
+  },
 });

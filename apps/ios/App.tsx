@@ -53,7 +53,9 @@ function Root() {
 
 function Phase({ phase }: { phase: ReturnType<typeof model.state.get> }) {
   if (phase.kind === "hydrating") return <EmptyState title="Opening msn…" />;
-  if (phase.kind === "signedOut") return <SignInScreen model={model} notice={phase.notice} />;
+  if (phase.kind === "signedOut") {
+    return <SignInScreen model={model} notice={phase.notice} profiles={phase.profiles} />;
+  }
   return <Connected controller={phase.controller} warning={phase.warning} />;
 }
 

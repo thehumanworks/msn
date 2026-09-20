@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::net::client_ops::SnapshotView;
 use crate::net::events::{CoordinationEvent, EventKind};
 use crate::net::worker::{Command, TaskEventRequest, UiEvent};
+use crate::profile::SaveOutcome;
 
 /// Bound on how many messages a channel keeps in memory. Oldest are evicted first.
 pub const MAX_CACHED_MESSAGES: usize = 2000;
@@ -156,6 +157,8 @@ pub struct AppState {
     deferred: Vec<Command>,
 
     pub status: Option<String>,
+    /// Outcome of "Save as profile" for the current connection.
+    pub profile_save: Option<SaveOutcome>,
 }
 
 impl AppState {
@@ -314,6 +317,15 @@ impl AppState {
                 });
                 self.events_ready = false;
                 self.status = Some("Synchronising with the event stream…".into());
+                Vec::new()
+            }
+            UiEvent::ProfileSaved {
+                generation,
+                outcome,
+            } => {
+                if self.generation() == Some(generation) {
+                    self.profile_save = Some(outcome);
+                }
                 Vec::new()
             }
             UiEvent::EventsReady { generation } => {
@@ -959,6 +971,32 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_save_outcome_only_applies_to_the_connection_that_requested_it() {
+        let mut state = AppState::default();
+        state.begin_connect(2, "acme".into());
+        state.apply(UiEvent::Connected {
+            generation: 2,
+            username: "alice".into(),
+        });
+        state.apply(UiEvent::ProfileSaved {
+            generation: 1,
+            outcome: SaveOutcome::Saved("stale".into()),
+        });
+        assert_eq!(state.profile_save, None, "an older connection's outcome");
+        state.apply(UiEvent::ProfileSaved {
+            generation: 2,
+            outcome: SaveOutcome::Saved("alice-acme".into()),
+        });
+        assert_eq!(
+            state.profile_save,
+            Some(SaveOutcome::Saved("alice-acme".into()))
+        );
+        // A new connection starts clean.
+        state.begin_connect(3, "acme".into());
+        assert_eq!(state.profile_save, None);
+    }
+
+    #[test]
     fn rejected_connect_and_invalidations_are_never_lost() {
         let mut state = AppState::default();
         state.begin_connect(1, "acme".into());
@@ -968,6 +1006,7 @@ mod tests {
             tenant: "acme".into(),
             token: "t".into(),
             chosen_username: None,
+            save: None,
         });
         assert!(state.pending_connect.is_none() && state.connect_error.is_some());
 

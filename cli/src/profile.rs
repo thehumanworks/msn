@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -133,11 +134,14 @@ fn list() -> Result<(), CliError> {
 }
 
 pub(crate) fn names() -> Result<Vec<String>, CliError> {
-    let directory = profile_directory()?;
+    names_in(&profile_directory()?)
+}
+
+fn names_in(directory: &Path) -> Result<Vec<String>, CliError> {
     if !directory.exists() {
         return Ok(Vec::new());
     }
-    check_directory(&directory)?;
+    check_directory(directory)?;
     let mut names = Vec::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
@@ -275,7 +279,11 @@ pub(crate) fn profile_directory() -> Result<PathBuf, CliError> {
 }
 
 pub(crate) fn profile_path(name: &str) -> Result<PathBuf, CliError> {
-    Ok(profile_directory()?.join(format!("{name}.json")))
+    Ok(path_in(&profile_directory()?, name))
+}
+
+fn path_in(directory: &Path, name: &str) -> PathBuf {
+    directory.join(format!("{name}.json"))
 }
 
 pub(crate) fn ensure_directory(path: &Path) -> Result<(), CliError> {
@@ -308,25 +316,60 @@ fn check_file(path: &Path) -> Result<(), CliError> {
 }
 
 pub(crate) fn write_new(name: &str, profile: &Profile) -> Result<(), CliError> {
-    let path = profile_path(name)?;
-    let parent = path.parent().expect("profile has parent");
-    ensure_directory(parent)?;
+    write_new_in(&profile_directory()?, name, profile)
+}
+
+/// Creates `name` without ever replacing an existing profile. The complete file is written and
+/// synced under a temporary name first and then linked into place, so a crash or a concurrent
+/// reader never observes a partially written profile.
+fn write_new_in(directory: &Path, name: &str, profile: &Profile) -> Result<(), CliError> {
+    ensure_directory(directory)?;
+    let path = path_in(directory, name);
     let serialized =
         serde_json::to_vec(profile).map_err(|error| CliError::generic(error.to_string()))?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    set_create_mode(&mut options, 0o600);
-    let mut file = options.open(&path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            CliError::conflict(format!("Profile \"{name}\" already exists."))
-        } else {
-            CliError::from(error)
+    let conflict = || CliError::conflict(format!("Profile \"{name}\" already exists."));
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        set_create_mode(&mut options, 0o600);
+        let mut file = options.open(&temp)?;
+        set_mode(&temp, 0o600)?;
+        file.write_all(&serialized)?;
+        file.sync_all()?;
+        match fs::hard_link(&temp, &path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(conflict()),
+            // A filesystem without hard links: fall back to an exclusive create.
+            Err(_) => {
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                set_create_mode(&mut options, 0o600);
+                let mut file = options.open(&path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        conflict()
+                    } else {
+                        CliError::from(error)
+                    }
+                })?;
+                set_mode(&path, 0o600)?;
+                file.write_all(&serialized)?;
+                file.sync_all()?;
+                Ok(())
+            }
         }
-    })?;
-    set_mode(&path, 0o600)?;
-    file.write_all(&serialized)?;
-    file.sync_all()?;
+    })();
+    let _ = fs::remove_file(&temp);
+    result?;
+    sync_directory(directory);
     check_file(&path)
+}
+
+/// Best effort: makes the new directory entry itself durable where the platform allows it.
+fn sync_directory(directory: &Path) {
+    if let Ok(handle) = fs::File::open(directory) {
+        let _ = handle.sync_all();
+    }
 }
 
 pub(crate) fn reject_existing(name: &str) -> Result<(), CliError> {
@@ -341,10 +384,13 @@ pub(crate) fn reject_existing(name: &str) -> Result<(), CliError> {
 }
 
 pub(crate) fn load(name: &str) -> Result<Profile, CliError> {
-    let path = profile_path(name)?;
-    let parent = path.parent().expect("profile has parent");
-    check_directory(parent).map_err(|error| {
-        if !parent.exists() {
+    load_in(&profile_directory()?, name)
+}
+
+fn load_in(directory: &Path, name: &str) -> Result<Profile, CliError> {
+    let path = path_in(directory, name);
+    check_directory(directory).map_err(|error| {
+        if !directory.exists() {
             CliError::not_found(format!("Profile \"{name}\" does not exist."))
         } else {
             error
@@ -366,6 +412,213 @@ pub(crate) fn load(name: &str) -> Result<Profile, CliError> {
     validate_username(&profile.username)?;
     reader_hash(&profile.reader)?;
     Ok(profile)
+}
+
+// ---- Profile store for first-party clients (ADR 0021) -----------------------------------------
+
+/// A connection that has already been authenticated against the workspace identity endpoint.
+/// `Debug` never prints the token.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Connection {
+    pub url: String,
+    pub tenant: String,
+    pub token: String,
+    pub username: String,
+}
+
+impl fmt::Debug for Connection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Connection")
+            .field("url", &self.url)
+            .field("tenant", &self.tenant)
+            .field("token", &"<redacted>")
+            .field("username", &self.username)
+            .finish()
+    }
+}
+
+/// What a profile picker may show. Never contains the token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub name: String,
+    pub url: String,
+    pub tenant: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Saved {
+    Created(String),
+    /// An identical connection (same origin, workspace, user and key) is already stored.
+    AlreadySaved(String),
+}
+
+impl Saved {
+    pub fn name(&self) -> &str {
+        match self {
+            Saved::Created(name) | Saved::AlreadySaved(name) => name,
+        }
+    }
+}
+
+/// The on-disk profile store shared by the CLI and the desktop app: one directory, one JSON
+/// shape, one set of permission checks and one writer. Saving never replaces a profile.
+#[derive(Debug, Clone)]
+pub struct ProfileStore {
+    directory: PathBuf,
+}
+
+const MAX_AUTOMATIC_NAMES: u32 = 99;
+
+impl ProfileStore {
+    /// `$XDG_CONFIG_HOME/msn/profiles`, or `~/.config/msn/profiles`.
+    pub fn default_location() -> Result<Self, CliError> {
+        Ok(ProfileStore {
+            directory: profile_directory()?,
+        })
+    }
+
+    pub fn at(directory: impl Into<PathBuf>) -> Self {
+        ProfileStore {
+            directory: directory.into(),
+        }
+    }
+
+    /// Every valid profile, sorted by name. A profile that fails validation or a permission
+    /// check is skipped rather than half-trusted; an unsafe directory is an error.
+    pub fn summaries(&self) -> Result<Vec<Summary>, CliError> {
+        if !self.directory.exists() {
+            return Ok(Vec::new());
+        }
+        check_directory(&self.directory)?;
+        let mut summaries = Vec::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if validate_name(name).is_err() {
+                continue;
+            }
+            if let Ok(profile) = load_in(&self.directory, name) {
+                summaries.push(Summary {
+                    name: name.to_string(),
+                    url: profile.url,
+                    tenant: profile.tenant,
+                    username: profile.username,
+                });
+            }
+        }
+        summaries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(summaries)
+    }
+
+    pub fn load(&self, name: &str) -> Result<Connection, CliError> {
+        validate_name(name)?;
+        let profile = load_in(&self.directory, name)?;
+        Ok(Connection {
+            url: profile.url,
+            tenant: profile.tenant,
+            token: profile.token,
+            username: profile.username,
+        })
+    }
+
+    /// Early form feedback: the name is valid and not taken. `save` still enforces both.
+    pub fn check_new_name(&self, name: &str) -> Result<(), CliError> {
+        validate_name(name)?;
+        match fs::symlink_metadata(path_in(&self.directory, name)) {
+            Ok(_) => Err(CliError::conflict(format!(
+                "Profile \"{name}\" already exists."
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Persists an authenticated connection. With `name`, an existing profile of that name is a
+    /// conflict. Without it the profile is named after the user and workspace
+    /// (`alice-my-team`, then `alice-my-team-2`, …); an identical stored connection is reported
+    /// instead of duplicated. The caller must have authenticated `connection` first: this never
+    /// talks to the network.
+    pub fn save(&self, name: Option<&str>, connection: &Connection) -> Result<Saved, CliError> {
+        let url = parse_origin(&connection.url)?;
+        let tenant = require_tenant(Some(&connection.tenant))?;
+        let token = require_token(Some(&connection.token), "access key")?;
+        let username = validate_username(&connection.username)?;
+        reader_hash(&username)?;
+        let profile = Profile {
+            url: origin_key(&url),
+            tenant,
+            token,
+            reader: username.clone(),
+            username,
+            activity: None,
+        };
+        if let Some(name) = name {
+            validate_name(name)?;
+            write_new_in(&self.directory, name, &profile)?;
+            return Ok(Saved::Created(name.to_string()));
+        }
+        for existing in names_in(&self.directory).unwrap_or_default() {
+            if let Ok(stored) = load_in(&self.directory, &existing)
+                && stored.url == profile.url
+                && stored.tenant == profile.tenant
+                && stored.username == profile.username
+                && stored.token == profile.token
+            {
+                return Ok(Saved::AlreadySaved(existing));
+            }
+        }
+        let base = automatic_name(&profile.username, &profile.tenant);
+        for attempt in 1..=MAX_AUTOMATIC_NAMES {
+            let candidate = if attempt == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{attempt}")
+            };
+            match write_new_in(&self.directory, &candidate, &profile) {
+                Ok(()) => return Ok(Saved::Created(candidate)),
+                Err(CliError::Conflict(_)) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CliError::conflict(format!(
+            "Too many profiles are named like \"{base}\"; choose a name."
+        )))
+    }
+}
+
+/// `Alice B` in `my-team` becomes `alice-b-my-team`: always a valid profile name with room for a
+/// numeric suffix.
+fn automatic_name(username: &str, tenant: &str) -> String {
+    let user: String = username
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let user = user.trim_matches(|c| c == '-' || c == '_');
+    let mut name = if user.is_empty() {
+        tenant.to_string()
+    } else {
+        format!("{user}-{tenant}")
+    };
+    name.truncate(60);
+    let name = name.trim_end_matches(['-', '_']).to_string();
+    if crate::config::is_slug(&name) {
+        name
+    } else {
+        "profile".to_string()
+    }
 }
 
 #[cfg(unix)]

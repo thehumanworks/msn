@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use msn_desktop::net::worker::{Command, EVENT_QUEUE_CAPACITY, UiEvent, Worker};
+use msn_desktop::profile::SaveRequest;
 use msn_desktop::state::AppState;
 
 pub struct Rig {
@@ -33,6 +34,16 @@ pub fn rig() -> Rig {
 
 impl Rig {
     pub fn connect(&self, origin: &str, tenant: &str, token: &str) -> u64 {
+        self.connect_saving(origin, tenant, token, None)
+    }
+
+    pub fn connect_saving(
+        &self,
+        origin: &str,
+        tenant: &str,
+        token: &str,
+        save: Option<SaveRequest>,
+    ) -> u64 {
         let generation = self.worker.next_generation();
         self.worker
             .send(Command::Connect {
@@ -41,6 +52,7 @@ impl Rig {
                 tenant: tenant.into(),
                 token: token.into(),
                 chosen_username: None,
+                save,
             })
             .ok()
             .unwrap();
