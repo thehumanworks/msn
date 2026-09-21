@@ -76,7 +76,21 @@ export class HostStore {
             .run(config.softTurnsPerConversation);
         const saved = this.db.prepare("SELECT value FROM meta WHERE key='binding'").get();
         const serialized = JSON.stringify(binding);
-        requireValue(!saved || saved.value === serialized, "host_state_binding_mismatch");
+        if (saved && saved.value !== serialized) {
+          // Roster changes are additive. Workspace and every saved identity must survive unchanged;
+          // allowed-channel policy is operator configuration and may change like timeoutMs.
+          const previous = JSON.parse(saved.value);
+          requireValue(
+            ["version", "hostId", "origin", "tenant"].every((k) => previous[k] === binding[k]),
+            "host_state_binding_mismatch",
+          );
+          for (const was of previous.agents ?? []) {
+            const is = binding.agents.find((a) => a.id === was.id);
+            requireValue(is, "host_state_agent_removed");
+            requireValue(is.username === was.username, "host_state_agent_identity_mismatch");
+          }
+          this.db.prepare("UPDATE meta SET value=? WHERE key='binding'").run(serialized);
+        }
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('binding', ?)").run(serialized);
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('version', '2')").run();
         this.db.prepare("UPDATE meta SET value='2' WHERE key='version' AND value='1'").run();
@@ -86,10 +100,21 @@ export class HostStore {
           this.db.prepare("SELECT value FROM meta WHERE key='version'").get().value === "2",
           "unsupported_host_state_version",
         );
+        // An agent added to an existing roster starts at the host's event boundary: replayHistory is a
+        // first-start policy, and events already handled by peers are not new work for a newcomer.
+        const boundary = this.db.prepare("SELECT COALESCE(MAX(cursor),0) AS cursor FROM agents").get().cursor;
         for (const agent of config.agents) {
           this.db
-            .prepare("INSERT OR IGNORE INTO agents(id,username,initialized,channels) VALUES (?,?,?,?)")
-            .run(agent.id, agent.username, config.replayHistory ? 1 : 0, JSON.stringify(agent.channels));
+            .prepare(
+              "INSERT OR IGNORE INTO agents(id,username,cursor,initialized,channels) VALUES (?,?,?,?,?)",
+            )
+            .run(
+              agent.id,
+              agent.username,
+              boundary,
+              config.replayHistory ? 1 : 0,
+              JSON.stringify(agent.channels),
+            );
         }
         // A crashed supervisor's watchdog still needs its disconnect escalation. Never overlap the
         // remaining lease, and reserve the recovery grace from this startup even when the lease has

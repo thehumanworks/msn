@@ -32,10 +32,22 @@ function fixtureConfig(dir, overrides = {}) {
   });
   return config;
 }
+// Mirrors the binding built by transport.mjs from the verified participant identities.
+function bindingFor(config) {
+  return {
+    version: 1,
+    hostId: config.hostId,
+    origin: "https://example.test",
+    tenant: "team",
+    agents: config.agents
+      .map((a) => ({ id: a.id, username: a.username, allowedChannels: [...a.allowedChannels].sort() }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  };
+}
 function fixture(t, overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), "msn-host-store-"));
   const config = fixtureConfig(dir, overrides);
-  const binding = { version: 1, hostId: config.hostId, origin: "https://example.test", tenant: "team" };
+  const binding = bindingFor(config);
   let store = new HostStore(config, binding);
   t.after(() => {
     store.close();
@@ -50,7 +62,7 @@ function fixture(t, overrides = {}) {
     },
     reopen(now = 10, nextConfig = config) {
       store.close();
-      store = new HostStore(nextConfig, binding, now);
+      store = new HostStore(nextConfig, bindingFor(nextConfig), now);
       return store;
     },
   };
@@ -182,6 +194,68 @@ test("restart persists cursors, committed state/outbox and defers unfinished pro
   assert.equal(f.store.claim("bob", 100, available - 1), null);
   assert.equal(f.store.claim("bob", 100, available).id, pending.id);
   assert.equal(f.store.claimOutput("alice", 10).body.text, "request");
+});
+test("roster additions migrate the binding; the newcomer starts at the host event boundary", (t) => {
+  const f = fixture(t);
+  const done = turn(f, "alice", 7);
+  f.store.finish(done, result(f.config, "alice", { state: { session: "kept" } }), null, 10);
+  const pending = turn(f, "bob", 8);
+  const grown = fixtureConfig(f.dir);
+  grown.agents.push({ ...grown.agents[0], id: "dave", username: "dave", profile: "dave", role: "peer" });
+  f.reopen(10, grown);
+  const saved = JSON.parse(f.store.db.prepare("SELECT value FROM meta WHERE key='binding'").get().value);
+  assert.deepEqual(saved, bindingFor(grown));
+  assert.deepEqual(f.store.agent("alice").state, { session: "kept" });
+  assert.equal(f.store.db.prepare("SELECT status FROM jobs WHERE id=?").get(pending.id).status, "queued");
+  assert.equal(f.store.agent("dave").cursor, 8, "no replay of events peers already handled");
+  assert.equal(f.store.agent("dave").initialized, 1);
+  assert.equal(f.store.ingest("dave", event(8)), true, "boundary event is a no-op");
+  assert.equal(f.store.status().jobs.find((j) => j.status === "queued").count, 1);
+  assert.equal(f.store.ingest("dave", event(9)), true);
+  assert.equal(f.store.agent("dave").cursor, 9);
+  assert.deepEqual(
+    f.store.status().agents.map((a) => a.id),
+    ["alice", "bob", "coordinator", "dave"],
+  );
+  // The generation is part of every durable key; migration must not rotate it.
+  const generation = f.store.generation;
+  f.reopen(10, grown);
+  assert.equal(f.store.generation, generation);
+});
+test("roster removals and renames are rejected before any write; the original roster still opens", (t) => {
+  const f = fixture(t);
+  turn(f, "alice", 3);
+  const before = f.store.db.prepare("SELECT value FROM meta WHERE key='binding'").get().value;
+  const removed = fixtureConfig(f.dir);
+  removed.agents = removed.agents.filter((a) => a.id !== "bob");
+  const renamed = fixtureConfig(f.dir);
+  renamed.agents.find((a) => a.id === "bob").username = "robert";
+  const rehosted = fixtureConfig(f.dir, { hostId: "other-host" });
+  f.store.close();
+  for (const [config, code] of [
+    [removed, /host_state_agent_removed/],
+    [renamed, /host_state_agent_identity_mismatch/],
+    [rehosted, /host_state_binding_mismatch/],
+  ]) {
+    assert.throws(() => new HostStore(config, bindingFor(config), 10), code);
+  }
+  f.reopen(10);
+  assert.equal(f.store.db.prepare("SELECT value FROM meta WHERE key='binding'").get().value, before);
+  assert.equal(f.store.agent("alice").cursor, 3);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM jobs").get().n, 1);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM agents").get().n, 3);
+});
+test("allowed-channel policy changes without touching identities or state", (t) => {
+  const f = fixture(t);
+  turn(f, "alice", 2);
+  const scoped = fixtureConfig(f.dir);
+  scoped.agents.find((a) => a.id === "alice").allowedChannels = ["work", "review"];
+  f.reopen(10, scoped);
+  assert.deepEqual(
+    JSON.parse(f.store.db.prepare("SELECT value FROM meta WHERE key='binding'").get().value),
+    bindingFor(scoped),
+  );
+  assert.equal(f.store.agent("alice").cursor, 2);
 });
 test("recovery reserves the cleanup grace from replacement startup even when a no-deadline lease expired", (t) => {
   const f = fixture(t);
