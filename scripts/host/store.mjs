@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { digest, HostError, requireValue } from "./protocol.mjs";
+import { digest, HostError, RECOVERY_GRACE_MS, requireValue } from "./protocol.mjs";
 
 export class HostStore {
   constructor(config, binding, now = Date.now()) {
@@ -41,6 +41,7 @@ export class HostStore {
           id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, event_id INTEGER, channel TEXT NOT NULL,
           event TEXT, trigger TEXT, root TEXT, status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
           available INTEGER NOT NULL DEFAULT 0, lease_until INTEGER NOT NULL DEFAULT 0, error TEXT,
+          counted INTEGER NOT NULL DEFAULT 0,
           UNIQUE(agent, event_id));
         CREATE INDEX IF NOT EXISTS jobs_ready ON jobs(agent, status, available, id);
         CREATE TABLE IF NOT EXISTS outbox (
@@ -48,18 +49,41 @@ export class HostStore {
           channel TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
           attempts INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 0, error TEXT);
         CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(agent, status, available, id);
-        CREATE TABLE IF NOT EXISTS budgets (root TEXT PRIMARY KEY, turns INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS budgets (
+          root TEXT PRIMARY KEY, turns INTEGER NOT NULL, agent_turns INTEGER NOT NULL DEFAULT 0,
+          last_human_event_id INTEGER NOT NULL DEFAULT 0, next_warning INTEGER NOT NULL DEFAULT 0);
       `);
       this.tx(() => {
+        // Version 1 -> 2: additive columns. Older hosts insert positional budget rows, so they cannot
+        // reuse this file after migration; the version bump makes them fail closed at open instead.
+        for (const [table, column, type] of [
+          ["jobs", "counted", "INTEGER NOT NULL DEFAULT 0"],
+          ["budgets", "agent_turns", "INTEGER NOT NULL DEFAULT 0"],
+          ["budgets", "last_human_event_id", "INTEGER NOT NULL DEFAULT 0"],
+          ["budgets", "next_warning", "INTEGER NOT NULL DEFAULT 0"],
+        ])
+          if (
+            !this.db
+              .prepare(`PRAGMA table_info(${table})`)
+              .all()
+              .some((c) => c.name === column)
+          )
+            this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+        // Legacy rows and rows created while the soft budget was disabled start at the first milestone.
+        if (config.softTurnsPerConversation > 0)
+          this.db
+            .prepare("UPDATE budgets SET next_warning=? WHERE next_warning=0")
+            .run(config.softTurnsPerConversation);
         const saved = this.db.prepare("SELECT value FROM meta WHERE key='binding'").get();
         const serialized = JSON.stringify(binding);
         requireValue(!saved || saved.value === serialized, "host_state_binding_mismatch");
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('binding', ?)").run(serialized);
-        this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('version', '1')").run();
+        this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('version', '2')").run();
+        this.db.prepare("UPDATE meta SET value='2' WHERE key='version' AND value='1'").run();
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('generation', ?)").run(randomUUID());
         this.generation = this.db.prepare("SELECT value FROM meta WHERE key='generation'").get().value;
         requireValue(
-          this.db.prepare("SELECT value FROM meta WHERE key='version'").get().value === "1",
+          this.db.prepare("SELECT value FROM meta WHERE key='version'").get().value === "2",
           "unsupported_host_state_version",
         );
         for (const agent of config.agents) {
@@ -67,12 +91,14 @@ export class HostStore {
             .prepare("INSERT OR IGNORE INTO agents(id,username,initialized,channels) VALUES (?,?,?,?)")
             .run(agent.id, agent.username, config.replayHistory ? 1 : 0, JSON.stringify(agent.channels));
         }
-        // A crashed supervisor has a finite watchdog. Never overlap its possible remaining lease.
+        // A crashed supervisor's watchdog still needs its disconnect escalation. Never overlap the
+        // remaining lease, and reserve the recovery grace from this startup even when the lease has
+        // already expired (a long no-deadline turn) or the deadline configuration changed.
         this.db
           .prepare(
             "UPDATE jobs SET status='queued', available=MAX(?,lease_until), error='host_restarted' WHERE status='running'",
           )
-          .run(now);
+          .run(now + RECOVERY_GRACE_MS);
         this.db.exec("UPDATE outbox SET status='queued' WHERE status='sending'");
       });
       chmodSync(join(config.stateDir, "state.sqlite"), 0o600);
@@ -162,16 +188,49 @@ export class HostStore {
   }
   startTurn(job, root, message) {
     return this.tx(() => {
-      const count = this.db.prepare("SELECT turns FROM budgets WHERE root=?").get(root)?.turns ?? 0;
-      if (count >= this.config.maxTurnsPerConversation) {
+      const { maxTurnsPerConversation: hard, softTurnsPerConversation: soft } = this.config;
+      const budget = this.db.prepare("SELECT * FROM budgets WHERE root=?").get(root);
+      if ((budget?.turns ?? 0) >= hard) {
         this.deadLetter(job, "conversation_budget_exhausted");
         return false;
       }
+      // The hard budget counts every activation, retries included. The soft budget counts logical
+      // agent-triggered turns since the newest human message: a job is counted once, on its first
+      // start, and jobs triggered by a human message (every broadcast recipient, replays included) never count.
       this.db
-        .prepare("INSERT INTO budgets VALUES (?,1) ON CONFLICT(root) DO UPDATE SET turns=turns+1")
-        .run(root);
-      this.db.prepare("UPDATE jobs SET root=? WHERE id=?").run(root, job.id);
+        .prepare(
+          "INSERT INTO budgets(root,turns,next_warning) VALUES (?,1,?) ON CONFLICT(root) DO UPDATE SET turns=turns+1",
+        )
+        .run(root, soft);
+      const first =
+        this.db.prepare("UPDATE jobs SET root=?, counted=1 WHERE id=? AND counted=0").run(root, job.id)
+          .changes === 1;
       job.root = root;
+      // Canonical message ids, not event cursor ids: a replayed or fanned-out human message resets once.
+      const human = message && !this.config.agents.some((a) => a.username === message.username);
+      if (soft > 0 && human && message.id > (budget?.last_human_event_id ?? 0))
+        this.db
+          .prepare("UPDATE budgets SET agent_turns=0, last_human_event_id=?, next_warning=? WHERE root=?")
+          .run(message.id, soft, root);
+      // A budget warning consumes the hard allowance but never counts toward the next warning.
+      if (soft > 0 && first && !human && job.trigger?.type !== "coordination.budget") {
+        const { agent_turns, next_warning } = this.db
+          .prepare(
+            "UPDATE budgets SET agent_turns=agent_turns+1 WHERE root=? RETURNING agent_turns, next_warning",
+          )
+          .get(root);
+        if (agent_turns >= next_warning) {
+          this.db.prepare("UPDATE budgets SET next_warning=next_warning+? WHERE root=?").run(soft, root);
+          this.enqueueSignal(job.agent, job.channel, root, {
+            type: "coordination.budget",
+            agentTurns: agent_turns,
+            softBudget: soft,
+            hardLimit: hard,
+            instruction:
+              "Agents have taken many turns in this conversation without new human input. Reassess before continuing: report what changed, what remains and whether peer input is actually needed. Continue only concrete remaining work; otherwise finish, report a blocker, or return no actions.",
+          });
+        }
+      }
       const wait = this.agent(job.agent).waiting;
       const resumed = Boolean(
         wait &&

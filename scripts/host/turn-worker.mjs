@@ -61,7 +61,8 @@ process.on("message", (input) => {
     let chunks = [],
       bytes = 0;
     clearTimeout(timer);
-    timer = setTimeout(() => stop("handler_timeout"), input.timeoutMs);
+    // `null` means no turn deadline; disconnect/stop handling above still bounds cleanup.
+    timer = input.timeoutMs === null ? undefined : setTimeout(() => stop("handler_timeout"), input.timeoutMs);
     child.stdout.on("data", (chunk) => {
       bytes += chunk.length;
       if (bytes > MAX_OUTPUT) {

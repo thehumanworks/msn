@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { RECOVERY_GRACE_MS } from "../scripts/host/protocol.mjs";
 import { Pulse } from "../scripts/host/runtime.mjs";
 import { validateHostPage } from "../scripts/host/transport.mjs";
 import { hostFixture } from "./support/host-fixture.mjs";
@@ -24,6 +27,28 @@ test("single-slot host coordinates two different harness executables without coo
   assert.ok(f.logs.some((e) => e.type === "turn.completed" && e.suspended));
   assert.equal(f.status().failures.length, 0);
 });
+test("one-slot host delivers a durable budget continuation to a real executable, which finishes without polling", async (t) => {
+  const f = await hostFixture(t, { maxConcurrent: 1, softTurnsPerConversation: 2 });
+  f.post({ to: "alice", text: "coordinate" });
+  await f.message((m) => m.to === "human" && m.text === "completed");
+  await f.message((m) => m.to === "human" && m.text === "budget:2");
+  const records = await f.records();
+  const budget = records.filter((r) => r.input.trigger.type === "coordination.budget");
+  assert.equal(budget.length, 1);
+  assert.equal(
+    budget[0].who,
+    "alice",
+    "the human-triggered turn is not counted; bob's request and alice's reply cross the milestone",
+  );
+  assert.equal(budget[0].input.conversationId, records[0].input.conversationId);
+  assert.deepEqual(
+    [budget[0].input.trigger.softBudget, budget[0].input.trigger.hardLimit, budget[0].input.message],
+    [2, 64, null],
+  );
+  assert.equal(records.filter((r) => r.input.trigger.type === "message").length, 3);
+  assert.equal(f.messages.filter((m) => m.text.startsWith("budget:")).length, 1);
+  assert.equal(f.status().failures.length, 0);
+});
 test("hung peer cannot block ingestion/execution of another peer; later input still runs", async (t) => {
   const f = await hostFixture(t, { timeoutMs: 500, maxConcurrent: 2 });
   f.post({ to: "alice", text: "hang" });
@@ -39,6 +64,29 @@ test("hung peer cannot block ingestion/execution of another peer; later input st
   await f.message(
     (m) => m.contentType === "application/json" && JSON.parse(m.text).schema === "msn.host.status.v1",
   );
+});
+test("timeoutMs null runs a turn past the finite default, bounds its lease and still stops cleanly", async (t) => {
+  const f = await hostFixture(t, { timeoutMs: null, maxConcurrent: 2 });
+  f.post({ to: "alice", text: "slow" });
+  const started = await f.log((e) => e.type === "turn.started" && e.agent === "alice");
+  const jobRow = (id) => {
+    const db = new DatabaseSync(join(f.config.stateDir, "state.sqlite"), { readOnly: true });
+    try {
+      return db.prepare("SELECT lease_until, error FROM jobs WHERE id=?").get(id);
+    } finally {
+      db.close();
+    }
+  };
+  const lease = jobRow(started.jobId).lease_until;
+  assert.ok(Number.isSafeInteger(lease) && lease <= Date.now() + RECOVERY_GRACE_MS);
+  await f.message((m) => m.to === "human" && m.text === "done:slow");
+  assert.ok(!f.logs.some((e) => e.type === "turn.failed"));
+  f.post({ to: "bob", text: "hang" });
+  const hung = await f.log((e) => e.type === "turn.started" && e.agent === "bob");
+  const stopping = Date.now();
+  await f.stop();
+  assert.ok(Date.now() - stopping < 4000);
+  assert.equal(jobRow(hung.jobId).error, "host_stopped");
 });
 test("an uncertain POST retries identical committed output without executing the model twice", async (t) => {
   const f = await hostFixture(t);

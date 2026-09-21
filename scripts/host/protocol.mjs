@@ -41,6 +41,7 @@ export function validateConfig(raw, base) {
     "maxConcurrent",
     "maxPending",
     "maxTurnsPerConversation",
+    "softTurnsPerConversation",
     "replayHistory",
     "agents",
   ]);
@@ -56,12 +57,15 @@ export function validateConfig(raw, base) {
     maxConcurrent: raw.maxConcurrent ?? 4,
     maxPending: raw.maxPending ?? 1000,
     maxTurnsPerConversation: raw.maxTurnsPerConversation ?? 64,
+    // Soft reassessment interval in logical agent turns since the last human message; 0 disables it.
+    softTurnsPerConversation: raw.softTurnsPerConversation ?? Math.min(16, raw.maxTurnsPerConversation ?? 64),
     replayHistory: raw.replayHistory ?? false,
   };
   requireValue(
     integer(config.maxConcurrent, 1, 32) &&
       integer(config.maxPending, 1, 10000) &&
-      integer(config.maxTurnsPerConversation, 1, 10000),
+      integer(config.maxTurnsPerConversation, 1, 10000) &&
+      integer(config.softTurnsPerConversation, 0, config.maxTurnsPerConversation),
     "invalid_host_limits",
   );
   requireValue(typeof config.replayHistory === "boolean", "invalid_replay_policy");
@@ -119,7 +123,8 @@ export function validateConfig(raw, base) {
       cwd: resolve(base, item.cwd ?? "."),
       role: item.role ?? "peer",
       description: item.description ?? "",
-      timeoutMs: item.timeoutMs ?? 300000,
+      // `null` is an explicit no-deadline turn; an absent field keeps the finite default.
+      timeoutMs: item.timeoutMs === undefined ? 300000 : item.timeoutMs,
       attempts: item.attempts ?? 3,
     };
     requireValue(
@@ -140,12 +145,23 @@ export function validateConfig(raw, base) {
       "invalid_agent_description",
     );
     requireValue(
-      integer(agent.timeoutMs, 10, 3600000) && integer(agent.attempts, 1, 10),
+      (agent.timeoutMs === null || integer(agent.timeoutMs, 10, 3600000)) && integer(agent.attempts, 1, 10),
       "invalid_agent_limits",
     );
     return agent;
   });
   return config;
+}
+/** Grace a replacement host reserves before reclaiming a turn that was running when the previous
+ * host died. The orphaned watchdog needs its host-disconnect SIGTERM/SIGKILL escalation to finish;
+ * recovery measures this grace from replacement startup, so an expired or reconfigured lease never
+ * permits an immediate overlapping claim. A no-deadline turn's lease is this grace alone. */
+export const RECOVERY_GRACE_MS = 15000;
+/** Lease recorded at turn start. A finite deadline covers the watchdog deadline plus its
+ * SIGTERM/SIGKILL escalation; a no-deadline turn only relies on the watchdog's host-disconnect
+ * cleanup, so its lease is the fixed recovery grace instead of forever. */
+export function turnLease(timeoutMs, now = Date.now()) {
+  return now + (timeoutMs === null ? RECOVERY_GRACE_MS : timeoutMs + 5000);
 }
 export function validateMessage(message, event, connection) {
   requireValue(
