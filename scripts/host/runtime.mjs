@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { executeTurn } from "./process.mjs";
-import { diagnostic, HostError, validateMessage, validateResult } from "./protocol.mjs";
+import { diagnostic, HostError, turnLease, validateMessage, validateResult } from "./protocol.mjs";
 import { request, validateHostPage } from "./transport.mjs";
 
 /** Edge-triggered notification with an epoch to close check/register lost-wakeup races. */
@@ -175,7 +175,7 @@ export class HostRuntime {
       };
       this.store.db
         .prepare("UPDATE jobs SET lease_until=? WHERE id=?")
-        .run(Date.now() + agent.timeoutMs + 5000, job.id);
+        .run(turnLease(agent.timeoutMs), job.id);
       this.emit("turn.started", { agent: agent.id, jobId: job.id, attempt: job.attempts });
       const raw = await executeTurn(agent, connection, envelope, this.config, signal, this.env);
       if (signal.aborted) {

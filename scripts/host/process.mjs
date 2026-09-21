@@ -61,10 +61,13 @@ export function executeTurn(agent, connection, envelope, config, signal, env = p
         finish();
       }, 1500);
     };
-    const timer = setTimeout(() => {
-      outcome = { ok: false, code: "handler_supervisor_timeout" };
-      stop();
-    }, agent.timeoutMs + 2500);
+    const timer =
+      agent.timeoutMs === null
+        ? undefined
+        : setTimeout(() => {
+            outcome = { ok: false, code: "handler_supervisor_timeout" };
+            stop();
+          }, agent.timeoutMs + 2500);
     signal.addEventListener("abort", stop, { once: true });
     worker.on("message", (message) => {
       if (Number.isSafeInteger(message.started) && message.started > 0) group = message.started;

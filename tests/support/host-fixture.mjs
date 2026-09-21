@@ -11,6 +11,7 @@ const HANDLER = `import {appendFile} from 'node:fs/promises';
 let raw=''; for await(const chunk of process.stdin) raw+=chunk; const i=JSON.parse(raw);
 await appendFile(process.env.HOST_TEST_RECORDS, JSON.stringify({who:i.identity.username,input:i,permission:process.env.MSN_PERMISSION_MODE,admin:!!process.env.MSN_ADMIN_TOKEN,other:!!process.env.ALICE_TOKEN||!!process.env.BOB_TOKEN})+'\\n');
 if (i.message?.text==='hang') {process.on('SIGTERM',()=>{}); await new Promise(r=>setTimeout(r,60000));}
+if (i.message?.text==='slow') await new Promise(r=>setTimeout(r,1800));
 let actions=[],wait;
 if(i.message?.text==='cycle-start') {actions=[{type:'send',channel:i.channel,to:'bob',text:'cycle-request'}]; wait={for:['bob'],timeoutMs:3000,reason:'bob'};}
 else if(i.message?.text==='cycle-request') wait={for:['alice'],timeoutMs:3000,reason:'alice'};
@@ -18,6 +19,7 @@ else if(i.trigger.type==='coordination.cycle') actions=[{type:'send',channel:i.c
 else if(i.message?.text==='wait-missing') wait={for:['absent-peer'],timeoutMs:100,reason:'missing peer'};
 else if(i.trigger.type==='coordination.timeout') actions=[{type:'send',channel:i.channel,to:'human',text:'timeout recovered'}];
 else if(i.trigger.type==='coordination.delivery_failed') actions=[{type:'send',channel:i.channel,to:'human',text:'delivery failure observed'}];
+else if(i.trigger.type==='coordination.budget') actions=[{type:'send',channel:i.channel,to:'human',text:'budget:'+i.trigger.agentTurns}];
 else if(i.message?.text==='coordinate') {actions=[{type:'send',channel:i.channel,to:'bob',text:'request'}]; wait={for:['bob'],timeoutMs:5000,reason:'peer work'};}
 else if(i.message?.text==='request') actions=[{type:'send',channel:i.channel,to:'alice',text:'reply'}];
 else if(i.message?.text==='reply') actions=[{type:'send',channel:i.channel,to:'human',text:'completed'}];
@@ -158,6 +160,7 @@ export async function hostFixture(t, options = {}) {
       replayHistory: false,
       maxConcurrent: options.maxConcurrent ?? 2,
       maxTurnsPerConversation: options.maxTurnsPerConversation ?? 64,
+      softTurnsPerConversation: options.softTurnsPerConversation ?? 16,
       agents: ["alice", "bob"].map((id) => ({
         id,
         connection: { origin, tenant: "team", tokenEnv: `${id.toUpperCase()}_TOKEN` },
@@ -167,7 +170,7 @@ export async function hostFixture(t, options = {}) {
         allowedChannels: ["*"],
         permissionMode: "yolo",
         attempts: 1,
-        timeoutMs: options.timeoutMs ?? 1200,
+        timeoutMs: options.timeoutMs === undefined ? 1200 : options.timeoutMs,
       })),
     },
     dir,

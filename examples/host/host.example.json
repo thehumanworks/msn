@@ -5,6 +5,7 @@
   "maxConcurrent": 4,
   "maxPending": 1000,
   "maxTurnsPerConversation": 64,
+  "softTurnsPerConversation": 16,
   "replayHistory": false,
   "agents": [
     {
