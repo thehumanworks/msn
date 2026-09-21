@@ -77,8 +77,8 @@ export class HostStore {
         const saved = this.db.prepare("SELECT value FROM meta WHERE key='binding'").get();
         const serialized = JSON.stringify(binding);
         if (saved && saved.value !== serialized) {
-          // Roster changes are additive. Workspace and every saved identity must survive unchanged;
-          // allowed-channel policy is operator configuration and may change like timeoutMs.
+          // Roster changes are additive. Workspace and every saved agent record, including its
+          // allowedChannels, must survive unchanged; only new agents may appear (ADR 0025).
           const previous = JSON.parse(saved.value);
           requireValue(
             ["version", "hostId", "origin", "tenant"].every((k) => previous[k] === binding[k]),
