@@ -76,7 +76,22 @@ export class HostStore {
             .run(config.softTurnsPerConversation);
         const saved = this.db.prepare("SELECT value FROM meta WHERE key='binding'").get();
         const serialized = JSON.stringify(binding);
-        requireValue(!saved || saved.value === serialized, "host_state_binding_mismatch");
+        if (saved && saved.value !== serialized) {
+          // Roster changes are additive. Workspace and every saved agent record, including its
+          // allowedChannels, must survive unchanged; only new agents may appear (ADR 0025).
+          const previous = JSON.parse(saved.value);
+          requireValue(
+            ["version", "hostId", "origin", "tenant"].every((k) => previous[k] === binding[k]),
+            "host_state_binding_mismatch",
+          );
+          for (const was of previous.agents ?? []) {
+            const is = binding.agents.find((a) => a.id === was.id);
+            requireValue(is, "host_state_agent_removed");
+            requireValue(is.username === was.username, "host_state_agent_identity_mismatch");
+            requireValue(JSON.stringify(is) === JSON.stringify(was), "host_state_binding_mismatch");
+          }
+          this.db.prepare("UPDATE meta SET value=? WHERE key='binding'").run(serialized);
+        }
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('binding', ?)").run(serialized);
         this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('version', '2')").run();
         this.db.prepare("UPDATE meta SET value='2' WHERE key='version' AND value='1'").run();
@@ -86,10 +101,18 @@ export class HostStore {
           this.db.prepare("SELECT value FROM meta WHERE key='version'").get().value === "2",
           "unsupported_host_state_version",
         );
+        // replayHistory is a first-start policy. An agent added to an existing roster always bootstraps
+        // without execution: it fast-forwards past every event already on the server, including ones
+        // peers have not consumed yet, so nothing that predates the addition is ever queued for it.
+        // The saved cursor boundary only shortens that first page.
+        const boundary = this.db.prepare("SELECT COALESCE(MAX(cursor),0) AS cursor FROM agents").get().cursor;
+        const initialized = !saved && config.replayHistory ? 1 : 0;
         for (const agent of config.agents) {
           this.db
-            .prepare("INSERT OR IGNORE INTO agents(id,username,initialized,channels) VALUES (?,?,?,?)")
-            .run(agent.id, agent.username, config.replayHistory ? 1 : 0, JSON.stringify(agent.channels));
+            .prepare(
+              "INSERT OR IGNORE INTO agents(id,username,cursor,initialized,channels) VALUES (?,?,?,?,?)",
+            )
+            .run(agent.id, agent.username, boundary, initialized, JSON.stringify(agent.channels));
         }
         // A crashed supervisor's watchdog still needs its disconnect escalation. Never overlap the
         // remaining lease, and reserve the recovery grace from this startup even when the lease has
