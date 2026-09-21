@@ -207,12 +207,16 @@ test("roster additions migrate the binding; the newcomer starts at the host even
   assert.deepEqual(saved, bindingFor(grown));
   assert.deepEqual(f.store.agent("alice").state, { session: "kept" });
   assert.equal(f.store.db.prepare("SELECT status FROM jobs WHERE id=?").get(pending.id).status, "queued");
-  assert.equal(f.store.agent("dave").cursor, 8, "no replay of events peers already handled");
-  assert.equal(f.store.agent("dave").initialized, 1);
-  assert.equal(f.store.ingest("dave", event(8)), true, "boundary event is a no-op");
-  assert.equal(f.store.status().jobs.find((j) => j.status === "queued").count, 1);
-  assert.equal(f.store.ingest("dave", event(9)), true);
+  assert.equal(f.store.agent("dave").cursor, 8, "first page starts after events peers already handled");
+  assert.equal(f.store.agent("dave").initialized, 0, "replayHistory never applies to an added agent");
+  // Peers lag the server: event 9 already exists remotely. The newcomer's first page must
+  // fast-forward past it without queueing, exactly as a replayHistory:false first start would.
+  f.store.bootstrap("dave", 9, true);
   assert.equal(f.store.agent("dave").cursor, 9);
+  assert.equal(f.store.agent("dave").initialized, 1);
+  assert.equal(f.store.status().jobs.find((j) => j.status === "queued").count, 1, "no pre-addition work");
+  assert.equal(f.store.ingest("dave", event(10)), true);
+  assert.equal(f.store.status().jobs.find((j) => j.status === "queued").count, 2);
   assert.deepEqual(
     f.store.status().agents.map((a) => a.id),
     ["alice", "bob", "coordinator", "dave"],
@@ -222,7 +226,7 @@ test("roster additions migrate the binding; the newcomer starts at the host even
   f.reopen(10, grown);
   assert.equal(f.store.generation, generation);
 });
-test("roster removals and renames are rejected before any write; the original roster still opens", (t) => {
+test("roster removals, renames and policy changes are rejected before any write; the original roster still opens", (t) => {
   const f = fixture(t);
   turn(f, "alice", 3);
   const before = f.store.db.prepare("SELECT value FROM meta WHERE key='binding'").get().value;
@@ -231,11 +235,14 @@ test("roster removals and renames are rejected before any write; the original ro
   const renamed = fixtureConfig(f.dir);
   renamed.agents.find((a) => a.id === "bob").username = "robert";
   const rehosted = fixtureConfig(f.dir, { hostId: "other-host" });
+  const scoped = fixtureConfig(f.dir);
+  scoped.agents.find((a) => a.id === "alice").allowedChannels = ["work", "review"];
   f.store.close();
   for (const [config, code] of [
     [removed, /host_state_agent_removed/],
     [renamed, /host_state_agent_identity_mismatch/],
     [rehosted, /host_state_binding_mismatch/],
+    [scoped, /host_state_binding_mismatch/],
   ]) {
     assert.throws(() => new HostStore(config, bindingFor(config), 10), code);
   }
@@ -244,18 +251,6 @@ test("roster removals and renames are rejected before any write; the original ro
   assert.equal(f.store.agent("alice").cursor, 3);
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM jobs").get().n, 1);
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM agents").get().n, 3);
-});
-test("allowed-channel policy changes without touching identities or state", (t) => {
-  const f = fixture(t);
-  turn(f, "alice", 2);
-  const scoped = fixtureConfig(f.dir);
-  scoped.agents.find((a) => a.id === "alice").allowedChannels = ["work", "review"];
-  f.reopen(10, scoped);
-  assert.deepEqual(
-    JSON.parse(f.store.db.prepare("SELECT value FROM meta WHERE key='binding'").get().value),
-    bindingFor(scoped),
-  );
-  assert.equal(f.store.agent("alice").cursor, 2);
 });
 test("recovery reserves the cleanup grace from replacement startup even when a no-deadline lease expired", (t) => {
   const f = fixture(t);

@@ -53,9 +53,11 @@ export async function hostFixture(t, options = {}) {
     rejectNextSend = false;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
-    const who = { "Bearer alice-secret-fixture": "alice", "Bearer bob-secret-fixture": "bob" }[
-      req.headers.authorization
-    ];
+    const who = {
+      "Bearer alice-secret-fixture": "alice",
+      "Bearer bob-secret-fixture": "bob",
+      "Bearer carol-secret-fixture": "carol",
+    }[req.headers.authorization];
     requests.push({
       method: req.method,
       path: url.pathname,
@@ -152,38 +154,43 @@ export async function hostFixture(t, options = {}) {
     changes.emit("message");
     return message;
   }
-  const config = validateConfig(
-    {
-      schema: "msn.host.v1",
-      hostId: "test-host",
-      stateDir: join(dir, "state"),
-      replayHistory: false,
-      maxConcurrent: options.maxConcurrent ?? 2,
-      maxTurnsPerConversation: options.maxTurnsPerConversation ?? 64,
-      softTurnsPerConversation: options.softTurnsPerConversation ?? 16,
-      agents: ["alice", "bob"].map((id) => ({
-        id,
-        connection: { origin, tenant: "team", tokenEnv: `${id.toUpperCase()}_TOKEN` },
-        command: options.pythonBob && id === "bob" ? ["python3", python] : [process.execPath, handler],
-        cwd: dir,
-        channels: ["work"],
-        allowedChannels: ["*"],
-        permissionMode: "yolo",
-        attempts: 1,
-        timeoutMs: options.timeoutMs === undefined ? 1200 : options.timeoutMs,
-      })),
-    },
-    dir,
-  );
+  const configFor = (ids) =>
+    validateConfig(
+      {
+        schema: "msn.host.v1",
+        hostId: "test-host",
+        stateDir: join(dir, "state"),
+        replayHistory: options.replayHistory ?? false,
+        maxConcurrent: options.maxConcurrent ?? 2,
+        maxTurnsPerConversation: options.maxTurnsPerConversation ?? 64,
+        softTurnsPerConversation: options.softTurnsPerConversation ?? 16,
+        agents: ids.map((id) => ({
+          id,
+          connection: { origin, tenant: "team", tokenEnv: `${id.toUpperCase()}_TOKEN` },
+          command: options.pythonBob && id === "bob" ? ["python3", python] : [process.execPath, handler],
+          cwd: dir,
+          channels: ["work"],
+          allowedChannels: ["*"],
+          permissionMode: "yolo",
+          attempts: 1,
+          timeoutMs: options.timeoutMs === undefined ? 1200 : options.timeoutMs,
+        })),
+      },
+      dir,
+    );
+  let config = configFor(["alice", "bob"]);
   const env = {
     ...process.env,
     ALICE_TOKEN: "alice-secret-fixture",
     BOB_TOKEN: "bob-secret-fixture",
+    CAROL_TOKEN: "carol-secret-fixture",
     HOST_TEST_RECORDS: records,
     MSN_ADMIN_TOKEN: "must-not-pass",
   };
   let controller, running, runError;
-  function start() {
+  // start(ids) restarts against the same state directory with a changed roster (ADR 0025).
+  function start(ids) {
+    if (ids) config = configFor(ids);
     controller = new AbortController();
     runError = null;
     running = runHost(config, controller.signal, {
@@ -233,12 +240,20 @@ export async function hostFixture(t, options = {}) {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   });
+  // A replayHistory:true first start never bootstraps, so agent.ready is not emitted; the first
+  // event subscription is the equivalent liveness signal.
   await Promise.all(
-    ["alice", "bob"].map((id) => until("log", logs, (log) => log.type === "agent.ready" && log.agent === id)),
+    ["alice", "bob"].map((id) =>
+      options.replayHistory
+        ? until("request", requests, (r) => r.who === id && r.path.endsWith("/events"))
+        : until("log", logs, (log) => log.type === "agent.ready" && log.agent === id),
+    ),
   );
   return {
     dir,
-    config,
+    get config() {
+      return config;
+    },
     env,
     post,
     stop,

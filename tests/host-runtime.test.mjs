@@ -134,6 +134,29 @@ test("restart resumes durable cursors without duplicating committed effects", as
   );
   assert.equal(f.messages.filter((m) => m.text === "done:before").length, 1);
 });
+test("an agent added on restart never executes pre-addition events, even when peers lag the server head", async (t) => {
+  const f = await hostFixture(t, { replayHistory: true });
+  f.post({ to: "alice", text: "before" });
+  await f.message((m) => m.to === "human" && m.text === "done:before");
+  await f.stop();
+  // The server head moves past every saved cursor while the host is down: the newcomer must treat
+  // this as history despite replayHistory:true, which is a first-start policy only.
+  f.post({ to: "carol", text: "stale" });
+  f.start(["alice", "bob", "carol"]);
+  // A correct host bootstraps carol; a regressed one would start a turn for the stale event instead.
+  await f.log((e) => e.agent === "carol" && (e.type === "agent.ready" || e.type === "turn.started"));
+  f.post({ to: "carol", text: "after" });
+  await f.message((m) => m.to === "human" && m.text === "done:after");
+  assert.deepEqual(
+    (await f.records()).filter((r) => r.who === "carol").map((r) => r.input.message.text),
+    ["after"],
+  );
+  assert.equal(
+    f.messages.some((m) => m.text === "done:stale"),
+    false,
+  );
+  assert.equal(f.status().agents.find((a) => a.id === "carol").cursor, f.events.length);
+});
 test("revoking one agent stops only that agent; remaining peer continues", async (t) => {
   const f = await hostFixture(t);
   f.revoke("alice");

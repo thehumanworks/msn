@@ -88,6 +88,7 @@ export class HostStore {
             const is = binding.agents.find((a) => a.id === was.id);
             requireValue(is, "host_state_agent_removed");
             requireValue(is.username === was.username, "host_state_agent_identity_mismatch");
+            requireValue(JSON.stringify(is) === JSON.stringify(was), "host_state_binding_mismatch");
           }
           this.db.prepare("UPDATE meta SET value=? WHERE key='binding'").run(serialized);
         }
@@ -100,21 +101,18 @@ export class HostStore {
           this.db.prepare("SELECT value FROM meta WHERE key='version'").get().value === "2",
           "unsupported_host_state_version",
         );
-        // An agent added to an existing roster starts at the host's event boundary: replayHistory is a
-        // first-start policy, and events already handled by peers are not new work for a newcomer.
+        // replayHistory is a first-start policy. An agent added to an existing roster always bootstraps
+        // without execution: it fast-forwards past every event already on the server, including ones
+        // peers have not consumed yet, so nothing that predates the addition is ever queued for it.
+        // The saved cursor boundary only shortens that first page.
         const boundary = this.db.prepare("SELECT COALESCE(MAX(cursor),0) AS cursor FROM agents").get().cursor;
+        const initialized = !saved && config.replayHistory ? 1 : 0;
         for (const agent of config.agents) {
           this.db
             .prepare(
               "INSERT OR IGNORE INTO agents(id,username,cursor,initialized,channels) VALUES (?,?,?,?,?)",
             )
-            .run(
-              agent.id,
-              agent.username,
-              boundary,
-              config.replayHistory ? 1 : 0,
-              JSON.stringify(agent.channels),
-            );
+            .run(agent.id, agent.username, boundary, initialized, JSON.stringify(agent.channels));
         }
         // A crashed supervisor's watchdog still needs its disconnect escalation. Never overlap the
         // remaining lease, and reserve the recovery grace from this startup even when the lease has
