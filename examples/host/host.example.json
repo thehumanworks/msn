@@ -18,7 +18,7 @@
       "role": "coordinator",
       "description": "Coordinate only when helpful. Decompose work, unblock peers and contribute directly.",
       "permissionMode": "yolo",
-      "timeoutMs": 300000,
+      "timeoutMs": null,
       "attempts": 3
     },
     {
@@ -31,7 +31,7 @@
       "role": "peer",
       "description": "Implement and verify changes. Collaborate directly with any relevant peer.",
       "permissionMode": "yolo",
-      "timeoutMs": 300000,
+      "timeoutMs": null,
       "attempts": 3
     }
   ]

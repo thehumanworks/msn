@@ -1,6 +1,6 @@
 # ADR 0022: event-driven, harness-neutral host agent runtime
 
-Status: Accepted. Extends ADRs 0010, 0017 and 0020. Supersedes the one-handler-at-a-time dispatcher as the recommended multi-agent runtime; its public interface remains compatible.
+Status: Accepted. Extends ADRs 0010, 0017 and 0020. Supersedes the one-handler-at-a-time dispatcher as the recommended multi-agent runtime; its public interface remains compatible. Amended by [ADR 0024](0024-host-chat-no-deadline.md): `timeoutMs: null` opts a turn out of the finite watchdog.
 
 ## Decision
 
