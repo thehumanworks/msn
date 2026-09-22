@@ -1001,6 +1001,7 @@ $("export-connection").addEventListener("click", () => {
 fetch("/api/account/config")
   .then((r) => r.json())
   .then((data) => {
+    $("cloudflare-login").href = data.loginUrl || "/login";
     $("cloudflare-login").hidden = !data.cloudflareAccess;
   })
   .catch(() => {});

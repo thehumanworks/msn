@@ -1,8 +1,31 @@
 import { createRemoteJWKSet, type JWTVerifyGetKey, jwtVerify } from "jose";
 import { digest, HttpError, text } from "./http";
 
-export type AccessSettings = { ACCESS_TEAM_DOMAIN?: string; ACCESS_AUD?: string };
+export type AccessSettings = {
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  ACCESS_LOGIN_URL?: string;
+};
 const issuers = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
+export function accessLoginUrl(env: AccessSettings): string {
+  if (!env.ACCESS_LOGIN_URL) return "/login";
+  try {
+    const url = new URL(env.ACCESS_LOGIN_URL);
+    if (
+      url.protocol !== "https:" ||
+      url.pathname !== "/login" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    )
+      throw new Error("invalid login URL");
+    return url.href;
+  } catch {
+    throw new HttpError(503, "access_configuration_invalid", "Invalid Cloudflare Access login URL.");
+  }
+}
 
 /** Access is optional. Never trust an email header or an unsigned JWT. */
 export async function accessAccount(request: Request, env: AccessSettings) {
@@ -16,7 +39,12 @@ export async function accessAccount(request: Request, env: AccessSettings) {
   if (!/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(domain))
     throw new HttpError(503, "access_configuration_invalid", "Invalid Cloudflare Access team domain.");
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (!assertion) throw new HttpError(401, "login_required", "Sign in through /login.");
+  if (!assertion)
+    throw new HttpError(
+      401,
+      "login_required",
+      "Cloudflare Access did not authenticate this request. Open the configured sign-in URL and check that its hostname and /login path are protected by an Access Allow policy.",
+    );
   const issuer = `https://${domain}`;
   let jwks = issuers.get(issuer);
   if (!jwks) {

@@ -1,4 +1,4 @@
-import { type AccessSettings, accessAccount } from "./account";
+import { type AccessSettings, accessAccount, accessLoginUrl } from "./account";
 import { admin, bearer, failure, HttpError, json, slug } from "./http";
 
 export { MsnDurableObject } from "./store";
@@ -10,7 +10,19 @@ export default {
       const url = new URL(request.url);
       if (url.pathname === "/api/account/config" && request.method === "GET") {
         const access = env as Env & AccessSettings;
-        response = json({ cloudflareAccess: Boolean(access.ACCESS_TEAM_DOMAIN && access.ACCESS_AUD) });
+        response = json({
+          cloudflareAccess: Boolean(access.ACCESS_TEAM_DOMAIN && access.ACCESS_AUD),
+          loginUrl: accessLoginUrl(access),
+        });
+      } else if (
+        url.pathname === "/login" &&
+        request.method === "GET" &&
+        new URL(accessLoginUrl(env as AccessSettings), url).origin !== url.origin
+      ) {
+        response = new Response(null, {
+          status: 302,
+          headers: { Location: accessLoginUrl(env as AccessSettings), "Cache-Control": "no-store" },
+        });
       } else if (
         (url.pathname === "/api/account/login" && request.method === "POST") ||
         (url.pathname === "/login" && request.method === "GET")

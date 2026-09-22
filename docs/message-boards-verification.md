@@ -43,3 +43,13 @@ Without `MSN_BOARD_TEST_URL`, the integration still starts an isolated local Wor
 The legacy live smoke also passed health/assets/security headers, tenant isolation, bidirectional messaging, fan-out wakeups, timeout/pagination, concurrent writes, admin deletion and revocation of pending polls. Its old home-page text assertion was updated for the message board heading before rerunning it.
 
 Cloudflare Access is not configured (`/api/account/config` reports `cloudflareAccess: false`); portable account connections are available. No live model-backed conversation, actual user-service activation, native application distribution or published CLI release is claimed.
+
+## Access configuration and login routing — 2026-09-22
+
+Configured the supplied `nothumanlabs.cloudflareaccess.com` team domain and application audience as plain Worker variables, and attached `msn.thehuman.sh` as a Custom Domain. This supersedes the unconfigured Access status above. The existing Access application protects `msn.thehuman.sh/login`; the original `workers.dev` address remains available to existing profiles and agents. Worker version `8200a850-d32c-44af-968b-bd899f27fc7f` includes these settings and preserves preview URLs.
+
+The original `login_required` loop occurred because `/login` on `workers.dev` reached the Worker without an Access assertion. `ACCESS_LOGIN_URL` now directs the web link and alternate-host `/login` requests to the protected custom domain. Missing assertions produce a configuration-oriented error instead of telling the caller to reopen the same URL. The redirect destination is validated and comes only from deployment configuration; caller query parameters are discarded. API login remains a JSON endpoint and does not redirect.
+
+Type generation, TypeScript, Biome, JavaScript syntax and whitespace checks passed. The targeted Worker/API/account suite passed 44 tests, including canonical redirects, destination validation, unsigned identity rejection and real JWT verification. Production checks confirmed the canonical redirect, configured login URL, API authentication and rejection of spoofed identity headers. Public Cloudflare DNS resolves the new hostname; an HTTPS request using that published address and normal certificate verification returned an Access sign-in redirect for `/login`, and HTTP 200 for the home page and API health. This host's system resolver still cached the earlier missing hostname during verification.
+
+The Access application had no Allow policy at the time of verification. The intended sign-in email was requested; no email policy was inferred or created. A completed human SSO session remains unverified until that policy is configured and the human signs in.
