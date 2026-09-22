@@ -20,6 +20,7 @@ const SCHEMA_HISTORY = [
   { version: 7 },
   { version: 8 },
   { version: 9 },
+  { version: 10 },
 ];
 /**
  * Rewinds a live database to an older schema version — dropping every column added after it —
@@ -788,7 +789,12 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
       username: "thehuman",
       usernamePrefix: null,
     });
-    expect(await whoami(t)).toEqual({ tenant: t.name, username: "thehuman", usernamePrefix: null });
+    expect(await whoami(t)).toEqual({
+      owner: true,
+      tenant: t.name,
+      username: "thehuman",
+      usernamePrefix: null,
+    });
     await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
     const poll = page(t, "?wait=3");
     await expect.poll(() => pending(t)).toBe(1);
@@ -816,7 +822,12 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
   it("binds a token to a display-name prefix", async () => {
     const t = await tenant({ usernamePrefix: "agent-" });
     expect(t.identity).toMatchObject({ username: null, usernamePrefix: "agent-" });
-    expect(await whoami(t)).toEqual({ tenant: t.name, username: null, usernamePrefix: "agent-" });
+    expect(await whoami(t)).toEqual({
+      owner: true,
+      tenant: t.name,
+      username: null,
+      usernamePrefix: "agent-",
+    });
     expect((await send(t, "seven", "general", undefined, "agent-7")).status).toBe(201);
     expect((await send(t, "bare", "general", undefined, "agent-")).status).toBe(201);
     for (const name of ["agent", "Agent-7", "human", " agent-7", "the agent-7"]) {
@@ -832,6 +843,7 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     const first = t.token;
     const kept = await rotate(t);
     expect(kept).toEqual({
+      owner: true,
       tenant: t.name,
       token: expect.stringMatching(/^[a-f0-9]{64}$/),
       username: "thehuman",
@@ -856,7 +868,12 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     });
     expect((await send(t, "x", "general", undefined, "anyone at all")).status).toBe(403);
     expect((await send(t, "x", "general", undefined, "late binder")).status).toBe(201);
-    expect(await whoami(t)).toEqual({ tenant: t.name, username: "late binder", usernamePrefix: null });
+    expect(await whoami(t)).toEqual({
+      owner: true,
+      tenant: t.name,
+      username: "late binder",
+      usernamePrefix: null,
+    });
     expect((await page(t)).messages.map((m) => m.username)).toEqual([
       "thehuman",
       "agent-1",
@@ -873,12 +890,12 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
       username: null,
       usernamePrefix: null,
     });
-    expect(await whoami(t)).toEqual({ tenant: t.name, username: null, usernamePrefix: null });
+    expect(await whoami(t)).toEqual({ owner: true, tenant: t.name, username: null, usernamePrefix: null });
     expect((await send(t, "before", "general", undefined, "anyone")).status).toBe(201);
     // Rewind the row to its v1 shape, then force a restart so the constructor migration runs again.
     await runInDurableObject(t.stub, (_, state) => rewind(state, 3));
     await abortAllDurableObjects();
-    expect(await whoami(t)).toEqual({ tenant: t.name, username: null, usernamePrefix: null });
+    expect(await whoami(t)).toEqual({ owner: true, tenant: t.name, username: null, usernamePrefix: null });
     expect((await send(t, "after", "general", undefined, "someone else")).status).toBe(201);
     expect((await page(t)).messages.map((m) => m.username)).toEqual(["anyone", "someone else"]);
     const restarted = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name]));
@@ -1110,7 +1127,7 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     const before = await page(t);
     await runInDurableObject(t.stub, (_, state) => rewind(state, 4));
     await abortAllDurableObjects();
-    expect(await whoami(t)).toEqual({ tenant: t.name, username: "Tomas", usernamePrefix: null });
+    expect(await whoami(t)).toEqual({ owner: true, tenant: t.name, username: "Tomas", usernamePrefix: null });
     expect(await page(t)).toEqual(before);
     expect((await send(t, "old history", "general", "retry", "Tomas")).status).toBe(200);
     expect(await (await call(`${t.admin}/keys`, ADMIN)).json()).toEqual({ keys: [] });

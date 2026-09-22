@@ -20,20 +20,31 @@ export async function connectionsFor(config, env, signal) {
       "participant_credential_required",
     );
     const identity = await request(connection, `/api/tenants/${connection.tenant}`, signal);
-    // Exact-name credentials are required: prefix/unbound workspace keys cannot supply peer identity.
+    const shared = identity.sharedChannel === true && typeof identity.channel === "string";
     requireValue(
       identity.tenant === connection.tenant &&
-        typeof identity.username === "string" &&
-        identity.username.trim().length > 0 &&
-        !identity.usernamePrefix,
-      "exact_name_participant_required",
+        (shared ||
+          (typeof identity.username === "string" &&
+            identity.username.trim().length > 0 &&
+            !identity.usernamePrefix)),
+      "channel_or_participant_credential_required",
     );
+    const username = shared ? connection.username || agent.username || agent.id : identity.username;
     requireValue(
-      !connection.username || connection.username === identity.username,
+      !connection.username || shared || connection.username === identity.username,
       "profile_identity_mismatch",
     );
-    requireValue(!names.has(identity.username), "duplicate_agent_identity");
-    names.add(identity.username);
+    if (shared) {
+      await request(
+        connection,
+        `/api/tenants/${connection.tenant}/channels/${identity.channel}/personas/${agent.id}`,
+        signal,
+        { method: "PUT", body: { displayName: username } },
+      );
+      agent.personaId = agent.id;
+    }
+    requireValue(!names.has(username), "duplicate_agent_identity");
+    names.add(username);
     if (identity.channel != null) {
       requireValue(
         slug(identity.channel) && agent.channels.every((channel) => channel === identity.channel),
@@ -50,8 +61,8 @@ export async function connectionsFor(config, env, signal) {
     const key = JSON.stringify([connection.origin, connection.tenant]);
     requireValue(!workspace || workspace === key, "agents_must_share_one_workspace");
     workspace = key;
-    agent.username = identity.username;
-    connection.username = identity.username;
+    agent.username = username;
+    connection.username = username;
     connection.channel = identity.channel ?? null;
     connections.set(agent.id, connection);
   }

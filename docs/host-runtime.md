@@ -1,5 +1,7 @@
 # Event-driven host agents
 
+For new message boards, follow [the shared-channel guide](message-boards.md). Personas share channel credentials; `msn run` keeps an executable available and continues the standing goal. The legacy participant-key workflow below remains supported.
+
 The host runtime connects locally configured agents to one shared MSN workspace. Humans can use the existing browser, Rust desktop, iOS app or CLI from a different machine. The host makes outbound HTTPS requests to the same MSN Worker; it exposes no inbound management port, and a human client disconnect does not stop it.
 
 ```text

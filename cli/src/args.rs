@@ -141,7 +141,7 @@ rotate is a workspace-wide emergency reset: it also revokes all participant keys
 #[command(
     name = "msn",
     version,
-    about = "Channel messaging CLI for agents and humans",
+    about = "Agent message boards with shared channel access",
     long_about = "msn talks to the msn Cloudflare Worker over HTTPS.\n\nTenant commands use Authorization: Bearer <MSN_WORKSPACE_TOKEN>. Admin commands (provision, rotate, delete, key-create, keys, key-revoke) use MSN_ADMIN_TOKEN and /api/admin/. Output is JSON on stdout; errors go to stderr with a distinct exit code.",
     after_help = EXAMPLES,
     arg_required_else_help = true,
@@ -196,6 +196,53 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Log in once using Cloudflare Access, a connection file, or a new portable account.
+    Login {
+        #[arg(long, conflicts_with_all = ["connection", "access"])]
+        create: bool,
+        #[arg(long, conflicts_with = "access")]
+        connection: Option<String>,
+        /// Use cloudflared to open the browser and obtain an Access assertion.
+        #[arg(long)]
+        access: bool,
+        #[arg(long, default_value = "account")]
+        save_as: String,
+    },
+    /// Account-owned message boards with shared channel access.
+    Board {
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
+    /// Lightweight personas. They share the channel credential.
+    Persona {
+        #[command(subcommand)]
+        command: PersonaCommand,
+    },
+    /// Export the selected connection to a private file for another device or agent.
+    ConnectionExport {
+        #[arg(long)]
+        out: String,
+    },
+    /// Keep an agent available using a trusted executable (Node 24+ required).
+    Run {
+        channel: String,
+        #[arg(long)]
+        state_dir: Option<String>,
+        #[arg(long)]
+        status: bool,
+        /// Install/start a systemd user service that resumes this saved runner after failure.
+        #[arg(long, conflicts_with = "status")]
+        install_service: bool,
+        /// Optional bundled prompt bridge; arbitrary executable commands remain supported.
+        #[arg(long, value_parser = ["codex", "claude"], conflicts_with="prompt")]
+        harness: Option<String>,
+        /// Adapter accepts a prompt on stdin and returns the JSON turn result.
+        #[arg(long)]
+        prompt: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+
     /// Create, cache and inspect accessible workspaces
     Workspace {
         #[command(subcommand)]
@@ -664,4 +711,51 @@ impl TrustPolicy {
 pub enum Shell {
     Bash,
     Zsh,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BoardCommand {
+    Connect {
+        channel: String,
+        #[arg(long, default_value = "lead")]
+        name: String,
+        #[arg(long)]
+        save_as: String,
+    },
+    Create {
+        channel: String,
+        #[arg(long)]
+        goal: String,
+        #[arg(long)]
+        save_as: String,
+    },
+    Show {
+        channel: String,
+    },
+    Set {
+        channel: String,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    Rotate {
+        channel: String,
+        #[arg(long)]
+        out: String,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum PersonaCommand {
+    Add {
+        channel: String,
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        save_as: String,
+    },
+    List {
+        channel: String,
+    },
 }

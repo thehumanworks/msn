@@ -195,7 +195,9 @@ export class HostStore {
     return this.tx(() => {
       if (this.db.prepare("SELECT 1 FROM jobs WHERE agent=? AND status='running'").get(agent)) return null;
       const job = this.db
-        .prepare("SELECT * FROM jobs WHERE agent=? AND status='queued' AND available<=? ORDER BY id LIMIT 1")
+        .prepare(
+          "SELECT * FROM jobs WHERE agent=? AND status='queued' AND available<=? ORDER BY CASE WHEN event_id IS NOT NULL THEN 0 ELSE 1 END,id LIMIT 1",
+        )
         .get(agent, now);
       if (!job) return null;
       this.db
@@ -213,7 +215,7 @@ export class HostStore {
     return this.tx(() => {
       const { maxTurnsPerConversation: hard, softTurnsPerConversation: soft } = this.config;
       const budget = this.db.prepare("SELECT * FROM budgets WHERE root=?").get(root);
-      if ((budget?.turns ?? 0) >= hard) {
+      if (hard !== null && (budget?.turns ?? 0) >= hard) {
         this.deadLetter(job, "conversation_budget_exhausted");
         return false;
       }
@@ -258,9 +260,15 @@ export class HostStore {
       const resumed = Boolean(
         wait &&
           message &&
-          wait.for.includes(message.username) &&
-          message.correlationId === wait.conversationId,
+          ((wait.onMessage !== false && message.channel === wait.channel) ||
+            (wait.for.includes(message.username) && message.correlationId === wait.conversationId)),
       );
+      if (message)
+        this.db
+          .prepare(
+            "UPDATE jobs SET status='ignored' WHERE agent=? AND channel=? AND status='queued' AND json_extract(trigger,'$.type')='goal.continue'",
+          )
+          .run(job.agent, job.channel);
       if (resumed) this.db.prepare("UPDATE agents SET waiting=NULL WHERE id=?").run(job.agent);
       return { resumed };
     });
@@ -294,7 +302,7 @@ export class HostStore {
     }
     return null;
   }
-  finish(job, result, message, now = Date.now()) {
+  finish(job, result, message, now = Date.now(), board = null) {
     return this.tx(() => {
       const agent = this.config.agents.find((a) => a.id === job.agent);
       this.db
@@ -312,6 +320,7 @@ export class HostStore {
           contentType: action.contentType ?? "text/plain",
           correlationId: job.root,
         };
+        if (agent.personaId) body.personaId = agent.personaId;
         if (action.to !== undefined) body.to = action.to;
         if (action.replyTo !== undefined) body.replyTo = action.replyTo;
         else if (message && message.channel === action.channel) body.replyTo = message.id;
@@ -339,6 +348,18 @@ export class HostStore {
               job.agent,
             );
         }
+      }
+      const progress =
+        result.progress ??
+        (board?.status === "active" ? { status: "working", reason: "Continue the channel goal." } : null);
+      if (board?.status === "active" && progress?.status === "working" && !this.agent(job.agent).waiting) {
+        this.enqueueSignal(job.agent, job.channel, job.root, {
+          type: "goal.continue",
+          reason: progress.reason,
+        });
+        this.db
+          .prepare("UPDATE jobs SET available=? WHERE id=last_insert_rowid()")
+          .run(now + Math.max(250, progress.delayMs ?? 1000));
       }
       this.db.prepare("UPDATE jobs SET status='done', error=NULL WHERE id=?").run(job.id);
     });

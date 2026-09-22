@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod archive;
 pub mod args;
+pub mod board;
 pub mod client;
 pub mod config;
 pub mod cursor;
@@ -11,6 +12,7 @@ pub mod identity;
 pub mod import;
 pub mod processing;
 pub mod profile;
+pub mod runner;
 pub mod task_client;
 pub mod tasks;
 pub mod workspace;
@@ -46,6 +48,19 @@ const BACKOFF_MAX_MS: u64 = 15000;
 pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     if matches!(
         &cli.command,
+        Command::Login { .. }
+            | Command::Board { .. }
+            | Command::Persona { .. }
+            | Command::ConnectionExport { .. }
+    ) {
+        return board::execute(&cli);
+    }
+    if matches!(&cli.command, Command::Run { .. }) {
+        return runner::execute(&cli);
+    }
+
+    if matches!(
+        &cli.command,
         Command::Workspace { .. }
             | Command::Invite { .. }
             | Command::Join { .. }
@@ -63,6 +78,11 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
+        Command::Login { .. }
+        | Command::Board { .. }
+        | Command::Persona { .. }
+        | Command::ConnectionExport { .. }
+        | Command::Run { .. } => unreachable!(),
         Command::Workspace { .. }
         | Command::Invite { .. }
         | Command::Join { .. }

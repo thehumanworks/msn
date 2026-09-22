@@ -29,6 +29,7 @@ pub struct MsnDesktopApp {
 
 #[derive(Default)]
 struct ConnectForm {
+    connection_json: String,
     url: String,
     tenant: String,
     token: String,
@@ -144,6 +145,37 @@ impl MsnDesktopApp {
         );
         ui.label(egui::RichText::new("Sign in to your workspace").color(theme::MUTED));
         ui.add_space(10.0);
+        ui.collapsing("Import account or channel connection", |ui| {
+            ui.label("Paste an exported MSN connection to access the same boards on this device.");
+            ui.add(
+                theme::field(&mut self.connect_form.connection_json)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            );
+            if ui.button("Use connection").clicked() {
+                let parsed =
+                    serde_json::from_str::<serde_json::Value>(&self.connect_form.connection_json);
+                if let Ok(data) = parsed {
+                    if let (Some(url), Some(tenant), Some(token), Some(username)) = (
+                        data["url"].as_str(),
+                        data["tenant"].as_str(),
+                        data["token"].as_str(),
+                        data["username"].as_str(),
+                    ) {
+                        self.connect_form.url = url.into();
+                        self.connect_form.tenant = tenant.into();
+                        self.connect_form.token = token.into();
+                        self.connect_form.username = username.into();
+                        self.connect_form.connection_json.clear();
+                        self.connect_form.save_profile = true;
+                    } else {
+                        self.state.connect_error = Some("Invalid MSN connection file.".into());
+                    }
+                } else {
+                    self.state.connect_error = Some("Paste exported MSN connection JSON.".into());
+                }
+            }
+        });
 
         if !self.connect_form.profiles.is_empty() {
             ui.horizontal(|ui| {

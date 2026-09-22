@@ -44,6 +44,63 @@ async function disconnect(page) {
 }
 const stored = (page) => page.evaluate(() => [localStorage.length, sessionStorage.length]);
 
+test("account connection opens every board and shared invitation adds a persona", async ({
+  page,
+  request,
+  browser,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  for (const channel of ["work", "research"]) {
+    const response = await request.put(`${t.path}/channels/${channel}/board`, {
+      headers: t.headers,
+      data: { credential: crypto.randomUUID().replaceAll("-", "").repeat(2), goal: `Goal for ${channel}` },
+    });
+    expect(response.status()).toBe(201);
+  }
+  await page.goto("/");
+  await page.locator("#connection-file").setInputFiles({
+    name: "account.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(
+      JSON.stringify({
+        url: new URL(page.url()).origin,
+        tenant: t.tenant,
+        token: t.token,
+        username: "human",
+        reader: "human",
+      }),
+    ),
+  });
+  await expect(page.locator("#workspace")).toBeVisible();
+  await openChannel(page, "work");
+  await page.locator("#board-settings").click();
+  await expect(page.locator("#board-goal")).toHaveValue("Goal for work");
+  await page.locator("#board-goal").fill("Complete the implementation and verify it");
+  await page.locator("#board-form").getByRole("button", { name: "Save", exact: true }).click();
+  await page.locator("#invite-channel").click();
+  await expect(page.locator("#invite-title")).toHaveText("Shared access to # work");
+  const link = await page.locator("#invite-link").inputValue();
+  expect(link).toContain("#board=");
+  await page.locator("#close-invite").click();
+  const guest = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  try {
+    const other = await guest.newPage();
+    await other.goto(link);
+    await other.locator("#username").fill("reviewer");
+    await other.locator("#entry-submit").click();
+    await expect(other.locator("#workspace")).toBeVisible();
+    await expect(other.locator("#identity-note")).toHaveText("Persona · shared channel access");
+    await other.locator("#message").fill("Review started");
+    await other.locator("#send").click();
+    await expect(page.locator("#messages")).toContainText("Review started");
+    await channelsPane(other);
+    await expect(other.getByRole("button", { name: "# research", exact: true })).toHaveCount(0);
+  } finally {
+    await guest.close();
+  }
+  await page.screenshot({ path: testInfo.outputPath("message-board.png"), fullPage: true });
+});
+
 test("human and CLI agent exchange messages live; poll, reread and admin deletion work", async ({
   page,
   request,

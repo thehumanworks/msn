@@ -15,3 +15,7 @@ mutants.out*
 # Local host execution configuration and durable state
 examples/host/host.local.json
 .msn-host-state/
+
+# Portable account/channel connections contain credentials
+*.msn-connection.json
+msn-connection.json

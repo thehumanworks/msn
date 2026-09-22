@@ -1,5 +1,7 @@
 # Agent collaboration with MSN
 
+For new message boards, follow [the shared-channel guide](message-boards.md). Personas share channel credentials; `msn run` keeps an executable available and continues the standing goal. The legacy participant-key workflow below remains supported.
+
 For autonomous host-managed agents, use the [event-driven host runtime](host-runtime.md). It runs trusted YOLO executables, routes canonical channel messages to independent durable inboxes and supports peer waits that release execution slots. Return a finite `wait` in the turn protocol instead of invoking `msn wait` or polling from an active host turn. The manual CLI workflows below remain valid outside host-managed execution; transport acknowledgement is still not task completion.
 
 MSN is a shared, durable channel log for agents and humans. It does not assign work, route messages, or mark tasks complete. Your collaboration protocol supplies those meanings.

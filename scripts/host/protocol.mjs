@@ -56,7 +56,8 @@ export function validateConfig(raw, base) {
     stateDir: resolve(base, raw.stateDir),
     maxConcurrent: raw.maxConcurrent ?? 4,
     maxPending: raw.maxPending ?? 1000,
-    maxTurnsPerConversation: raw.maxTurnsPerConversation ?? 64,
+    maxTurnsPerConversation:
+      raw.maxTurnsPerConversation === null ? null : (raw.maxTurnsPerConversation ?? 64),
     // Soft reassessment interval in logical agent turns since the last human message; 0 disables it.
     softTurnsPerConversation: raw.softTurnsPerConversation ?? Math.min(16, raw.maxTurnsPerConversation ?? 64),
     replayHistory: raw.replayHistory ?? false,
@@ -64,8 +65,8 @@ export function validateConfig(raw, base) {
   requireValue(
     integer(config.maxConcurrent, 1, 32) &&
       integer(config.maxPending, 1, 10000) &&
-      integer(config.maxTurnsPerConversation, 1, 10000) &&
-      integer(config.softTurnsPerConversation, 0, config.maxTurnsPerConversation),
+      (config.maxTurnsPerConversation === null || integer(config.maxTurnsPerConversation, 1, 10000)) &&
+      integer(config.softTurnsPerConversation, 0, config.maxTurnsPerConversation ?? 10000),
     "invalid_host_limits",
   );
   requireValue(typeof config.replayHistory === "boolean", "invalid_replay_policy");
@@ -73,6 +74,7 @@ export function validateConfig(raw, base) {
   config.agents = raw.agents.map((item) => {
     keys(item, [
       "id",
+      "username",
       "profile",
       "connection",
       "command",
@@ -195,7 +197,7 @@ export function diagnostic(message) {
   }
 }
 export function validateResult(result, agent, currentChannels) {
-  keys(result, ["schema", "actions", "state", "wait"]);
+  keys(result, ["schema", "actions", "state", "wait", "progress"]);
   requireValue(
     result.schema === "msn.turn.result.v1" && Buffer.byteLength(JSON.stringify(result)) <= MAX_OUTPUT,
     "invalid_turn_result",
@@ -248,7 +250,11 @@ export function validateResult(result, agent, currentChannels) {
   if (Object.hasOwn(result, "state"))
     requireValue(Buffer.byteLength(JSON.stringify(result.state)) <= 16384, "state_too_large");
   if (result.wait !== undefined && result.wait !== null) {
-    keys(result.wait, ["for", "timeoutMs", "reason"]);
+    keys(result.wait, ["for", "timeoutMs", "reason", "onMessage"]);
+    requireValue(
+      result.wait.onMessage === undefined || typeof result.wait.onMessage === "boolean",
+      "invalid_wait_mode",
+    );
     requireValue(
       Array.isArray(result.wait.for) &&
         result.wait.for.length > 0 &&
@@ -262,6 +268,21 @@ export function validateResult(result, agent, currentChannels) {
         typeof result.wait.reason === "string" &&
         result.wait.reason.length <= 2048,
       "bounded_wait_required",
+    );
+  }
+  if (result.progress !== undefined) {
+    keys(result.progress, ["status", "reason", "delayMs"]);
+    requireValue(
+      ["working", "waiting", "blocked", "complete"].includes(result.progress.status),
+      "invalid_progress_status",
+    );
+    requireValue(
+      typeof result.progress.reason === "string" && result.progress.reason.length <= 2048,
+      "invalid_progress_reason",
+    );
+    requireValue(
+      result.progress.delayMs === undefined || integer(result.progress.delayMs, 0, 3600000),
+      "invalid_progress_delay",
     );
   }
   return { ...result, memberships: [...memberships] };

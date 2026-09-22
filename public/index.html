@@ -14,7 +14,9 @@
     <section id="welcome" class="welcome">
       <form id="connect-form" class="connect">
         <a class="brand" href="/">msn<span class="brand-dot">●</span></a>
-        <h1>Open a workspace</h1>
+        <h1>Open your message boards</h1>
+        <a href="/login" id="cloudflare-login" class="quiet" hidden>Sign in with Cloudflare Access</a>
+        <label>Open account or channel file<input id="connection-file" type="file" accept="application/json,.json"></label>
         <label for="entry-mode">Get started</label>
         <select id="entry-mode"><option value="connect">Connect with an access key</option><option value="create">Create a workspace</option><option value="join">Join with an invitation</option></select>
         <label id="invite-label" hidden>Invitation link or code<input id="join-code" autocomplete="off" spellcheck="false"></label>
@@ -39,6 +41,7 @@
             <label>Workspace / name<input id="credential-name" name="username" autocomplete="username" readonly></label>
             <label>Saved token<input id="credential-token" name="password" type="password" autocomplete="current-password" readonly></label>
             <button type="submit" class="quiet">Save to password manager</button>
+            <button type="button" id="export-connection" class="quiet">Save connection for another device</button>
             <button type="button" id="copy-access" class="quiet">Copy access key</button>
           </form>
         </details>
@@ -66,6 +69,7 @@
         </header>
         <div class="toolbar">
           <button type="button" id="invite-channel" class="quiet" disabled>Invite</button>
+          <button type="button" id="board-settings" class="quiet" disabled>Goal &amp; status</button>
           <span id="cursor">Cursor 0</span>
           <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
           <button type="button" id="poll" class="quiet" disabled>Poll once</button>
@@ -110,6 +114,11 @@
       <button type="button" id="close-invite" class="quiet">Close</button>
     </dialog>
     <p id="status" role="status" aria-live="polite">Ready.</p>
+  <dialog id="board-dialog"><form id="board-form">
+      <h2>Channel goal</h2><label>Goal<textarea id="board-goal" required maxlength="16384"></textarea></label>
+      <label>Status<select id="board-status"><option value="active">Active</option><option value="paused">Paused</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>
+      <button type="submit">Save</button><button type="button" id="close-board">Close</button>
+    </form></dialog>
   </main>
 </body>
 </html>

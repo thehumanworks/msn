@@ -131,6 +131,24 @@ export class HostRuntime {
           return;
         }
       }
+      let board = null;
+      if (connection.channel) {
+        try {
+          board = (
+            await request(
+              connection,
+              `/api/tenants/${connection.tenant}/channels/${job.channel}/board`,
+              signal,
+            )
+          ).board;
+        } catch (error) {
+          if (error.status !== 404) throw error;
+        }
+      }
+      if (board && ["paused", "complete"].includes(board.status)) {
+        this.store.ignore(job);
+        return;
+      }
       if (signal.aborted) {
         this.store.requeue(job);
         return;
@@ -151,6 +169,7 @@ export class HostRuntime {
       const state = this.store.agent(agent.id);
       const envelope = {
         schema: "msn.turn.v1",
+        board,
         hostId: this.config.hostId,
         channel: job.channel,
         identity: {
@@ -171,7 +190,7 @@ export class HostRuntime {
         waiting: state.waiting,
         previousFailure: job.error,
         instructions:
-          "Coordinate directly with peers. Return sends and a bounded wait to yield; never poll or synchronously wait for a peer. A coordinator is optional, not an approval gate. Exit success is not task completion. Persist only bounded useful continuation state; use the idempotency key for external effects.",
+          "Work towards the board goal until complete or blocked. Return progress {status: working|waiting|blocked|complete, reason, delayMs?}; working schedules a durable continuation and new messages wake waits. Use msn board set to update the shared goal/status. Personas share channel access and are attribution, not verified identities. Coordinate directly with peers. Return sends and a bounded wait to yield; never poll or synchronously wait for a peer. A coordinator is optional, not an approval gate. Exit success is not task completion. Persist only bounded useful continuation state; use the idempotency key for external effects.",
       };
       this.store.db
         .prepare("UPDATE jobs SET lease_until=? WHERE id=?")
@@ -183,7 +202,7 @@ export class HostRuntime {
         return;
       }
       const output = validateResult(raw, agent, state.channels);
-      this.store.finish(job, output, message);
+      this.store.finish(job, output, message, Date.now(), board);
       this.emit("turn.completed", {
         agent: agent.id,
         jobId: job.id,
