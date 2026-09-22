@@ -35,7 +35,14 @@ export function parseArgs(args) {
     if (args[i] === "--status") result.status = true;
     else if (args[i] === "--install-service") result.installService = true;
     else if (args[i] === "--prompt") result.prompt = true;
-    else if (args[i] === "--harness") {
+    else if (args[i] === "--state-dir") {
+      const value = args[++i];
+      need(
+        typeof value === "string" && value.length > 0 && !value.startsWith("--") && !/[\0\r\n]/.test(value),
+        "--state-dir requires a private local directory.",
+      );
+      result.stateDir = resolve(value);
+    } else if (args[i] === "--harness") {
       result.harness = args[++i];
       need(["codex", "claude", "tny"].includes(result.harness), "Supported harnesses: codex, claude, tny.");
     } else throw new RunnerError("Unknown listener option; put trusted executable arguments after --.");
@@ -52,6 +59,7 @@ export function parseArgs(args) {
   return result;
 }
 export function configPath(options, env = process.env) {
+  if (options.stateDir) return join(options.stateDir, "listener.json");
   const base = env.XDG_CONFIG_HOME || (env.HOME && join(env.HOME, ".config"));
   need(
     base && isAbsolute(base),

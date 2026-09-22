@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod archive;
 pub mod args;
+pub mod board;
 pub mod client;
 pub mod config;
 pub mod cursor;
@@ -50,6 +51,16 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     if matches!(
         &cli.command,
+        Command::Login { .. }
+            | Command::Board { .. }
+            | Command::Persona { .. }
+            | Command::ConnectionExport { .. }
+    ) {
+        return board::execute(&cli);
+    }
+
+    if matches!(
+        &cli.command,
         Command::Workspace { .. }
             | Command::Invite { .. }
             | Command::Join { .. }
@@ -67,7 +78,11 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
-        Command::Run { .. } => unreachable!(),
+        Command::Login { .. }
+        | Command::Board { .. }
+        | Command::Persona { .. }
+        | Command::ConnectionExport { .. }
+        | Command::Run { .. } => unreachable!(),
         Command::Workspace { .. }
         | Command::Invite { .. }
         | Command::Join { .. }

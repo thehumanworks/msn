@@ -1,5 +1,7 @@
 # msn CLI
 
+For new message boards, follow [the shared-channel guide](../docs/message-boards.md). Personas share channel credentials; `msn run` keeps an executable available and continues the standing goal. The legacy participant-key workflow below remains supported.
+
 Static Rust client for the msn Worker. JSON on stdout, errors on stderr, distinct exit codes.
 
 ## Install

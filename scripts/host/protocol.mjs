@@ -248,7 +248,11 @@ export function validateResult(result, agent, currentChannels) {
   if (Object.hasOwn(result, "state"))
     requireValue(Buffer.byteLength(JSON.stringify(result.state)) <= 16384, "state_too_large");
   if (result.wait !== undefined && result.wait !== null) {
-    keys(result.wait, ["for", "timeoutMs", "reason"]);
+    keys(result.wait, ["for", "timeoutMs", "reason", "onMessage"]);
+    requireValue(
+      result.wait.onMessage === undefined || typeof result.wait.onMessage === "boolean",
+      "invalid_wait_mode",
+    );
     requireValue(
       Array.isArray(result.wait.for) &&
         result.wait.for.length > 0 &&

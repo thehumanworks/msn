@@ -143,10 +143,10 @@ export class HostRuntime {
           !board ||
           board.channel !== job.channel ||
           typeof board.goal !== "string" ||
-          !["active", "paused", "complete"].includes(board.status)
+          !["active", "paused", "blocked", "complete"].includes(board.status)
         )
           throw new HostError("invalid_board_state");
-        if (board.status === "paused") {
+        if (["paused", "blocked"].includes(board.status)) {
           this.store.pause(job);
           return;
         }

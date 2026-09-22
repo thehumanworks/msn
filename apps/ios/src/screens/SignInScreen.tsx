@@ -6,9 +6,10 @@ import type { ProfileSummary } from "../core/profileStorage.ts";
 import { Banner, Button, Field, Segmented, Text } from "../components/ui.tsx";
 import { colors, radius, spacing } from "../components/theme.ts";
 
-type Mode = "key" | "create" | "invite";
+type Mode = "connection" | "key" | "create" | "invite";
 
 const MODES = [
+  { value: "connection", label: "Account" },
   { value: "key", label: "Access key" },
   { value: "create", label: "New workspace" },
   { value: "invite", label: "Invitation" },
@@ -28,7 +29,8 @@ export function SignInScreen({
   profiles: ProfileSummary[];
 }) {
   const insets = useSafeAreaInsets();
-  const [mode, setMode] = useState<Mode>("key");
+  const [mode, setMode] = useState<Mode>("connection");
+  const [connectionText, setConnectionText] = useState("");
   const [origin, setOrigin] = useState("");
   const [tenant, setTenant] = useState("");
   const [token, setToken] = useState("");
@@ -47,12 +49,21 @@ export function SignInScreen({
   }, []);
 
   const needsSecret = mode === "key" ? token.trim() : mode === "invite" ? code.trim() : "x";
-  const ready = origin.trim() && tenant.trim() && needsSecret && (mode === "key" || username.trim());
+  const ready = mode === "connection" ? connectionText.trim() : origin.trim() && tenant.trim() && needsSecret && (mode === "key" || username.trim());
 
   async function submit() {
     if (busy || !ready) return;
     setBusy(true);
     setError(null);
+    if (mode === "connection") {
+      try {
+        const data = JSON.parse(connectionText);
+        if (connectionText.length > 65536 || typeof data.url !== "string" || typeof data.tenant !== "string" || typeof data.token !== "string" || typeof data.username !== "string") throw new Error("invalid");
+        const result = await model.signInWithKey({ origin: data.url, tenant: data.tenant, username: data.username, token: data.token, remember });
+        if (mounted.current) { setBusy(false); if (result) setError(result); else setConnectionText(""); }
+      } catch { if (mounted.current) { setBusy(false); setError("Paste an exported MSN connection from the CLI or web client."); } }
+      return;
+    }
     const base = { origin, tenant, username, remember };
     const result =
       mode === "key"
@@ -109,7 +120,7 @@ export function SignInScreen({
           <Text style={styles.title} accessibilityRole="header">
             msn
           </Text>
-          <Text style={{ color: colors.muted }}>Connect this device to a workspace.</Text>
+          <Text style={{ color: colors.muted }}>Sign in to read and coordinate your agent message boards.</Text>
         </View>
 
         {notice ? <Banner tone="warning">{notice}</Banner> : null}
@@ -153,6 +164,7 @@ export function SignInScreen({
 
         <Segmented options={MODES} value={mode} onChange={(next) => { setMode(next); setError(null); }} />
 
+        {mode === "connection" ? <Field label="Account connection" value={connectionText} onChangeText={setConnectionText} secureTextEntry autoComplete="off" textContentType="none" placeholder="Paste MSN connection JSON" hint="Export your account connection once from the CLI or web client. All its channels are available here." /> : <>
         <Field
           label="Server"
           value={origin}
@@ -208,6 +220,8 @@ export function SignInScreen({
           />
         ) : null}
 
+        </>}
+
         <View style={styles.rememberRow}>
           <View style={{ flex: 1 }}>
             <Text accessibilityRole="header">Save as a profile on this device</Text>
@@ -227,7 +241,7 @@ export function SignInScreen({
 
         <Button
           variant="primary"
-          label={mode === "key" ? "Connect" : mode === "create" ? "Create workspace" : "Join workspace"}
+          label={mode === "connection" ? "Sign in" : mode === "key" ? "Connect" : mode === "create" ? "Create workspace" : "Join workspace"}
           onPress={submit}
           busy={busy}
           disabled={!ready}

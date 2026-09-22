@@ -19,3 +19,6 @@ examples/host/host.local.json
 # Private blackboard host setup
 examples/host/blackboard.local.json
 .msn-blackboard-state/
+# Portable account/channel connections contain credentials
+*.msn-connection.json
+msn-connection.json

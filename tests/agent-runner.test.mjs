@@ -330,3 +330,16 @@ test("service rejects multi-agent configs with any ambient-only identity", async
   config.agents.push({ ...config.agents[0], profile: undefined, connection: { tokenEnv: "OTHER_TOKEN" } });
   assert.throws(() => serviceUnit(path, config, env), /saved --profile/);
 });
+
+test("explicit state-dir persists launch and durable state under its private root", async (t) => {
+  const { root, env } = await fixture(t);
+  const options = parseArgs(["work", "--state-dir", join(root, "custom"), "--", process.execPath]);
+  const path = configPath(options, env);
+  assert.equal(path, join(root, "custom/listener.json"));
+  assert.equal((await buildConfig(options, path, env)).stateDir, join(root, "custom/state"));
+  for (const argv of [
+    ["work", "--state-dir"],
+    ["work", "--state-dir", "--status"],
+  ])
+    assert.throws(() => parseArgs(argv));
+});

@@ -259,8 +259,8 @@ export class HostStore {
       const resumed = Boolean(
         wait &&
           message &&
-          wait.for.includes(message.username) &&
-          message.correlationId === wait.conversationId,
+          ((wait.onMessage === true && message.channel === wait.channel) ||
+            (wait.for.includes(message.username) && message.correlationId === wait.conversationId)),
       );
       if (resumed) this.db.prepare("UPDATE agents SET waiting=NULL WHERE id=?").run(job.agent);
       return { resumed };
@@ -342,6 +342,7 @@ export class HostStore {
             this.db.prepare("UPDATE agents SET waiting=? WHERE id=?").run(
               JSON.stringify({
                 ...result.wait,
+                onMessage: result.wait.onMessage ?? Boolean(agent.personaId),
                 deadline: now + result.wait.timeoutMs,
                 conversationId: job.root,
                 channel: job.channel,

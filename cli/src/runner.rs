@@ -173,6 +173,7 @@ fn verify_runtime_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), CliEr
 pub fn execute(cli: &Cli) -> Result<(), CliError> {
     let Command::Run {
         channel,
+        state_dir,
         status,
         install_service,
         harness,
@@ -186,6 +187,9 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
     let runtime = runtime_path()?;
     let mut child = Process::new("node");
     child.arg(runtime).arg(channel);
+    if let Some(state_dir) = state_dir {
+        child.args(["--state-dir", state_dir]);
+    }
     if *status {
         child.arg("--status");
     }
@@ -293,6 +297,17 @@ mod tests {
         assert!(
             matches!(cli.command, Command::Run { status: false, install_service: false, command, .. } if command.is_empty())
         );
+    }
+    #[test]
+    fn explicit_state_directory_can_resume_or_inspect() {
+        for extra in [vec![], vec!["--status"], vec!["--install-service"]] {
+            let mut args = vec!["msn", "run", "work", "--state-dir", "/state with spaces"];
+            args.extend(extra);
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(
+                matches!(cli.command, Command::Run { state_dir: Some(path), .. } if path == "/state with spaces")
+            );
+        }
     }
     #[test]
     fn preserves_trusted_argv() {

@@ -91,7 +91,7 @@ pub fn start(
         ));
     }
     let reader = validate_username(reader.unwrap_or(&username))?;
-    let extra = json!({
+    let mut extra = json!({
         "protocolVersion": 1,
         "identity": {
             "tenant": tenant,
@@ -111,6 +111,23 @@ pub fn start(
             "start does not move read or processing cursors. peek begins at committed processing progress, initially zero."
         ]
     });
+    if identity["sharedChannel"] == true {
+        extra["identity"]["sharedChannel"] = json!(true);
+        extra["identity"]["personaId"] = json!(reader);
+        extra["board"] = fetch_json(
+            &MsnClient::new(url)?,
+            &format!("/api/tenants/{tenant}/channels/{channel}/board"),
+            token,
+        )?["board"]
+            .clone();
+        extra["workflow"]["personas"] = json!(
+            "persona add CHANNEL NAME --save-as PROFILE; all personas share this channel credential"
+        );
+        extra["workflow"]["availability"] = json!(
+            "run CHANNEL -- COMMAND keeps a harness available; wait CHANNEL returns immediately on new messages"
+        );
+        extra["warnings"].as_array_mut().expect("warnings").push(json!("Persona and reviewer names are cooperative attribution, not authenticated approval."));
+    }
     // Adding these fields to the response costs their JSON representation minus its
     // braces plus one separating comma. Include the trailing stdout newline as well.
     let overhead = serde_json::to_vec(&extra)

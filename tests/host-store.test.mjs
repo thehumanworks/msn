@@ -90,6 +90,58 @@ function turn(f, agent, id, root = "conversation") {
   return job;
 }
 
+test("explicit onMessage allows channel input to cancel a peer wait from another conversation", (t) => {
+  const f = fixture(t);
+  const job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", {
+      wait: { for: ["bob"], timeoutMs: 60000, reason: "review", onMessage: true },
+    }),
+    null,
+    10,
+  );
+  f.store.ingest("alice", event(2));
+  const incoming = f.store.claim("alice", 100, 20);
+  assert.equal(
+    f.store.startTurn(incoming, "new-human-request", {
+      id: 2,
+      channel: "work",
+      username: "human",
+      correlationId: "different",
+    }).resumed,
+    true,
+  );
+  assert.equal(f.store.agent("alice").waiting, null);
+  assert.equal(f.store.expire(90000), 0);
+});
+
+test("goal continuation survives restart and an explicit same-conversation completion supersedes its delayed wake", (t) => {
+  const f = fixture(t);
+  const job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", { progress: { status: "working", reason: "next step", delayMs: 10000 } }),
+    null,
+    10,
+    { status: "active" },
+  );
+  f.reopen(20);
+  assert.equal(f.store.claim("alice", 100, 50), null);
+  f.store.ingest("alice", event(2));
+  const incoming = f.store.claim("alice", 100, 60);
+  f.store.startTurn(incoming, "conversation", { id: 2, channel: "work", username: "human" });
+  f.store.finish(
+    incoming,
+    result(f.config, "alice", { progress: { status: "complete", reason: "done" } }),
+    null,
+    70,
+    { status: "active" },
+  );
+  assert.equal(f.store.claim("alice", 100, 20000), null);
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status='failed'").get().n, 0);
+});
+
 test("configuration fails closed on missing identity, non-YOLO, arbitrary remote commands and bad channels", () => {
   const good = fixtureConfig("/tmp/state");
   const raw = {

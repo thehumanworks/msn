@@ -1,3 +1,4 @@
+import { type AccessSettings, accessAccount, accessLoginUrl } from "./account";
 import { admin, bearer, failure, HttpError, json, slug } from "./http";
 
 export { MsnDurableObject } from "./store";
@@ -7,7 +8,45 @@ export default {
     let response: Response;
     try {
       const url = new URL(request.url);
-      if (url.pathname === "/api/health" && request.method === "GET") {
+      if (url.pathname === "/api/account/config" && request.method === "GET") {
+        const access = env as Env & AccessSettings;
+        response = json({
+          cloudflareAccess: Boolean(access.ACCESS_TEAM_DOMAIN && access.ACCESS_AUD),
+          loginUrl: accessLoginUrl(access),
+        });
+      } else if (
+        url.pathname === "/login" &&
+        request.method === "GET" &&
+        new URL(accessLoginUrl(env as AccessSettings), url).origin !== url.origin
+      ) {
+        response = new Response(null, {
+          status: 302,
+          headers: { Location: accessLoginUrl(env as AccessSettings), "Cache-Control": "no-store" },
+        });
+      } else if (
+        (url.pathname === "/api/account/login" && request.method === "POST") ||
+        (url.pathname === "/login" && request.method === "GET")
+      ) {
+        const origin = request.headers.get("Origin");
+        if (origin && origin !== url.origin)
+          throw new HttpError(403, "origin_forbidden", "Use a same-origin login.");
+        const account = await accessAccount(request, env as Env & AccessSettings);
+        const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", account.tenant]));
+        const connection = {
+          url: url.origin,
+          ...(await stub.accountSession(account.tenant, account.username)),
+        };
+        response =
+          url.pathname === "/login"
+            ? new Response(null, {
+                status: 303,
+                headers: {
+                  Location: `/#account=${encodeURIComponent(JSON.stringify(connection))}`,
+                  "Cache-Control": "no-store",
+                },
+              })
+            : json(connection);
+      } else if (url.pathname === "/api/health" && request.method === "GET") {
         response = json({ ok: true, service: "msn" });
       } else if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
         // Browser clients are same-origin; no cookie auth and no permissive CORS.

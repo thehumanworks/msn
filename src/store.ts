@@ -36,6 +36,7 @@ export type Message = {
   replyTo?: number;
   correlationId?: string;
   to?: string;
+  personaId?: string;
 };
 /** Optional annotation input on send; `undefined` means "not supplied". */
 export type Correlation = { replyTo?: number; correlationId?: string; to?: string };
@@ -49,14 +50,17 @@ type MessageRow = {
   replyTo: number | null;
   correlationId: string | null;
   recipient: string | null;
+  personaId: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
   bound_prefix: string | null;
   channel_scope?: string | null;
+  owner_access?: number;
+  shared_channel?: number;
 };
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
@@ -68,7 +72,7 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 type InviteRow = {
   id: string;
   code_hash: string;
@@ -123,13 +127,14 @@ function toEvent(row: EventRow, tenant: string): CoordinationEvent {
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
-  const { replyTo, correlationId, recipient, ...rest } = row;
+  const { replyTo, correlationId, recipient, personaId, ...rest } = row;
   return {
     ...rest,
     tenant,
     ...(replyTo === null ? {} : { replyTo }),
     ...(correlationId === null ? {} : { correlationId }),
     ...(recipient === null ? {} : { to: recipient }),
+    ...(personaId == null ? {} : { personaId }),
   };
 }
 
@@ -206,6 +211,15 @@ export class MsnDurableObject extends DurableObject<Env> {
           resourceId INTEGER, historyRevision INTEGER NOT NULL, createdAt TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS events_channel ON events(channel, id);
+        CREATE TABLE IF NOT EXISTS boards (
+          channel TEXT PRIMARY KEY, goal TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+          revision INTEGER NOT NULL DEFAULT 1, updatedAt TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS channel_credentials(channel TEXT PRIMARY KEY, token TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS personas (
+          channel TEXT NOT NULL, id TEXT NOT NULL, displayName TEXT NOT NULL, createdAt TEXT NOT NULL,
+          PRIMARY KEY(channel,id)
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -220,6 +234,19 @@ export class MsnDurableObject extends DurableObject<Env> {
           .some((column) => column.name === "channel_scope")
       )
         ctx.storage.sql.exec("ALTER TABLE access_keys ADD COLUMN channel_scope TEXT");
+      for (const [table, column, definition] of [
+        ["access_keys", "owner_access", "INTEGER NOT NULL DEFAULT 0"],
+        ["access_keys", "shared_channel", "INTEGER NOT NULL DEFAULT 0"],
+        ["messages", "personaId", "TEXT"],
+      ]) {
+        if (
+          !ctx.storage.sql
+            .exec<{ name: string }>(`PRAGMA table_info(${table})`)
+            .toArray()
+            .some((c) => c.name === column)
+        )
+          ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
       if (version === null) {
         for (let applied = 1; applied <= SCHEMA_VERSION; applied++)
           ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", applied);
@@ -253,6 +280,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         if (version < 7) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (7)");
         if (version < 8) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (8)");
+        if (version < 10) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (10)");
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -269,6 +297,243 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
+  async accountSession(tenant: string, username: string) {
+    const token = newToken();
+    const hash = await digest(token);
+    this.ctx.storage.transactionSync(() => {
+      if (!this.tenantRow()) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO tenant(singleton,token_hash,bound_username,bound_prefix) VALUES(1,?,?,NULL)",
+          hash,
+          username,
+        );
+      } else {
+        this.requireKeyCapacity();
+        this.ctx.storage.sql.exec(
+          "INSERT INTO access_keys(id,token_hash,bound_username,createdAt,owner_access) VALUES(?,?,?,?,1)",
+          crypto.randomUUID(),
+          hash,
+          username,
+          new Date().toISOString(),
+        );
+      }
+    });
+    return { tenant, username, token, owner: true };
+  }
+
+  private async boardRoute(
+    request: Request,
+    tenant: string,
+    channel: string,
+    rest: string[],
+    hash: string,
+  ): Promise<Response> {
+    const input = request.method === "PUT" || request.method === "POST" ? await body(request) : null;
+    const secret =
+      rest[0] === "board" && request.method === "PUT" ? text(input?.credential, "credential", 64) : null;
+    if (secret && !/^[a-f0-9]{64}$/.test(secret))
+      throw new HttpError(400, "invalid_credential", "Use a random 256-bit channel credential.");
+    const secretHash = secret ? await digest(secret) : null;
+    const capability = this.authorize(hash);
+    this.requireScope(capability, channel);
+    if (rest.join("/") === "board/connection" && request.method === "GET") {
+      if (!capability.owner_access && !capability.shared_channel)
+        throw new HttpError(
+          403,
+          "channel_connection_required",
+          "Use the owner or shared channel connection.",
+        );
+      this.board(channel);
+      const row = this.ctx.storage.sql
+        .exec<{ token: string }>(
+          "SELECT c.token FROM channel_credentials c JOIN access_keys a ON a.channel_scope=c.channel AND a.shared_channel=1 WHERE c.channel=?",
+          channel,
+        )
+        .toArray()[0];
+      if (!row)
+        throw new HttpError(404, "channel_connection_missing", "Recreate shared access with board create.");
+      return json({
+        url: new URL(request.url).origin,
+        tenant,
+        token: row.token,
+        channel,
+        sharedChannel: true,
+      });
+    }
+    if (rest[0] === "personas") {
+      this.board(channel);
+      if (rest.length === 1 && request.method === "GET") {
+        return json({
+          personas: this.ctx.storage.sql
+            .exec(
+              "SELECT id,displayName,createdAt FROM personas WHERE channel=? ORDER BY createdAt,id",
+              channel,
+            )
+            .toArray(),
+        });
+      }
+      if (rest.length === 2 && request.method === "PUT") {
+        const id = slug(rest[1]);
+        const displayName = text(input?.displayName, "displayName", 128);
+        const existing = this.ctx.storage.sql
+          .exec<{ displayName: string }>(
+            "SELECT displayName FROM personas WHERE channel=? AND id=?",
+            channel,
+            id,
+          )
+          .toArray()[0];
+        if (existing && existing.displayName !== displayName)
+          throw new HttpError(
+            409,
+            "persona_conflict",
+            "This persona ID already has a different display name.",
+          );
+        const sameName = this.ctx.storage.sql
+          .exec(
+            "SELECT id FROM personas WHERE channel=? AND displayName=? AND id<>?",
+            channel,
+            displayName,
+            id,
+          )
+          .toArray();
+        if (sameName.length)
+          throw new HttpError(409, "persona_name_conflict", "Choose another display name in this channel.");
+        if (!existing)
+          this.ctx.storage.sql.exec(
+            "INSERT INTO personas VALUES(?,?,?,?)",
+            channel,
+            id,
+            displayName,
+            new Date().toISOString(),
+          );
+        return json({ id, displayName, channel, attribution: "shared-channel" }, existing ? 200 : 201);
+      }
+    }
+    if (rest[0] === "board" && rest.length === 1) {
+      if (request.method === "GET") return json({ board: this.board(channel) });
+      if (request.method === "PUT" && secretHash) {
+        this.requireOwner(capability);
+        const goal = text(input?.goal, "goal", 16384);
+        const existing = this.ctx.storage.sql
+          .exec<{ token_hash: string }>(
+            "SELECT token_hash FROM access_keys WHERE channel_scope=? AND shared_channel=1",
+            channel,
+          )
+          .toArray()[0];
+        if (existing) {
+          if (!equalHash(existing.token_hash, secretHash))
+            throw new HttpError(
+              409,
+              "board_exists",
+              "Board already exists. Use its saved channel connection or rotate access explicitly.",
+            );
+          return json({ board: this.board(channel), sharedChannel: true });
+        }
+        this.ctx.storage.transactionSync(() => {
+          this.requireKeyCapacity();
+          this.createChannel(channel);
+          this.ctx.storage.sql.exec(
+            "INSERT INTO access_keys(id,token_hash,bound_username,bound_prefix,createdAt,channel_scope,shared_channel) VALUES(?,?,NULL,NULL,?,?,1)",
+            `board-${channel}`,
+            secretHash,
+            new Date().toISOString(),
+            channel,
+          );
+          this.ctx.storage.sql.exec(
+            "INSERT INTO boards(channel,goal,updatedAt) VALUES(?,?,?) ON CONFLICT(channel) DO NOTHING",
+            channel,
+            goal,
+            new Date().toISOString(),
+          );
+          this.ctx.storage.sql.exec(
+            "INSERT INTO channel_credentials VALUES(?,?) ON CONFLICT(channel) DO UPDATE SET token=excluded.token",
+            channel,
+            secret,
+          );
+        });
+        this.wakeEvents(channel);
+        return json({ board: this.board(channel), sharedChannel: true }, 201);
+      }
+      if (request.method === "POST") {
+        const current = this.board(channel);
+        const revision = snapshotInteger(input?.revision, "revision");
+        if (current.revision !== revision)
+          throw new HttpError(409, "board_revision_conflict", "Read the current board before updating it.");
+        const goal = input?.goal === undefined ? current.goal : text(input.goal, "goal", 16384);
+        const status = input?.status ?? current.status;
+        if (!["active", "paused", "complete", "blocked"].includes(status as string))
+          throw new HttpError(400, "invalid_board_status", "Use active, paused, complete or blocked.");
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(
+            "UPDATE boards SET goal=?,status=?,revision=revision+1,updatedAt=? WHERE channel=?",
+            goal,
+            status,
+            new Date().toISOString(),
+            channel,
+          );
+          // A visible control message wakes existing message/event clients without a new event protocol.
+          this.send(
+            tenant,
+            channel,
+            "board",
+            JSON.stringify({
+              schema: "msn.board.v1",
+              goal: goal.length > 1024 ? `${goal.slice(0, 1024)}…` : goal,
+              status,
+              revision: revision + 1,
+            }),
+            "application/json",
+            {},
+            null,
+            `board-${revision + 1}`,
+          );
+        });
+        return json({ board: this.board(channel) });
+      }
+    }
+    if (rest.join("/") === "board/rotate" && request.method === "POST") {
+      this.requireOwner(capability);
+      const credential = text(input?.credential, "credential", 64);
+      if (!/^[a-f0-9]{64}$/.test(credential))
+        throw new HttpError(400, "invalid_credential", "Use a random channel credential.");
+      const nextHash = await digest(credential);
+      this.requireOwner(this.authorize(hash));
+      this.board(channel);
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "UPDATE access_keys SET token_hash=? WHERE channel_scope=? AND shared_channel=1",
+          nextHash,
+          channel,
+        );
+        this.ctx.storage.sql.exec(
+          "UPDATE channel_credentials SET token=? WHERE channel=?",
+          credential,
+          channel,
+        );
+      });
+      for (const waiter of this.waiters) waiter.wake();
+      for (const waiter of this.eventWaiters) waiter.wake();
+      return json({ rotated: true, channel });
+    }
+    throw new HttpError(404, "route_not_found", "Unknown board operation.");
+  }
+
+  private requireOwner(capability: TenantRow) {
+    if (!capability.owner_access)
+      throw new HttpError(403, "owner_required", "Use the human account connection for this operation.");
+  }
+
+  private board(channel: string) {
+    const row = this.ctx.storage.sql
+      .exec<{ channel: string; goal: string; status: string; revision: number; updatedAt: string }>(
+        "SELECT * FROM boards WHERE channel=?",
+        channel,
+      )
+      .toArray()[0];
+    if (!row) throw new HttpError(404, "board_not_found", "Create this message board first.");
+    return row;
+  }
+
   private tenantRow(): TenantRow | undefined {
     return this.ctx.storage.sql
       .exec<TenantRow>("SELECT token_hash, bound_username, bound_prefix FROM tenant WHERE singleton = 1")
@@ -277,7 +542,7 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   private authorize(hash: string): TenantRow {
     const row = this.tenantRow();
-    if (row && equalHash(hash, row.token_hash)) return row;
+    if (row && equalHash(hash, row.token_hash)) return { ...row, owner_access: 1 };
     const key = this.ctx.storage.sql
       .exec<AccessKeyRow>("SELECT * FROM access_keys WHERE token_hash = ?", hash)
       .toArray()[0];
@@ -306,6 +571,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       username: row.bound_username,
       usernamePrefix: row.bound_prefix,
       ...(row.channel_scope ? { channel: row.channel_scope } : {}),
+      ...(row.owner_access ? { owner: true } : {}),
+      ...(row.shared_channel ? { sharedChannel: true } : {}),
     };
   }
 
@@ -534,6 +801,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     correlation: Correlation,
     key: string | null,
     hash: string,
+    personaId: string | null = null,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       if (key) {
@@ -589,7 +857,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -601,6 +869,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           correlation.replyTo ?? null,
           correlation.correlationId ?? null,
           correlation.to ?? null,
+          personaId,
         )
         .one();
       this.ctx.storage.sql.exec(
@@ -868,10 +1137,25 @@ export class MsnDurableObject extends DurableObject<Env> {
       throw new HttpError(409, "key_quota", "Tenant participant key limit reached (1,000).");
   }
 
-  private async provision(tenant: string, bind: Binding, channel?: string): Promise<Response> {
-    const token = newToken();
+  private async provision(
+    tenant: string,
+    bind: Binding,
+    channel?: string,
+    credential?: string,
+  ): Promise<Response> {
+    const token = credential ?? newToken();
+    if (!/^[a-f0-9]{64}$/.test(token))
+      throw new HttpError(400, "invalid_credential", "Use a random 256-bit credential.");
     const hash = await digest(token);
     return this.ctx.storage.transactionSync(() => {
+      if (credential && this.tenantRow()?.token_hash === hash)
+        return json(
+          this.identity(
+            tenant,
+            { bound_username: bind.username, bound_prefix: bind.prefix, owner_access: 1 },
+            token,
+          ),
+        );
       if (this.tenantRow())
         throw new HttpError(
           409,
@@ -898,6 +1182,12 @@ export class MsnDurableObject extends DurableObject<Env> {
   private async createInvite(request: Request, tenant: string, hash: string): Promise<Response> {
     const input = await body(request);
     const channel = input.channel == null ? null : slug(text(input.channel, "channel", 64));
+    if (this.authorize(hash).shared_channel)
+      throw new HttpError(
+        400,
+        "shared_channel_invitation",
+        "Share the channel connection with msn connection-export; add personas without new keys.",
+      );
     const maxUses = input.maxUses === undefined ? 25 : snapshotInteger(input.maxUses, "maxUses");
     const expiresIn = input.expiresIn === undefined ? 86400 : snapshotInteger(input.expiresIn, "expiresIn");
     if (maxUses < 1 || maxUses > 100 || expiresIn < 60 || expiresIn > 604800)
@@ -1002,10 +1292,17 @@ export class MsnDurableObject extends DurableObject<Env> {
       const tenant = slug(parts[tenantIndex] ?? "");
       const rest = parts.slice(tenantIndex + 1);
       if (!isAdmin && !rest.length && request.method === "PUT") {
+        if (tenant.startsWith("account-"))
+          throw new HttpError(403, "reserved_account", "This account requires Cloudflare login.");
         const input = await body(request);
         const username = text(input.username, "username", 128);
         const channel = input.channel === undefined ? "general" : slug(text(input.channel, "channel", 64));
-        return await this.provision(tenant, { username, prefix: null }, channel);
+        return await this.provision(
+          tenant,
+          { username, prefix: null },
+          channel,
+          input.credential === undefined ? undefined : text(input.credential, "credential", 64),
+        );
       }
       if (!isAdmin && rest.join("/") === "invites/redeem" && request.method === "POST")
         return await this.redeemInvite(request, tenant);
@@ -1146,12 +1443,15 @@ export class MsnDurableObject extends DurableObject<Env> {
         const hash = await digest(bearer(request));
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
+        if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
+          return await this.boardRoute(request, tenant, slug(rest[1]), rest.slice(2), hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.
         const input =
           request.method === "POST" && rest.length === 3 && rest[2] === "messages"
             ? await body(request)
             : null;
         const username = input ? text(input.username, "username", 128) : "";
+        let personaId = input?.personaId === undefined ? null : slug(text(input.personaId, "personaId", 64));
         const content = input ? text(input.text, "text", 16384) : "";
         const type = input ? contentType(input.contentType, content) : "text/plain";
         const correlation: Correlation = input
@@ -1161,7 +1461,13 @@ export class MsnDurableObject extends DurableObject<Env> {
               to: recipient(input.to),
             }
           : {};
-        const payloadHash = input ? await digest(payload(username, content, type, correlation)) : "";
+        const payloadHash = input
+          ? await digest(
+              personaId
+                ? JSON.stringify([payload(username, content, type, correlation), personaId])
+                : payload(username, content, type, correlation),
+            )
+          : "";
         const snapshotInput =
           request.method === "POST" && rest.length === 3 && rest[2] === "snapshots"
             ? await body(request)
@@ -1177,8 +1483,35 @@ export class MsnDurableObject extends DurableObject<Env> {
           : null;
         const snapshotHash = snapshotData ? await digest(JSON.stringify(snapshotData)) : "";
         const capability = this.authorize(hash);
+        if (input && capability.shared_channel && !personaId) {
+          const persona = this.ctx.storage.sql
+            .exec<{ id: string }>(
+              "SELECT id FROM personas WHERE channel=? AND displayName=?",
+              rest[1],
+              username,
+            )
+            .toArray()[0];
+          if (!persona)
+            throw new HttpError(
+              400,
+              "persona_required",
+              "Register your persona with msn persona add before sending.",
+            );
+          personaId = persona.id;
+        }
         // Bound-name check precedes any transaction: a rejected send stores nothing and wakes nobody.
         if (input) this.requireBoundName(capability, username);
+        if (input && personaId) {
+          const persona = this.ctx.storage.sql
+            .exec<{ displayName: string }>(
+              "SELECT displayName FROM personas WHERE channel=? AND id=?",
+              rest[1],
+              personaId,
+            )
+            .toArray()[0];
+          if (!persona || persona.displayName !== username)
+            throw new HttpError(400, "persona_mismatch", "Register this persona and use its display name.");
+        }
         if (!rest.length && request.method === "GET") return json(this.identity(tenant, capability));
         if (rest[0] === "invites" && rest.length === 2 && request.method === "DELETE") {
           const deleted = this.ctx.storage.sql
@@ -1321,7 +1654,17 @@ export class MsnDurableObject extends DurableObject<Env> {
                   "invalid_key",
                   "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
                 );
-              return this.send(tenant, channel, username, content, type, correlation, key, payloadHash);
+              return this.send(
+                tenant,
+                channel,
+                username,
+                content,
+                type,
+                correlation,
+                key,
+                payloadHash,
+                personaId,
+              );
             }
             if (request.method === "GET") {
               this.requireChannel(channel);

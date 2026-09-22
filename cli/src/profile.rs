@@ -30,6 +30,9 @@ pub(crate) struct Profile {
 ///
 /// `true` means the command was fully handled and normal command execution should stop.
 pub fn prepare(cli: &mut Cli, matches: &ArgMatches) -> Result<bool, CliError> {
+    if matches!(&cli.command, Command::Login { .. }) {
+        return Ok(false);
+    }
     match &cli.command {
         Command::Profile { command } => {
             match command {
@@ -61,6 +64,17 @@ pub fn prepare(cli: &mut Cli, matches: &ArgMatches) -> Result<bool, CliError> {
         _ => {}
     }
 
+    // A human's remembered account is a convenience default only when no connection was selected.
+    // Agent environment credentials and explicit flags always win.
+    if cli.profile.is_none()
+        && cli.tenant.is_none()
+        && cli.token.is_none()
+        && matches.value_source("url") != Some(ValueSource::CommandLine)
+        && !matches!(&cli.command, Command::Login { .. } | Command::Health)
+        && profile_path("account")?.exists()
+    {
+        cli.profile = Some("account".into());
+    }
     let Some(name) = cli.profile.clone() else {
         return Ok(false);
     };

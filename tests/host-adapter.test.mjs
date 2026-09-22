@@ -114,7 +114,7 @@ test("every role retains blackboard safety, recovery and executable turn contrac
       /no active wait/,
       /durable goal.continue/,
       /omitted progress does not start an automatic loop/,
-      /paused or complete means stop goal work/,
+      /paused, blocked or complete means stop goal work/,
     ])
       assert.match(prompt, rule);
     assert.ok(prompt.endsWith(JSON.stringify(envelope)));

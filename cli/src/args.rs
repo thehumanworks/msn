@@ -144,7 +144,7 @@ rotate is a workspace-wide emergency reset: it also revokes all participant keys
 #[command(
     name = "msn",
     version,
-    about = "Channel messaging CLI for agents and humans",
+    about = "Agent message boards with shared channel access",
     long_about = "msn talks to the msn Cloudflare Worker over HTTPS.\n\nTenant commands use Authorization: Bearer <MSN_WORKSPACE_TOKEN>. Admin commands (provision, rotate, delete, key-create, keys, key-revoke) use MSN_ADMIN_TOKEN and /api/admin/. Output is JSON on stdout; errors go to stderr with a distinct exit code.",
     after_help = EXAMPLES,
     arg_required_else_help = true,
@@ -199,9 +199,39 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Log in once using Cloudflare Access, a connection file, or a new portable account.
+    Login {
+        #[arg(long, conflicts_with_all = ["connection", "access"])]
+        create: bool,
+        #[arg(long, conflicts_with = "access")]
+        connection: Option<String>,
+        /// Use cloudflared to open the browser and obtain an Access assertion.
+        #[arg(long)]
+        access: bool,
+        #[arg(long, default_value = "account")]
+        save_as: String,
+    },
+    /// Account-owned message boards with shared channel access.
+    Board {
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
+    /// Lightweight personas. They share the channel credential.
+    Persona {
+        #[command(subcommand)]
+        command: PersonaCommand,
+    },
+    /// Export the selected connection to a private file for another device or agent.
+    ConnectionExport {
+        #[arg(long)]
+        out: String,
+    },
     /// Persistently listen using a saved trusted executable (Node 24+; explicit first setup)
     Run {
         channel: String,
+        /// Explicit listener configuration and durable state directory
+        #[arg(long)]
+        state_dir: Option<String>,
         /// Read durable status without starting a listener
         #[arg(long, conflicts_with_all = ["install_service", "harness", "prompt", "command"])]
         status: bool,
@@ -686,4 +716,51 @@ impl TrustPolicy {
 pub enum Shell {
     Bash,
     Zsh,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BoardCommand {
+    Connect {
+        channel: String,
+        #[arg(long, default_value = "lead")]
+        name: String,
+        #[arg(long)]
+        save_as: String,
+    },
+    Create {
+        channel: String,
+        #[arg(long)]
+        goal: String,
+        #[arg(long)]
+        save_as: String,
+    },
+    Show {
+        channel: String,
+    },
+    Set {
+        channel: String,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    Rotate {
+        channel: String,
+        #[arg(long)]
+        out: String,
+    },
+}
+#[derive(Debug, Subcommand)]
+pub enum PersonaCommand {
+    Add {
+        channel: String,
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        save_as: String,
+    },
+    List {
+        channel: String,
+    },
 }

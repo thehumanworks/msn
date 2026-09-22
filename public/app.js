@@ -224,7 +224,19 @@ function appendMessage(message) {
   label.title = `#${message.channel} · message ${message.id}`;
   meta.append(name, time);
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
-  const structured = message.contentType === "application/json";
+  let boardUpdate = null;
+  if (message.contentType === "application/json") {
+    try {
+      const data = JSON.parse(message.text);
+      if (
+        data.schema === "msn.board.v1" &&
+        typeof data.goal === "string" &&
+        ["active", "paused", "complete", "blocked"].includes(data.status)
+      )
+        boardUpdate = data;
+    } catch {}
+  }
+  const structured = message.contentType === "application/json" && !boardUpdate;
   if (structured) {
     const kind = document.createElement("span");
     kind.className = "message-kind";
@@ -234,7 +246,11 @@ function appendMessage(message) {
   // The id stays last so every row ends the same way, typed or not.
   meta.append(label);
   const content = document.createElement(structured ? "pre" : "p");
-  content.textContent = structured ? pretty(message.text) : message.text;
+  content.textContent = boardUpdate
+    ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
+    : structured
+      ? pretty(message.text)
+      : message.text;
   article.append(meta);
   for (const [field, label] of [
     ["to", "To"],
@@ -401,6 +417,7 @@ async function poll(live = false) {
 
 function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
+  $("board-settings").disabled = false;
   savePosition();
   stopPolling();
   channel = name;
@@ -496,6 +513,26 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
         return;
       }
       note = `Display name · your access key requires the prefix “${identity.usernamePrefix}”`;
+    }
+    connection.sharedChannel = identity.sharedChannel === true;
+    connection.owner = identity.owner === true;
+    if (identity.sharedChannel) {
+      note = "Persona · shared channel access";
+      const roster = await api(`/channels/${identity.channel}/personas`, {}, connection);
+      let persona = roster.personas.find((p) => p.displayName === connection.username);
+      if (!persona) {
+        const id = `persona-${crypto.randomUUID()}`;
+        persona = await api(
+          `/channels/${identity.channel}/personas/${id}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({ displayName: connection.username }),
+            headers: { "Content-Type": "application/json" },
+          },
+          connection,
+        );
+      }
+      connection.reader = persona.id;
     }
     const channels = await refreshChannels(connection);
     if (session !== connection) return;
@@ -621,7 +658,27 @@ async function copy(value, message) {
 $("copy-access").addEventListener("click", () => copy(session.token, "Access key copied."));
 let inviteChannel = null;
 let activeInvite = null;
-function openInvite(scope) {
+async function openInvite(scope) {
+  $("revoke-invite").hidden = false;
+  if (scope) {
+    try {
+      const shared = await api(`/channels/${scope}/board/connection`);
+      $("invite-title").textContent = `Shared access to # ${scope}`;
+      $("invite-form").hidden = true;
+      $("invite-result").hidden = false;
+      $("revoke-invite").hidden = true;
+      $("invite-link").value = `${location.origin}/#board=${encodeURIComponent(JSON.stringify(shared))}`;
+      $("invite-expiry").textContent =
+        "All personas share this channel credential. Access lasts until the owner rotates it.";
+      $("invite-dialog").showModal();
+      return;
+    } catch (error) {
+      if (session?.sharedChannel) {
+        status(error.message, true);
+        return;
+      }
+    }
+  }
   inviteChannel = scope;
   activeInvite = null;
   $("invite-title").textContent = scope ? `Invite to # ${scope}` : "Invite to workspace";
@@ -677,7 +734,24 @@ $("channel-form").addEventListener("submit", async (event) => {
   const connection = session;
   const name = $("new-channel").value.trim();
   try {
-    await api(`/channels/${name}`, { method: "PUT" }, connection);
+    await api(
+      connection.owner ? `/channels/${name}/board` : `/channels/${name}`,
+      {
+        method: "PUT",
+        ...(connection.owner
+          ? {
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                credential: Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) =>
+                  b.toString(16).padStart(2, "0"),
+                ).join(""),
+                goal: `Collaborate in #${name}. Set a specific goal using Goal & status.`,
+              }),
+            }
+          : {}),
+      },
+      connection,
+    );
     await refreshChannels(connection);
     if (session !== connection) return;
     $("new-channel").value = "";
@@ -821,6 +895,32 @@ $("jump").addEventListener("click", () => {
 
 // Reconnect with remembered credentials; an invalid key is forgotten and the form shown instead.
 function receiveInvitation() {
+  const board = new URLSearchParams(location.hash.slice(1)).get("board");
+  if (board) {
+    history.replaceState(null, "", location.pathname);
+    try {
+      const data = JSON.parse(board);
+      if (new URL(data.url).origin !== location.origin) throw new Error("Wrong server");
+      $("entry-mode").value = "connect";
+      $("tenant").value = data.tenant;
+      $("token").value = data.token;
+      $("username").value = "";
+      status("Choose a display name to join this message board.");
+    } catch {
+      status("Invalid channel connection.", true);
+    }
+    return true;
+  }
+  const account = new URLSearchParams(location.hash.slice(1)).get("account");
+  if (account) {
+    history.replaceState(null, "", location.pathname);
+    try {
+      importConnection(JSON.parse(account));
+    } catch {
+      status("Invalid account connection.", true);
+    }
+    return true;
+  }
   const code = new URLSearchParams(location.hash.slice(1)).get("invite");
   if (!code) return false;
   history.replaceState(null, "", location.pathname);
@@ -845,3 +945,95 @@ if (remembered) {
   );
   remembered.token = "";
 }
+
+// The same portable file works in the CLI and native clients. It contains a credential.
+function importConnection(data) {
+  if (
+    new URL(data.url).origin !== location.origin ||
+    !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(data.tenant) ||
+    typeof data.token !== "string" ||
+    typeof data.username !== "string"
+  )
+    throw new Error("Open this connection on its original MSN server.");
+  $("tenant").value = data.tenant;
+  $("username").value = data.username;
+  void connect(
+    {
+      tenant: data.tenant,
+      token: data.token,
+      username: data.username,
+      reader: data.reader,
+      remember: $("remember").checked,
+      drafts: new Map(),
+      channels: new Map(),
+    },
+    { offerSave: true },
+  );
+}
+$("connection-file").addEventListener("change", async (event) => {
+  try {
+    const file = event.target.files[0];
+    if (!file || file.size > 65536) throw new Error("Choose an MSN connection JSON file.");
+    importConnection(JSON.parse(await file.text()));
+  } catch (error) {
+    status(error.message, true);
+  }
+  event.target.value = "";
+});
+$("export-connection").addEventListener("click", () => {
+  if (!session) return;
+  const connection = {
+    url: location.origin,
+    tenant: session.tenant,
+    token: session.token,
+    username: session.username,
+    reader: session.reader ?? session.username,
+  };
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(connection, null, 2)], { type: "application/json" }),
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "msn-connection.json";
+  a.click();
+  URL.revokeObjectURL(url);
+});
+fetch("/api/account/config")
+  .then((r) => r.json())
+  .then((data) => {
+    $("cloudflare-login").href = data.loginUrl || "/login";
+    $("cloudflare-login").hidden = !data.cloudflareAccess;
+  })
+  .catch(() => {});
+let editingBoard = null;
+$("board-settings").addEventListener("click", async () => {
+  try {
+    const { board } = await api(`/channels/${channel}/board`);
+    editingBoard = board;
+    $("board-goal").value = board.goal;
+    $("board-status").value = board.status;
+    $("board-dialog").showModal();
+  } catch (error) {
+    status(error.message, true);
+  }
+});
+$("close-board").addEventListener("click", () => $("board-dialog").close());
+$("board-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!editingBoard) return;
+  try {
+    await api(`/channels/${editingBoard.channel}/board`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        revision: editingBoard.revision,
+        goal: $("board-goal").value,
+        status: $("board-status").value,
+      }),
+    });
+    $("board-dialog").close();
+    status("Channel goal updated.");
+  } catch (error) {
+    status(error.message, true);
+  }
+});
