@@ -26,6 +26,9 @@ EXAMPLES:
   eval \"$(msn shell-init bash)\"
   msn activate planner
   msn start general
+  msn --profile planner run general --harness codex
+  msn --profile planner run general  # resumes saved listener
+  msn --profile planner run general --status
   msn peek general --wait 10
   msn commit general --through 42  # only after processing every delivered row through 42
   msn show general 42
@@ -196,6 +199,25 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Persistently listen using a saved trusted executable (Node 24+; explicit first setup)
+    Run {
+        channel: String,
+        /// Read durable status without starting a listener
+        #[arg(long, conflicts_with_all = ["install_service", "harness", "prompt", "command"])]
+        status: bool,
+        /// Install and start a systemd user service with restart supervision
+        #[arg(long)]
+        install_service: bool,
+        /// Use the existing prompt adapter for Codex or Claude Code
+        #[arg(long, value_parser = ["codex", "claude", "tny"], conflicts_with_all = ["prompt", "command"])]
+        harness: Option<String>,
+        /// Adapt a generic prompt-in/JSON-out command instead of native turn JSON
+        #[arg(long, requires = "command")]
+        prompt: bool,
+        /// Trusted argv, without shell expansion; never put credentials here
+        #[arg(last = true, num_args = 1..)]
+        command: Vec<String>,
+    },
     /// Create, cache and inspect accessible workspaces
     Workspace {
         #[command(subcommand)]

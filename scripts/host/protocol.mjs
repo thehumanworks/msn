@@ -195,7 +195,7 @@ export function diagnostic(message) {
   }
 }
 export function validateResult(result, agent, currentChannels) {
-  keys(result, ["schema", "actions", "state", "wait"]);
+  keys(result, ["schema", "actions", "state", "wait", "progress"]);
   requireValue(
     result.schema === "msn.turn.result.v1" && Buffer.byteLength(JSON.stringify(result)) <= MAX_OUTPUT,
     "invalid_turn_result",
@@ -263,6 +263,18 @@ export function validateResult(result, agent, currentChannels) {
         result.wait.reason.length <= 2048,
       "bounded_wait_required",
     );
+  }
+  if (result.progress !== undefined) {
+    keys(result.progress, ["status", "reason", "delayMs"]);
+    requireValue(
+      ["working", "waiting", "blocked", "complete"].includes(result.progress.status) &&
+        typeof result.progress.reason === "string" &&
+        result.progress.reason.trim().length > 0 &&
+        Buffer.byteLength(result.progress.reason) <= 2048 &&
+        (result.progress.delayMs === undefined || integer(result.progress.delayMs, 250, 3600000)),
+      "invalid_progress",
+    );
+    requireValue(!(result.progress.status === "working" && result.wait), "working_cannot_wait");
   }
   return { ...result, memberships: [...memberships] };
 }

@@ -14,6 +14,8 @@ export function childEnvironment(agent, connection, envelope, config, source = p
     MSN_WORKSPACE_TENANT: connection.tenant,
     MSN_WORKSPACE_TOKEN: connection.token,
     MSN_USERNAME: agent.username,
+    ...(agent.profile ? { MSN_PROFILE: agent.profile } : {}),
+    ...(agent.personaId ? { MSN_READER: agent.personaId } : {}),
     MSN_CHANNEL: envelope.channel,
     MSN_HOST_ID: config.hostId,
     MSN_PERMISSION_MODE: "yolo",

@@ -558,8 +558,12 @@ fn given_partial_map_when_import_resumes_then_no_duplicates() {
         .unwrap();
     let start = Instant::now();
     loop {
+        // Wait until the delayed second-message request is actually in flight. The durable
+        // first-message map can appear before that POST is issued; interrupting at that earlier
+        // point leaves its scripted response queued for the resumed channel-list request.
         if let Ok(text) = fs::read_to_string(&state_file)
             && text.contains("\"lastSourceId\":1")
+            && server.recorded().len() >= 5
         {
             break;
         }

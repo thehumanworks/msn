@@ -773,3 +773,118 @@ test("soft budget configuration defaults below the hard limit, allows 0 to disab
   assert.throws(() => fixtureConfig("/tmp/state", { softTurnsPerConversation: -1 }), /invalid_host_limits/);
   assert.throws(() => fixtureConfig("/tmp/state", { softTurnsPerConversation: 1.5 }), /invalid_host_limits/);
 });
+
+test("explicit progress is bounded, survives restart, and a newer completion cancels stale continuation", (t) => {
+  const f = fixture(t);
+  const job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", {
+      progress: { status: "working", reason: "next action", delayMs: 1000 },
+      state: { step: 1 },
+    }),
+    null,
+    10,
+  );
+  f.reopen(20);
+  assert.equal(f.store.nextDeadline(20), 1010);
+  assert.equal(f.store.claim("alice", 100, 1000), null);
+  assert.deepEqual(f.store.agent("alice").state, { step: 1 });
+  const next = turn(f, "alice", 2);
+  f.store.finish(
+    next,
+    result(f.config, "alice", { progress: { status: "complete", reason: "already solved" } }),
+    null,
+    30,
+  );
+  assert.equal(f.store.claim("alice", 100, 2000), null);
+});
+test("progress cannot create implicit loops, conflicting waits, unbounded delays or leave-channel continuations", (t) => {
+  const f = fixture(t);
+  for (const progress of [
+    null,
+    { status: "unknown", reason: "x" },
+    { status: "working", reason: "" },
+    { status: "working", reason: "x", delayMs: 0 },
+    { status: "working", reason: "x", delayMs: 3600001 },
+  ])
+    assert.throws(() => result(f.config, "alice", { progress }));
+  assert.throws(() =>
+    result(f.config, "alice", {
+      progress: { status: "working", reason: "x" },
+      wait: { for: ["bob"], timeoutMs: 100, reason: "x" },
+    }),
+  );
+  let job = turn(f, "alice", 1);
+  f.store.finish(job, result(f.config, "alice"), null, 10);
+  assert.equal(f.store.claim("alice", 100, 2000), null);
+  job = turn(f, "alice", 2);
+  f.store.finish(
+    job,
+    result(f.config, "alice", {
+      actions: [{ type: "leave", channel: "work" }],
+      progress: { status: "working", reason: "x" },
+    }),
+    null,
+    10,
+  );
+  assert.equal(f.store.claim("alice", 100, 2000), null);
+});
+test("remote personas do not reset the soft human-input budget", (t) => {
+  const f = fixture(t, { softTurnsPerConversation: 2 });
+  f.store.ingest("alice", event(1));
+  const job = f.store.claim("alice", 100, 10);
+  f.store.startTurn(job, "remote", { id: 1, username: "remote-agent", personaId: "persona-remote" });
+  assert.equal(
+    f.store.db.prepare("SELECT agent_turns FROM budgets WHERE root='remote'").get().agent_turns,
+    1,
+  );
+});
+
+test("complete progress clears only its own outstanding wait; working cannot silently disappear behind a wait", (t) => {
+  const f = fixture(t);
+  let job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", { wait: { for: ["bob"], timeoutMs: 1000, reason: "review" } }),
+    null,
+    10,
+  );
+  job = turn(f, "alice", 2);
+  assert.throws(
+    () =>
+      f.store.finish(
+        job,
+        result(f.config, "alice", { progress: { status: "working", reason: "next" } }),
+        null,
+        20,
+      ),
+    /working_cannot_wait/,
+  );
+  assert.ok(f.store.agent("alice").waiting);
+  f.store.finish(
+    job,
+    result(f.config, "alice", { progress: { status: "complete", reason: "solved" } }),
+    null,
+    20,
+  );
+  assert.equal(f.store.agent("alice").waiting, null);
+  assert.equal(f.store.expire(2000), 0);
+});
+test("explicit continuations consume the hard budget instead of looping forever", (t) => {
+  const f = fixture(t, { maxTurnsPerConversation: 2, softTurnsPerConversation: 0 });
+  const output = () =>
+    result(f.config, "alice", { progress: { status: "working", reason: "next", delayMs: 250 } });
+  let job = turn(f, "alice", 1);
+  f.store.finish(job, output(), null, 10);
+  job = f.store.claim("alice", 100, 300);
+  assert.ok(f.store.startTurn(job, "conversation", null));
+  f.store.finish(job, output(), null, 300);
+  job = f.store.claim("alice", 100, 600);
+  assert.equal(f.store.startTurn(job, "conversation", null), false);
+  assert.equal(
+    f.store.db.prepare("SELECT status,error FROM jobs WHERE id=?").get(job.id).error,
+    "conversation_budget_exhausted",
+  );
+  assert.equal(f.store.claim("alice", 100, 2000), null);
+});

@@ -137,6 +137,7 @@ export async function loadProfile(name, env = process.env) {
     tenant: requireSlug(String(parsed.tenant ?? ""), "profile tenant"),
     token: typeof parsed.token === "string" ? parsed.token : "",
     username: typeof parsed.username === "string" ? parsed.username : "",
+    ...(typeof parsed.reader === "string" ? { reader: parsed.reader } : {}),
   };
 }
 

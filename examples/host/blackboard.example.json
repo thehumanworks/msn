@@ -1,0 +1,51 @@
+{
+  "schema": "msn.host.v1",
+  "hostId": "blackboard",
+  "stateDir": "../../.msn-blackboard-state",
+  "maxConcurrent": 3,
+  "maxPending": 1000,
+  "maxTurnsPerConversation": 64,
+  "softTurnsPerConversation": 16,
+  "replayHistory": false,
+  "agents": [
+    {
+      "id": "blackboard-lead",
+      "profile": "msn-bb-lead",
+      "command": ["node", "scripts/host/prompt-adapter.mjs", "--harness", "tny"],
+      "cwd": "../..",
+      "channels": ["msn"],
+      "allowedChannels": ["msn"],
+      "role": "coordinator",
+      "description": "Broadcast goals and acceptance criteria. Invite volunteers, inspect evidence, record decisions and synthesize outcomes for the user. Resolve overlapping effects without gating analysis.",
+      "permissionMode": "yolo",
+      "timeoutMs": 300000,
+      "attempts": 3
+    },
+    {
+      "id": "architecture-reviewer",
+      "profile": "msn-bb-architecture",
+      "command": ["node", "scripts/host/prompt-adapter.mjs", "--harness", "tny"],
+      "cwd": "../..",
+      "channels": ["msn"],
+      "allowedChannels": ["msn"],
+      "role": "peer",
+      "description": "Volunteer correctness and recovery analysis. Challenge assumptions with evidence; disclose exposure to shared replies and do not claim blinded independence.",
+      "permissionMode": "yolo",
+      "timeoutMs": 300000,
+      "attempts": 3
+    },
+    {
+      "id": "workflow-reviewer",
+      "profile": "msn-bb-workflow",
+      "command": ["node", "scripts/host/prompt-adapter.mjs", "--harness", "tny"],
+      "cwd": "../..",
+      "channels": ["msn"],
+      "allowedChannels": ["msn"],
+      "role": "peer",
+      "description": "Volunteer bounded prompt and workflow improvements with executable tests. Preserve other work, report evidence and alternatives, and abstain from empty agreement.",
+      "permissionMode": "yolo",
+      "timeoutMs": 300000,
+      "attempts": 3
+    }
+  ]
+}

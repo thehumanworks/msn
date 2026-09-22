@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,10 +9,13 @@ import { inspectState, runHost } from "../../scripts/host-runner.mjs";
 
 const HANDLER = `import {appendFile} from 'node:fs/promises';
 let raw=''; for await(const chunk of process.stdin) raw+=chunk; const i=JSON.parse(raw);
-await appendFile(process.env.HOST_TEST_RECORDS, JSON.stringify({who:i.identity.username,input:i,permission:process.env.MSN_PERMISSION_MODE,admin:!!process.env.MSN_ADMIN_TOKEN,other:!!process.env.ALICE_TOKEN||!!process.env.BOB_TOKEN})+'\\n');
+await appendFile(process.env.HOST_TEST_RECORDS, JSON.stringify({who:i.identity.username,input:i,permission:process.env.MSN_PERMISSION_MODE,admin:!!process.env.MSN_ADMIN_TOKEN,reader:process.env.MSN_READER,profile:process.env.MSN_PROFILE,other:!!process.env.ALICE_TOKEN||!!process.env.BOB_TOKEN})+'\\n');
 if (i.message?.text==='hang') {process.on('SIGTERM',()=>{}); await new Promise(r=>setTimeout(r,60000));}
 if (i.message?.text==='slow') await new Promise(r=>setTimeout(r,1800));
-let actions=[],wait;
+let actions=[],wait,progress;
+if(i.message?.text==='continue-work') {progress={status:'working',reason:'second useful step',delayMs:300};}
+else if(i.trigger.type==='goal.continue') {actions=[{type:'send',channel:i.channel,to:'human',text:'continued'}];progress={status:'complete',reason:'finished'};}
+else
 if(i.message?.text==='cycle-start') {actions=[{type:'send',channel:i.channel,to:'bob',text:'cycle-request'}]; wait={for:['bob'],timeoutMs:3000,reason:'bob'};}
 else if(i.message?.text==='cycle-request') wait={for:['alice'],timeoutMs:3000,reason:'alice'};
 else if(i.trigger.type==='coordination.cycle') actions=[{type:'send',channel:i.channel,to:'alice',text:'reply'}];
@@ -24,7 +27,7 @@ else if(i.message?.text==='coordinate') {actions=[{type:'send',channel:i.channel
 else if(i.message?.text==='request') actions=[{type:'send',channel:i.channel,to:'alice',text:'reply'}];
 else if(i.message?.text==='reply') actions=[{type:'send',channel:i.channel,to:'human',text:'completed'}];
 else if(i.message) actions=[{type:'send',channel:i.channel,to:'human',text:'done:'+i.message.text}];
-console.log(JSON.stringify({schema:'msn.turn.result.v1',actions,state:{turns:(i.state?.turns||0)+1},...(wait?{wait}:{})}));`;
+console.log(JSON.stringify({schema:'msn.turn.result.v1',actions,state:{turns:(i.state?.turns||0)+1},...(wait?{wait}:{}),...(progress?{progress}:{})}));`;
 const PYTHON_HANDLER = `import json, os, sys
 inp = json.load(sys.stdin)
 with open(os.environ['HOST_TEST_RECORDS'], 'a') as out:
@@ -49,6 +52,7 @@ export async function hostFixture(t, options = {}) {
   const retryKeys = new Map(),
     denied = new Set(),
     deleted = new Set();
+  const board = { channel: "work", goal: "Test shared board", status: "active", revision: 1 };
   let dropNextReply = false,
     rejectNextSend = false;
   const server = createServer(async (req, res) => {
@@ -72,7 +76,16 @@ export async function hostFixture(t, options = {}) {
     };
     if (!who || denied.has(who)) return respond({}, 401);
     if (url.pathname === "/api/tenants/team")
-      return respond({ tenant: "team", username: who, usernamePrefix: null, channel: null });
+      return respond(
+        options.shared
+          ? { tenant: "team", username: null, usernamePrefix: null, channel: "work", sharedChannel: true }
+          : { tenant: "team", username: who, usernamePrefix: null, channel: null },
+      );
+    if (url.pathname === "/api/tenants/team/channels/work/personas")
+      return respond({
+        personas: ["alice", "bob", "carol"].map((id) => ({ id: `persona-${id}`, displayName: id })),
+      });
+    if (url.pathname === "/api/tenants/team/channels/work/board") return respond({ board });
     if (url.pathname === "/api/tenants/team/events") {
       const after = Number(url.searchParams.get("after"));
       const page = () => {
@@ -104,6 +117,7 @@ export async function hostFixture(t, options = {}) {
       for await (const chunk of req) raw += chunk;
       const body = JSON.parse(raw);
       assert.equal(body.username, who);
+      if (options.shared) assert.equal(body.personaId, `persona-${who}`);
       if (rejectNextSend) {
         rejectNextSend = false;
         return respond({}, 400);
@@ -166,7 +180,9 @@ export async function hostFixture(t, options = {}) {
         softTurnsPerConversation: options.softTurnsPerConversation ?? 16,
         agents: ids.map((id) => ({
           id,
-          connection: { origin, tenant: "team", tokenEnv: `${id.toUpperCase()}_TOKEN` },
+          ...(options.shared
+            ? { profile: id }
+            : { connection: { origin, tenant: "team", tokenEnv: `${id.toUpperCase()}_TOKEN` } }),
           command: options.pythonBob && id === "bob" ? ["python3", python] : [process.execPath, handler],
           cwd: dir,
           channels: ["work"],
@@ -178,9 +194,25 @@ export async function hostFixture(t, options = {}) {
       },
       dir,
     );
+  if (options.shared) {
+    await mkdir(join(dir, "config/msn/profiles"), { recursive: true });
+    for (const id of ["alice", "bob", "carol"])
+      await writeFile(
+        join(dir, `config/msn/profiles/${id}.json`),
+        JSON.stringify({
+          url: origin,
+          tenant: "team",
+          token: `${id}-secret-fixture`,
+          username: id,
+          reader: `persona-${id}`,
+        }),
+        { mode: 0o600 },
+      );
+  }
   let config = configFor(["alice", "bob"]);
   const env = {
     ...process.env,
+    ...(options.shared ? { XDG_CONFIG_HOME: join(dir, "config") } : {}),
     ALICE_TOKEN: "alice-secret-fixture",
     BOB_TOKEN: "bob-secret-fixture",
     CAROL_TOKEN: "carol-secret-fixture",
@@ -255,6 +287,7 @@ export async function hostFixture(t, options = {}) {
       return config;
     },
     env,
+    board,
     post,
     stop,
     start,

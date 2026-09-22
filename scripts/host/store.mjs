@@ -230,7 +230,8 @@ export class HostStore {
           .changes === 1;
       job.root = root;
       // Canonical message ids, not event cursor ids: a replayed or fanned-out human message resets once.
-      const human = message && !this.config.agents.some((a) => a.username === message.username);
+      const human =
+        message && !message.personaId && !this.config.agents.some((a) => a.username === message.username);
       if (soft > 0 && human && message.id > (budget?.last_human_event_id ?? 0))
         this.db
           .prepare("UPDATE budgets SET agent_turns=0, last_human_event_id=?, next_warning=? WHERE root=?")
@@ -264,6 +265,14 @@ export class HostStore {
       if (resumed) this.db.prepare("UPDATE agents SET waiting=NULL WHERE id=?").run(job.agent);
       return { resumed };
     });
+  }
+  pause(job) {
+    this.db.prepare("UPDATE jobs SET status='paused', attempts=MAX(0,attempts-1) WHERE id=?").run(job.id);
+  }
+  resumeChannel(agent, channel) {
+    this.db
+      .prepare("UPDATE jobs SET status='queued', available=0 WHERE agent=? AND channel=? AND status='paused'")
+      .run(agent, channel);
   }
   ignore(job) {
     this.db.prepare("UPDATE jobs SET status='ignored', error=NULL WHERE id=?").run(job.id);
@@ -308,6 +317,7 @@ export class HostStore {
         if (action.type !== "send") continue;
         const body = {
           username: agent.username,
+          ...(agent.personaId ? { personaId: agent.personaId } : {}),
           text: action.text,
           contentType: action.contentType ?? "text/plain",
           correlationId: job.root,
@@ -340,6 +350,35 @@ export class HostStore {
             );
         }
       }
+      if (result.progress !== undefined) {
+        const waiting = this.agent(job.agent).waiting;
+        if (["blocked", "complete"].includes(result.progress.status) && waiting?.conversationId === job.root)
+          this.db.prepare("UPDATE agents SET waiting=NULL WHERE id=?").run(job.agent);
+        requireValue(
+          !(result.progress.status === "working" && this.agent(job.agent).waiting),
+          "working_cannot_wait",
+        );
+        // One explicit continuation per conversation. A new decision cancels stale queued intent,
+        // never a currently running turn or a different request. Omission does not start an idle loop.
+        this.db
+          .prepare(
+            "UPDATE jobs SET status='ignored' WHERE agent=? AND channel=? AND root=? AND status='queued' AND json_extract(trigger,'$.type')='goal.continue'",
+          )
+          .run(job.agent, job.channel, job.root);
+        if (
+          result.progress.status === "working" &&
+          !this.agent(job.agent).waiting &&
+          result.memberships.includes(job.channel)
+        ) {
+          this.enqueueSignal(job.agent, job.channel, job.root, {
+            type: "goal.continue",
+            reason: result.progress.reason,
+          });
+          this.db
+            .prepare("UPDATE jobs SET available=? WHERE id=last_insert_rowid()")
+            .run(now + (result.progress.delayMs ?? 1000));
+        }
+      }
       this.db.prepare("UPDATE jobs SET status='done', error=NULL WHERE id=?").run(job.id);
     });
   }
@@ -353,6 +392,7 @@ export class HostStore {
     const agent = this.config.agents.find((a) => a.id === job.agent);
     this.queueOutput(`msn-host-${this.key(job.agent, job.id, "failure")}`, job.agent, job.channel, {
       username: agent.username,
+      ...(agent.personaId ? { personaId: agent.personaId } : {}),
       text: JSON.stringify({
         schema: "msn.host.status.v1",
         hostId: this.config.hostId,

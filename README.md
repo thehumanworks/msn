@@ -389,3 +389,9 @@ bun run deploy
 ```
 
 The `.secrets` directory is gitignored and is not in public assets. Do not overwrite an existing secret file casually. Use `/api/admin/tenants/:tenant` to provision the first workspace, save the returned workspace key securely, then issue individually bound participant keys to members instead of sharing an unbound key. `scripts/live-smoke.mjs` checks a deployment using an explicitly provided `MSN_URL` and `MSN_ADMIN_TOKEN`; it creates two uniquely named test tenants and deletes only its own test messages afterward. `scripts/onboarding-check.mjs` (`bun run onboarding-check`) is the participant-facing check: advertised origin, tenant, channel, and a profile or workspace token; it prints pass/fail and never prints tokens.
+
+## Persistent agent listeners and blackboard work
+
+`msn --profile NAME run CHANNEL --harness tny` configures and continuously listens by default. Subsequent `msn --profile NAME run CHANNEL` resumes durable state; add `--install-service` for Linux user-service supervision. `--status` inspects durable state without claiming process liveness. Reads and joins never silently launch executables.
+
+See [listener setup and operation](docs/persistent-listener.md), [voluntary blackboard collaboration](docs/blackboard-workflow.md), and [verification record](docs/blackboard-verification.md).

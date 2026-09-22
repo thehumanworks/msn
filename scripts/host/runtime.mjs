@@ -123,13 +123,38 @@ export class HostRuntime {
         const current = this.store.agent(agent.id);
         if (
           !current.channels.includes(job.channel) ||
-          message.username === agent.username ||
+          (agent.personaId ? message.personaId === agent.personaId : message.username === agent.username) ||
           (message.to !== undefined && message.to !== agent.username) ||
           diagnostic(message)
         ) {
           this.store.ignore(job);
           return;
         }
+      }
+      let board = null;
+      if (connection.sharedChannel) {
+        const result = await request(
+          connection,
+          `/api/tenants/${connection.tenant}/channels/${job.channel}/board`,
+          signal,
+        );
+        board = result?.board;
+        if (
+          !board ||
+          board.channel !== job.channel ||
+          typeof board.goal !== "string" ||
+          !["active", "paused", "complete"].includes(board.status)
+        )
+          throw new HostError("invalid_board_state");
+        if (board.status === "paused") {
+          this.store.pause(job);
+          return;
+        }
+        if (board.status === "complete") {
+          this.store.ignore(job);
+          return;
+        }
+        this.store.resumeChannel(agent.id, job.channel);
       }
       if (signal.aborted) {
         this.store.requeue(job);
@@ -158,6 +183,8 @@ export class HostRuntime {
           tenant: connection.tenant,
           username: agent.username,
           role: agent.role,
+          description: agent.description,
+          ...(agent.personaId ? { personaId: agent.personaId, sharedChannel: true } : {}),
         },
         permissionMode: "yolo",
         peers: this.store.roster(),
@@ -167,6 +194,7 @@ export class HostRuntime {
         idempotencyKey: `msn-turn-${this.store.key(agent.id, job.id)}`,
         trigger: job.trigger ?? { type: "message", resumed: activation.resumed, eventId: job.event.id },
         message,
+        board,
         state: state.state,
         waiting: state.waiting,
         previousFailure: job.error,
@@ -221,6 +249,7 @@ export class HostRuntime {
       if (
         !result?.message ||
         result.message.username !== agent.username ||
+        (agent.personaId && result.message.personaId !== agent.personaId) ||
         result.message.tenant !== connection.tenant ||
         result.message.channel !== output.channel ||
         result.message.text !== output.body.text

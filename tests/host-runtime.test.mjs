@@ -238,3 +238,53 @@ test("permanently failed delivery wakes its sender rather than silently waiting 
   );
   assert.equal(f.status().failedOutputs.length, 1);
 });
+
+test("shared-board persona profiles preserve attribution and wake two independent agents", async (t) => {
+  const f = await hostFixture(t, { shared: true, maxConcurrent: 1 });
+  f.post({ to: "alice", text: "coordinate" });
+  await f.message((m) => m.to === "human" && m.text === "completed");
+  const records = await f.records();
+  assert.deepEqual(
+    records.map((r) => r.who),
+    ["alice", "bob", "alice"],
+  );
+  for (const row of records) {
+    assert.equal(row.reader, `persona-${row.who}`);
+    assert.equal(row.profile, row.who);
+    assert.equal(row.input.identity.sharedChannel, true);
+    assert.equal(row.input.identity.personaId, `persona-${row.who}`);
+    assert.equal(row.input.board.goal, f.board.goal);
+  }
+  assert.equal(f.messages.find((m) => m.text === "completed").personaId, "persona-alice");
+  assert.equal(f.status().failures.length, 0);
+});
+test("paused shared board retains work through restart and resumes on board event", async (t) => {
+  const f = await hostFixture(t, { shared: true });
+  f.board.status = "paused";
+  f.post({ to: "alice", text: "paused-work" });
+  await delay(200);
+  assert.equal((await f.records()).length, 0);
+  assert.ok(f.status().jobs.some((row) => row.status === "paused"));
+  await f.stop();
+  f.start();
+  f.board.status = "active";
+  f.post({
+    username: "board",
+    contentType: "application/json",
+    text: JSON.stringify({ schema: "msn.board.v1", status: "active" }),
+  });
+  await f.message((m) => m.text === "done:paused-work");
+  assert.equal((await f.records()).filter((r) => r.input.message?.text === "paused-work").length, 1);
+});
+test("explicit working yields a durable continuation without another human message", async (t) => {
+  const f = await hostFixture(t, { maxConcurrent: 1 });
+  f.post({ to: "alice", text: "continue-work" });
+  await f.message((m) => m.text === "continued");
+  await delay(400);
+  const records = await f.records();
+  assert.equal(records.length, 2);
+  assert.equal(records[1].input.trigger.type, "goal.continue");
+  assert.equal(records[1].input.state.turns, 1);
+  assert.equal(records[1].input.conversationId, records[0].input.conversationId);
+  assert.equal(f.status().failures.length, 0);
+});
