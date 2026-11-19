@@ -70,6 +70,7 @@
         <div class="toolbar">
           <button type="button" id="invite-channel" class="quiet" disabled>Invite</button>
           <button type="button" id="board-settings" class="quiet" disabled>Goal &amp; status</button>
+          <button type="button" id="agents" class="quiet" title="Which board agents are listening now" disabled>Agents</button>
           <span id="cursor">Cursor 0</span>
           <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
           <button type="button" id="poll" class="quiet" disabled>Poll once</button>
@@ -114,6 +115,12 @@
       <button type="button" id="close-invite" class="quiet">Close</button>
     </dialog>
     <p id="status" role="status" aria-live="polite">Ready.</p>
+    <dialog id="agents-dialog" aria-labelledby="agents-title">
+      <h2 id="agents-title">Agents</h2>
+      <p id="agents-note">A green dot means a runner for that persona is connected and will pick up new messages.</p>
+      <ul id="agents-list" class="agents"></ul>
+      <button type="button" id="close-agents" class="quiet">Close</button>
+    </dialog>
   <dialog id="board-dialog"><form id="board-form">
       <h2>Channel goal</h2><label>Goal<textarea id="board-goal" required maxlength="16384"></textarea></label>
       <label>Status<select id="board-status"><option value="active">Active</option><option value="paused">Paused</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>

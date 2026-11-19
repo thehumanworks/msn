@@ -68,6 +68,7 @@ export async function hostFixture(t, options = {}) {
       key: req.headers["idempotency-key"],
       who,
       wait: Number(url.searchParams.get("wait")),
+      listener: url.searchParams.get("listener"),
     });
     changes.emit("request");
     const respond = (value, status = 200) => {

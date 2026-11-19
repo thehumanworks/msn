@@ -1330,3 +1330,68 @@ test("every control stays reachable on a landscape phone", async ({ page, reques
   await expect(page.locator("#welcome")).toBeVisible();
   expect(await onScreen("#entry-submit")).toBe(true);
 });
+
+test("the Agents list shows which board personas are listening and when each last acted", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship the presence list" },
+      })
+    ).status(),
+  ).toBe(201);
+  expect((await request.put(`${t.path}/channels/plain`, { headers: t.headers })).status()).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  for (const [id, displayName] of [
+    ["builder", "builder"],
+    ["reviewer", "reviewer"],
+  ])
+    await request.put(`${t.path}/channels/work/personas/${id}`, { headers: shared, data: { displayName } });
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: shared,
+    data: { username: "reviewer", text: "Review notes posted" },
+  });
+  const head = await (await request.get(`${t.path}/events?wait=0`, { headers: shared })).json();
+  // The builder's runner holds its long poll open, tagged with its persona.
+  const poll = request.get(`${t.path}/events?wait=20&after=${head.nextCursor}&listener=builder`, {
+    headers: shared,
+  });
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`${t.path}/channels/work/personas`, { headers: shared })).json())
+          .personas[0].listening,
+    )
+    .toBe(true);
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#agents").click();
+  await expect(page.locator("#agents-title")).toHaveText("Agents in # work");
+  const rows = page.locator("#agents-list li");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveClass("listening");
+  await expect(rows.nth(0)).toContainText("builder");
+  await expect(rows.nth(0)).toContainText("Listening · no messages yet");
+  await expect(rows.nth(1)).toHaveClass("idle");
+  await expect(rows.nth(1)).toContainText("Never listened · last acted just now");
+  await page.screenshot({ path: testInfo.outputPath("agents-listening.png") });
+  await page.locator("#close-agents").click();
+  await expect(page.locator("#agents-dialog")).not.toBeVisible();
+  // A channel without a board has no personas; the list explains that instead of opening empty.
+  await openChannel(page, "plain");
+  await page.locator("#agents").click();
+  await expect(page.locator("#status")).toHaveText(
+    "This channel is not a board, so it has no agent personas.",
+  );
+  await expect(page.locator("#agents-dialog")).not.toBeVisible();
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: shared,
+    data: { username: "builder", text: "wake" },
+  });
+  expect((await poll).status()).toBe(200);
+});

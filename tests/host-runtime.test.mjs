@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { RECOVERY_GRACE_MS } from "../scripts/host/protocol.mjs";
-import { Pulse } from "../scripts/host/runtime.mjs";
+import { HostRuntime, Pulse } from "../scripts/host/runtime.mjs";
 import { validateHostPage } from "../scripts/host/transport.mjs";
 import { hostFixture } from "./support/host-fixture.mjs";
 
@@ -257,6 +257,15 @@ test("shared-board persona profiles preserve attribution and wake two independen
   }
   assert.equal(f.messages.find((m) => m.text === "completed").personaId, "persona-alice");
   assert.equal(f.status().failures.length, 0);
+  // Long polls report listening as the agent's own persona; the startup catch-up read does not.
+  const polls = f.requests.filter((r) => r.path.endsWith("/events"));
+  for (const poll of polls) assert.equal(poll.listener, poll.wait ? `persona-${poll.who}` : null);
+  assert.ok(polls.some((poll) => poll.wait && poll.listener));
+});
+test("exact-name participants do not tag their event polls as board listeners", async (t) => {
+  const f = await hostFixture(t);
+  await f.request((r) => r.path.endsWith("/events") && r.wait > 0);
+  assert.ok(f.requests.filter((r) => r.path.endsWith("/events")).every((r) => r.listener === null));
 });
 test("paused shared board retains work through restart and resumes on board event", async (t) => {
   const f = await hostFixture(t, { shared: true });
@@ -287,4 +296,37 @@ test("explicit working yields a durable continuation without another human messa
   assert.equal(records[1].input.state.turns, 1);
   assert.equal(records[1].input.conversationId, records[0].input.conversationId);
   assert.equal(f.status().failures.length, 0);
+});
+
+test("one scheduling pass claims and computes its wake deadline from the same clock reading", async () => {
+  // Regression: claim at T-1 ("not yet due") then deadline at T ("only rows due after T") lost a
+  // row due exactly at T, so the host slept with no timer until an unrelated notify.
+  const seen = [];
+  const controller = new AbortController();
+  const store = {
+    agent: () => ({ cursor: 0, initialized: true }),
+    expire: (now) => seen.push(["expire", now]),
+    claimOutput: (_agent, now) => {
+      seen.push(["claimOutput", now]);
+      return null;
+    },
+    claim: (_agent, _timeout, now) => {
+      seen.push(["claim", now]);
+      return null;
+    },
+    nextDeadline: (now) => {
+      seen.push(["nextDeadline", now]);
+      controller.abort();
+      return null;
+    },
+  };
+  const config = { agents: [{ id: "solo", channels: ["work"] }], maxConcurrent: 1 };
+  const connections = new Map([["solo", { origin: "http://127.0.0.1:9", tenant: "team", token: "x" }]]);
+  await new HostRuntime(config, store, connections, { log: () => {} }).run(controller.signal);
+  assert.deepEqual(
+    seen.map(([name]) => name),
+    ["expire", "claimOutput", "claim", "nextDeadline"],
+  );
+  assert.equal(typeof seen[0][1], "number");
+  for (const [, now] of seen) assert.equal(now, seen[0][1]);
 });

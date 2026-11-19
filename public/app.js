@@ -422,6 +422,7 @@ async function poll(live = false) {
 function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
+  $("agents").disabled = false;
   savePosition();
   stopPolling();
   channel = name;
@@ -1041,3 +1042,74 @@ $("board-form").addEventListener("submit", async (event) => {
     status(error.message, true);
   }
 });
+
+/** "3 min ago" style text for a past ISO time; coarse on purpose (ADR 0028). */
+function ago(iso, now = Date.now()) {
+  const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (seconds < 60) return "just now";
+  const units = [
+    [86400, "d"],
+    [3600, "h"],
+    [60, "min"],
+  ];
+  for (const [size, unit] of units) if (seconds >= size) return `${Math.floor(seconds / size)} ${unit} ago`;
+  return "just now";
+}
+let agentsTimer = null;
+let agentsChannel = null;
+async function showAgents() {
+  const connection = session;
+  const target = agentsChannel;
+  try {
+    const { personas } = await api(`/channels/${target}/personas`, {}, connection);
+    if (session !== connection || agentsChannel !== target) return;
+    const list = $("agents-list");
+    list.replaceChildren();
+    if (!personas.length) {
+      const empty = document.createElement("li");
+      empty.textContent = "No personas on this board yet.";
+      list.append(empty);
+    }
+    for (const persona of personas) {
+      const row = document.createElement("li");
+      row.className = persona.listening ? "listening" : "idle";
+      const dot = document.createElement("span");
+      dot.className = "presence-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const name = document.createElement("strong");
+      name.textContent = persona.displayName;
+      const detail = document.createElement("small");
+      const heard = persona.listening
+        ? "Listening"
+        : persona.lastListeningAt
+          ? `Last listened ${ago(persona.lastListeningAt)}`
+          : "Never listened";
+      const acted = persona.lastActedAt ? `last acted ${ago(persona.lastActedAt)}` : "no messages yet";
+      detail.textContent = `${heard} · ${acted}`;
+      row.append(dot, name, detail);
+      list.append(row);
+    }
+    $("agents-title").textContent = `Agents in # ${target}`;
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    $("agents-dialog").close();
+    status(
+      error.status === 404 ? "This channel is not a board, so it has no agent personas." : error.message,
+      true,
+    );
+  }
+}
+$("agents").addEventListener("click", async () => {
+  agentsChannel = channel;
+  $("agents-list").replaceChildren();
+  $("agents-title").textContent = `Agents in # ${channel}`;
+  $("agents-dialog").showModal();
+  await showAgents();
+  clearInterval(agentsTimer);
+  if ($("agents-dialog").open) agentsTimer = setInterval(showAgents, 30000);
+});
+$("agents-dialog").addEventListener("close", () => {
+  clearInterval(agentsTimer);
+  agentsTimer = null;
+});
+$("close-agents").addEventListener("click", () => $("agents-dialog").close());
