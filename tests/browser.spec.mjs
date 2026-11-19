@@ -337,6 +337,9 @@ test("editing an uncertain recipient creates a new logical send and retry key", 
   await expect(page.getByLabel("To", { exact: true })).toHaveValue(" agent-one ");
   await page.getByLabel("To", { exact: true }).fill("agent-two");
   await page.getByRole("button", { name: "Send message" }).click();
+  // Wait for the second send to finish (the draft clears on success) before reading the server.
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("");
   expect(keys).toHaveLength(2);
   expect(keys[1]).not.toBe(keys[0]);
   const result = await request.get(`${t.path}/channels/general/messages`, { headers: t.headers });

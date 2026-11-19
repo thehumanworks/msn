@@ -253,6 +253,9 @@ mod tests {
             .arg(&path)
             .args(["work", "--status"])
             .env_clear()
+            // Keep only PATH so `node` resolves the same way the real CLI finds it;
+            // without it, lookup falls back to /bin:/usr/bin and misses toolcache installs.
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("XDG_CONFIG_HOME", &base)
             .output()
             .expect("Node 24+ required");
