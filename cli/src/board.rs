@@ -12,6 +12,7 @@ use crate::cursor::CursorLock;
 use crate::error::CliError;
 use crate::identity::{fetch_identity, validate_username};
 use crate::profile::{self, Profile};
+use crate::templates;
 
 fn value(raw: RawResponse) -> Result<Value, CliError> {
     classify(raw.status, &raw.body)?;
@@ -70,6 +71,59 @@ fn register(client: &MsnClient, p: &Profile, channel: &str) -> Result<Value, Cli
         &[],
         Some(&json!({"displayName":p.username})),
     )?)
+}
+
+fn summary(name: &str, profile: &Profile, role: &str) -> Value {
+    json!({"profile":name,"username":profile.username,"personaId":profile.reader,"role":role})
+}
+
+/// Save a persona profile that shares `p`'s channel credential, and register it. Idempotent.
+fn add_persona(
+    client: &MsnClient,
+    url: &url::Url,
+    p: &Profile,
+    channel: &str,
+    name: &str,
+    id: Option<&String>,
+    save_as: &str,
+) -> Result<Profile, CliError> {
+    slug(channel)?;
+    let identity = fetch_identity(url, &p.tenant, &p.token)?;
+    if identity["sharedChannel"] != true || identity["channel"] != *channel {
+        return Err(CliError::usage(
+            "Use the shared channel profile when adding personas.",
+        ));
+    }
+    profile::ensure_directory(&profile::profile_directory()?)?;
+    let _lock = CursorLock::acquire(&profile::profile_path(save_as)?)?;
+    let persona = if profile::profile_path(save_as)?.exists() {
+        let existing = profile::load(save_as)?;
+        if existing.url != p.url
+            || existing.tenant != p.tenant
+            || existing.token != p.token
+            || existing.username != *name
+            || id.is_some_and(|id| id != &existing.reader)
+        {
+            return Err(CliError::usage(
+                "Persona profile already exists with different settings.",
+            ));
+        }
+        existing
+    } else {
+        let persona = Profile {
+            username: validate_username(name)?,
+            reader: id
+                .cloned()
+                .unwrap_or_else(|| format!("persona-{}", Uuid::new_v4().simple())),
+            activity: None,
+            ..p.clone()
+        };
+        slug(&persona.reader)?;
+        save(save_as, &persona)?;
+        persona
+    };
+    register(client, &persona, channel)?;
+    Ok(persona)
 }
 
 pub fn execute(cli: &Cli) -> Result<(), CliError> {
@@ -206,6 +260,25 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
         announce(save_as, &p);
         return Ok(());
     }
+    if let Command::Board {
+        command: BoardCommand::Templates,
+    } = &cli.command
+    {
+        let list = templates::all()
+            .into_iter()
+            .map(|t| {
+                json!({
+                    "id": t.id,
+                    "title": t.title,
+                    "summary": t.summary,
+                    "goal": t.goal,
+                    "personas": t.personas.iter().map(|p| json!({"name": p.name, "role": p.role})).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", json!({ "templates": list }));
+        return Ok(());
+    }
     let p = selected(cli)?;
     let base = format!("/api/tenants/{}", p.tenant);
     match &cli.command {
@@ -222,15 +295,37 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 BoardCommand::Create {
                     channel,
                     goal,
+                    template,
                     save_as,
                 },
         } => {
             slug(channel)?;
-            profile::validate_name(save_as)?;
+            let template = template.as_deref().map(templates::find).transpose()?;
             let name = if cli.username_from_flag {
                 p.username.clone()
             } else {
                 "lead".into()
+            };
+            let save_as = &save_as.clone().unwrap_or_else(|| format!("{channel}-lead"));
+            profile::validate_name(save_as)
+                .map_err(|_| CliError::usage("Use --save-as NAME or a shorter channel name."))?;
+            // Profile names for the template's other personas, checked before anything is created.
+            let members = template
+                .iter()
+                .flat_map(|t| t.personas.iter().skip(1))
+                .map(|persona| {
+                    let profile_name = format!("{channel}-{}", persona.name);
+                    profile::validate_name(&profile_name)
+                        .map(|()| (persona.name.clone(), persona.role.clone(), profile_name))
+                        .map_err(|_| {
+                            CliError::usage("Use a shorter channel name for this template.")
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let goal = match (&template, goal) {
+                (Some(t), goal) => templates::goal(t, goal.as_deref().unwrap_or(&t.goal), &name),
+                (None, Some(goal)) => goal.clone(),
+                (None, None) => return Err(CliError::usage("Use --goal or --template.")),
             };
             profile::ensure_directory(&profile::profile_directory()?)?;
             let _lock = CursorLock::acquire(&profile::profile_path(save_as)?)?;
@@ -264,7 +359,33 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 Some(&json!({"credential":agent.token,"goal":goal})),
             )?)?;
             register(&client, &agent, channel)?;
-            announce(save_as, &agent);
+            let Some(template) = &template else {
+                announce(save_as, &agent);
+                return Ok(());
+            };
+            drop(_lock);
+            let mut profiles = vec![summary(save_as, &agent, &template.personas[0].role)];
+            for (persona, role, profile_name) in members {
+                let added = add_persona(
+                    &client,
+                    &url,
+                    &agent,
+                    channel,
+                    &persona,
+                    None,
+                    &profile_name,
+                )?;
+                profiles.push(summary(&profile_name, &added, &role));
+            }
+            println!(
+                "{}",
+                json!({
+                    "board": channel,
+                    "template": template.id,
+                    "profiles": profiles,
+                    "next": format!("Start each agent on a host that should run it: msn --profile PROFILE run {channel} --harness codex|claude, or -- /path/to/adapter"),
+                })
+            );
         }
         Command::Board {
             command:
@@ -377,42 +498,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     save_as,
                 },
         } => {
-            slug(channel)?;
-            let identity = fetch_identity(&url, &p.tenant, &p.token)?;
-            if identity["sharedChannel"] != true || identity["channel"] != *channel {
-                return Err(CliError::usage(
-                    "Use the shared channel profile when adding personas.",
-                ));
-            }
-            profile::ensure_directory(&profile::profile_directory()?)?;
-            let _lock = CursorLock::acquire(&profile::profile_path(save_as)?)?;
-            let persona = if profile::profile_path(save_as)?.exists() {
-                let existing = profile::load(save_as)?;
-                if existing.url != p.url
-                    || existing.tenant != p.tenant
-                    || existing.token != p.token
-                    || existing.username != *name
-                    || id.as_ref().is_some_and(|id| id != &existing.reader)
-                {
-                    return Err(CliError::usage(
-                        "Persona profile already exists with different settings.",
-                    ));
-                }
-                existing
-            } else {
-                let persona = Profile {
-                    username: validate_username(name)?,
-                    reader: id
-                        .clone()
-                        .unwrap_or_else(|| format!("persona-{}", Uuid::new_v4().simple())),
-                    activity: None,
-                    ..p
-                };
-                slug(&persona.reader)?;
-                save(save_as, &persona)?;
-                persona
-            };
-            register(&client, &persona, channel)?;
+            let persona = add_persona(&client, &url, &p, channel, name, id.as_ref(), save_as)?;
             announce(save_as, &persona);
         }
         Command::Persona {

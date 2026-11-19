@@ -15,6 +15,7 @@ pub mod profile;
 pub mod runner;
 pub mod task_client;
 pub mod tasks;
+pub mod templates;
 pub mod workspace;
 
 use std::fs;

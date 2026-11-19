@@ -707,3 +707,67 @@ body > footer {
     padding: 12px 24px;
   }
 }
+/* Board templates: an owner starts a ready team in one step. */
+.template-start {
+  margin: 0 8px 4px;
+  align-self: flex-start;
+  text-align: left;
+  color: var(--accent);
+}
+.template-choices {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.template-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  cursor: pointer;
+}
+.template-choice:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.template-choice input {
+  accent-color: var(--accent);
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  margin: 3px 0 0;
+  flex: none;
+}
+.template-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.template-choice strong {
+  font-size: 15px;
+}
+.template-team {
+  font-family: var(--mono);
+}
+#template-error {
+  margin: 0;
+  color: var(--error);
+}
+#template-commands {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: 12px / 1.6 var(--mono);
+  /* Commands are pasted into a shell: never break one inside a word. */
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--text);
+}

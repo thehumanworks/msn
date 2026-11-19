@@ -136,6 +136,53 @@ try {
   await cli(["--profile", "lead", "create", "outside"], 3);
   const roster = await cli(["--profile", "reviewer", "persona", "list", "work"]);
   assert.equal(roster.personas.length, 2);
+
+  // A template creates the board, every persona and a profile for each, in one command.
+  const listed = await cli(["board", "templates"]);
+  assert.deepEqual(
+    listed.templates.map((t) => t.id),
+    ["solo", "lead-reviewer", "lead-workers"],
+  );
+  const team = await cli(["board", "create", "team", "--template", "lead-workers"]);
+  assert.deepEqual(
+    team.profiles.map((p) => [p.profile, p.username]),
+    [
+      ["team-lead", "lead"],
+      ["team-worker-1", "worker-1"],
+      ["team-worker-2", "worker-2"],
+      ["team-worker-3", "worker-3"],
+    ],
+  );
+  assert.deepEqual(await cli(["board", "create", "team", "--template", "lead-workers"]), team);
+  const teamRoster = await cli(["--profile", "team-worker-2", "persona", "list", "team"]);
+  assert.deepEqual(teamRoster.personas.map((p) => p.displayName).sort(), [
+    "lead",
+    "worker-1",
+    "worker-2",
+    "worker-3",
+  ]);
+  const teamStart = await cli(["--profile", "team-worker-3", "start", "team"]);
+  assert.match(
+    teamStart.board.goal,
+    /^Split the project into tasks, finish every task and verify the result\.\n\nTeam \(Lead and three workers\):\n- lead: Splits/,
+  );
+  assert.match(teamStart.board.goal, /\n- worker-3: Claims a task/);
+  await cli([
+    "board",
+    "create",
+    "pair",
+    "--template",
+    "lead-reviewer",
+    "--goal",
+    "Ship the docs",
+    "--save-as",
+    "pair-lead",
+  ]);
+  assert.match(
+    (await cli(["--profile", "pair-reviewer", "board", "show", "pair"])).board.goal,
+    /^Ship the docs\n\nTeam \(Lead and reviewer\):/,
+  );
+  await cli(["board", "create", "nope", "--template", "unknown", "--save-as", "nope-lead"], 2);
   const entered = await cli(["--profile", "lead", "start", "work"]);
   assert.equal(entered.board.goal, "Finish the integration goal");
   assert.equal(entered.identity.sharedChannel, true);
