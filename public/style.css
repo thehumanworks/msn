@@ -965,3 +965,24 @@ body > footer {
     animation: none;
   }
 }
+
+/* Watch-only keys (ADR 0039) cannot post, invite or change a board; the server refuses it anyway. */
+.watching #send-form,
+.watching #invite-channel,
+.watching #invite-workspace,
+.watching #board-settings,
+.watching #channel-form,
+.watching #start-template {
+  display: none;
+}
+.watch-note {
+  display: none;
+  margin: 0;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.watching .watch-note {
+  display: block;
+}

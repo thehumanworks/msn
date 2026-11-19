@@ -240,6 +240,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             channel,
             uses,
             expires_in,
+            watch,
             for_agent: false,
             ..
         } => {
@@ -253,12 +254,28 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             }
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
-            let data = response(MsnClient::new(&parse_origin(&cli.url)?)?.post_json(
+            let mut request =
+                json!({ "channel": channel, "maxUses": uses, "expiresIn": expires_in });
+            if *watch {
+                request["watch"] = json!(true);
+            }
+            let client = MsnClient::new(&parse_origin(&cli.url)?)?;
+            let data = response(client.post_json(
                 &format!("/api/tenants/{tenant}/invites"),
                 &token,
                 &[],
-                &json!({ "channel": channel, "maxUses": uses, "expiresIn": expires_in }),
+                &request,
             )?)?;
+            if *watch && data["watch"] != json!(true) {
+                // A server without watch-only invitations ignores the field and issues full
+                // access. Never hand that link out: revoke it before reporting the error.
+                if let Some(id) = data["id"].as_str() {
+                    let _ = client.delete(&format!("/api/tenants/{tenant}/invites/{id}"), &token);
+                }
+                return Err(CliError::generic(
+                    "This server does not support watch-only invitations; nothing was created.",
+                ));
+            }
             println!("{data}");
             Ok(())
         }

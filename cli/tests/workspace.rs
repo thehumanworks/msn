@@ -180,6 +180,69 @@ fn join_code_and_invite_options_follow_the_shared_api() {
 }
 
 #[test]
+fn watch_invite_asks_for_read_only_and_revokes_a_full_access_fallback() {
+    let home = home();
+    let id = "11111111-1111-4111-8111-111111111111";
+    let server = MockServer::spawn(vec![
+        issued(),
+        stats(),
+        Scripted::json(
+            201,
+            &format!(r#"{{"id":"{id}","url":"https://example.test/#invite=code","watch":true}}"#),
+        ),
+        // An older server ignores `watch` and answers with an ordinary invitation.
+        Scripted::json(
+            201,
+            &format!(r#"{{"id":"{id}","url":"https://example.test/#invite=code"}}"#),
+        ),
+        Scripted::empty(204),
+    ]);
+    value(&run(
+        &home,
+        &[
+            "--url",
+            &server.url(),
+            "join",
+            &format!("team.{}", "b".repeat(64)),
+            "--username",
+            "alice",
+            "--save-as",
+            "agent",
+        ],
+    ));
+    let watch = ["--profile", "agent", "invite", "board", "--watch"];
+    assert_eq!(value(&run(&home, &watch))["watch"], json!(true));
+    let refused = run(&home, &watch);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("watch-only"));
+    let requests = server.recorded();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[2].body).unwrap(),
+        json!({"channel":"board","maxUses":25,"expiresIn":86400,"watch":true})
+    );
+    assert_eq!(requests[4].method, "DELETE");
+    assert_eq!(requests[4].path, format!("/api/tenants/team/invites/{id}"));
+    assert!(
+        !run(
+            &home,
+            &[
+                "--profile",
+                "agent",
+                "invite",
+                "board",
+                "--watch",
+                "--for-agent",
+                "--name",
+                "x"
+            ]
+        )
+        .status
+        .success()
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn failed_refresh_keeps_issued_credentials_and_revocation_clears_cached_activity() {
     let home = home();
     let server = MockServer::spawn(vec![

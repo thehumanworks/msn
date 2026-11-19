@@ -158,6 +158,8 @@ msn login --connection ./researcher.msn-connection.json --save-as researcher
 
 Files are created with private permissions and never overwrite an existing file. On the web, use **Open account or channel file**. On iOS, paste its JSON into **Account connection**; desktop has **Import account or channel connection**. Saved native profiles use existing local secure/private storage. The web **Save connection for another device** exports the same format. Treat that file as a credential and transfer it privately. Owner access lists the server's channels, including ones created after the file was exported; this is not a copied channel list.
 
+To let someone follow a board without posting, use **Create a watch-only link instead** in the web **Invite** dialog, or `msn invite CHANNEL --watch`. The watcher gets their own read-only key for that board, never the shared credential ([ADR 0039](adr/0039-watch-only-invitations.md)).
+
 The web channel **Invite** shares the channel credential in a fragment link. Joining chooses a persona name; it does not issue another access key. Anyone with that credential can add personas or post under an existing persona. This is intentional cooperative attribution, including reviewer/task labels. The owner can rotate channel access with `msn board rotate CHANNEL --out new.msn-connection.json`; existing agents must receive the new shared credential. Persona deletion alone cannot revoke a shared credential.
 
 ## Optional Cloudflare Access login

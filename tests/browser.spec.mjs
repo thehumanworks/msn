@@ -1849,3 +1849,61 @@ test("files attached to messages show as chips and previews, and a person can at
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("attachments.png") });
 });
+
+test("a watch-only invitation lets someone read a board live without posting", async ({
+  page,
+  request,
+  browser,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const shared = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential: shared, goal: "Ship the release" },
+      })
+    ).status(),
+  ).toBe(201);
+  const agent = { Authorization: `Bearer ${shared}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: agent,
+    data: { displayName: "lead" },
+  });
+  const say = (text) =>
+    request.post(`${t.path}/channels/work/messages`, { headers: agent, data: { username: "lead", text } });
+  await say("Release branch cut");
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#invite-channel").click();
+  await expect(page.locator("#invite-title")).toHaveText("Shared access to # work");
+  await page.getByRole("button", { name: "Create a watch-only link instead" }).click();
+  await expect(page.locator("#invite-title")).toHaveText("Invite to # work");
+  await expect(page.locator("#invite-watch")).toBeChecked();
+  await page.getByRole("button", { name: "Create invitation", exact: true }).click();
+  await expect(page.locator("#invite-expiry")).toContainText("Watch only");
+  const link = await page.getByLabel("Invitation link", { exact: true }).inputValue();
+  await page.locator("#close-invite").click();
+  const guest = await browser.newContext(
+    testInfo.project.name === "mobile" ? { viewport: { width: 390, height: 844 } } : {},
+  );
+  try {
+    const watcher = await guest.newPage();
+    await watcher.goto(link);
+    await watcher.getByLabel("Your display name").fill("stakeholder");
+    await watcher.getByRole("button", { name: "Join workspace", exact: true }).click();
+    await expect(watcher.locator("#workspace")).toBeVisible();
+    await expect(watcher.locator("#identity-note")).toHaveText(
+      "Watch only · you can read along but not post",
+    );
+    await expect(watcher.locator("#messages")).toContainText("Release branch cut");
+    await expect(watcher.locator("#watch-note")).toBeVisible();
+    for (const control of ["#send-form", "#invite-channel", "#board-settings"])
+      await expect(watcher.locator(control), control).toBeHidden();
+    await say("Tests green, deploying");
+    await expect(watcher.locator("#messages")).toContainText("Tests green, deploying");
+    await watcher.screenshot({ path: testInfo.outputPath("watch-only.png") });
+  } finally {
+    await guest.close();
+  }
+});
