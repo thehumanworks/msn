@@ -15,8 +15,15 @@ import {
   idempotencyKey,
   integer,
   json,
+  type LabelChange,
+  type LabelFilter,
+  type Labels,
+  labelChange,
+  labelFilters,
+  MAX_LABELS,
   newToken,
   optionalBody,
+  labels as parseLabels,
   recipient,
   replyTarget,
   slug,
@@ -45,6 +52,8 @@ export type Message = {
   correlationId?: string;
   to?: string;
   personaId?: string;
+  /** key=value labels (ADR 0032); absent from JSON when the message has none. */
+  labels?: Labels;
 };
 /** Optional annotation input on send; `undefined` means "not supplied". */
 export type Correlation = { replyTo?: number; correlationId?: string; to?: string };
@@ -81,6 +90,8 @@ const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
 const SCHEMA_VERSION = 14;
+/** Lifetime label changes per workspace; each one writes a journal event (ADR 0032). */
+const MAX_LABEL_CHANGES = 100000;
 /** A runner counts as listening this long after its last event poll ended (ADR 0028). */
 export const LISTENING_GRACE_MS = 60_000;
 /** `persona_presence.lastListeningAt` is written at most this often per persona while it polls. */
@@ -98,7 +109,7 @@ type InviteRow = {
 const MAX_SNAPSHOTS = 1000;
 // Exact upper bound: every message can be created and later deleted, every channel and every
 // snapshot emits one event. Fail-closed capacity, never reached while other quotas hold.
-const MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS;
+const MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES;
 const SNAPSHOT_COLUMNS =
   "channel, version, username, text, coversThrough, historyRevision, createdAt, invalidated";
 type SnapshotRow = {
@@ -116,7 +127,12 @@ function toSnapshot(row: SnapshotRow, tenant: string) {
   return { ...snapshot, tenant, invalidated: Boolean(invalidated) };
 }
 
-export type EventType = "channel.created" | "message.created" | "message.deleted" | "snapshot.published";
+export type EventType =
+  | "channel.created"
+  | "message.created"
+  | "message.deleted"
+  | "message.labeled"
+  | "snapshot.published";
 export type CoordinationEvent = {
   id: number;
   tenant: string;
@@ -248,7 +264,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS channel_messages ON messages(channel, deleted, id);
         CREATE TABLE IF NOT EXISTS usage (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), messages INTEGER NOT NULL, bytes INTEGER NOT NULL);
-        INSERT OR IGNORE INTO usage VALUES (1, 0, 0);
+        INSERT OR IGNORE INTO usage(singleton, messages, bytes) VALUES (1, 0, 0);
         CREATE TABLE IF NOT EXISTS channel_history (
           channel TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0
         );
@@ -294,6 +310,11 @@ export class MsnDurableObject extends DurableObject<Env> {
           generation INTEGER NOT NULL, holder TEXT, claimedAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
           PRIMARY KEY(channel, reader)
         );
+        CREATE TABLE IF NOT EXISTS message_labels (
+          channel TEXT NOT NULL, messageId INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+          updatedAt TEXT NOT NULL, PRIMARY KEY(channel, messageId, key)
+        );
+        CREATE INDEX IF NOT EXISTS label_values ON message_labels(channel, key, value, messageId);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -312,6 +333,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["access_keys", "owner_access", "INTEGER NOT NULL DEFAULT 0"],
         ["access_keys", "shared_channel", "INTEGER NOT NULL DEFAULT 0"],
         ["messages", "personaId", "TEXT"],
+        ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
         if (
           !ctx.storage.sql
@@ -362,8 +384,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         // v11 → v12: owner push subscriptions and the workspace's VAPID key (ADR 0029). Both tables
         // are created above and start empty, so push stays off until an owner device subscribes.
         if (version < 12) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (12)");
-        // v13 is reserved for message labels (ADR 0032), whose table is created idempotently above, so
-        // its marker is safe to record in either merge order; a fresh database records it too.
+        // v12 → v13: key=value message labels (ADR 0032). The table and usage.labelChanges are
+        // created above; existing messages start with no labels.
         if (version < 13) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (13)");
         // v13 → v14: resumable processing cursors (ADR 0034). The table is created above and starts
         // empty; agents that never opt in keep local-only progress.
@@ -910,16 +932,21 @@ export class MsnDurableObject extends DurableObject<Env> {
     for (const waiter of this.eventWaiters) waiter.wake();
   }
 
-  private eventsPage(tenant: string, channel: string | null, after: number, limit: number) {
+  /**
+   * `labels` opts in to `message.labeled` events. Clients built before ADR 0032 reject unknown
+   * event types, so they never receive one unless they ask.
+   */
+  private eventsPage(tenant: string, channel: string | null, after: number, limit: number, labels = false) {
+    const types = labels ? "" : " AND type != 'message.labeled'";
     const rows = (
       channel === null
         ? this.ctx.storage.sql.exec<EventRow>(
-            `SELECT ${EVENT_COLUMNS} FROM events WHERE id > ? ORDER BY id LIMIT ?`,
+            `SELECT ${EVENT_COLUMNS} FROM events WHERE id > ?${types} ORDER BY id LIMIT ?`,
             after,
             limit + 1,
           )
         : this.ctx.storage.sql.exec<EventRow>(
-            `SELECT ${EVENT_COLUMNS} FROM events WHERE channel = ? AND id > ? ORDER BY id LIMIT ?`,
+            `SELECT ${EVENT_COLUMNS} FROM events WHERE channel = ? AND id > ?${types} ORDER BY id LIMIT ?`,
             channel,
             after,
             limit + 1,
@@ -939,8 +966,9 @@ export class MsnDurableObject extends DurableObject<Env> {
     limit: number,
     wait: number,
     listener: string | null = null,
+    labels = false,
   ): Promise<Response> | Response {
-    const page = this.eventsPage(tenant, channel, after, limit);
+    const page = this.eventsPage(tenant, channel, after, limit, labels);
     // A catch-up read (wait=0) is not listening; a long poll that returns at once still is.
     const key = listener && channel && wait ? JSON.stringify([channel, listener]) : null;
     if (key && channel && listener && page.events.length) this.touchListener(key, channel, listener, 0);
@@ -964,7 +992,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (finished) return;
         try {
           this.authorize(hash); // Rotation and revocation abort already-pending polls, too.
-          const next = this.eventsPage(tenant, channel, after, limit);
+          const next = this.eventsPage(tenant, channel, after, limit, labels);
           finished = true;
           cleanup();
           resolve(
@@ -986,7 +1014,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             finish();
             return;
           }
-          if (this.eventsPage(tenant, channel, after, limit).events.length) finish();
+          if (this.eventsPage(tenant, channel, after, limit, labels).events.length) finish();
         },
       };
       const abort = () => finish(true);
@@ -998,17 +1026,172 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
-  private page(tenant: string, channel: string, after: number, limit: number) {
+  private page(
+    tenant: string,
+    channel: string,
+    after: number,
+    limit: number,
+    filters: LabelFilter[] = [],
+    before = Number.MAX_SAFE_INTEGER,
+  ) {
+    const exists = (filter: LabelFilter) =>
+      `EXISTS (SELECT 1 FROM message_labels l WHERE l.channel = messages.channel AND l.messageId = messages.id AND l.key = ?${
+        filter.values ? ` AND l.value IN (${filter.values.map(() => "?").join(", ")})` : ""
+      })`;
+    const params = (filter: LabelFilter) => [filter.key, ...(filter.values ?? [])];
+    let rows: MessageRow[];
+    if (!filters.length) {
+      rows = this.ctx.storage.sql
+        .exec<MessageRow>(
+          `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? AND id < ? ORDER BY id LIMIT ?`,
+          channel,
+          after,
+          before,
+          limit + 1,
+        )
+        .toArray();
+    } else {
+      // Drive the scan from the label_values index, so its cost follows how many messages carry
+      // the label, not how long the channel is. A key=value filter is the most selective driver.
+      const driverIndex = Math.max(
+        0,
+        filters.findIndex((filter) => filter.values),
+      );
+      const driver = filters[driverIndex];
+      const rest = filters.filter((_, index) => index !== driverIndex);
+      const columns = MESSAGE_COLUMNS.split(", ")
+        .map((column) => `messages.${column}`)
+        .join(", ");
+      rows = this.ctx.storage.sql
+        .exec<MessageRow>(
+          `SELECT ${columns} FROM message_labels d INDEXED BY label_values JOIN messages ON messages.id = d.messageId
+           WHERE d.channel = ? AND d.key = ?${driver.values ? ` AND d.value IN (${driver.values.map(() => "?").join(", ")})` : ""}
+           AND d.messageId > ? AND d.messageId < ? AND messages.channel = d.channel AND messages.deleted = 0${rest
+             .map((filter) => ` AND ${exists(filter)}`)
+             .join("")}
+           ORDER BY d.messageId LIMIT ?`,
+          channel,
+          ...params(driver),
+          after,
+          before,
+          ...rest.flatMap(params),
+          limit + 1,
+        )
+        .toArray();
+    }
+    const messages = this.withLabels(
+      channel,
+      rows.slice(0, limit).map((row) => toMessage(row, tenant)),
+    );
+    return { messages, nextCursor: messages.at(-1)?.id ?? after, hasMore: rows.length > limit };
+  }
+
+  /** Adds each message's current labels; one range query per page. */
+  private withLabels(channel: string, messages: Message[]): Message[] {
+    if (!messages.length) return messages;
+    const byId = new Map(messages.map((message) => [message.id, message]));
     const rows = this.ctx.storage.sql
-      .exec<MessageRow>(
-        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
+      .exec<{ messageId: number; key: string; value: string }>(
+        "SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId BETWEEN ? AND ? ORDER BY messageId, key",
         channel,
-        after,
-        limit + 1,
+        messages[0].id,
+        messages[messages.length - 1].id,
       )
       .toArray();
-    const messages: Message[] = rows.slice(0, limit).map((row) => toMessage(row, tenant));
-    return { messages, nextCursor: messages.at(-1)?.id ?? after, hasMore: rows.length > limit };
+    for (const row of rows) {
+      const message = byId.get(row.messageId);
+      if (message) message.labels = { ...message.labels, [row.key]: row.value };
+    }
+    return messages;
+  }
+
+  /** A Map, not an object: keys such as "constructor" must not match inherited properties. */
+  private currentLabels(channel: string, id: number): Map<string, string> {
+    return new Map(
+      this.ctx.storage.sql
+        .exec<{ key: string; value: string }>(
+          "SELECT key, value FROM message_labels WHERE channel = ? AND messageId = ? ORDER BY key",
+          channel,
+          id,
+        )
+        .toArray()
+        .map((row) => [row.key, row.value]),
+    );
+  }
+
+  /**
+   * Applies one label change atomically. A failed `if` condition changes nothing and returns 409
+   * label_conflict with the current labels, so a caller can claim a message with compare-and-set.
+   */
+  private relabel(tenant: string, channel: string, id: number, change: LabelChange): Response {
+    const result = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql
+        .exec<MessageRow & { deleted: number }>(
+          `SELECT ${MESSAGE_COLUMNS}, deleted FROM messages WHERE channel = ? AND id = ?`,
+          channel,
+          id,
+        )
+        .toArray()[0];
+      if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+      if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+      const current = this.currentLabels(channel, id);
+      for (const [key, expected] of change.condition)
+        if ((current.get(key) ?? null) !== expected) return { conflict: Object.fromEntries(current) };
+      const next = new Map([...current, ...change.set]);
+      for (const key of change.unset) next.delete(key);
+      if (next.size > MAX_LABELS)
+        throw new HttpError(400, "label_limit", `A message can carry at most ${MAX_LABELS} labels.`);
+      const changed =
+        change.unset.some((key) => current.has(key)) ||
+        [...change.set].some(([key, value]) => current.get(key) !== value);
+      if (changed) {
+        const usage = this.ctx.storage.sql
+          .exec<{ labelChanges: number }>("SELECT labelChanges FROM usage")
+          .one();
+        if (usage.labelChanges >= MAX_LABEL_CHANGES)
+          throw new HttpError(
+            409,
+            "label_quota",
+            "Label change limit reached (100,000 lifetime changes). Contact the administrator.",
+          );
+        const now = new Date().toISOString();
+        for (const key of change.unset)
+          this.ctx.storage.sql.exec(
+            "DELETE FROM message_labels WHERE channel = ? AND messageId = ? AND key = ?",
+            channel,
+            id,
+            key,
+          );
+        for (const [key, value] of change.set)
+          if (current.get(key) !== value)
+            this.ctx.storage.sql.exec(
+              "INSERT INTO message_labels(channel, messageId, key, value, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(channel, messageId, key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt",
+              channel,
+              id,
+              key,
+              value,
+              now,
+            );
+        this.ctx.storage.sql.exec("UPDATE usage SET labelChanges = labelChanges + 1 WHERE singleton = 1");
+        this.insertEvent(channel, "message.labeled", id);
+      }
+      const { deleted: _deleted, ...message } = row;
+      return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], changed };
+    });
+    if ("conflict" in result)
+      return json(
+        {
+          error: { code: "label_conflict", message: "The if condition did not match; nothing changed." },
+          labels: result.conflict,
+        },
+        409,
+      );
+    if (result.changed) {
+      // Filtered message polls may now match an older message; recheck them all for this channel.
+      for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
+      this.wakeEvents(channel);
+    }
+    return json(result);
   }
 
   private poll(
@@ -1019,6 +1202,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     after: number,
     limit: number,
     wait: number,
+    filters: LabelFilter[] = [],
+    before = Number.MAX_SAFE_INTEGER,
     fence: ProcessingFence | null = null,
   ): Promise<Response> | Response {
     const respond = (page: ReturnType<typeof this.page>) => {
@@ -1027,7 +1212,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.requireGeneration(channel, fence.reader, fence.generation);
       return json({ ...page, committedThrough: after, generation: fence.generation });
     };
-    const page = this.page(tenant, channel, after, limit);
+    const page = this.page(tenant, channel, after, limit, filters, before);
     if (page.messages.length || !wait) return respond(page);
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
@@ -1043,7 +1228,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (finished) return;
         try {
           this.authorize(hash); // Rotation revokes already-pending polls, too.
-          const next = this.page(tenant, channel, after, limit);
+          const next = this.page(tenant, channel, after, limit, filters, before);
           finished = true;
           cleanup();
           resolve(
@@ -1067,7 +1252,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             finish();
             return;
           }
-          if (this.page(tenant, channel, after, limit).messages.length) finish();
+          if (this.page(tenant, channel, after, limit, filters, before).messages.length) finish();
         },
       };
       const abort = () => finish(true);
@@ -1089,6 +1274,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     hash: string,
     personaId: string | null = null,
     notify = true,
+    labels: Labels | undefined = undefined,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       if (key) {
@@ -1113,7 +1299,7 @@ export class MsnDurableObject extends DurableObject<Env> {
               "The original message was deleted; retries cannot resurrect it.",
             );
           const { digest: _digest, deleted: _deleted, ...message } = old;
-          return { message: toMessage(message, tenant), replayed: true };
+          return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: true };
         }
       }
       // replyTo is only interpretable within one channel's log; a tombstoned id still counts as
@@ -1163,8 +1349,17 @@ export class MsnDurableObject extends DurableObject<Env> {
         "UPDATE usage SET messages = messages + 1, bytes = bytes + ? WHERE singleton = 1",
         bytes,
       );
+      for (const [label, value] of Object.entries(labels ?? {}))
+        this.ctx.storage.sql.exec(
+          "INSERT INTO message_labels(channel, messageId, key, value, updatedAt) VALUES (?, ?, ?, ?, ?)",
+          channel,
+          message.id,
+          label,
+          value,
+          message.createdAt,
+        );
       this.insertEvent(channel, "message.created", message.id);
-      return { message: toMessage(message, tenant), replayed: false };
+      return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: false };
     });
     // transactionSync succeeded; output gates delay network replies until durable commit.
     if (!result.replayed) {
@@ -1195,7 +1390,10 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
     if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
     const { deleted: _deleted, ...message } = row;
-    return json({ message: toMessage(message, tenant), historyRevision: this.historyRevision(channel) });
+    return json({
+      message: this.withLabels(channel, [toMessage(message, tenant)])[0],
+      historyRevision: this.historyRevision(channel),
+    });
   }
 
   private latestSnapshot(channel: string): SnapshotRow | undefined {
@@ -1841,6 +2039,11 @@ export class MsnDurableObject extends DurableObject<Env> {
               "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, bytes = 0 WHERE id = ?",
               id,
             );
+            this.ctx.storage.sql.exec(
+              "DELETE FROM message_labels WHERE channel = ? AND messageId = ?",
+              channel,
+              id,
+            );
             const snapshotBytes = this.ctx.storage.sql
               .exec<{ bytes: number }>(
                 "SELECT COALESCE(SUM(bytes), 0) AS bytes FROM snapshots WHERE channel = ?",
@@ -1888,13 +2091,18 @@ export class MsnDurableObject extends DurableObject<Env> {
               to: recipient(input.to),
             }
           : {};
-        const payloadHash = input
-          ? await digest(
-              personaId
-                ? JSON.stringify([payload(username, content, type, correlation), personaId])
-                : payload(username, content, type, correlation),
-            )
+        const sendLabels = input ? parseLabels(input.labels) : undefined;
+        const base = input
+          ? personaId
+            ? JSON.stringify([payload(username, content, type, correlation), personaId])
+            : payload(username, content, type, correlation)
           : "";
+        // Unlabeled sends hash exactly as before ADR 0032, so older retries still replay.
+        const payloadHash = input ? await digest(sendLabels ? JSON.stringify([base, sendLabels]) : base) : "";
+        const change =
+          request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "labels"
+            ? labelChange(await body(request))
+            : null;
         const snapshotInput =
           request.method === "POST" && rest.length === 3 && rest[2] === "snapshots"
             ? await body(request)
@@ -1973,7 +2181,20 @@ export class MsnDurableObject extends DurableObject<Env> {
           const wait = integer(url.searchParams.get("wait"), 0, 25);
           if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
           const listener = this.listenerPersona(capability, url.searchParams.get("listener"));
-          return await this.eventPoll(request, hash, tenant, effectiveChannel, after, limit, wait, listener);
+          const include = url.searchParams.get("include");
+          if (include !== null && include !== "labels")
+            throw new HttpError(400, "invalid_query", "include accepts only labels.");
+          return await this.eventPoll(
+            request,
+            hash,
+            tenant,
+            effectiveChannel,
+            after,
+            limit,
+            wait,
+            listener,
+            include === "labels",
+          );
         }
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
@@ -2072,6 +2293,10 @@ export class MsnDurableObject extends DurableObject<Env> {
               });
             }
           }
+          if (change) {
+            this.requireChannel(channel);
+            return this.relabel(tenant, channel, messageId(rest[3]), change);
+          }
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);
             return this.showMessage(tenant, channel, messageId(rest[3]));
@@ -2097,6 +2322,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                 personaId,
                 // The owner's own messages never notify the owner.
                 !capability.owner_access,
+                sendLabels,
               );
             }
             if (request.method === "GET") {
@@ -2108,21 +2334,40 @@ export class MsnDurableObject extends DurableObject<Env> {
               if (fence) {
                 // Resumable peek (ADR 0034): the server's committedThrough is the start, and a
                 // superseded generation is refused before and after any wait.
-                if (url.searchParams.has("after"))
+                if (
+                  ["after", "before"].some((name) => url.searchParams.has(name)) ||
+                  labelFilters(url.searchParams).length
+                )
                   throw new HttpError(
                     400,
                     "invalid_query",
-                    "after cannot be combined with processingReader.",
+                    "after, before and label filters cannot be combined with processingReader.",
                   );
                 const after = this.requireGeneration(
                   channel,
                   fence.reader,
                   fence.generation,
                 ).committedThrough;
-                return await this.poll(request, hash, tenant, channel, after, limit, wait, fence);
+                return await this.poll(
+                  request,
+                  hash,
+                  tenant,
+                  channel,
+                  after,
+                  limit,
+                  wait,
+                  [],
+                  Number.MAX_SAFE_INTEGER,
+                  fence,
+                );
               }
               const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
-              return await this.poll(request, hash, tenant, channel, after, limit, wait);
+              const filters = labelFilters(url.searchParams);
+              // Exclusive upper bound: after=41&before=43 waits on message 42 alone.
+              const before = url.searchParams.has("before")
+                ? integer(url.searchParams.get("before"), 0, Number.MAX_SAFE_INTEGER)
+                : Number.MAX_SAFE_INTEGER;
+              return await this.poll(request, hash, tenant, channel, after, limit, wait, filters, before);
             }
           }
         }

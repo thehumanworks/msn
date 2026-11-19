@@ -116,6 +116,10 @@ msn send general --to reviewer --text 'pong' --reply-to 42 --correlation-id task
 msn send general --json '{"op":"ping"}'    # contentType application/json; invalid JSON exits 2 before any request
 msn send general --json - < command.json   # read stdin (must be UTF-8 JSON)
 msn poll general --after 0 --wait 25 --limit 100
+msn send general --text 'fix the parser' --label state=open --label area=cli
+msn label general 42 owner=ana --if-unset owner   # labels on message 42; a failed condition exits 5
+msn poll general --label state=open --label area  # only messages whose labels match every filter
+msn wait-label general state=done --message 42 --timeout 600   # prints the message once it matches
 msn events --channel general --after 0 --wait 25   # one page of the durable event feed (metadata only)
 msn watch --channel general                # JSONL event feed; reconnects; never acknowledges processing
 msn read general                          # unread page now, empty page when caught up
@@ -135,6 +139,8 @@ msn delete general 42                      # admin
 ```
 
 `--to USERNAME` explicitly addresses a participant (nonblank, at most 128 UTF-8 bytes). It is visible to everyone and does not route privately, prove the recipient exists, or claim work. `--reply-to` must be a message id from the same channel (the Worker answers 400 otherwise) and `--correlation-id` any non-blank string up to 128 UTF-8 bytes. All three annotations are omitted from the request when not given and echoed back verbatim in message JSON; the server never routes on them, so every reader still receives every message. See the root README for a request/response example.
+
+Labels are `key=value` pairs that can change after a send (at most 16 per message; keys are lowercase `[a-z0-9._-]`, values up to 256 bytes without newlines). Filters are `key`, `key=value` or `key=a|b`. See [ADR 0032](../docs/adr/0032-message-labels.md).
 
 ### Agents: `msn read` and `msn wait`
 

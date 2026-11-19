@@ -229,3 +229,103 @@ export function idempotencyKey(request: Request, required = false): string | nul
     );
   return key;
 }
+
+/** key=value message labels (ADR 0032). One value per key. */
+export type Labels = Record<string, string>;
+export const MAX_LABELS = 16;
+const LABEL_KEY = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+
+export function labelKey(value: unknown): string {
+  if (typeof value !== "string" || !LABEL_KEY.test(value))
+    throw new HttpError(
+      400,
+      "invalid_label",
+      "Label keys are 1–64 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit.",
+    );
+  return value;
+}
+
+export function labelValue(value: unknown, key: string): string {
+  if (
+    typeof value !== "string" ||
+    !value.length ||
+    new TextEncoder().encode(value).length > 256 ||
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what we reject.
+    /[\u0000-\u001f\u007f-\u009f]/.test(value)
+  )
+    throw new HttpError(
+      400,
+      "invalid_label",
+      `Label ${key} needs a value of 1–256 UTF-8 bytes without control characters such as newlines.`,
+    );
+  return value;
+}
+
+function labelObject(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new HttpError(400, "invalid_label", `${field} must be an object of key: value labels.`);
+  return value as Record<string, unknown>;
+}
+
+/** Optional `labels` on send: absent/null means none; otherwise at most 16 key: value pairs. */
+export function labels(value: unknown): Labels | undefined {
+  if (value === undefined || value === null) return undefined;
+  const entries = Object.entries(labelObject(value, "labels"));
+  if (entries.length > MAX_LABELS)
+    throw new HttpError(400, "label_limit", `A message can carry at most ${MAX_LABELS} labels.`);
+  if (!entries.length) return undefined;
+  const result: Labels = {};
+  for (const [key, raw] of entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    result[labelKey(key)] = labelValue(raw, key);
+  return result;
+}
+
+/** Body of POST …/messages/{id}/labels: what to set, what to remove, and an optional precondition. */
+export type LabelChange = {
+  set: Map<string, string>;
+  unset: string[];
+  condition: Map<string, string | null>;
+};
+
+export function labelChange(input: Record<string, unknown>): LabelChange {
+  for (const field of Object.keys(input))
+    if (!["set", "unset", "if"].includes(field))
+      throw new HttpError(400, "invalid_label", `Unknown field ${field}; use set, unset and if.`);
+  // Maps, not objects: a key such as "constructor" must never match an inherited property.
+  const set = new Map<string, string>();
+  for (const [key, raw] of Object.entries(input.set === undefined ? {} : labelObject(input.set, "set")))
+    set.set(labelKey(key), labelValue(raw, key));
+  if (input.unset !== undefined && !Array.isArray(input.unset))
+    throw new HttpError(400, "invalid_label", "unset must be an array of label keys.");
+  const unset = [...new Set(((input.unset as unknown[] | undefined) ?? []).map(labelKey))];
+  if (unset.some((key) => set.has(key)))
+    throw new HttpError(400, "invalid_label", "A key cannot be both set and unset in one change.");
+  if (!set.size && !unset.length)
+    throw new HttpError(400, "invalid_label", "Set or unset at least one label.");
+  if (set.size + unset.length > MAX_LABELS * 2)
+    throw new HttpError(400, "label_limit", "Too many labels in one change.");
+  const condition = new Map<string, string | null>();
+  for (const [key, raw] of Object.entries(input.if === undefined ? {} : labelObject(input.if, "if")))
+    condition.set(labelKey(key), raw === null ? null : labelValue(raw, key));
+  if (condition.size > MAX_LABELS)
+    throw new HttpError(400, "label_limit", `A condition can test at most ${MAX_LABELS} labels.`);
+  return { set, unset, condition };
+}
+
+/** One `label` query filter: a key, optionally restricted to one of several values. */
+export type LabelFilter = { key: string; values: string[] | null };
+
+/** `?label=state`, `?label=state=open` or `?label=state=open|draft`; repeated filters must all match. */
+export function labelFilters(params: URLSearchParams): LabelFilter[] {
+  const raw = params.getAll("label");
+  if (raw.length > 8) throw new HttpError(400, "invalid_query", "Use at most 8 label filters.");
+  return raw.map((filter) => {
+    const split = filter.indexOf("=");
+    const key = labelKey(split < 0 ? filter : filter.slice(0, split));
+    if (split < 0) return { key, values: null };
+    const values = filter.slice(split + 1).split("|");
+    if (values.length > 8)
+      throw new HttpError(400, "invalid_query", "Use at most 8 values per label filter.");
+    return { key, values: values.map((value) => labelValue(value, key)) };
+  });
+}
