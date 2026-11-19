@@ -148,3 +148,28 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: artifacts/*
+      # Keeps `brew install thehumanworks/msn/msn` on the newest release. A push made
+      # with GITHUB_TOKEN starts no workflows, so this deploys and releases nothing.
+      - name: Update the Homebrew formula
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4; do
+            git fetch origin main
+            git checkout -B formula-update FETCH_HEAD
+            scripts/homebrew-formula.sh "$TAG" artifacts > Formula/msn.rb
+            if git diff --quiet -- Formula/msn.rb; then
+              echo "Formula/msn.rb is already at $TAG"
+              exit 0
+            fi
+            git commit -m "chore(brew): msn formula for $TAG [skip ci] [skip release]" -- Formula/msn.rb
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "Could not push the formula update for $TAG" >&2
+          exit 1

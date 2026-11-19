@@ -47,6 +47,8 @@ jobs:
       - run: bun install
       - run: bun run typecheck
       - run: bun run lint
+      - name: Shellcheck the install scripts
+        run: shellcheck -s sh public/install.sh scripts/homebrew-formula.sh
       - run: bun run test
 
   agent-workflows:
