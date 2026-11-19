@@ -80,6 +80,18 @@ test("unconfigured status is read-only and actionable", async (t) => {
   await assert.rejects(stat(dirname(path)), { code: "ENOENT" });
   await assert.rejects(main(["work"], env), /Configure once/);
 });
+test("entry scripts run when launched through a symlinked directory", async (t) => {
+  // macOS temp and home paths often pass through symlinks (/var -> /private/var).
+  const { root, env } = await fixture(t);
+  const linked = join(root, "linked-scripts");
+  await symlink(fileURLToPath(new URL("../scripts", import.meta.url)), linked, "dir");
+  const result = spawnSync(process.execPath, [join(linked, "agent-runner.mjs"), "work", "--status"], {
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).status, "not-configured");
+});
 test("first explicit command persists; subsequent run reuses cwd and durable state", async (t) => {
   const { env, options, path } = await fixture(t);
   const calls = [];

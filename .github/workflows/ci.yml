@@ -21,7 +21,8 @@ jobs:
         working-directory: cli
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      # The bundled runner test launches the MSN runtime, which needs Node 24+.
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
       - uses: dtolnay/rust-toolchain@stable

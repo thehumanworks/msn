@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 /**
  * Participant onboarding check: can this key read the named channel on the advertised origin?
  *
@@ -12,7 +13,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -306,7 +307,7 @@ export async function run(argv, env = process.env, fetchImpl = fetch) {
   }
 }
 
-const invoked = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+const invoked = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
 
 if (invoked) {
   run(process.argv.slice(2), process.env)
