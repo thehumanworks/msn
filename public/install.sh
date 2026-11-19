@@ -4,7 +4,9 @@
 #   curl -fsSL https://msn.thehuman.sh/install.sh | sh
 #   curl -fsSL https://msn.thehuman.sh/install.sh | sh -s -- --version v0.1.14 --dir ~/bin
 #
-# Supports Linux (glibc) and macOS on x86_64 and arm64. It installs into
+# Supports Linux and macOS on x86_64 and arm64. Linux systems with glibc 2.28 or
+# newer get the glibc build; musl systems (Alpine) and older glibc get the static
+# musl build. It installs into
 # ~/.local/bin by default and never uses sudo. It refuses to install a binary
 # whose SHA-256 does not match the checksum published with the release.
 #
@@ -12,7 +14,8 @@
 #   MSN_VERSION      release tag to install, for example v0.1.14 (default: latest)
 #   MSN_INSTALL_DIR  directory for the msn binary (default: $HOME/.local/bin)
 #   MSN_RELEASES_URL release base URL (default: https://github.com/thehumanworks/msn/releases)
-#   MSN_TARGET       Rust target triple to install instead of the detected one
+#   MSN_TARGET       Rust target triple to install instead of the detected one,
+#                    for example x86_64-unknown-linux-musl
 
 # Everything runs inside main, called on the last line, so a partial download
 # (for example a dropped `curl | sh` connection) runs nothing.
@@ -148,10 +151,19 @@ detect_target() {
   esac
   case "$os" in
   Linux)
-    if ldd --version 2>&1 | grep -qi musl || ls /lib/ld-musl-* >/dev/null 2>&1; then
-      fail "this system uses musl libc (for example Alpine); msn releases need glibc. Build it instead: cargo install --git https://github.com/thehumanworks/msn msn-cli"
+    # The glibc build needs glibc 2.28 or newer. Anything else (musl, an older
+    # glibc, or a libc we cannot identify) gets the static musl build, which
+    # needs no libc at all.
+    libc=musl
+    if ! { ldd --version 2>&1 | grep -qi musl || ls /lib/ld-musl-* >/dev/null 2>&1; }; then
+      glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')"
+      if [ -n "$glibc" ] && [ "${glibc%%.*}" -eq 2 ] && [ "${glibc#*.}" -ge 28 ]; then
+        libc=gnu
+      elif [ -n "$glibc" ] && [ "${glibc%%.*}" -gt 2 ]; then
+        libc=gnu
+      fi
     fi
-    echo "${arch}-unknown-linux-gnu"
+    echo "${arch}-unknown-linux-${libc}"
     ;;
   Darwin)
     # An x86_64 shell under Rosetta on Apple silicon should still get the native build.
@@ -220,8 +232,9 @@ else
   sed 's/^/  /' "$tmp/run.err" >&2
   case "$target" in
   *-linux-gnu)
-    say "Linux releases need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later)."
-    say "On an older system, build it instead: cargo install --git https://github.com/thehumanworks/msn msn-cli"
+    say "The glibc build needs glibc 2.28 or newer (Debian 10, Ubuntu 20.04, RHEL 8 or later)."
+    say "Try the static build instead: curl -fsSL https://msn.thehuman.sh/install.sh | MSN_TARGET=${target%-gnu}-musl sh"
+    say "Or build it: cargo install --git https://github.com/thehumanworks/msn msn-cli"
     ;;
   esac
   exit 1
