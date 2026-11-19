@@ -92,7 +92,10 @@ mod tests {
             ("deploy \"on friday\"".to_owned(), Some("ada".to_owned()))
         );
         assert_eq!(split_from("from: plain"), ("from: plain".to_owned(), None));
-        assert_eq!(split_from("from:a from:b"), (String::new(), Some("b".to_owned())));
+        assert_eq!(
+            split_from("from:a from:b"),
+            (String::new(), Some("b".to_owned()))
+        );
     }
 
     fn search(text: Option<&str>) -> Search<'_> {

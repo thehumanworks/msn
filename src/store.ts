@@ -12,18 +12,23 @@ import {
   verifySignature,
 } from "./github";
 import {
+  ATTACHMENT_ORPHAN_MS,
+  type AttachmentRef,
   admin,
+  attachmentRefs,
   type Binding,
   bearer,
   binding,
   body,
   type ContentType,
+  contentDisposition,
   contentType,
   correlationId,
   digest,
   equalHash,
   failure,
   HttpError,
+  INLINE_MEDIA_TYPES,
   idempotencyKey,
   integer,
   json,
@@ -32,13 +37,16 @@ import {
   type Labels,
   labelChange,
   labelFilters,
+  MAX_ATTACHMENT_BYTES,
   MAX_LABELS,
   newToken,
   optionalBody,
   labels as parseLabels,
+  rawBody,
   recipient,
   replyTarget,
   searchMatch,
+  sha256,
   slug,
   snapshotInteger,
   text,
@@ -67,7 +75,11 @@ export type Message = {
   personaId?: string;
   /** key=value labels (ADR 0032); absent from JSON when the message has none. */
   labels?: Labels;
+  /** Files sent with the message (ADR 0035); absent from JSON when it has none. */
+  attachments?: Attachment[];
 };
+/** Attachment metadata on a message; the bytes come from the per-message download route. */
+export type Attachment = { index: number; id: string; name: string; mediaType: string; bytes: number };
 /** Optional annotation input on send; `undefined` means "not supplied". */
 export type Correlation = { replyTo?: number; correlationId?: string; to?: string };
 type MessageRow = {
@@ -177,6 +189,46 @@ type EventRow = {
 const EVENT_COLUMNS = "id, channel, type, resourceId, historyRevision, createdAt";
 function toEvent(row: EventRow, tenant: string): CoordinationEvent {
   return { ...row, tenant };
+}
+
+/** Resumable processing progress per channel and reader, fenced by generation (ADR 0034). */
+type ProcessingRow = {
+  reader: string;
+  committedThrough: number;
+  generation: number;
+  holder: string | null;
+  claimedAt: string;
+  updatedAt: string;
+};
+const PROCESSING_COLUMNS = "reader, committedThrough, generation, holder, claimedAt, updatedAt";
+type ProcessingFence = { reader: string; generation: number };
+function toProcessing(row: ProcessingRow) {
+  return { ...row };
+}
+function processingReader(value: string | undefined): string {
+  let reader: string;
+  try {
+    reader = decodeURIComponent(value ?? "");
+  } catch {
+    throw new HttpError(400, "invalid_reader", "Reader must be URL-encoded UTF-8.");
+  }
+  return text(reader, "reader", 128, "invalid_reader");
+}
+function processingInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new HttpError(400, "invalid_processing", `${field} must be a non-negative integer.`);
+  return value;
+}
+function processingFence(url: URL): ProcessingFence | null {
+  const reader = url.searchParams.get("processingReader");
+  const generation = url.searchParams.get("generation");
+  if (reader === null && generation === null) return null;
+  if (reader === null || generation === null)
+    throw new HttpError(400, "invalid_query", "processingReader and generation go together.");
+  return {
+    reader: text(reader, "processingReader", 128, "invalid_reader"),
+    generation: integer(generation, 0, Number.MAX_SAFE_INTEGER),
+  };
 }
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
@@ -289,11 +341,27 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS push_subscriptions (
           endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, createdAt TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS processing_cursors (
+          channel TEXT NOT NULL, reader TEXT NOT NULL, committedThrough INTEGER NOT NULL,
+          generation INTEGER NOT NULL, holder TEXT, claimedAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+          PRIMARY KEY(channel, reader)
+        );
         CREATE TABLE IF NOT EXISTS message_labels (
           channel TEXT NOT NULL, messageId INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
           updatedAt TEXT NOT NULL, PRIMARY KEY(channel, messageId, key)
         );
         CREATE INDEX IF NOT EXISTS label_values ON message_labels(channel, key, value, messageId);
+        CREATE TABLE IF NOT EXISTS attachments (
+          channel TEXT NOT NULL, id TEXT NOT NULL, bytes INTEGER NOT NULL, createdAt TEXT NOT NULL,
+          data BLOB NOT NULL, PRIMARY KEY(channel, id)
+        );
+        CREATE INDEX IF NOT EXISTS attachment_age ON attachments(createdAt);
+        CREATE TABLE IF NOT EXISTS message_attachments (
+          messageId INTEGER NOT NULL, position INTEGER NOT NULL, channel TEXT NOT NULL,
+          attachmentId TEXT NOT NULL, name TEXT NOT NULL, mediaType TEXT NOT NULL,
+          PRIMARY KEY(messageId, position)
+        );
+        CREATE INDEX IF NOT EXISTS attachment_refs ON message_attachments(channel, attachmentId);
         CREATE TABLE IF NOT EXISTS github_hook (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), secret TEXT NOT NULL, createdAt TEXT NOT NULL
         );
@@ -381,6 +449,11 @@ export class MsnDurableObject extends DurableObject<Env> {
         // v12 → v13: key=value message labels (ADR 0032). The table and usage.labelChanges are
         // created above; existing messages start with no labels.
         if (version < 13) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (13)");
+        // v13 → v14: resumable processing cursors (ADR 0034). The table is created above and starts
+        // empty; agents that never opt in keep local-only progress.
+        if (version < 14) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (14)");
+        // v14 → v15: message attachments (ADR 0035). Both tables are created above and start
+        // empty; existing messages have no attachments.
         // v15 → v16: boards follow GitHub pull requests (ADR 0036). Both tables are created above and
         // start empty; nothing arrives until the owner links a pull request and adds the webhook.
         // v14 (ADR 0034) and v15 (ADR 0035) belong to other changes; both only add tables with
@@ -1388,7 +1461,12 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** Adds each message's current labels; one range query per page. */
+  /** Every message output carries its labels (ADR 0032) and attachments (ADR 0035). */
   private withLabels(channel: string, messages: Message[]): Message[] {
+    return this.withAttachments(channel, this.labelsOnly(channel, messages));
+  }
+
+  private labelsOnly(channel: string, messages: Message[]): Message[] {
     if (!messages.length) return messages;
     const byId = new Map(messages.map((message) => [message.id, message]));
     const rows = this.ctx.storage.sql
@@ -1505,9 +1583,16 @@ export class MsnDurableObject extends DurableObject<Env> {
     wait: number,
     filters: LabelFilter[] = [],
     before = Number.MAX_SAFE_INTEGER,
+    fence: ProcessingFence | null = null,
   ): Promise<Response> | Response {
+    const respond = (page: ReturnType<typeof this.page>) => {
+      if (!fence) return json(page);
+      // Recheck at reply time: a takeover during a long poll fences this reply, too.
+      this.requireGeneration(channel, fence.reader, fence.generation);
+      return json({ ...page, committedThrough: after, generation: fence.generation });
+    };
     const page = this.page(tenant, channel, after, limit, filters, before);
-    if (page.messages.length || !wait) return json(page);
+    if (page.messages.length || !wait) return respond(page);
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
     // No await between SELECT and registration: sends cannot fall into a lost-wakeup gap.
@@ -1526,7 +1611,9 @@ export class MsnDurableObject extends DurableObject<Env> {
           finished = true;
           cleanup();
           resolve(
-            aborted ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499) : json(next),
+            aborted
+              ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499)
+              : respond(next),
           );
         } catch (error) {
           finished = true;
@@ -1567,6 +1654,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     personaId: string | null = null,
     notify = true,
     labels: Labels | undefined = undefined,
+    attachments: AttachmentRef[] = [],
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       if (key) {
@@ -1611,6 +1699,18 @@ export class MsnDurableObject extends DurableObject<Env> {
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
+      // Every referenced file must already be uploaded to this channel; the upload counted its bytes.
+      for (const ref of attachments)
+        if (
+          !this.ctx.storage.sql
+            .exec("SELECT 1 FROM attachments WHERE channel = ? AND id = ?", channel, ref.id)
+            .toArray().length
+        )
+          throw new HttpError(
+            400,
+            "attachment_not_found",
+            "Upload each attachment to this channel first; unused uploads expire after 24 hours.",
+          );
       const bytes = new TextEncoder().encode(username + content).length;
       if (usage.messages >= MAX_MESSAGES || usage.bytes + bytes > MAX_CONTENT_BYTES) {
         throw new HttpError(
@@ -1655,6 +1755,16 @@ export class MsnDurableObject extends DurableObject<Env> {
           value,
           message.createdAt,
         );
+      for (const [position, ref] of attachments.entries())
+        this.ctx.storage.sql.exec(
+          "INSERT INTO message_attachments(messageId, position, channel, attachmentId, name, mediaType) VALUES (?, ?, ?, ?, ?, ?)",
+          message.id,
+          position,
+          channel,
+          ref.id,
+          ref.name,
+          ref.mediaType,
+        );
       this.insertEvent(channel, "message.created", message.id);
       return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: false };
     });
@@ -1665,6 +1775,158 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (notify) this.notifyOwner(result.message);
     }
     return json(result, result.replayed ? 200 : 201);
+  }
+
+  /** Adds attachment metadata to a page of same-channel messages with one range query. */
+  private withAttachments(channel: string, messages: Message[]): Message[] {
+    if (!messages.length) return messages;
+    const rows = this.ctx.storage.sql
+      .exec<{
+        messageId: number;
+        position: number;
+        id: string;
+        name: string;
+        mediaType: string;
+        bytes: number;
+      }>(
+        `SELECT r.messageId, r.position, r.attachmentId AS id, r.name, r.mediaType, a.bytes
+         FROM message_attachments r JOIN attachments a ON a.channel = r.channel AND a.id = r.attachmentId
+         WHERE r.channel = ? AND r.messageId BETWEEN ? AND ? ORDER BY r.messageId, r.position`,
+        channel,
+        Math.min(...messages.map((m) => m.id)),
+        Math.max(...messages.map((m) => m.id)),
+      )
+      .toArray();
+    if (!rows.length) return messages;
+    const byMessage = new Map<number, Attachment[]>();
+    for (const { messageId, position, ...file } of rows) {
+      const list = byMessage.get(messageId) ?? [];
+      list.push({ index: position, ...file });
+      byMessage.set(messageId, list);
+    }
+    return messages.map((m) => (byMessage.has(m.id) ? { ...m, attachments: byMessage.get(m.id) } : m));
+  }
+
+  /**
+   * Stores one file under its SHA-256 (ADR 0035). The same bytes in the same channel are stored
+   * once, so a retried upload returns the same id and costs nothing. Counted in the content quota.
+   */
+  private async upload(channel: string, request: Request): Promise<Response> {
+    const data = await rawBody(request, MAX_ATTACHMENT_BYTES);
+    const id = await sha256(data);
+    const result = this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      this.dropOrphans(now);
+      const existing = this.ctx.storage.sql
+        .exec<{ bytes: number }>("SELECT bytes FROM attachments WHERE channel = ? AND id = ?", channel, id)
+        .toArray()[0];
+      if (existing) {
+        // Refresh the clock so a retry just before expiry keeps the upload for a full window.
+        this.ctx.storage.sql.exec(
+          "UPDATE attachments SET createdAt = ? WHERE channel = ? AND id = ?",
+          new Date(now).toISOString(),
+          channel,
+          id,
+        );
+        return { created: false };
+      }
+      const usage = this.ctx.storage.sql.exec<{ bytes: number }>("SELECT bytes FROM usage").one();
+      if (usage.bytes + data.byteLength > MAX_CONTENT_BYTES)
+        throw new HttpError(
+          409,
+          "storage_quota",
+          "Tenant quota reached (128 MiB active content, attachments included). Contact the administrator.",
+        );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO attachments(channel, id, data, bytes, createdAt) VALUES (?, ?, ?, ?, ?)",
+        channel,
+        id,
+        data,
+        data.byteLength,
+        new Date(now).toISOString(),
+      );
+      this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes + ? WHERE singleton = 1", data.byteLength);
+      return { created: true };
+    });
+    return json({ attachment: { id, bytes: data.byteLength } }, result.created ? 201 : 200);
+  }
+
+  /** Serves one file of a live message. Only common image types render inline. */
+  private download(channel: string, message: number, index: number): Response {
+    const row = this.ctx.storage.sql
+      .exec<{ deleted: number; name: string | null; mediaType: string | null; data: ArrayBuffer | null }>(
+        `SELECT m.deleted, r.name, r.mediaType, a.data FROM messages m
+         LEFT JOIN message_attachments r ON r.messageId = m.id AND r.position = ?
+         LEFT JOIN attachments a ON a.channel = r.channel AND a.id = r.attachmentId
+         WHERE m.channel = ? AND m.id = ?`,
+        index,
+        channel,
+        message,
+      )
+      .toArray()[0];
+    if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+    if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+    if (!row.data || !row.name || !row.mediaType)
+      throw new HttpError(404, "attachment_not_found", "This message has no attachment at that index.");
+    const inline = INLINE_MEDIA_TYPES.includes(row.mediaType);
+    return new Response(row.data, {
+      headers: {
+        "Content-Type": row.mediaType,
+        "Content-Disposition": contentDisposition(inline, row.name),
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  /** Deletes uploads no message references once they are older than the orphan window. */
+  private dropOrphans(now: number): void {
+    const cutoff = new Date(now - ATTACHMENT_ORPHAN_MS).toISOString();
+    const freed = this.ctx.storage.sql
+      .exec<{ bytes: number }>(
+        `DELETE FROM attachments WHERE createdAt < ? AND NOT EXISTS (
+           SELECT 1 FROM message_attachments r WHERE r.channel = attachments.channel AND r.attachmentId = attachments.id
+         ) RETURNING bytes`,
+        cutoff,
+      )
+      .toArray()
+      .reduce((sum, row) => sum + row.bytes, 0);
+    if (freed) this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes - ? WHERE singleton = 1", freed);
+  }
+
+  /**
+   * Redaction: removes a deleted message's file references and, at once, every file in the channel
+   * that no live reference still needs. Returns the bytes freed for the caller's usage update.
+   */
+  private dropAttachments(channel: string, message: number): number {
+    const ids = this.ctx.storage.sql
+      .exec<{ attachmentId: string }>(
+        "DELETE FROM message_attachments WHERE messageId = ? RETURNING attachmentId",
+        message,
+      )
+      .toArray()
+      .map((row) => row.attachmentId);
+    let freed = 0;
+    for (const id of new Set(ids)) {
+      if (
+        this.ctx.storage.sql
+          .exec(
+            "SELECT 1 FROM message_attachments WHERE channel = ? AND attachmentId = ? LIMIT 1",
+            channel,
+            id,
+          )
+          .toArray().length
+      )
+        continue;
+      freed += this.ctx.storage.sql
+        .exec<{ bytes: number }>(
+          "DELETE FROM attachments WHERE channel = ? AND id = ? RETURNING bytes",
+          channel,
+          id,
+        )
+        .toArray()
+        .reduce((sum, row) => sum + row.bytes, 0);
+    }
+    return freed;
   }
 
   private historyRevision(channel: string): number {
@@ -1757,7 +2019,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       }
     }
     return json({
-      messages,
+      // Attachments (ADR 0035) read by id range, which works in any order.
+      messages: this.withAttachments(channel, messages),
       hasMore: rows.length > limit,
       ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
       complete: this.searchIndexed(),
@@ -1990,6 +2253,143 @@ export class MsnDurableObject extends DurableObject<Env> {
         413,
       );
     return json(result);
+  }
+
+  /** Current processing cursor row, or null when the reader was never claimed (ADR 0034). */
+  private processingRow(channel: string, reader: string): ProcessingRow | null {
+    return (
+      this.ctx.storage.sql
+        .exec<ProcessingRow>(
+          `SELECT ${PROCESSING_COLUMNS} FROM processing_cursors WHERE channel = ? AND reader = ?`,
+          channel,
+          reader,
+        )
+        .toArray()[0] ?? null
+    );
+  }
+
+  /**
+   * The fence (ADR 0034). Synchronous, so callers run it in the same storage turn as the read or
+   * write it guards: once a takeover commits, no request carrying an older generation succeeds.
+   */
+  private requireGeneration(channel: string, reader: string, generation: number): ProcessingRow {
+    const row = this.processingRow(channel, reader);
+    if (!row)
+      throw new HttpError(
+        404,
+        "processing_not_claimed",
+        "This reader has no resumable progress on this channel. Claim it first.",
+      );
+    if (row.generation !== generation)
+      throw new HttpError(
+        409,
+        "processing_fenced",
+        `Generation ${generation} was taken over; generation ${row.generation} now holds this reader. Stop processing.`,
+      );
+    return row;
+  }
+
+  private async processingRoute(
+    request: Request,
+    channel: string,
+    rest: string[],
+    capability: TenantRow,
+  ): Promise<Response> {
+    this.requireChannel(channel);
+    const reader = processingReader(rest[0]);
+    if (rest.length === 1 && request.method === "GET") {
+      const row = this.processingRow(channel, reader);
+      return json(row ? toProcessing(row) : { reader, generation: 0, committedThrough: 0, holder: null });
+    }
+    if (rest.length !== 2 || request.method !== "POST")
+      throw new HttpError(404, "route_not_found", "Unknown processing operation.");
+    // A key bound to a name may only claim, take over or commit that name's readers, as with
+    // sends: the name itself or `name/<worker>` (for `--reader` on concurrent consumers). Prefix
+    // keys already allow any suffix. Unbound and shared board keys stay cooperative (ADR 0026).
+    const bound = capability.bound_username;
+    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
+      this.requireBoundName(capability, reader);
+    const input = await body(request);
+    if (rest[1] === "claim") {
+      const expected = processingInteger(input.expectGeneration, "expectGeneration");
+      const holder =
+        input.holder === undefined || input.holder === null ? null : text(input.holder, "holder", 128);
+      const start =
+        input.committedThrough === undefined
+          ? 0
+          : processingInteger(input.committedThrough, "committedThrough");
+      const row = this.ctx.storage.transactionSync(() => {
+        const current = this.processingRow(channel, reader);
+        const generation = current?.generation ?? 0;
+        if (generation !== expected)
+          throw new HttpError(
+            409,
+            generation && !expected ? "processing_held" : "processing_generation_mismatch",
+            generation && !expected
+              ? `Generation ${generation} holds this reader. Take over explicitly only if that agent is gone.`
+              : `expectGeneration is ${expected} but generation ${generation} holds this reader. Read it again.`,
+            { generation, holder: current?.holder ?? null, committedThrough: current?.committedThrough ?? 0 },
+          );
+        // A first claim may carry local progress forward; a takeover always keeps the server's.
+        if (current && input.committedThrough !== undefined)
+          throw new HttpError(
+            400,
+            "invalid_processing",
+            "committedThrough is only accepted on a first claim.",
+          );
+        if (start > this.headCursor(channel))
+          throw new HttpError(400, "invalid_cursor", "committedThrough exceeds this channel's current head.");
+        const now = new Date().toISOString();
+        return this.ctx.storage.sql
+          .exec<ProcessingRow>(
+            `INSERT INTO processing_cursors(channel, reader, committedThrough, generation, holder, claimedAt, updatedAt)
+             VALUES (?, ?, ?, 1, ?, ?, ?)
+             ON CONFLICT(channel, reader) DO UPDATE SET generation = generation + 1, holder = excluded.holder,
+               claimedAt = excluded.claimedAt, updatedAt = excluded.updatedAt
+             RETURNING ${PROCESSING_COLUMNS}`,
+            channel,
+            reader,
+            start,
+            holder,
+            now,
+            now,
+          )
+          .one();
+      });
+      return json({ ...toProcessing(row), previousGeneration: expected }, expected ? 200 : 201);
+    }
+    if (rest[1] === "commit") {
+      const generation = processingInteger(input.generation, "generation");
+      const through = processingInteger(input.through, "through");
+      const row = this.ctx.storage.transactionSync(() => {
+        // Fence check and write share one transaction: a superseded generation cannot commit.
+        const current = this.requireGeneration(channel, reader, generation);
+        if (through < current.committedThrough)
+          throw new HttpError(409, "commit_behind", "through is behind committedThrough.", {
+            committedThrough: current.committedThrough,
+          });
+        if (through > this.headCursor(channel))
+          throw new HttpError(400, "invalid_cursor", "through exceeds this channel's current head.");
+        return this.ctx.storage.sql
+          .exec<ProcessingRow>(
+            `UPDATE processing_cursors SET committedThrough = ?, updatedAt = ? WHERE channel = ? AND reader = ?
+             RETURNING ${PROCESSING_COLUMNS}`,
+            through,
+            new Date().toISOString(),
+            channel,
+            reader,
+          )
+          .one();
+      });
+      return json(toProcessing(row));
+    }
+    throw new HttpError(404, "route_not_found", "Unknown processing operation.");
+  }
+
+  private headCursor(channel: string): number {
+    return this.ctx.storage.sql
+      .exec<{ head: number }>("SELECT COALESCE(MAX(id), 0) AS head FROM messages WHERE channel = ?", channel)
+      .one().head;
   }
 
   private requireScope(capability: TenantRow, channel: string | null): void {
@@ -2317,7 +2717,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             );
             this.ctx.storage.sql.exec(
               "UPDATE usage SET bytes = bytes - ? WHERE singleton = 1",
-              row.bytes + snapshotBytes,
+              row.bytes + snapshotBytes + this.dropAttachments(channel, id),
             );
             // After the revision bump, so this event's historyRevision is the post-deletion value.
             this.insertEvent(channel, "message.deleted", id);
@@ -2353,8 +2753,11 @@ export class MsnDurableObject extends DurableObject<Env> {
             ? JSON.stringify([payload(username, content, type, correlation), personaId])
             : payload(username, content, type, correlation)
           : "";
-        // Unlabeled sends hash exactly as before ADR 0032, so older retries still replay.
-        const payloadHash = input ? await digest(sendLabels ? JSON.stringify([base, sendLabels]) : base) : "";
+        const files = input ? attachmentRefs(input.attachments) : [];
+        // Sends without labels or files hash exactly as before ADR 0032, so older retries still replay.
+        let hashInput = sendLabels ? JSON.stringify([base, sendLabels]) : base;
+        if (files.length) hashInput = JSON.stringify([hashInput, files]);
+        const payloadHash = input ? await digest(hashInput) : "";
         const change =
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "labels"
             ? labelChange(await body(request))
@@ -2495,6 +2898,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
             return this.catchup(tenant, channel, url);
+          if (rest[2] === "processing")
+            return await this.processingRoute(request, channel, rest.slice(3), capability);
           if (rest[2] === "snapshots") {
             this.requireChannel(channel);
             if (rest.length === 3 && request.method === "POST" && snapshotData) {
@@ -2557,6 +2962,19 @@ export class MsnDurableObject extends DurableObject<Env> {
               });
             }
           }
+          if (rest.length === 3 && rest[2] === "attachments" && request.method === "POST") {
+            this.requireChannel(channel);
+            return await this.upload(channel, request);
+          }
+          if (
+            rest.length === 6 &&
+            rest[2] === "messages" &&
+            rest[4] === "attachments" &&
+            request.method === "GET"
+          ) {
+            this.requireChannel(channel);
+            return this.download(channel, messageId(rest[3]), integer(rest[5], 0, 1000));
+          }
           if (change) {
             this.requireChannel(channel);
             return this.relabel(tenant, channel, messageId(rest[3]), change);
@@ -2591,14 +3009,46 @@ export class MsnDurableObject extends DurableObject<Env> {
                 // The owner's own messages never notify the owner.
                 !capability.owner_access,
                 sendLabels,
+                files,
               );
             }
             if (request.method === "GET") {
               this.requireChannel(channel);
-              const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
               const limit = integer(url.searchParams.get("limit"), 100, 100);
               const wait = integer(url.searchParams.get("wait"), 0, 25);
               if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+              const fence = processingFence(url);
+              if (fence) {
+                // Resumable peek (ADR 0034): the server's committedThrough is the start, and a
+                // superseded generation is refused before and after any wait.
+                if (
+                  ["after", "before"].some((name) => url.searchParams.has(name)) ||
+                  labelFilters(url.searchParams).length
+                )
+                  throw new HttpError(
+                    400,
+                    "invalid_query",
+                    "after, before and label filters cannot be combined with processingReader.",
+                  );
+                const after = this.requireGeneration(
+                  channel,
+                  fence.reader,
+                  fence.generation,
+                ).committedThrough;
+                return await this.poll(
+                  request,
+                  hash,
+                  tenant,
+                  channel,
+                  after,
+                  limit,
+                  wait,
+                  [],
+                  Number.MAX_SAFE_INTEGER,
+                  fence,
+                );
+              }
+              const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
               const filters = labelFilters(url.searchParams);
               // Exclusive upper bound: after=41&before=43 waits on message 42 alone.
               const before = url.searchParams.has("before")

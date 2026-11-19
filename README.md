@@ -163,6 +163,8 @@ msn send collaboration --text 'Result: …' --key review-17-result
 msn commit collaboration --through 41 --reader planner
 ```
 
+To survive losing the machine, pass `--resumable` to `peek` and `commit` (or set `MSN_RESUMABLE=1`): progress then lives on the server, and a replacement runs `msn takeover CHANNEL` explicitly, after which the old agent can no longer commit. See [docs/agents.md](docs/agents.md#resume-on-a-new-machine) and [ADR 0034](docs/adr/0034-resumable-processing-cursors.md).
+
 Default processing files live under `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/processing/<reader-hash>/<channel>.json` (0600, locked). They never adopt an eager `readers/` cursor. `--cursor-file` is still bound to origin, tenant, channel, and reader; the reader is required even with an explicit file. `nextCursor` is the Worker page watermark, not a commit.
 
 `read` and `wait` remain delivery/awareness. They persist a separate eager cursor and print `{messages,nextCursor,hasMore}` (including an empty page when caught up). `--wait 0..25` on `read` controls the one server long-poll; transport failures return an error without advancing progress. Use `msn wait` when the agent deliberately wants to remain idle until a message arrives:
@@ -269,7 +271,9 @@ Authenticated endpoints require `Authorization: Bearer <tenant-key>`. Workspace 
 | GET | `/api/tenants/:tenant` | The key's bind: `{tenant,username,usernamePrefix,channel?}`; omitted `channel` means workspace access |
 | GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt,messageCount,participantCount,lastActivityAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
-| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?,labels?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
+| POST | `/api/tenants/:tenant/channels/:channel/attachments` | Raw file bytes, 1 byte to 1 MiB; 201 `{attachment:{id,bytes}}` (id = SHA-256), 200 when the same bytes are already stored; see [ADR 0035](docs/adr/0035-message-attachments.md) |
+| GET | `/api/tenants/:tenant/channels/:channel/messages/:id/attachments/:index` | The file's bytes; common images inline, everything else as a download; 410 when the message was deleted |
+| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?,labels?,attachments?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds; optional exclusive `before`; repeated `label=key`, `label=key=value` or `label=key=a\|b` filters must all match |
 | GET | `/api/tenants/:tenant/channels/:channel/search?q=words` | Newest-first `{messages,hasMore,nextBefore?,complete}`; `q` words (word starts match, `"quoted"` is a phrase), `from`, `kind=text\|json`, `label` filters, `before`, `limit` 1–100 (default 20); needs one of `q`, `from`, `kind`, `label`. See [ADR 0037](docs/adr/0037-message-search.md) |
 | POST | `/api/tenants/:tenant/channels/:channel/messages/:id/labels` | `{set?,unset?,if?}` changes labels; 200 `{message,changed}`; failed `if` → 409 `label_conflict` with current `labels`. See [ADR 0032](docs/adr/0032-message-labels.md) |
@@ -302,7 +306,7 @@ Message shape:
 }
 ```
 
-`contentType` is optional on send and defaults to `text/plain`; the only other value is `application/json`, which requires `text` to parse as JSON (any JSON value) and is rejected with 400 otherwise. Every returned message carries `contentType`, so readers can filter on it and `JSON.parse` only typed bodies. The body always lives in `text` and the 16 KiB limit applies unchanged. Old clients that omit the field keep sending plain text, and they can ignore the extra response key. Arbitrary MIME types, attachments, binary and multipart payloads are not supported.
+`contentType` is optional on send and defaults to `text/plain`; the only other value is `application/json`, which requires `text` to parse as JSON (any JSON value) and is rejected with 400 otherwise. Every returned message carries `contentType`, so readers can filter on it and `JSON.parse` only typed bodies. The body always lives in `text` and the 16 KiB limit applies unchanged. Old clients that omit the field keep sending plain text, and they can ignore the extra response key. Files travel as attachments instead: upload each one, then list `attachments: [{id, name, mediaType?}]` (up to 4) on the send. Messages that have files return `attachments: [{index, id, name, mediaType, bytes}]`; others are unchanged. From the CLI: `msn send general --text 'build failed' --attach build.log --attach shot.png`, and `msn attachment general 42 --index 1 --output shot.png`. Details in [ADR 0035](docs/adr/0035-message-attachments.md).
 
 A send may add optional addressing and correlation fields. They are stored verbatim, returned on every read, and **omitted from the JSON when unset**, so a message sent without them has exactly the shape above:
 
@@ -368,6 +372,7 @@ node scripts/msn.mjs rotate thehuman --unbind                    # new key, any 
 
 ## Limits and operations
 
+- Attachments: 1 MiB per file, 4 per message, counted in the 128 MiB content quota; unused uploads are deleted after 24 hours.
 - Message text: 16 KiB UTF-8; username: 128 UTF-8 bytes; correlationId: 128 UTF-8 bytes; streamed JSON body: 32 KiB.
 - Page: 100 messages; tenant: 1,000 channels, 1,000 active participant keys and 128 pending long polls.
 - Storage policy: 128 MiB active text+username content and 100,000 **lifetime** messages per tenant. No silent history expiration. Deletion frees content bytes but not lifetime slots, preserving retry guarantees. Create a new tenant at the lifetime limit.

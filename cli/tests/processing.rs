@@ -453,3 +453,233 @@ fn visit(root: &Path, processing: &mut Vec<PathBuf>, readers: &mut Vec<PathBuf>)
         }
     }
 }
+
+// Resumable mode (ADR 0034), R1–R5 in src/resumable.rs.
+
+fn resumable(mut args: Vec<String>) -> Vec<String> {
+    args.push("--resumable".into());
+    args
+}
+
+fn body_json(recorded: &common::Recorded) -> Value {
+    serde_json::from_slice(&recorded.body).expect("request body JSON")
+}
+
+const RESUMED: &str = r#"{"messages":[{"id":5,"tenant":"team","channel":"general"},{"id":7,"tenant":"team","channel":"general"}],"nextCursor":7,"hasMore":false,"committedThrough":3,"generation":1}"#;
+
+#[test]
+fn resumable_first_peek_claims_with_local_progress() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            201,
+            r#"{"reader":"alice","generation":1,"committedThrough":3,"holder":"h"}"#,
+        ),
+        Scripted::json(200, RESUMED),
+    ]);
+    let home = TestHome::new("res-claim");
+    let cursor = home.file("proc.json");
+    fs::write(
+        &cursor,
+        format!(
+            r#"{{"server":"{}","tenant":"team","channel":"general","reader":"alice","committedThrough":3,"highestFetched":3}}"#,
+            server.url()
+        ),
+    )
+    .unwrap();
+    let output = output_capped(
+        home.command()
+            .args(resumable(peek_args(&server.url(), &cursor))),
+        Duration::from_secs(8),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = server.recorded();
+    assert_eq!(recorded[0].method, "POST");
+    assert!(
+        recorded[0]
+            .path
+            .ends_with("/channels/general/processing/alice/claim")
+    );
+    let claim = body_json(&recorded[0]);
+    assert_eq!(claim["expectGeneration"], 0);
+    assert_eq!(claim["committedThrough"], 3);
+    assert!(
+        recorded[1]
+            .path
+            .contains("processingReader=alice&generation=1"),
+        "{}",
+        recorded[1].path
+    );
+    assert!(!recorded[1].path.contains("after="));
+    let envelope = parse_stdout(&output);
+    assert_eq!(envelope["generation"], 1);
+    assert_eq!(envelope["committedThrough"], 3);
+    assert_eq!(envelope["highestFetched"], 7);
+    let state = state_json(&cursor);
+    assert_eq!(state["generation"], 1);
+    assert_eq!(state["highestFetched"], 7);
+}
+
+#[test]
+fn resumable_held_reader_names_takeover() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        409,
+        r#"{"error":{"code":"processing_held","message":"Generation 4 holds this reader.","details":{"generation":4,"holder":"old-box","committedThrough":9}}}"#,
+    )]);
+    let home = TestHome::new("res-held");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command()
+            .args(resumable(peek_args(&server.url(), &cursor))),
+        Duration::from_secs(8),
+    );
+    assert_eq!(output.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("old-box"), "{stderr}");
+    assert!(
+        stderr.contains("msn takeover general --reader 'alice'"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(server.recorded().len(), 1);
+    assert!(!cursor.exists());
+}
+
+#[test]
+fn takeover_sends_current_generation() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            200,
+            r#"{"reader":"alice","generation":4,"committedThrough":9,"holder":"old-box"}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"reader":"alice","generation":5,"committedThrough":9,"holder":"new-box","previousGeneration":4}"#,
+        ),
+    ]);
+    let home = TestHome::new("res-takeover");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command().args([
+            "--url",
+            &server.url(),
+            "--tenant",
+            "team",
+            "--token",
+            "tenant-secret",
+            "--reader",
+            "alice",
+            "takeover",
+            "general",
+            "--cursor-file",
+            &cursor.display().to_string(),
+        ]),
+        Duration::from_secs(8),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = server.recorded();
+    assert_eq!(recorded[0].method, "GET");
+    let claim = body_json(&recorded[1]);
+    assert_eq!(claim["expectGeneration"], 4);
+    assert!(claim.get("committedThrough").is_none());
+    let envelope = parse_stdout(&output);
+    assert_eq!(envelope["generation"], 5);
+    assert_eq!(envelope["previousGeneration"], 4);
+    assert_eq!(envelope["previousHolder"], "old-box");
+    assert_eq!(envelope["committedThrough"], 9);
+    let state = state_json(&cursor);
+    assert_eq!(state["generation"], 5);
+    assert_eq!(state["committedThrough"], 9);
+    assert_eq!(state["highestFetched"], 9);
+}
+
+fn held_state(server: &MockServer, cursor: &Path) {
+    fs::write(
+        cursor,
+        format!(
+            r#"{{"server":"{}","tenant":"team","channel":"general","reader":"alice","committedThrough":3,"highestFetched":7,"generation":2}}"#,
+            server.url()
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn resumable_fenced_commit_is_conflict() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            409,
+            r#"{"error":{"code":"processing_fenced","message":"Generation 2 was taken over; generation 3 now holds this reader. Stop processing."}}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"reader":"alice","generation":3,"committedThrough":3,"holder":null}"#,
+        ),
+    ]);
+    let home = TestHome::new("res-fenced");
+    let cursor = home.file("proc.json");
+    held_state(&server, &cursor);
+    let output = output_capped(
+        home.command()
+            .args(resumable(commit_args(&server.url(), &cursor, "7"))),
+        Duration::from_secs(8),
+    );
+    assert_eq!(output.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("This agent was replaced"), "{stderr}");
+    let recorded = server.recorded();
+    assert_eq!(
+        body_json(&recorded[0]),
+        serde_json::json!({"generation":2,"through":7})
+    );
+    assert_eq!(state_json(&cursor)["committedThrough"], 3);
+    assert_eq!(state_json(&cursor)["generation"], 2);
+}
+
+#[test]
+fn resumable_commit_saves_server_progress() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"reader":"alice","generation":2,"committedThrough":7,"holder":null}"#,
+    )]);
+    let home = TestHome::new("res-commit");
+    let cursor = home.file("proc.json");
+    held_state(&server, &cursor);
+    let output = output_capped(
+        home.command()
+            .args(resumable(commit_args(&server.url(), &cursor, "7"))),
+        Duration::from_secs(8),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(parse_stdout(&output)["committedThrough"], 7);
+    assert_eq!(state_json(&cursor)["committedThrough"], 7);
+}
+
+#[test]
+fn local_commit_refuses_resumable_file() {
+    let server = MockServer::spawn(vec![]);
+    let home = TestHome::new("res-local");
+    let cursor = home.file("proc.json");
+    held_state(&server, &cursor);
+    for args in [
+        commit_args(&server.url(), &cursor, "7"),
+        peek_args(&server.url(), &cursor),
+    ] {
+        let output = output_capped(home.command().args(args), Duration::from_secs(8));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--resumable"));
+    }
+    assert!(server.recorded().is_empty());
+    assert_eq!(state_json(&cursor)["committedThrough"], 3);
+}

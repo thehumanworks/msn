@@ -1786,6 +1786,70 @@ test("with more than 300 unread, opening a board does not mark the rest as read"
   await expect.poll(mark).toBe(Number(newest));
 });
 
+test("files attached to messages show as chips and previews, and a person can attach files", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  // A 1×1 PNG, and a log whose name tries to inject markup.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const upload = async (data) => {
+    const response = await request.post(`${t.path}/channels/general/attachments`, {
+      headers: { ...t.headers, "Content-Type": "application/octet-stream" },
+      data,
+    });
+    expect(response.ok()).toBe(true);
+    return (await response.json()).attachment.id;
+  };
+  const attack = '<img src=x onerror="window.pwned=true">.log';
+  const sent = await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: {
+      username: "agent",
+      text: "build failed, screenshot and log attached",
+      attachments: [
+        { id: await upload(png), name: "screen.png" },
+        { id: await upload("step 2 FAILED\n"), name: attack },
+      ],
+    },
+  });
+  expect(sent.status()).toBe(201);
+  await connect(page, t);
+  await expect(page.locator(".attachment")).toHaveText(["screen.png · 70 B", `${attack} · 14 B`]);
+  await expect(page.locator(".attachment-preview")).toHaveJSProperty("complete", true);
+  await expect
+    .poll(() => page.locator(".attachment-preview").evaluate((image) => image.naturalWidth))
+    .toBe(1);
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  const download = page.waitForEvent("download");
+  await page.locator(".attachment").nth(1).click();
+  expect((await download).suggestedFilename()).toContain("onerror");
+
+  // A person attaches a patch from the composer; it reaches the board with the message.
+  await page.locator("#attach-input").setInputFiles({
+    name: "fix.patch",
+    mimeType: "text/x-diff",
+    buffer: Buffer.from("--- a\n+++ b\n"),
+  });
+  await expect(page.locator("#attach-list")).toContainText("fix.patch");
+  await page.getByLabel("Message", { exact: true }).fill("here is the fix");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".attachment")).toHaveCount(3);
+  await expect(page.locator("#attach-list")).toBeHidden();
+  const history = await (
+    await request.get(`${t.path}/channels/general/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.at(-1).attachments).toEqual([
+    expect.objectContaining({ index: 0, name: "fix.patch", mediaType: "text/x-diff", bytes: 12 }),
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("attachments.png") });
+});
+
 test("the search box finds a board's messages by words and sender, newest first, with older pages", async ({
   page,
   request,

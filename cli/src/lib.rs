@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod archive;
 pub mod args;
+pub mod attachments;
 pub mod board;
 pub mod client;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod labels;
 pub mod mcp;
 pub mod processing;
 pub mod profile;
+pub mod resumable;
 pub mod runner;
 pub mod search;
 pub mod task_client;
@@ -155,6 +157,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             wait,
             limit,
             cursor_file,
+            resumable,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -168,7 +171,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
-            processing::peek(
+            let peek = if resumable {
+                resumable::peek
+            } else {
+                processing::peek
+            };
+            peek(
                 &url,
                 &tenant,
                 &token,
@@ -184,6 +192,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             channel,
             through,
             cursor_file,
+            resumable,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -195,13 +204,41 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
-            processing::commit(
+            let cursor_file = cursor_file.as_deref().map(Path::new);
+            if resumable {
+                resumable::commit(
+                    &url,
+                    &tenant,
+                    &token,
+                    channel,
+                    &reader,
+                    cursor_file,
+                    through,
+                )
+            } else {
+                processing::commit(&url, &tenant, channel, &reader, cursor_file, through)
+            }
+        }
+        Command::Takeover {
+            channel,
+            cursor_file,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let reader = identity::resolve_username(
                 &url,
                 &tenant,
+                &token,
+                cli.reader.as_deref().or(cli.username.as_deref()),
+            )?;
+            resumable::takeover(
+                &url,
+                &tenant,
+                &token,
                 channel,
                 &reader,
                 cursor_file.as_deref().map(Path::new),
-                through,
             )
         }
         Command::Task { command } => {
@@ -287,6 +324,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             correlation_id,
             to,
             labels,
+            attach,
         } => {
             let labels = labels::parse_labels(&labels)?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
@@ -322,6 +360,8 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 // clap enforces exactly one of --text / --json.
                 _ => return Err(CliError::usage("Pass either --text or --json, not both.")),
             };
+            // Read every file before any network call: a bad path fails without side effects.
+            let files = attachments::read_files(&attach)?;
             let username =
                 identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
             send(
@@ -338,7 +378,48 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                     to,
                 },
                 &labels,
+                &files,
             )
+        }
+        Command::Attachment {
+            channel,
+            message_id,
+            index,
+            output,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let id = parse_int(&message_id, MAX_SAFE_INTEGER)?;
+            if id == 0 {
+                return Err(CliError::usage("message ID must be positive."));
+            }
+            let index = parse_optional_int(index.as_deref(), 0, 1000)?;
+            let file =
+                attachments::download(&MsnClient::new(&url)?, &tenant, &token, channel, id, index)?;
+            match output.as_deref() {
+                None | Some("-") => {
+                    let mut stdout = io::stdout().lock();
+                    stdout.write_all(&file.data)?;
+                    stdout.flush()?;
+                }
+                Some(path) => {
+                    let mut out = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(path)
+                        .map_err(|error| {
+                            CliError::usage(format!("Cannot create {path}: {error}"))
+                        })?;
+                    out.write_all(&file.data)?;
+                    eprintln!(
+                        "Saved {} bytes ({}) to {path}",
+                        file.data.len(),
+                        file.media_type
+                    );
+                }
+            }
+            Ok(())
         }
         Command::Poll {
             channel,
@@ -938,6 +1019,16 @@ pub struct Correlation {
 /// The POST body for a send. Unset annotation fields are omitted, so a plain send is byte-for-byte
 /// what older CLIs produced and idempotency replays keep matching.
 pub fn send_body(username: &str, payload: &Payload, correlation: &Correlation) -> Value {
+    send_body_with(username, payload, correlation, &[])
+}
+
+/// `send_body` plus the uploaded `attachments` list; an empty list leaves the field out.
+pub fn send_body_with(
+    username: &str,
+    payload: &Payload,
+    correlation: &Correlation,
+    attachments: &[Value],
+) -> Value {
     let mut body = json!({ "username": username, "text": payload.text });
     if let Some(content_type) = payload.content_type {
         body["contentType"] = Value::String(content_type.to_string());
@@ -950,6 +1041,9 @@ pub fn send_body(username: &str, payload: &Payload, correlation: &Correlation) -
     }
     if let Some(to) = &correlation.to {
         body["to"] = json!(to);
+    }
+    if !attachments.is_empty() {
+        body["attachments"] = json!(attachments);
     }
     body
 }
@@ -972,6 +1066,7 @@ fn send(
     key: Option<&str>,
     correlation: Correlation,
     labels: &labels::Labels,
+    files: &[attachments::LocalFile],
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
     let key = key
@@ -979,7 +1074,9 @@ fn send(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     eprintln!("Idempotency-Key: {key}");
     let _ = io::stderr().flush();
-    let mut body = send_body(username, payload, &correlation);
+    // Uploads are content-addressed, so a retry with the same files and key replays one message.
+    let uploaded = attachments::upload(&client, tenant, token, channel, files)?;
+    let mut body = send_body_with(username, payload, &correlation, &uploaded);
     with_labels(&mut body, labels);
     let response = client.post_json(
         &format!("/api/tenants/{tenant}/channels/{channel}/messages"),

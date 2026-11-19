@@ -106,6 +106,30 @@ describe("message search (ADR 0037)", () => {
     expect(labeled.messages[0].labels).toEqual({ state: "open" });
   });
 
+  it("returns attachments with matching messages", async () => {
+    const w = await workspace();
+    await send(w, "unrelated note");
+    const upload = await call(`${w.path}/channels/general/attachments`, w.token, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: "step 2 FAILED\n",
+    });
+    expect(upload.ok).toBe(true);
+    const { attachment } = await upload.json<{ attachment: { id: string } }>();
+    const response = await call(`${w.path}/channels/general/messages`, w.token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: "agent",
+        text: "build log attached",
+        attachments: [{ id: attachment.id, name: "build.log" }],
+      }),
+    });
+    expect(response.status).toBe(201);
+    const [found_] = (await found(w, "q=build")).messages as Array<Message & { attachments?: unknown[] }>;
+    expect(found_.attachments).toMatchObject([{ index: 0, id: attachment.id, name: "build.log" }]);
+  });
+
   it("pages to older matches with before", async () => {
     const w = await workspace();
     const sent = [];

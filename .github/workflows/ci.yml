@@ -111,6 +111,7 @@ jobs:
       - run: bun run test:critical
       - run: bun run test:dispatch
       - run: bun run test:mcp
+      - run: bun run test:resume
 
   # Releases the Worker from GitHub, never from a personal computer.
   # Pull requests: bundle and validate the Worker with a dry run (no credentials).

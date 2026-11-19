@@ -82,7 +82,7 @@ export default {
     secured.headers.set("Referrer-Policy", "no-referrer");
     secured.headers.set(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
     const pathname = new URL(request.url).pathname;
     if (pathname.startsWith("/api")) secured.headers.set("Cache-Control", "no-store");

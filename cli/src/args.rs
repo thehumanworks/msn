@@ -316,6 +316,9 @@ pub enum Command {
         /// Separate processing state, bound to origin/workspace/channel/reader
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
+        /// Keep progress on the server so a replacement on another machine can resume (ADR 0034)
+        #[arg(long, env = "MSN_RESUMABLE", value_parser = clap::builder::FalseyValueParser::new())]
+        resumable: bool,
     },
     /// Commit processing of every message through a previously fetched watermark
     Commit {
@@ -324,9 +327,29 @@ pub enum Command {
         through: String,
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
+        /// Commit to the server, fenced by this machine's generation (ADR 0034)
+        #[arg(long, env = "MSN_RESUMABLE", value_parser = clap::builder::FalseyValueParser::new())]
+        resumable: bool,
+    },
+    /// Explicitly take over a reader's resumable progress from an agent that is gone; the old agent can no longer commit
+    Takeover {
+        channel: String,
+        #[arg(long = "cursor-file")]
+        cursor_file: Option<String>,
     },
     /// Fetch one exact message by channel and ID (404 absent, 410 deleted)
     Show { channel: String, message_id: String },
+    /// Download one file attached to a message (to stdout, or to --output)
+    Attachment {
+        channel: String,
+        message_id: String,
+        /// Which file, counted from 0 in the message's attachments list (default 0)
+        #[arg(long)]
+        index: Option<String>,
+        /// Write the file here instead of stdout; refuses to overwrite an existing file
+        #[arg(long, short)]
+        output: Option<String>,
+    },
     /// Publish readable task events or project a complete, bounded task board
     Task {
         #[command(subcommand)]
@@ -404,6 +427,9 @@ pub enum Command {
         /// key=value label, such as state=open; repeat for more (at most 16)
         #[arg(long = "label", value_name = "KEY=VALUE")]
         labels: Vec<String>,
+        /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
+        #[arg(long = "attach", value_name = "PATH")]
+        attach: Vec<String>,
     },
     /// GET …/messages (single page; wait defaults to 0)
     Poll {
