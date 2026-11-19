@@ -240,7 +240,11 @@ try {
   const doctor = await agentRun(["--profile", "work-helper", "doctor", "work", "--json"]);
   assert.equal(doctor.ok, true, JSON.stringify(doctor));
   for (const id of ["login", "profile", "server", "workspace", "board"])
-    assert.equal(doctor.checks.find((c) => c.check === id)?.status, "ok", `doctor ${id}: ${JSON.stringify(doctor)}`);
+    assert.equal(
+      doctor.checks.find((c) => c.check === id)?.status,
+      "ok",
+      `doctor ${id}: ${JSON.stringify(doctor)}`,
+    );
   const sharedKey = joinCommand.match(/"token":"([^"]+)"/)?.[1];
   assert.ok(sharedKey && !JSON.stringify(doctor).includes(sharedKey), "doctor never prints the key");
   const helpers = (await cli(["--profile", "lead", "persona", "list", "work"])).personas.filter(
