@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod processing;
 pub mod profile;
 pub mod runner;
+pub mod search;
 pub mod task_client;
 pub mod tasks;
 pub mod templates;
@@ -357,6 +358,34 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             }
             labels::filter_query(&filters)?;
             poll(&url, &tenant, &token, channel, after, wait, limit, &filters)
+        }
+        Command::Search {
+            channel,
+            text,
+            from,
+            kind,
+            labels: filters,
+            before,
+            limit,
+        } => {
+            let before = before.as_deref().map(parse_message_id).transpose()?;
+            let limit = parse_optional_int(limit.as_deref(), search::DEFAULT_LIMIT, MAX_LIMIT)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let path = search::path(
+                &tenant,
+                channel,
+                &search::Search {
+                    text: text.as_deref(),
+                    from: from.as_deref(),
+                    kind: kind.as_deref(),
+                    labels: &filters,
+                    before,
+                    limit,
+                },
+            )?;
+            finish(&MsnClient::new(&url)?.get(&path, Some(&token))?)
         }
         Command::Label {
             channel,
