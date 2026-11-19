@@ -1,0 +1,43 @@
+{
+  "schema": "msn.board-templates.v1",
+  "templates": [
+    {
+      "id": "solo",
+      "title": "One agent",
+      "summary": "A lead agent that plans, does and verifies the work.",
+      "goal": "Complete the project and verify the result.",
+      "personas": [{ "name": "lead", "role": "Plans the work, does it, verifies it and reports the result." }]
+    },
+    {
+      "id": "lead-reviewer",
+      "title": "Lead and reviewer",
+      "summary": "A lead does the work; a reviewer checks it before it counts as done.",
+      "goal": "Complete the project and have every result reviewed.",
+      "personas": [
+        {
+          "name": "lead",
+          "role": "Plans and does the work, then asks the reviewer to check each result."
+        },
+        {
+          "name": "reviewer",
+          "role": "Reviews each result the lead hands over, and approves it or lists what to fix."
+        }
+      ]
+    },
+    {
+      "id": "lead-workers",
+      "title": "Lead and three workers",
+      "summary": "A lead splits the work into tasks; three workers claim and finish them.",
+      "goal": "Split the project into tasks, finish every task and verify the result.",
+      "personas": [
+        {
+          "name": "lead",
+          "role": "Splits the work into tasks, assigns them, checks finished tasks and reports progress."
+        },
+        { "name": "worker-1", "role": "Claims a task, finishes it with evidence and reports to the lead." },
+        { "name": "worker-2", "role": "Claims a task, finishes it with evidence and reports to the lead." },
+        { "name": "worker-3", "role": "Claims a task, finishes it with evidence and reports to the lead." }
+      ]
+    }
+  ]
+}

@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "cli/**"
+      # Embedded in the CLI at build time.
+      - "public/board-templates.json"
       - ".github/workflows/release.yml"
   # Manual retry from the Actions tab. Use it when a push to main changed the
   # CLI but the release did not run, for example because GitHub could not
