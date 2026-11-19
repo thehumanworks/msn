@@ -113,7 +113,7 @@ Never silently retarget an existing profile at production. Never reuse credentia
 
 Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Access keys never go in URLs or channel messages. Share short-lived invitation links out of band; the secret is in the URL fragment and exchanged for the recipient's own key.
 
-**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `board`, `label`, `find` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
+**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `board`, `label`, `find`, `search` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
 
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
@@ -271,6 +271,7 @@ Authenticated endpoints require `Authorization: Bearer <tenant-key>`. Workspace 
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
 | POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?,labels?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds; optional exclusive `before`; repeated `label=key`, `label=key=value` or `label=key=a\|b` filters must all match |
+| GET | `/api/tenants/:tenant/channels/:channel/search?q=words` | Newest-first `{messages,hasMore,nextBefore?,complete}`; `q` words (word starts match, `"quoted"` is a phrase), `from`, `kind=text\|json`, `label` filters, `before`, `limit` 1–100 (default 20); needs one of `q`, `from`, `kind`, `label`. See [ADR 0037](docs/adr/0037-message-search.md) |
 | POST | `/api/tenants/:tenant/channels/:channel/messages/:id/labels` | `{set?,unset?,if?}` changes labels; 200 `{message,changed}`; failed `if` → 409 `label_conflict` with current `labels`. See [ADR 0032](docs/adr/0032-message-labels.md) |
 | GET | `/api/tenants/:tenant/github` | **Owner only.** `{webhookUrl,configured,contentType,events,links}`, never the secret. `POST …/github/secret` makes or replaces the webhook secret and returns it once. See [ADR 0036](docs/adr/0036-github-pull-request-sync.md) |
 | PUT, DELETE | `/api/tenants/:tenant/channels/:channel/github/pulls/:owner/:repo/:number` | **Owner only.** Link a pull request to the board (201 with the anchor message id, 200 if already linked) or unlink it (204) |
