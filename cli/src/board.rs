@@ -306,10 +306,21 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             } else {
                 "lead".into()
             };
-            let save_as = &save_as.clone().unwrap_or_else(|| format!("{channel}-lead"));
-            profile::validate_name(save_as)
-                .map_err(|_| CliError::usage("Use --save-as NAME or a shorter channel name."))?;
-            // Profile names for the template's other personas, checked before anything is created.
+            let save_as = match save_as {
+                Some(save_as) => {
+                    profile::validate_name(save_as)?;
+                    save_as.clone()
+                }
+                None => {
+                    let save_as = format!("{channel}-lead");
+                    profile::validate_name(&save_as).map_err(|_| {
+                        CliError::usage("Use --save-as NAME or a shorter channel name.")
+                    })?;
+                    save_as
+                }
+            };
+            let save_as = &save_as;
+            // The template's other personas and their profile names.
             let members = template
                 .iter()
                 .flat_map(|t| t.personas.iter().skip(1))
@@ -322,14 +333,14 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let goal = match (&template, goal) {
-                (Some(t), goal) => templates::goal(t, goal.as_deref().unwrap_or(&t.goal), &name),
-                (None, Some(goal)) => goal.clone(),
-                (None, None) => return Err(CliError::usage("Use --goal or --template.")),
+            let goal = match &template {
+                Some(t) => templates::goal(t, goal.as_deref().unwrap_or(&t.goal), &name),
+                // clap requires --goal when there is no --template.
+                None => goal.clone().unwrap_or_default(),
             };
             profile::ensure_directory(&profile::profile_directory()?)?;
             let _lock = CursorLock::acquire(&profile::profile_path(save_as)?)?;
-            let agent = if profile::profile_path(save_as)?.exists() {
+            let existing = if profile::profile_path(save_as)?.exists() {
                 let existing = profile::load(save_as)?;
                 if existing.url != p.url
                     || existing.tenant != p.tenant
@@ -338,26 +349,62 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 {
                     return Err(CliError::usage("Choose a new channel profile name."));
                 }
-                existing
+                Some(existing)
             } else {
-                let agent = Profile {
-                    url: p.url.clone(),
-                    tenant: p.tenant.clone(),
-                    token: secret(),
-                    username: name,
-                    reader: format!("persona-{}", Uuid::new_v4().simple()),
-                    activity: None,
-                };
-                save(save_as, &agent)?;
-                agent
+                None
             };
-            value(client.exchange(
+            // Check every member before anything is created, so a failure never leaves a half-made board.
+            for (persona, _, profile_name) in &members {
+                if *persona == name {
+                    return Err(CliError::usage(format!(
+                        "This template already has a persona named {persona}. Use another --username."
+                    )));
+                }
+                if profile::profile_path(profile_name)?.exists() {
+                    let member = profile::load(profile_name)?;
+                    if member.url != p.url
+                        || member.tenant != p.tenant
+                        || member.username != *persona
+                        || existing
+                            .as_ref()
+                            .is_none_or(|lead| lead.token != member.token)
+                    {
+                        return Err(CliError::usage(format!(
+                            "Profile {profile_name} already belongs to another connection. Use another channel name."
+                        )));
+                    }
+                }
+            }
+            let agent = match existing {
+                Some(existing) => existing,
+                None => {
+                    let agent = Profile {
+                        url: p.url.clone(),
+                        tenant: p.tenant.clone(),
+                        token: secret(),
+                        username: name,
+                        reader: format!("persona-{}", Uuid::new_v4().simple()),
+                        activity: None,
+                    };
+                    save(save_as, &agent)?;
+                    agent
+                }
+            };
+            let created = value(client.exchange(
                 "PUT",
                 &format!("{base}/channels/{channel}/board"),
                 Some(&p.token),
                 &[],
                 Some(&json!({"credential":agent.token,"goal":goal})),
             )?)?;
+            if created["board"]["goal"]
+                .as_str()
+                .is_some_and(|current| current != goal)
+            {
+                eprintln!(
+                    "Board {channel} already exists, so its goal was not changed. Use msn board set {channel} --goal to change it."
+                );
+            }
             register(&client, &agent, channel)?;
             let Some(template) = &template else {
                 announce(save_as, &agent);
@@ -374,7 +421,12 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     &persona,
                     None,
                     &profile_name,
-                )?;
+                )
+                .inspect_err(|_| {
+                    eprintln!(
+                        "Board {channel} was created, but adding persona {persona} failed. Run the same command again to finish."
+                    );
+                })?;
                 profiles.push(summary(&profile_name, &added, &role));
             }
             println!(

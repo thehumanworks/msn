@@ -5,12 +5,14 @@ on:
     paths:
       - "apps/desktop/**"
       - "cli/**"
+      - "public/board-templates.json"
       - ".github/workflows/desktop.yml"
   push:
     branches: [main]
     paths:
       - "apps/desktop/**"
       - "cli/**"
+      - "public/board-templates.json"
       - ".github/workflows/desktop.yml"
 
 permissions:

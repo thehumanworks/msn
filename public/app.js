@@ -422,6 +422,7 @@ async function poll(live = false) {
 function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
+  $("agents").disabled = false;
   savePosition();
   stopPolling();
   channel = name;
@@ -786,7 +787,11 @@ function chosenTemplate() {
 
 $("start-template").addEventListener("click", async () => {
   try {
-    templates ??= (await (await fetch("/board-templates.json")).json()).templates;
+    if (!templates) {
+      const data = await (await fetch("/board-templates.json")).json();
+      if (!Array.isArray(data?.templates) || !data.templates.length) throw new Error("No templates");
+      templates = data.templates;
+    }
   } catch {
     status("Templates are unavailable. Reload and try again.", true);
     return;
@@ -838,6 +843,8 @@ $("template-form").addEventListener("submit", async (event) => {
   const goal = templateGoal(template, $("template-goal").value.trim() || template.goal);
   $("template-submit").disabled = true;
   $("template-error").hidden = true;
+  let created = false;
+  let failure = null;
   try {
     await api(
       `/channels/${name}/board`,
@@ -848,6 +855,7 @@ $("template-form").addEventListener("submit", async (event) => {
       },
       connection,
     );
+    created = true;
     for (const persona of template.personas)
       await api(
         `/channels/${name}/personas/persona-${crypto.randomUUID()}`,
@@ -858,32 +866,44 @@ $("template-form").addEventListener("submit", async (event) => {
         },
         connection,
       );
-    await refreshChannels(connection);
-    if (session !== connection) return;
-    const profiles = template.personas.map((p) => [p.name, `${name}-${p.name}`]);
-    $("template-commands").textContent = [
-      ...profiles.map(
-        ([persona, profile]) => `msn board connect ${name} --name ${persona} --save-as ${profile}`,
-      ),
-      "# Start each agent you want running on this computer, for example:",
-      ...profiles.map(([, profile]) => `msn --profile ${profile} run ${name} --harness codex`),
-    ].join("\n");
-    $("template-ready").textContent =
-      `# ${name} is ready with ${template.personas.length === 1 ? "1 agent" : `${template.personas.length} agents`}`;
-    $("template-form").hidden = true;
-    $("template-result").hidden = false;
-    $("template-form").reset();
-    selectChannel(name);
   } catch (error) {
-    if (session !== connection) return;
-    $("template-error").textContent =
-      error.code === "board_exists"
-        ? "A board with this name already exists. Choose another name."
-        : error.message;
-    $("template-error").hidden = false;
-  } finally {
-    $("template-submit").disabled = false;
+    failure = error;
   }
+  $("template-submit").disabled = false;
+  if (session !== connection) return;
+  if (!created) {
+    $("template-error").textContent =
+      failure.code === "board_exists"
+        ? "A board with this name already exists. Choose another name."
+        : failure.message;
+    $("template-error").hidden = false;
+    return;
+  }
+  // The board exists even if a persona failed: board connect registers any missing persona,
+  // so the same commands finish the setup and a retry is never needed.
+  const profiles = template.personas.map((p) => [p.name, `${name}-${p.name}`]);
+  $("template-commands").textContent = [
+    ...profiles.map(
+      ([persona, profile]) => `msn board connect ${name} --name ${persona} --save-as ${profile}`,
+    ),
+    "# Start each agent you want running on this computer, for example:",
+    ...profiles.map(([, profile]) => `msn --profile ${profile} run ${name} --harness codex`),
+  ].join("\n");
+  const count = template.personas.length === 1 ? "1 agent" : `${template.personas.length} agents`;
+  $("template-ready").textContent = `# ${name} is ready with ${count}`;
+  $("template-partial").textContent = failure
+    ? `Some agents were not added yet (${failure.message}). The connect commands below add them.`
+    : "";
+  $("template-partial").hidden = !failure;
+  $("template-form").hidden = true;
+  $("template-result").hidden = false;
+  $("template-form").reset();
+  try {
+    await refreshChannels(connection);
+  } catch (error) {
+    if (session === connection) status(error.message, true);
+  }
+  if (session === connection) selectChannel(name);
 });
 
 function autosize() {
@@ -1162,3 +1182,74 @@ $("board-form").addEventListener("submit", async (event) => {
     status(error.message, true);
   }
 });
+
+/** "3 min ago" style text for a past ISO time; coarse on purpose (ADR 0028). */
+function ago(iso, now = Date.now()) {
+  const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (seconds < 60) return "just now";
+  const units = [
+    [86400, "d"],
+    [3600, "h"],
+    [60, "min"],
+  ];
+  for (const [size, unit] of units) if (seconds >= size) return `${Math.floor(seconds / size)} ${unit} ago`;
+  return "just now";
+}
+let agentsTimer = null;
+let agentsChannel = null;
+async function showAgents() {
+  const connection = session;
+  const target = agentsChannel;
+  try {
+    const { personas } = await api(`/channels/${target}/personas`, {}, connection);
+    if (session !== connection || agentsChannel !== target) return;
+    const list = $("agents-list");
+    list.replaceChildren();
+    if (!personas.length) {
+      const empty = document.createElement("li");
+      empty.textContent = "No personas on this board yet.";
+      list.append(empty);
+    }
+    for (const persona of personas) {
+      const row = document.createElement("li");
+      row.className = persona.listening ? "listening" : "idle";
+      const dot = document.createElement("span");
+      dot.className = "presence-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const name = document.createElement("strong");
+      name.textContent = persona.displayName;
+      const detail = document.createElement("small");
+      const heard = persona.listening
+        ? "Listening"
+        : persona.lastListeningAt
+          ? `Last listened ${ago(persona.lastListeningAt)}`
+          : "Never listened";
+      const acted = persona.lastActedAt ? `last acted ${ago(persona.lastActedAt)}` : "no messages yet";
+      detail.textContent = `${heard} · ${acted}`;
+      row.append(dot, name, detail);
+      list.append(row);
+    }
+    $("agents-title").textContent = `Agents in # ${target}`;
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    $("agents-dialog").close();
+    status(
+      error.status === 404 ? "This channel is not a board, so it has no agent personas." : error.message,
+      true,
+    );
+  }
+}
+$("agents").addEventListener("click", async () => {
+  agentsChannel = channel;
+  $("agents-list").replaceChildren();
+  $("agents-title").textContent = `Agents in # ${channel}`;
+  $("agents-dialog").showModal();
+  await showAgents();
+  clearInterval(agentsTimer);
+  if ($("agents-dialog").open) agentsTimer = setInterval(showAgents, 30000);
+});
+$("agents-dialog").addEventListener("close", () => {
+  clearInterval(agentsTimer);
+  agentsTimer = null;
+});
+$("close-agents").addEventListener("click", () => $("agents-dialog").close());

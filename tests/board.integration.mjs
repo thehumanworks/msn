@@ -183,6 +183,14 @@ try {
     /^Ship the docs\n\nTeam \(Lead and reviewer\):/,
   );
   await cli(["board", "create", "nope", "--template", "unknown", "--save-as", "nope-lead"], 2);
+  // Conflicts are found before the board exists, so a fixed retry never meets a half-made board.
+  await cli(["--username", "reviewer", "board", "create", "clash", "--template", "lead-reviewer"], 2);
+  await cli(["--profile", "lead", "persona", "add", "work", "other", "--save-as", "clash-reviewer"]);
+  await cli(["board", "create", "clash", "--template", "lead-reviewer"], 2);
+  assert.ok(
+    !(await cli(["channels"])).channels.some((c) => c.name === "clash"),
+    "A rejected template create makes no board",
+  );
   const entered = await cli(["--profile", "lead", "start", "work"]);
   assert.equal(entered.board.goal, "Finish the integration goal");
   assert.equal(entered.identity.sharedChannel, true);

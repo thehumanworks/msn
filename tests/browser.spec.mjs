@@ -187,6 +187,46 @@ test("an owner starts a ready board from a template in one step", async ({ page,
   await expect(page.getByRole("button", { name: "Start a board from a template" })).toBeHidden();
 });
 
+test("a template board whose persona setup fails still shows how to finish it", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  await page.goto("/");
+  await page.locator("#connection-file").setInputFiles({
+    name: "account.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(
+      JSON.stringify({
+        url: new URL(page.url()).origin,
+        tenant: t.tenant,
+        token: t.token,
+        username: "human",
+      }),
+    ),
+  });
+  await expect(page.locator("#workspace")).toBeVisible();
+  let personas = 0;
+  await page.route("**/channels/half/personas/*", (route) =>
+    ++personas === 2
+      ? route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { code: "unavailable", message: "Try again later." } }),
+        })
+      : route.continue(),
+  );
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  await page.locator("#template-channel").fill("half");
+  await page.locator("#template-dialog").getByRole("button", { name: "Create board" }).click();
+  await expect(page.locator("#template-ready")).toHaveText("# half is ready with 2 agents");
+  await expect(page.locator("#template-partial")).toHaveText(
+    "Some agents were not added yet (Try again later.). The connect commands below add them.",
+  );
+  await expect(page.locator("#template-commands")).toContainText(
+    "msn board connect half --name reviewer --save-as half-reviewer",
+  );
+  const roster = await (await request.get(`${t.path}/channels/half/personas`, { headers: t.headers })).json();
+  expect(roster.personas.map((p) => p.displayName)).toEqual(["lead"]);
+});
+
 test("human and CLI agent exchange messages live; poll, reread and admin deletion work", async ({
   page,
   request,
@@ -1415,4 +1455,69 @@ test("every control stays reachable on a landscape phone", async ({ page, reques
   await page.getByRole("button", { name: "Disconnect" }).click();
   await expect(page.locator("#welcome")).toBeVisible();
   expect(await onScreen("#entry-submit")).toBe(true);
+});
+
+test("the Agents list shows which board personas are listening and when each last acted", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship the presence list" },
+      })
+    ).status(),
+  ).toBe(201);
+  expect((await request.put(`${t.path}/channels/plain`, { headers: t.headers })).status()).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  for (const [id, displayName] of [
+    ["builder", "builder"],
+    ["reviewer", "reviewer"],
+  ])
+    await request.put(`${t.path}/channels/work/personas/${id}`, { headers: shared, data: { displayName } });
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: shared,
+    data: { username: "reviewer", text: "Review notes posted" },
+  });
+  const head = await (await request.get(`${t.path}/events?wait=0`, { headers: shared })).json();
+  // The builder's runner holds its long poll open, tagged with its persona.
+  const poll = request.get(`${t.path}/events?wait=20&after=${head.nextCursor}&listener=builder`, {
+    headers: shared,
+  });
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`${t.path}/channels/work/personas`, { headers: shared })).json())
+          .personas[0].listening,
+    )
+    .toBe(true);
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#agents").click();
+  await expect(page.locator("#agents-title")).toHaveText("Agents in # work");
+  const rows = page.locator("#agents-list li");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveClass("listening");
+  await expect(rows.nth(0)).toContainText("builder");
+  await expect(rows.nth(0)).toContainText("Listening · no messages yet");
+  await expect(rows.nth(1)).toHaveClass("idle");
+  await expect(rows.nth(1)).toContainText("Never listened · last acted just now");
+  await page.screenshot({ path: testInfo.outputPath("agents-listening.png") });
+  await page.locator("#close-agents").click();
+  await expect(page.locator("#agents-dialog")).not.toBeVisible();
+  // A channel without a board has no personas; the list explains that instead of opening empty.
+  await openChannel(page, "plain");
+  await page.locator("#agents").click();
+  await expect(page.locator("#status")).toHaveText(
+    "This channel is not a board, so it has no agent personas.",
+  );
+  await expect(page.locator("#agents-dialog")).not.toBeVisible();
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: shared,
+    data: { username: "builder", text: "wake" },
+  });
+  expect((await poll).status()).toBe(200);
 });

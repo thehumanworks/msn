@@ -72,7 +72,11 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
+/** A runner counts as listening this long after its last event poll ended (ADR 0028). */
+export const LISTENING_GRACE_MS = 60_000;
+/** `persona_presence.lastListeningAt` is written at most this often per persona while it polls. */
+export const PRESENCE_WRITE_INTERVAL_MS = 5 * 60_000;
 type InviteRow = {
   id: string;
   code_hash: string;
@@ -165,6 +169,10 @@ export function payload(username: string, text: string, type: ContentType, corre
 export class MsnDurableObject extends DurableObject<Env> {
   private waiters = new Set<Waiter>();
   private eventWaiters = new Set<EventWaiter>();
+  /** In-memory only: open listener polls and when the last one ended, per channel/persona key. */
+  private listeners = new Map<string, { open: number; lastEnded: number }>();
+  /** When `persona_presence` was last written per key; empty after a restart, so the first poll writes. */
+  private presenceWritten = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -220,6 +228,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           channel TEXT NOT NULL, id TEXT NOT NULL, displayName TEXT NOT NULL, createdAt TEXT NOT NULL,
           PRIMARY KEY(channel,id)
         );
+        CREATE TABLE IF NOT EXISTS persona_presence (
+          channel TEXT NOT NULL, personaId TEXT NOT NULL, lastListeningAt TEXT NOT NULL,
+          PRIMARY KEY(channel, personaId)
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -247,6 +259,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         )
           ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
       }
+      // After the column loop: restored databases gain messages.personaId first. Serves lastActedAt.
+      ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS persona_messages ON messages(channel, personaId, id)");
       if (version === null) {
         for (let applied = 1; applied <= SCHEMA_VERSION; applied++)
           ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", applied);
@@ -281,6 +295,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (version < 7) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (7)");
         if (version < 8) ctx.storage.sql.exec("INSERT INTO schema_version VALUES (8)");
         if (version < 10) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (10)");
+        // v10 → v11: persona listening presence (ADR 0028); table and index are created above.
+        if (version < 11) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (11)");
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -364,12 +380,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.board(channel);
       if (rest.length === 1 && request.method === "GET") {
         return json({
-          personas: this.ctx.storage.sql
-            .exec(
-              "SELECT id,displayName,createdAt FROM personas WHERE channel=? ORDER BY createdAt,id",
-              channel,
-            )
-            .toArray(),
+          personas: this.roster(channel),
         });
       }
       if (rest.length === 2 && request.method === "PUT") {
@@ -516,6 +527,73 @@ export class MsnDurableObject extends DurableObject<Env> {
       return json({ rotated: true, channel });
     }
     throw new HttpError(404, "route_not_found", "Unknown board operation.");
+  }
+
+  /** Personas with listening presence (ADR 0028). Unknown times are null, never omitted. */
+  private roster(channel: string) {
+    const now = Date.now();
+    return this.ctx.storage.sql
+      .exec<{
+        id: string;
+        displayName: string;
+        createdAt: string;
+        lastListeningAt: string | null;
+        lastActedAt: string | null;
+      }>(
+        `SELECT p.id, p.displayName, p.createdAt, pp.lastListeningAt,
+           (SELECT m.createdAt FROM messages m WHERE m.channel=p.channel AND m.personaId=p.id AND m.deleted=0
+            ORDER BY m.id DESC LIMIT 1) AS lastActedAt
+         FROM personas p LEFT JOIN persona_presence pp ON pp.channel=p.channel AND pp.personaId=p.id
+         WHERE p.channel=? ORDER BY p.createdAt, p.id`,
+        channel,
+      )
+      .toArray()
+      .map((row) => {
+        const live = this.listeners.get(JSON.stringify([channel, row.id]));
+        const seen = live ? (live.open ? now : live.lastEnded) : null;
+        const stored = row.lastListeningAt === null ? null : Date.parse(row.lastListeningAt);
+        const last = Math.max(seen ?? -1, stored ?? -1);
+        return {
+          id: row.id,
+          displayName: row.displayName,
+          createdAt: row.createdAt,
+          listening: seen !== null && now - seen < LISTENING_GRACE_MS,
+          lastListeningAt: last < 0 ? null : new Date(last).toISOString(),
+          lastActedAt: row.lastActedAt,
+        };
+      });
+  }
+
+  /** A listener poll started or ended: update memory, and persist at most every few minutes. */
+  private touchListener(key: string, channel: string, personaId: string, delta: number) {
+    const now = Date.now();
+    const entry = this.listeners.get(key) ?? { open: 0, lastEnded: now };
+    entry.open = Math.max(0, entry.open + delta);
+    entry.lastEnded = now;
+    this.listeners.set(key, entry);
+    const written = this.presenceWritten.get(key);
+    if (written !== undefined && now - written < PRESENCE_WRITE_INTERVAL_MS) return;
+    this.presenceWritten.set(key, now);
+    this.ctx.storage.sql.exec(
+      "INSERT INTO persona_presence VALUES(?,?,?) ON CONFLICT(channel, personaId) DO UPDATE SET lastListeningAt=excluded.lastListeningAt",
+      channel,
+      personaId,
+      new Date(now).toISOString(),
+    );
+  }
+
+  /** `listener=<personaId>` is accepted only on a board's shared credential, for a registered persona. */
+  private listenerPersona(capability: TenantRow, value: string | null): string | null {
+    if (value === null) return null;
+    const id = slug(value);
+    if (!capability.shared_channel || !capability.channel_scope)
+      throw new HttpError(400, "listener_requires_board", "Only a board persona can report listening.");
+    const known = this.ctx.storage.sql
+      .exec("SELECT 1 FROM personas WHERE channel=? AND id=?", capability.channel_scope, id)
+      .toArray();
+    if (!known.length)
+      throw new HttpError(400, "listener_unknown_persona", "Register this persona before listening.");
+    return id;
   }
 
   private requireOwner(capability: TenantRow) {
@@ -667,8 +745,12 @@ export class MsnDurableObject extends DurableObject<Env> {
     after: number,
     limit: number,
     wait: number,
+    listener: string | null = null,
   ): Promise<Response> | Response {
     const page = this.eventsPage(tenant, channel, after, limit);
+    // A catch-up read (wait=0) is not listening; a long poll that returns at once still is.
+    const key = listener && channel && wait ? JSON.stringify([channel, listener]) : null;
+    if (key && channel && listener && page.events.length) this.touchListener(key, channel, listener, 0);
     if (page.events.length || !wait) return json(page);
     if (this.eventWaiters.size >= MAX_WAITERS)
       throw new HttpError(
@@ -683,6 +765,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         clearTimeout(timer);
         this.eventWaiters.delete(waiter);
         request.signal.removeEventListener("abort", abort);
+        if (key && channel && listener) this.touchListener(key, channel, listener, -1);
       };
       const finish = (aborted = false) => {
         if (finished) return;
@@ -716,6 +799,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       const abort = () => finish(true);
       const timer = setTimeout(finish, wait * 1000);
       this.eventWaiters.add(waiter);
+      if (key && channel && listener) this.touchListener(key, channel, listener, 1);
       request.signal.addEventListener("abort", abort, { once: true });
       if (request.signal.aborted) abort();
     });
@@ -1544,7 +1628,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           const limit = integer(url.searchParams.get("limit"), 100, 100);
           const wait = integer(url.searchParams.get("wait"), 0, 25);
           if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
-          return await this.eventPoll(request, hash, tenant, effectiveChannel, after, limit, wait);
+          const listener = this.listenerPersona(capability, url.searchParams.get("listener"));
+          return await this.eventPoll(request, hash, tenant, effectiveChannel, after, limit, wait, listener);
         }
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
