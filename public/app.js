@@ -1,10 +1,13 @@
 import { acquire, invitation, savePassword } from "./access.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
+import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { onViewportChange } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "msn.session";
 const CHANNEL_KEY = (tenant) => `msn.channel.${tenant}`;
+// Where this reader stopped on each board. Device-local only; the server never learns it.
+const MARKS_KEY = (tenant) => `msn.read.${tenant}`;
 let session = null;
 let channel = "";
 let generation = 0;
@@ -45,7 +48,39 @@ function savedSession() {
 
 function forgetSession(tenant) {
   storage.remove(SESSION_KEY);
-  if (tenant) storage.remove(CHANNEL_KEY(tenant));
+  if (tenant) {
+    storage.remove(CHANNEL_KEY(tenant));
+    storage.remove(MARKS_KEY(tenant));
+  }
+}
+
+function readMark(name, connection = session) {
+  return connection?.marks?.[markId(connection.username, name)];
+}
+
+/**
+ * Move this board's read mark to the newest message whose top has reached the visible log.
+ * Only while the page is visible: a background tab that keeps receiving does not count as read.
+ * While a summary loads, and while a truncated one is showing, the mark stops at the last
+ * message the summary covered: following Live to the bottom is not reading what it skipped.
+ */
+function advanceMark() {
+  if (!session || !channel || !chatVisible() || document.visibilityState !== "visible") return;
+  const box = $("messages");
+  const bottom = box.getBoundingClientRect().bottom;
+  let seen = null;
+  for (let node = box.lastElementChild; node; node = node.previousElementSibling) {
+    if (node.dataset.id && node.getBoundingClientRect().top < bottom) {
+      seen = Number(node.dataset.id);
+      break;
+    }
+  }
+  const ceiling = session.channels.get(channel)?.markCeiling;
+  if (seen !== null && ceiling !== undefined && ceiling !== null) seen = Math.min(seen, ceiling);
+  const next = advance(session.marks ?? {}, markId(session.username, channel), seen);
+  if (!next) return;
+  session.marks = next;
+  if (session.remember) storage.set(MARKS_KEY(session.tenant), JSON.stringify(next));
 }
 
 function draft(connection = session, name = channel) {
@@ -75,6 +110,7 @@ function savePosition() {
     : [...box.children].find((node) => node.getBoundingClientRect().bottom > top);
   state.anchor = anchor ? { id: anchor.dataset.id, offset: anchor.getBoundingClientRect().top - top } : null;
   if (state.atBottom) state.newMessages = false;
+  advanceMark();
 }
 
 function restorePosition(state) {
@@ -150,6 +186,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   autosize();
   $("messages").replaceChildren();
   showCheckpoint(null);
+  showSince(null);
   $("channels").replaceChildren();
   for (const id of ["workspace-name", "display-name", "identity-note", "channel-note"])
     $(id).textContent = "";
@@ -277,7 +314,87 @@ function appendMessage(message) {
     article.append(annotation);
   }
   article.append(content);
+  if (session?.channels.get(channel)?.since?.firstId === message.id) article.classList.add("since-start");
   $("messages").append(article);
+}
+
+function showSince(state) {
+  const since = state?.since ?? null;
+  $("since").hidden = !since;
+  for (const node of $("messages").querySelectorAll(".since-start")) node.classList.remove("since-start");
+  $("since-list").replaceChildren();
+  if (!since) return;
+  $("since-title").textContent = headline(since);
+  for (const item of since.items) {
+    const row = document.createElement("li");
+    row.className = item.attention ? `since-${item.kind} attention` : `since-${item.kind}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = item.text;
+    button.title = `Show message #${item.id}`;
+    button.addEventListener("click", () => showMessage(item.id));
+    row.append(button);
+    $("since-list").append(row);
+  }
+  if (since.hidden) {
+    const more = document.createElement("li");
+    more.className = "since-more";
+    more.textContent = `and ${since.hidden} more on the board`;
+    $("since-list").append(more);
+  }
+  $("messages").querySelector(`[data-id="${since.firstId}"]`)?.classList.add("since-start");
+}
+
+function showMessage(id, block = "center") {
+  const node = $("messages").querySelector(`[data-id="${id}"]`);
+  if (!node) {
+    status("That message is not loaded yet. Turn on Live or load the next page.", true);
+    return;
+  }
+  node.scrollIntoView({ block });
+  node.classList.remove("flash");
+  void node.offsetWidth;
+  node.classList.add("flash");
+  savePosition();
+  const state = session?.channels.get(channel);
+  if (state) showJump(state);
+}
+
+/**
+ * Read up to SINCE_PAGES pages after `mark` and summarise them. Plain message reads with the
+ * reader's own key: no new endpoint, no server state, no model calls.
+ */
+async function loadSince(connection, name, state, mark) {
+  const load = Symbol(name);
+  state.sinceLoad = load;
+  state.markCeiling = mark;
+  const messages = [];
+  let after = mark;
+  let truncated = false;
+  try {
+    for (let page = 0; page < SINCE_PAGES; page++) {
+      const data = await api(`/channels/${name}/messages?after=${after}&limit=100`, {}, connection);
+      messages.push(...data.messages);
+      after = data.nextCursor;
+      if (!data.hasMore) break;
+      if (page === SINCE_PAGES - 1) truncated = true;
+    }
+  } catch {
+    // The summary is a convenience: the messages themselves still load.
+    if (state.sinceLoad === load) state.markCeiling = null;
+    return;
+  }
+  if (state.sinceLoad !== load || session !== connection) return;
+  const summary = summarize(messages, { after: mark, me: connection.username, truncated });
+  state.since = summary.count ? { mark, ...summary } : null;
+  state.markCeiling = truncated ? (messages.at(-1)?.id ?? mark) : null;
+  if (channel !== name) return;
+  const visible = chatVisible();
+  if (visible) savePosition();
+  showSince(state);
+  if (visible) restorePosition(state);
+  advanceMark();
 }
 
 function showJump(state) {
@@ -380,6 +497,7 @@ function render(messages, state) {
   }
   if (added && !follow) state.newMessages = true;
   if (visible) restorePosition(state);
+  if (added) advanceMark();
   showJump(state);
   trimCache();
 }
@@ -441,6 +559,9 @@ function selectChannel(name, { reset = false } = {}) {
   channel = name;
   const cache = session.channels;
   let state = reset ? null : cache.get(name);
+  // Only a board loaded fresh in this connection gets a new summary. Returning to a cached
+  // board keeps any list still showing; what was loaded while you were here is not news.
+  const opening = !state;
   if (!state)
     state = {
       messages: [],
@@ -462,11 +583,15 @@ function selectChannel(name, { reset = false } = {}) {
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
   showCheckpoint(state);
+  // Capture where the reader stopped before this visit's own reading moves the mark.
+  const mark = state.since?.mark ?? readMark(name);
+  showSince(state);
+  if (opening && mark !== undefined) void loadSince(session, name, state, mark);
   $("channel-title").textContent = `# ${name}`;
   $("channel-note").textContent =
-    "Delivery cursor only · not a read acknowledgment. Recent history is cached in memory.";
+    "Delivery cursor only · not a read acknowledgment. Where you stopped stays on this device.";
   $("channel-note").title =
-    "Up to 1,000 messages per channel, 2,000 total across 5 recent channels. Reread resets only this channel; reload or disconnect clears all cached history.";
+    "Up to 1,000 messages per channel, 2,000 total across 5 recent channels. Reread resets only this channel; reload or disconnect clears all cached history. Where you stopped reading is kept in this browser only and is never sent to the server.";
   $("cursor").textContent = `Cursor ${state.cursor}`;
   $("more").hidden = !state.hasMore;
   showJump(state);
@@ -536,6 +661,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     }
     connection.sharedChannel = identity.sharedChannel === true;
     connection.owner = identity.owner === true;
+    connection.marks = connection.remember ? parseMarks(storage.get(MARKS_KEY(connection.tenant))) : {};
     if (identity.sharedChannel) {
       note = "Persona · shared channel access";
       const roster = await api(`/channels/${identity.channel}/personas`, {}, connection);
@@ -1046,6 +1172,39 @@ onViewportChange(() => {
   restorePosition(state);
   autosize();
 });
+$("since-jump").addEventListener("click", () => {
+  const since = session?.channels.get(channel)?.since;
+  if (since) showMessage(since.firstId, "start");
+});
+$("since-done").addEventListener("click", () => {
+  const state = session?.channels.get(channel);
+  if (!state) return;
+  state.since = null;
+  state.markCeiling = null;
+  showSince(state);
+  advanceMark();
+});
+// Leaving the tab records where you stopped; coming back summarises what arrived meanwhile.
+document.addEventListener("visibilitychange", () => {
+  const state = session?.channels.get(channel);
+  if (!state) return;
+  if (document.visibilityState !== "visible") {
+    state.hiddenAfter = state.messages.at(-1)?.id ?? 0;
+    return;
+  }
+  const away = state.hiddenAfter;
+  state.hiddenAfter = undefined;
+  const stored = readMark(channel);
+  const mark =
+    away === undefined
+      ? undefined
+      : (state.since?.mark ?? (stored === undefined ? undefined : Math.max(stored, away)));
+  // Capture the mark first; then what is on screen now counts as seen (up to any ceiling).
+  if (mark !== undefined) void loadSince(session, channel, state, mark);
+  advanceMark();
+});
+// Closing or navigating away records the last position while the page is still visible.
+addEventListener("pagehide", () => advanceMark());
 $("jump").addEventListener("click", () => {
   $("messages").scrollTop = $("messages").scrollHeight;
   savePosition();
