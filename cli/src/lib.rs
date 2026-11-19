@@ -12,6 +12,7 @@ pub mod events;
 pub mod export;
 pub mod identity;
 pub mod import;
+pub mod labels;
 pub mod mcp;
 pub mod processing;
 pub mod profile;
@@ -283,8 +284,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             reply_to,
             correlation_id,
             to,
+            labels,
             attach,
         } => {
+            let labels = labels::parse_labels(&labels)?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -335,6 +338,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                     correlation_id,
                     to,
                 },
+                &labels,
                 &files,
             )
         }
@@ -380,6 +384,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         }
         Command::Poll {
             channel,
+            labels: filters,
             after,
             wait,
             limit,
@@ -393,7 +398,47 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             if limit < 1 {
                 return Err(CliError::usage("limit must be an integer from 1 to 100."));
             }
-            poll(&url, &tenant, &token, channel, after, wait, limit)
+            labels::filter_query(&filters)?;
+            poll(&url, &tenant, &token, channel, after, wait, limit, &filters)
+        }
+        Command::Label {
+            channel,
+            message_id,
+            set,
+            unset,
+            if_equal,
+            if_unset,
+        } => {
+            let body = labels::change_body(
+                &labels::parse_labels(&set)?,
+                &unset,
+                &labels::parse_labels(&if_equal)?,
+                &if_unset,
+            )?;
+            let id = parse_message_id(&message_id)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            label(&url, &tenant, &token, channel, id, &body)
+        }
+        Command::WaitLabel {
+            channel,
+            filters,
+            message,
+            timeout,
+        } => {
+            labels::filter_query(&filters)?;
+            let message = message.as_deref().map(parse_message_id).transpose()?;
+            let timeout = timeout
+                .as_deref()
+                .map(|raw| parse_int(raw, 86_400))
+                .transpose()?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            wait_label(
+                &url, &tenant, &token, channel, &filters, message, timeout, stop,
+            )
         }
         Command::Events {
             channel,
@@ -776,6 +821,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
 }
 
+fn parse_message_id(raw: &str) -> Result<u64, CliError> {
+    match parse_int(raw, MAX_SAFE_INTEGER)? {
+        0 => Err(CliError::usage("Message id must be a positive integer.")),
+        id => Ok(id),
+    }
+}
+
 fn parse_optional_int(raw: Option<&str>, default: u64, max: u64) -> Result<u64, CliError> {
     match raw {
         None => Ok(default),
@@ -929,6 +981,13 @@ pub fn send_body_with(
     body
 }
 
+/// Adds `labels` to a send body only when there are some, so unlabeled sends keep their bytes.
+pub fn with_labels(body: &mut Value, labels: &labels::Labels) {
+    if !labels.is_empty() {
+        body["labels"] = json!(labels);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send(
     url: &Url,
@@ -939,6 +998,7 @@ fn send(
     payload: &Payload,
     key: Option<&str>,
     correlation: Correlation,
+    labels: &labels::Labels,
     files: &[attachments::LocalFile],
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
@@ -949,7 +1009,8 @@ fn send(
     let _ = io::stderr().flush();
     // Uploads are content-addressed, so a retry with the same files and key replays one message.
     let uploaded = attachments::upload(&client, tenant, token, channel, files)?;
-    let body = send_body_with(username, payload, &correlation, &uploaded);
+    let mut body = send_body_with(username, payload, &correlation, &uploaded);
+    with_labels(&mut body, labels);
     let response = client.post_json(
         &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
         token,
@@ -959,6 +1020,7 @@ fn send(
     finish(&response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll(
     url: &Url,
     tenant: &str,
@@ -967,12 +1029,96 @@ fn poll(
     after: u64,
     wait: u64,
     limit: u64,
+    filters: &[String],
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
     let path = format!(
-        "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}"
+        "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}{}",
+        labels::filter_query(filters)?
     );
     finish(&client.get(&path, Some(token))?)
+}
+
+fn label(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    id: u64,
+    body: &Value,
+) -> Result<(), CliError> {
+    let response = MsnClient::new(url)?.post_json(
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/labels"),
+        token,
+        &[],
+        body,
+    )?;
+    if let Some(message) = labels::conflict_message(response.status, &response.body) {
+        return Err(CliError::conflict(message));
+    }
+    finish(&response)
+}
+
+/// Long-polls a label filter until a message matches, `timeout` passes or a signal stops it.
+/// Transient failures retry with the same backoff as `msn follow`.
+#[allow(clippy::too_many_arguments)]
+fn wait_label(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    filters: &[String],
+    message: Option<u64>,
+    timeout: Option<u64>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), CliError> {
+    labels::wait_path(tenant, channel, filters, message, 0)?;
+    let client = Arc::new(MsnClient::new(url)?);
+    let deadline = timeout.map(|seconds| std::time::Instant::now() + Duration::from_secs(seconds));
+    let mut backoff = BACKOFF_START_MS;
+    loop {
+        // Round the remaining time up, so the last poll still waits instead of spinning at wait=0.
+        let wait = match deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                (left.as_secs() + u64::from(left.subsec_nanos() > 0)).min(MAX_WAIT)
+            }
+            None => MAX_WAIT,
+        };
+        let path = labels::wait_path(tenant, channel, filters, message, wait)?;
+        let Some(result) = get_interruptible(client.clone(), path, token.to_string(), &stop)?
+        else {
+            return Err(CliError::generic("Interrupted before the label appeared."));
+        };
+        match result {
+            Ok(response) if (200..300).contains(&response.status) => {
+                backoff = BACKOFF_START_MS;
+                if let Some(found) = labels::first_match(&response.body)? {
+                    println!("{found}");
+                    return io::stdout()
+                        .flush()
+                        .map_err(|error| CliError::generic(error.to_string()));
+                }
+            }
+            Ok(response) if !is_retryable_status(response.status) => {
+                return Err(status_error(response.status, &response.body));
+            }
+            Ok(_) | Err(CliError::Network(_)) => {
+                if interruptible_sleep(backoff, &stop, "Label wait failed; retrying", 0) {
+                    return Err(CliError::generic("Interrupted before the label appeared."));
+                }
+                backoff = (backoff * 2).min(BACKOFF_MAX_MS);
+            }
+            Err(error) => return Err(error),
+        }
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return Err(CliError::generic(format!(
+                "Timed out after {}s; no message has {}.",
+                timeout.unwrap_or(0),
+                filters.join(" ")
+            )));
+        }
+    }
 }
 
 fn events_path(tenant: &str, channel: Option<&str>, after: u64, wait: u64, limit: u64) -> String {

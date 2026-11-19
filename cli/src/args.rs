@@ -405,6 +405,9 @@ pub enum Command {
         /// Address a username (visible to everyone in the channel; not a private message)
         #[arg(long)]
         to: Option<String>,
+        /// key=value label, such as state=open; repeat for more (at most 16)
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        labels: Vec<String>,
         /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
         #[arg(long = "attach", value_name = "PATH")]
         attach: Vec<String>,
@@ -412,6 +415,9 @@ pub enum Command {
     /// GET …/messages (single page; wait defaults to 0)
     Poll {
         channel: String,
+        /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
+        #[arg(long = "label", value_name = "FILTER")]
+        labels: Vec<String>,
         /// Exclusive message id cursor
         #[arg(long)]
         after: Option<String>,
@@ -569,6 +575,36 @@ pub enum Command {
         /// Clear the bound name so the new token may send as any display name
         #[arg(long)]
         unbind: bool,
+    },
+    /// Set, replace or remove labels on a message, optionally only if other labels match
+    Label {
+        channel: String,
+        message_id: String,
+        /// Labels to set, as KEY=VALUE
+        #[arg(value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Remove this label; repeatable
+        #[arg(long, value_name = "KEY")]
+        unset: Vec<String>,
+        /// Change nothing unless this label currently has this value; repeatable
+        #[arg(long = "if", value_name = "KEY=VALUE")]
+        if_equal: Vec<String>,
+        /// Change nothing unless this label is currently not set; repeatable
+        #[arg(long = "if-unset", value_name = "KEY")]
+        if_unset: Vec<String>,
+    },
+    /// Block until a message has the given labels, print it as JSON, exit 0
+    WaitLabel {
+        channel: String,
+        /// Filters that must all match: KEY, KEY=VALUE or KEY=A|B
+        #[arg(required = true, value_name = "FILTER")]
+        filters: Vec<String>,
+        /// Wait on this message only; otherwise the first matching message in the channel
+        #[arg(long)]
+        message: Option<String>,
+        /// Give up after this many seconds (exit 1); waits until interrupted when omitted
+        #[arg(long)]
+        timeout: Option<String>,
     },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
