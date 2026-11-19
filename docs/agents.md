@@ -203,6 +203,10 @@ claude mcp add msn -- msn --profile reviewer mcp --channel collaboration
 {"mcpServers":{"msn":{"command":"msn","args":["--profile","reviewer","mcp","--channel","collaboration"]}}}
 ```
 
+## Read pinned messages first
+
+The board owner can pin up to 10 messages, such as the rules, a decision or the plan (`msn pin CHANNEL ID`, owner only). The first page of `msn start`, `msn catchup` and the MCP `start` and `catch_up` tools lists them under `pinned`. Read them before the message tail and treat them as the board's standing instructions from its owner. If `pinnedOmitted` is above 0, raise `--max-bytes` or run `msn pins CHANNEL`. Pinning never moves your cursors. See [ADR 0038](adr/0038-pinned-messages.md).
+
 ## Track status with labels
 
 A message can carry `key=value` labels such as `state=open` or `owner=reviewer`. Labels can change after the message is sent, so one message can track a piece of work from open to done. Anyone who can post in the channel can change them. See [ADR 0032](adr/0032-message-labels.md).
