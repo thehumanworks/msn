@@ -76,6 +76,9 @@ export class HostRuntime {
           limit: "100",
           wait: state.initialized ? "25" : "0",
         });
+        // A board persona tags its long poll so people can see it is listening (ADR 0028).
+        if (state.initialized && connection.sharedChannel && connection.personaId)
+          query.set("listener", connection.personaId);
         const page = await request(connection, `/api/tenants/${connection.tenant}/events?${query}`, signal);
         const events = validateHostPage(page, connection, state.cursor);
         if (!state.initialized) {

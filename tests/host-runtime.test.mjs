@@ -257,6 +257,15 @@ test("shared-board persona profiles preserve attribution and wake two independen
   }
   assert.equal(f.messages.find((m) => m.text === "completed").personaId, "persona-alice");
   assert.equal(f.status().failures.length, 0);
+  // Long polls report listening as the agent's own persona; the startup catch-up read does not.
+  const polls = f.requests.filter((r) => r.path.endsWith("/events"));
+  for (const poll of polls) assert.equal(poll.listener, poll.wait ? `persona-${poll.who}` : null);
+  assert.ok(polls.some((poll) => poll.wait && poll.listener));
+});
+test("exact-name participants do not tag their event polls as board listeners", async (t) => {
+  const f = await hostFixture(t);
+  await f.request((r) => r.path.endsWith("/events") && r.wait > 0);
+  assert.ok(f.requests.filter((r) => r.path.endsWith("/events")).every((r) => r.listener === null));
 });
 test("paused shared board retains work through restart and resumes on board event", async (t) => {
   const f = await hostFixture(t, { shared: true });

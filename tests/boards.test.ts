@@ -131,3 +131,107 @@ describe("account-owned agent message boards", () => {
     );
   });
 });
+
+type Presence = {
+  id: string;
+  listening: boolean;
+  lastListeningAt: string | null;
+  lastActedAt: string | null;
+};
+const roster = async (f: { tenant: string; token: string }) =>
+  (await (await call(f.tenant, "/channels/work/personas", f.token)).json<{ personas: Presence[] }>())
+    .personas;
+const stubFor = (tenant: string) => env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
+const storedPresence = (tenant: string) =>
+  runInDurableObject(stubFor(tenant), (_, state) =>
+    state.storage.sql.exec("SELECT personaId, lastListeningAt FROM persona_presence").toArray(),
+  );
+async function personas(f: { tenant: string; token: string }) {
+  for (const [id, displayName] of [
+    ["p1", "lead"],
+    ["p2", "reviewer"],
+  ])
+    await call(f.tenant, `/channels/work/personas/${id}`, f.token, "PUT", { displayName });
+}
+async function waitFor(check: () => Promise<boolean>) {
+  for (let i = 0; i < 100; i++) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("condition not reached");
+}
+
+describe("persona listening presence (ADR 0028)", () => {
+  it("accepts listener only from a board credential for a registered persona", async () => {
+    const f = await fixture();
+    await personas(f);
+    const owner = await call(f.tenant, "/events?channel=work&wait=0&listener=p1", f.owner);
+    expect(owner.status).toBe(400);
+    expect(await owner.json()).toMatchObject({ error: { code: "listener_requires_board" } });
+    const unknown = await call(f.tenant, "/events?wait=0&listener=ghost", f.token);
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({ error: { code: "listener_unknown_persona" } });
+    expect((await call(f.tenant, "/events?wait=0&listener=Bad%20Id", f.token)).status).toBe(400);
+  });
+
+  it("reports nothing before any runner listens, and a catch-up read does not count", async () => {
+    const f = await fixture();
+    await personas(f);
+    expect((await call(f.tenant, "/events?wait=0&listener=p1", f.token)).status).toBe(200);
+    for (const persona of await roster(f))
+      expect(persona).toMatchObject({ listening: false, lastListeningAt: null, lastActedAt: null });
+    expect(await storedPresence(f.tenant)).toEqual([]);
+  });
+
+  it("shows an open long poll as listening, keeps a grace window, then falls back to last seen", async () => {
+    const f = await fixture();
+    await personas(f);
+    const head = await (await call(f.tenant, "/events?wait=0", f.token)).json<{ nextCursor: number }>();
+    const poll = call(f.tenant, `/events?wait=20&after=${head.nextCursor}&listener=p1`, f.token);
+    await waitFor(async () => (await roster(f))[0].listening);
+    const [lead, reviewer] = await roster(f);
+    expect(lead.lastListeningAt).not.toBeNull();
+    expect(reviewer).toMatchObject({ listening: false, lastListeningAt: null });
+    // A message wakes the poll; the persona that sent it gains lastActedAt.
+    const sent = await (
+      await call(f.tenant, "/channels/work/messages", f.token, "POST", { username: "reviewer", text: "hi" })
+    ).json<{ message: { createdAt: string } }>();
+    expect((await poll).status).toBe(200);
+    const after = await roster(f);
+    expect(after[0].listening).toBe(true); // within the grace window between polls
+    expect(after[1].lastActedAt).toBe(sent.message.createdAt);
+    expect(after[0].lastActedAt).toBeNull();
+    // Age the in-memory poll end past the grace window.
+    await runInDurableObject(stubFor(f.tenant), (instance) => {
+      const listeners = (instance as unknown as { listeners: Map<string, { lastEnded: number }> }).listeners;
+      for (const entry of listeners.values()) entry.lastEnded -= 61_000;
+    });
+    const aged = (await roster(f))[0];
+    expect(aged.listening).toBe(false);
+    expect(aged.lastListeningAt).not.toBeNull();
+  });
+
+  it("writes presence at most once per interval and keeps last seen across a restart", async () => {
+    const f = await fixture();
+    await personas(f);
+    let cursor = (await (await call(f.tenant, "/events?wait=0", f.token)).json<{ nextCursor: number }>())
+      .nextCursor;
+    for (let i = 0; i < 3; i++) {
+      const poll = call(f.tenant, `/events?wait=20&after=${cursor}&listener=p1`, f.token);
+      await waitFor(async () => (await roster(f))[0].listening);
+      await call(f.tenant, "/channels/work/messages", f.token, "POST", { username: "lead", text: `m${i}` });
+      cursor = (await (await poll).json<{ nextCursor: number }>()).nextCursor;
+    }
+    const stored = await storedPresence(f.tenant);
+    expect(stored).toHaveLength(1);
+    // Six poll starts/ends happened; only the first wrote, so the row still holds the first time.
+    const first = stored[0].lastListeningAt as string;
+    expect(Date.parse((await roster(f))[0].lastListeningAt as string)).toBeGreaterThanOrEqual(
+      Date.parse(first),
+    );
+    await abortAllDurableObjects();
+    const restarted = (await roster(f))[0];
+    expect(restarted).toMatchObject({ id: "p1", listening: false, lastListeningAt: first });
+    expect(restarted.lastActedAt).not.toBeNull();
+  });
+});
