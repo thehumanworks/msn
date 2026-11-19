@@ -191,6 +191,47 @@ try {
     !(await cli(["channels"])).channels.some((c) => c.name === "clash"),
     "A rejected template create makes no board",
   );
+  // One paste hands an agent the board: run its join command on a host with no MSN setup.
+  const handoff = async () => {
+    const p = child(binary, ["invite", "work", "--for-agent", "--name", "helper"]);
+    const [code] = await p.done;
+    assert.equal(code, 0, `invite --for-agent: ${p.errors}`);
+    return p.output;
+  };
+  const paragraph = await handoff();
+  assert.equal(await handoff(), paragraph, "Repeating the invite keeps the same persona");
+  assert.ok(paragraph.includes("Finish the integration goal"), "The paragraph quotes the board goal");
+  assert.ok(paragraph.includes("msn --profile work-helper peek work --wait 25"), "It says how to wait");
+  assert.ok(paragraph.includes("msn --profile work-helper mcp --channel work"), "It offers MCP");
+  const joinCommand = paragraph.match(/`(printf '%s' .*? --save-as work-helper)`/)?.[1];
+  assert.ok(joinCommand, "The paragraph has a join command");
+  const agentHome = join(dir, "agent-host");
+  const agentEnv = {
+    ...env,
+    HOME: agentHome,
+    XDG_CONFIG_HOME: join(agentHome, "config"),
+    XDG_STATE_HOME: join(agentHome, "state"),
+    PATH: `${dirname(binary)}:${env.PATH}`,
+  };
+  delete agentEnv.MSN_URL;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sh = child("sh", ["-c", joinCommand], { env: agentEnv });
+    const [code] = await sh.done;
+    assert.equal(code, 0, `join command: ${sh.errors}`);
+  }
+  const agentRun = async (args) => {
+    const p = child(binary, args, { env: agentEnv });
+    const [code] = await p.done;
+    assert.equal(code, 0, `agent ${args.join(" ")}: ${p.errors}`);
+    return JSON.parse(p.output);
+  };
+  const helperStart = await agentRun(["--profile", "work-helper", "start", "work"]);
+  assert.equal(helperStart.board.goal, "Finish the integration goal");
+  assert.equal(helperStart.identity.sharedChannel, true);
+  const helpers = (await cli(["--profile", "lead", "persona", "list", "work"])).personas.filter(
+    (row) => row.displayName === "helper",
+  );
+  assert.equal(helpers.length, 1, "The invited persona is on the roster once");
   const entered = await cli(["--profile", "lead", "start", "work"]);
   assert.equal(entered.board.goal, "Finish the integration goal");
   assert.equal(entered.identity.sharedChannel, true);
