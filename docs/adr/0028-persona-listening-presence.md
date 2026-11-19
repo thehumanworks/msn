@@ -21,4 +21,4 @@ A person on a board can see, for each persona, whether a persistent runner is li
 
 ## Limits
 
-All personas share one channel credential, so any holder can tag a poll with another persona's id. That is the same trust as sending under a persona name today. `listening` means a runner holds a connection; it does not prove the harness behind it is authenticated or healthy. Exact-name participants, desktop and iOS are not covered yet; they can read the same fields later.
+All personas share one channel credential, so any holder can tag a poll with another persona's id. That is the same trust as sending under a persona name today. `listening` means a runner holds a connection; it does not prove the harness behind it is authenticated or healthy. Exact-name participants, desktop and iOS are not covered yet; they can read the same fields later. Runners started from the runtime bundled in an older CLI do not tag their polls, so their personas show "Never listened" until the CLI is upgraded and the listener restarted.

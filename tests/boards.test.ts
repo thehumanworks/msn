@@ -216,22 +216,50 @@ describe("persona listening presence (ADR 0028)", () => {
     await personas(f);
     let cursor = (await (await call(f.tenant, "/events?wait=0", f.token)).json<{ nextCursor: number }>())
       .nextCursor;
-    for (let i = 0; i < 3; i++) {
+    const listenOnce = async (text: string) => {
       const poll = call(f.tenant, `/events?wait=20&after=${cursor}&listener=p1`, f.token);
       await waitFor(async () => (await roster(f))[0].listening);
-      await call(f.tenant, "/channels/work/messages", f.token, "POST", { username: "lead", text: `m${i}` });
+      await call(f.tenant, "/channels/work/messages", f.token, "POST", { username: "lead", text });
       cursor = (await (await poll).json<{ nextCursor: number }>()).nextCursor;
-    }
-    const stored = await storedPresence(f.tenant);
-    expect(stored).toHaveLength(1);
-    // Six poll starts/ends happened; only the first wrote, so the row still holds the first time.
-    const first = stored[0].lastListeningAt as string;
-    expect(Date.parse((await roster(f))[0].lastListeningAt as string)).toBeGreaterThanOrEqual(
-      Date.parse(first),
-    );
+    };
+    const storedTime = async () => (await storedPresence(f.tenant))[0]?.lastListeningAt as string;
+    await listenOnce("m0");
+    const first = await storedTime();
+    expect(first).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await listenOnce("m1");
+    await listenOnce("m2");
+    // Later poll starts and ends inside the interval do not rewrite the row...
+    expect(await storedTime()).toBe(first);
+    // ...while the roster still reports the newer in-memory time.
+    expect(Date.parse((await roster(f))[0].lastListeningAt as string)).toBeGreaterThan(Date.parse(first));
+    // Once the interval has passed, the next poll writes again.
+    await runInDurableObject(stubFor(f.tenant), (instance) => {
+      const written = (instance as unknown as { presenceWritten: Map<string, number> }).presenceWritten;
+      for (const [key, at] of written) written.set(key, at - 5 * 60_000);
+    });
+    await listenOnce("m3");
+    const second = await storedTime();
+    expect(Date.parse(second)).toBeGreaterThan(Date.parse(first));
+    expect(await storedPresence(f.tenant)).toHaveLength(1);
     await abortAllDurableObjects();
     const restarted = (await roster(f))[0];
-    expect(restarted).toMatchObject({ id: "p1", listening: false, lastListeningAt: first });
+    expect(restarted).toMatchObject({ id: "p1", listening: false, lastListeningAt: second });
     expect(restarted.lastActedAt).not.toBeNull();
+  });
+
+  it("counts a tagged long poll that returns events at once as listening", async () => {
+    const f = await fixture();
+    await personas(f);
+    const head = await (await call(f.tenant, "/events?wait=0", f.token)).json<{ nextCursor: number }>();
+    await call(f.tenant, "/channels/work/messages", f.token, "POST", { username: "lead", text: "queued" });
+    const page = await (
+      await call(f.tenant, `/events?wait=20&after=${head.nextCursor}&listener=p1`, f.token)
+    ).json<{ events: unknown[] }>();
+    expect(page.events.length).toBeGreaterThan(0);
+    const [lead] = await roster(f);
+    expect(lead.listening).toBe(true);
+    expect(lead.lastListeningAt).not.toBeNull();
+    expect(await storedPresence(f.tenant)).toHaveLength(1);
   });
 });
