@@ -734,20 +734,25 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             };
             match command {
                 GithubCommand::Hook { rotate } => {
-                    let response = if *rotate {
-                        client.post_json(
+                    let current = value(client.get(&format!("{base}/github"), Some(&p.token))?)?;
+                    // The server shows the secret only when it makes one: on first use or --rotate.
+                    if *rotate || current["configured"] != json!(true) {
+                        let made = value(client.post_json(
                             &format!("{base}/github/secret"),
                             &p.token,
                             &[],
                             &json!({}),
-                        )?
+                        )?)?;
+                        println!("{made}");
+                        eprintln!(
+                            "Add this webhook on each repository (Settings, Webhooks): Payload URL and Secret as shown, content type application/json, and the listed events. The secret is shown only now and lets anyone post GitHub messages to your linked boards; keep it private."
+                        );
                     } else {
-                        client.get(&format!("{base}/github"), Some(&p.token))?
-                    };
-                    println!("{}", value(response)?);
-                    eprintln!(
-                        "Add this webhook on each repository (Settings, Webhooks): Payload URL and Secret as shown, content type application/json, and the listed events. The secret lets anyone post GitHub messages to your linked boards; keep it private."
-                    );
+                        println!("{current}");
+                        eprintln!(
+                            "The webhook secret was shown when it was made. Run msn github hook --rotate for a new one, then update it on each repository."
+                        );
+                    }
                 }
                 GithubCommand::Link {
                     channel,

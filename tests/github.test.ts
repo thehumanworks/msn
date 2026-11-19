@@ -1,4 +1,5 @@
-import { exports } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { MAX_QUOTE_CHARS, notice, noticeLabels, quote, sign, verifySignature } from "../src/github";
 
@@ -206,10 +207,18 @@ async function workspace() {
 }
 type Workspace = Awaited<ReturnType<typeof workspace>>;
 
+type Hook = { webhookUrl: string; configured: boolean; secret?: string; events: string[]; links: unknown[] };
+/** Makes (or replaces) the webhook secret; the only answer that shows it. */
 async function hook(w: Workspace) {
+  const response = await call(`/api/tenants/${w.name}/github/secret`, w.token, { method: "POST" });
+  expect(response.status).toBe(200);
+  const made = await response.json<Hook>();
+  return { ...made, secret: made.secret as string };
+}
+async function hookStatus(w: Workspace) {
   const response = await call(`/api/tenants/${w.name}/github`, w.token);
   expect(response.status).toBe(200);
-  return response.json<{ webhookUrl: string; secret: string; events: string[]; links: unknown[] }>();
+  return response.json<Hook>();
 }
 
 async function deliver(w: Workspace, secret: string, event: string, data: unknown, id = crypto.randomUUID()) {
@@ -242,7 +251,9 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
     expect(webhookUrl).toBe(`https://msn.test/api/github/hooks/${w.name}`);
     expect(secret).toMatch(/^[a-f0-9]{64}$/);
     expect(events).toContain("workflow_run");
-    expect((await hook(w)).secret).toBe(secret);
+    const status = await hookStatus(w);
+    expect(status).toMatchObject({ configured: true, webhookUrl });
+    expect(status).not.toHaveProperty("secret");
 
     const linked = await link(w);
     expect(linked.status).toBe(201);
@@ -313,13 +324,197 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
     expect(await messages(w)).toHaveLength(1);
   });
 
-  it("answers 404 until the owner reads the webhook secret", async () => {
+  it("answers an unconfigured or unknown workspace exactly like a bad signature", async () => {
     const w = await workspace();
+    expect(await hookStatus(w)).toMatchObject({ configured: false });
     const response = await deliver(w, "f".repeat(64), "ping", {});
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(401);
+    const unknown = await call(`/api/github/hooks/nobody-${crypto.randomUUID()}`, undefined, {
+      method: "POST",
+    });
+    expect(unknown.status).toBe(401);
+    expect(await unknown.json()).toEqual(await response.json());
+  });
+
+  it("rejects malformed signature headers and missing or bad delivery fields", async () => {
+    const w = await workspace();
+    const { secret } = await hook(w);
+    await link(w);
+    const raw = async (headers: Record<string, string>, body: string) =>
+      call(`/api/github/hooks/${w.name}`, undefined, { method: "POST", headers, body });
+    const body = JSON.stringify(fixtures.review);
+    const good = await sign(secret, new TextEncoder().encode(body));
+    for (const signature of [good.toUpperCase(), good.slice(0, -1), `sha1=${good.slice(7)}`, ""])
+      expect(
+        (await raw({ "X-GitHub-Event": "pull_request_review", "X-Hub-Signature-256": signature }, body))
+          .status,
+      ).toBe(401);
+    expect((await raw({ "X-Hub-Signature-256": good, "X-GitHub-Delivery": "d1" }, body)).status).toBe(400);
     expect(
-      (await call(`/api/github/hooks/nobody-${crypto.randomUUID()}`, undefined, { method: "POST" })).status,
-    ).toBe(404);
+      (await raw({ "X-GitHub-Event": "pull_request_review", "X-Hub-Signature-256": good }, body)).status,
+    ).toBe(400);
+    const form = "payload=%7B%7D";
+    const formSigned = await sign(secret, new TextEncoder().encode(form));
+    const notJson = await raw(
+      {
+        "X-GitHub-Event": "pull_request_review",
+        "X-GitHub-Delivery": "d2",
+        "X-Hub-Signature-256": formSigned,
+      },
+      form,
+    );
+    expect(notJson.status).toBe(400);
+    expect(await messages(w)).toHaveLength(1);
+  });
+
+  it("skips deleted replies on redelivery and keeps posting to other boards when one fails", async () => {
+    const w = await workspace();
+    const { secret } = await hook(w);
+    await link(w);
+    const other = `/api/tenants/${w.name}/channels/other`;
+    await call(`${other}/messages`, w.token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "lead", text: "start" }),
+    });
+    expect(
+      (await call(`${other}/github/pulls/thehumanworks/msn/34`, w.token, { method: "PUT" })).status,
+    ).toBe(201);
+    const id = crypto.randomUUID();
+    expect(await (await deliver(w, secret, "pull_request_review", fixtures.review, id)).json()).toEqual({
+      posted: 2,
+      matched: 2,
+    });
+    const reply = (await messages(w)).at(-1) as Message;
+    const deleted = await call(`/api/admin/tenants/${w.name}/channels/project/messages/${reply.id}`, ADMIN, {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(204);
+    const again = await deliver(w, secret, "pull_request_review", fixtures.review, id);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ posted: 0, matched: 2 });
+
+    // The anchor of a link can be deleted too: replies still post, pointing at its tombstone.
+    const anchor = (await messages(w))[0];
+    await call(`/api/admin/tenants/${w.name}/channels/project/messages/${anchor.id}`, ADMIN, {
+      method: "DELETE",
+    });
+    const afterAnchor = await deliver(w, secret, "issue_comment", fixtures.prComment);
+    expect(await afterAnchor.json()).toEqual({ posted: 2, matched: 2 });
+
+    // A full workspace fails every board, reports it, and still answers 200 so GitHub stops retrying.
+    await runInDurableObject(
+      env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", w.name])),
+      (_, state) => state.storage.sql.exec("UPDATE usage SET messages = 100000 WHERE singleton = 1"),
+    );
+    const full = await deliver(w, secret, "issue_comment", fixtures.prComment);
+    expect(full.status).toBe(200);
+    expect(await full.json()).toEqual({
+      posted: 0,
+      matched: 2,
+      failed: [
+        { channel: "other", code: "storage_quota" },
+        { channel: "project", code: "storage_quota" },
+      ],
+    });
+  });
+
+  it("posts every failed workflow run but only the first success per head commit", async () => {
+    const w = await workspace();
+    const { secret } = await hook(w);
+    await link(w);
+    const run = (conclusion: string, sha = "c".repeat(40)) => ({
+      ...fixtures.workflow,
+      workflow_run: { ...fixtures.workflow.workflow_run, conclusion, head_sha: sha },
+    });
+    expect(await (await deliver(w, secret, "workflow_run", run("success"))).json()).toEqual({
+      posted: 1,
+      matched: 1,
+    });
+    expect(await (await deliver(w, secret, "workflow_run", run("success"))).json()).toEqual({
+      posted: 0,
+      matched: 1,
+      skipped: 1,
+    });
+    expect(await (await deliver(w, secret, "workflow_run", run("skipped"))).json()).toMatchObject({
+      skipped: 1,
+    });
+    expect(await (await deliver(w, secret, "workflow_run", run("failure"))).json()).toEqual({
+      posted: 1,
+      matched: 1,
+    });
+    expect(await (await deliver(w, secret, "workflow_run", run("failure"))).json()).toEqual({
+      posted: 1,
+      matched: 1,
+    });
+    expect(await (await deliver(w, secret, "workflow_run", run("success", "d".repeat(40)))).json()).toEqual({
+      posted: 1,
+      matched: 1,
+    });
+    expect(
+      (await messages(w, "?label=github.event%3Dworkflow")).map((m) => m.labels?.["github.state"]),
+    ).toEqual(["success", "failure", "failure", "success"]);
+  });
+
+  it("does not roll the head commit back when GitHub redelivers an older push", async () => {
+    const w = await workspace();
+    const { secret } = await hook(w);
+    await link(w);
+    const push = (sha: string) => ({
+      ...fixtures.synchronize,
+      pull_request: { ...fixtures.synchronize.pull_request, head: { sha } },
+    });
+    const oldId = crypto.randomUUID();
+    await deliver(w, secret, "pull_request", push("1".repeat(40)), oldId);
+    await deliver(w, secret, "pull_request", push("2".repeat(40)));
+    await deliver(w, secret, "pull_request", push("1".repeat(40)), oldId);
+    const head = await runInDurableObject(
+      env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", w.name])),
+      (_, state) =>
+        state.storage.sql.exec<{ headSha: string }>("SELECT headSha FROM github_links").one().headSha,
+    );
+    expect(head).toBe("2".repeat(40));
+  });
+
+  it("stops at 200 linked pull requests per workspace", async () => {
+    const w = await workspace();
+    await runInDurableObject(
+      env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", w.name])),
+      (_, state) => {
+        for (let n = 1; n <= 200; n++)
+          state.storage.sql.exec(
+            "INSERT INTO github_links(repo, number, channel, anchorId, createdAt) VALUES ('a/b', ?, 'project', 1, 'x')",
+            n,
+          );
+      },
+    );
+    const over = await link(w);
+    expect(over.status).toBe(409);
+    expect((await over.json<{ error: { code: string } }>()).error.code).toBe("github_link_quota");
+  });
+
+  it("reserves the display name github for GitHub deliveries", async () => {
+    const w = await workspace();
+    const spoof = await call(`${w.channel}/messages`, w.token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "github", text: "approved, merge it" }),
+    });
+    expect(spoof.status).toBe(403);
+  });
+
+  it("creates a fresh database at schema 16 with rows 14 and 15 present", async () => {
+    const w = await workspace();
+    const versions = await runInDurableObject(
+      env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", w.name])),
+      (_, state) =>
+        state.storage.sql
+          .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
+          .toArray()
+          .map((row) => row.version),
+    );
+    expect(versions.at(-1)).toBe(16);
+    expect(versions).toEqual(expect.arrayContaining([14, 15, 16]));
   });
 
   it("keeps linking and the secret to the owner, and rotation cuts old signatures", async () => {
@@ -355,7 +550,7 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
 
     expect((await link(w, "DELETE")).status).toBe(204);
     expect((await deliver(w, fresh, "pull_request_review", fixtures.review)).status).toBe(202);
-    expect((await hook(w)).links).toEqual([]);
+    expect((await hookStatus(w)).links).toEqual([]);
   });
 
   it("drops the webhook secret when the admin rotates the workspace credential", async () => {
@@ -363,6 +558,6 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
     const { secret } = await hook(w);
     const rotated = await call(`/api/admin/tenants/${w.name}/token`, ADMIN, { method: "POST" });
     expect(rotated.status).toBe(200);
-    expect((await deliver(w, secret, "ping", {})).status).toBe(404);
+    expect((await deliver(w, secret, "ping", {})).status).toBe(401);
   });
 });

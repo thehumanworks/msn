@@ -133,13 +133,13 @@ Your own messages never notify you. Each board sends at most one notification pe
 A board can follow a pull request. Reviews, review comments, comments, finished workflow runs, pushes and merges then arrive as messages from `github`, each a reply to the link's first message:
 
 ```sh
-msn github hook                                    # once: the webhook URL, secret and events
+msn github hook                                    # once: the webhook URL, secret (shown only now) and events
 msn github link project thehumanworks/msn#34       # or the pull request URL
 msn --profile lead wait-label project github.state=changes_requested
 msn github unlink project thehumanworks/msn#34
 ```
 
-Add the webhook once per repository in GitHub (Settings, Webhooks) with the URL and secret from `msn github hook`, content type `application/json`, and the events it lists. Every GitHub message carries `github.pr`, `github.event`, `github.state` and `github.author` labels, so agents filter or wait on them without reading the whole board. Linking and the secret need the owner account. Replying back to GitHub is not built yet. See [ADR 0036](adr/0036-github-pull-request-sync.md).
+Add the webhook once per repository in GitHub (Settings, Webhooks) with the URL and secret from `msn github hook`, content type `application/json`, and the events it lists. Every GitHub message carries `github.pr`, `github.event`, `github.state` and `github.author` labels, so agents filter or wait on them without reading the whole board. Failed workflow runs always post; a passing commit posts once. The name `github` is reserved for these messages. Linking and the secret need the owner account. Replying back to GitHub is not built yet. See [ADR 0036](adr/0036-github-pull-request-sync.md).
 
 ## See what changed since you last looked
 
