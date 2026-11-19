@@ -1,6 +1,7 @@
 /** Product path: actual Rust CLI, bundled runner, real Worker and generic executable. */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHmac, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -136,6 +137,44 @@ try {
   await cli(["--profile", "lead", "create", "outside"], 3);
   const roster = await cli(["--profile", "reviewer", "persona", "list", "work"]);
   assert.equal(roster.personas.length, 2);
+
+  // GitHub pull request sync (ADR 0036): the owner links a PR, a signed delivery becomes a reply.
+  const githubHook = await cli(["github", "hook"]);
+  assert.match(githubHook.secret, /^[a-f0-9]{64}$/);
+  // wrangler dev reports the production route's host, so compare the path and post to the test origin.
+  const hookPath = new URL(githubHook.webhookUrl).pathname;
+  assert.equal(hookPath, `/api/github/hooks/${account.tenant}`);
+  await cli(["--profile", "lead", "github", "hook"], 3);
+  const linked = await cli(["github", "link", "work", "https://github.com/thehumanworks/msn/pull/34"]);
+  assert.equal(linked.link.repo, "thehumanworks/msn");
+  const review = JSON.stringify({
+    action: "submitted",
+    repository: { full_name: "thehumanworks/msn" },
+    pull_request: { number: 34 },
+    review: {
+      state: "APPROVED",
+      body: "Ship it",
+      user: { login: "reviewer" },
+      html_url: "https://github.com/x",
+    },
+  });
+  const delivered = await fetch(`${origin}${hookPath}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-GitHub-Event": "pull_request_review",
+      "X-GitHub-Delivery": randomUUID(),
+      "X-Hub-Signature-256": `sha256=${createHmac("sha256", githubHook.secret).update(review).digest("hex")}`,
+    },
+    body: review,
+  });
+  assert.equal(delivered.status, 200, await delivered.text());
+  const approved = await cli(["--profile", "lead", "poll", "work", "--label", "github.state=approved"]);
+  assert.equal(approved.messages.length, 1);
+  assert.equal(approved.messages[0].replyTo, linked.link.anchorId);
+  assert.match(approved.messages[0].text, /^@reviewer approved thehumanworks\/msn#34/);
+  await cli(["github", "unlink", "work", "thehumanworks/msn#34"]);
+  console.log("PASS: a linked pull request review arrives on the board as a labeled reply");
 
   // A template creates the board, every persona and a profile for each, in one command.
   const listed = await cli(["board", "templates"]);

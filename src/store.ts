@@ -1,5 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  GITHUB_SENDER,
+  type GithubNotice,
+  MAX_GITHUB_LINKS,
+  notice,
+  noticeLabels,
+  type PullRef,
+  pullNumber,
+  readDelivery,
+  repoName,
+  verifySignature,
+} from "./github";
+import {
   admin,
   type Binding,
   bearer,
@@ -89,13 +101,15 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 16;
 /** Lifetime label changes per workspace; each one writes a journal event (ADR 0032). */
 const MAX_LABEL_CHANGES = 100000;
 /** A runner counts as listening this long after its last event poll ended (ADR 0028). */
 export const LISTENING_GRACE_MS = 60_000;
 /** `persona_presence.lastListeningAt` is written at most this often per persona while it polls. */
 export const PRESENCE_WRITE_INTERVAL_MS = 5 * 60_000;
+/** Workflow conclusions that never post a board message (ADR 0036). */
+const QUIET_CONCLUSIONS = new Set(["skipped", "neutral"]);
 /** Owner devices that receive push notifications (ADR 0029). */
 const MAX_PUSH_SUBSCRIPTIONS = 20;
 type InviteRow = {
@@ -270,6 +284,14 @@ export class MsnDurableObject extends DurableObject<Env> {
           updatedAt TEXT NOT NULL, PRIMARY KEY(channel, messageId, key)
         );
         CREATE INDEX IF NOT EXISTS label_values ON message_labels(channel, key, value, messageId);
+        CREATE TABLE IF NOT EXISTS github_hook (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1), secret TEXT NOT NULL, createdAt TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS github_links (
+          repo TEXT NOT NULL, number INTEGER NOT NULL, channel TEXT NOT NULL, anchorId INTEGER NOT NULL,
+          headSha TEXT, greenSha TEXT, createdAt TEXT NOT NULL, PRIMARY KEY(repo, number, channel)
+        );
+        CREATE INDEX IF NOT EXISTS github_link_heads ON github_links(repo, headSha);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -342,6 +364,13 @@ export class MsnDurableObject extends DurableObject<Env> {
         // v12 → v13: key=value message labels (ADR 0032). The table and usage.labelChanges are
         // created above; existing messages start with no labels.
         if (version < 13) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (13)");
+        // v15 → v16: boards follow GitHub pull requests (ADR 0036). Both tables are created above and
+        // start empty; nothing arrives until the owner links a pull request and adds the webhook.
+        // v14 (ADR 0034) and v15 (ADR 0035) belong to other changes; both only add tables with
+        // CREATE TABLE IF NOT EXISTS above, so recording them here is safe in any merge order.
+        if (version < 16)
+          for (const applied of [14, 15, 16])
+            ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -431,6 +460,12 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (rest.length === 2 && request.method === "PUT") {
         const id = slug(rest[1]);
         const displayName = text(input?.displayName, "displayName", 128);
+        if (displayName === GITHUB_SENDER)
+          throw new HttpError(
+            403,
+            "reserved_name",
+            "The display name github is reserved for GitHub messages.",
+          );
         const existing = this.ctx.storage.sql
           .exec<{ displayName: string }>(
             "SELECT displayName FROM personas WHERE channel=? AND id=?",
@@ -762,6 +797,256 @@ export class MsnDurableObject extends DurableObject<Env> {
   pushCooldownMs = 60_000;
   /** Replaced in tests; production calls the push service directly. */
   pushFetch: typeof fetch = (input, init) => fetch(input, init);
+
+  private githubSecret(): string | undefined {
+    return this.ctx.storage.sql
+      .exec<{ secret: string }>("SELECT secret FROM github_hook WHERE singleton = 1")
+      .toArray()[0]?.secret;
+  }
+
+  /** Owner only: the webhook address and secret to paste into GitHub, and the followed pulls. */
+  private githubRoute(request: Request, url: URL, tenant: string, rest: string[], capability: TenantRow) {
+    this.requireOwner(capability);
+    // The secret is shown once: on the POST that creates or replaces it, never on a read.
+    const create = rest.length === 1 && rest[0] === "secret" && request.method === "POST";
+    if (!(create || (!rest.length && request.method === "GET")))
+      throw new HttpError(404, "route_not_found", "Unknown GitHub operation.");
+    let secret: string | undefined;
+    if (create) {
+      secret = newToken();
+      this.ctx.storage.sql.exec(
+        "INSERT INTO github_hook(singleton, secret, createdAt) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET secret = excluded.secret, createdAt = excluded.createdAt",
+        secret,
+        new Date().toISOString(),
+      );
+    }
+    const links = this.ctx.storage.sql
+      .exec<{ repo: string; number: number; channel: string; anchorId: number; createdAt: string }>(
+        "SELECT repo, number, channel, anchorId, createdAt FROM github_links ORDER BY channel, repo, number",
+      )
+      .toArray();
+    return json({
+      webhookUrl: `${url.origin}/api/github/hooks/${tenant}`,
+      configured: Boolean(this.githubSecret()),
+      ...(secret ? { secret } : {}),
+      contentType: "application/json",
+      events: [
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "issue_comment",
+        "workflow_run",
+      ],
+      links,
+    });
+  }
+
+  /** Owner only: `PUT|DELETE …/channels/:c/github/pulls/:owner/:repo/:number`. */
+  private async githubLinkRoute(
+    request: Request,
+    tenant: string,
+    channel: string,
+    rest: string[],
+    capability: TenantRow,
+  ): Promise<Response> {
+    this.requireOwner(capability);
+    if (rest.length !== 4 || rest[0] !== "pulls" || !["PUT", "DELETE"].includes(request.method))
+      throw new HttpError(404, "route_not_found", "Unknown GitHub link operation.");
+    const pull: PullRef = { repo: repoName(rest[1], rest[2]), number: pullNumber(rest[3]) };
+    if (request.method === "DELETE") {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM github_links WHERE repo = ? AND number = ? AND channel = ?",
+        pull.repo,
+        pull.number,
+        channel,
+      );
+      return new Response(null, { status: 204 });
+    }
+    this.requireChannel(channel);
+    const existing = this.githubLink(pull, channel);
+    if (existing) return json({ link: existing, created: false });
+    const count = this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_links").one().n;
+    if (count >= MAX_GITHUB_LINKS)
+      throw new HttpError(409, "github_link_quota", "Unlink a pull request first (200 per workspace).");
+    // The anchor message starts the board's thread for this pull request: every later GitHub
+    // message replies to it, and it carries the same labels so agents can find it.
+    const ref = `${pull.repo}#${pull.number}`;
+    const text = `Following ${ref}. Reviews, comments and check results appear here as replies.\n\nhttps://github.com/${pull.repo}/pull/${pull.number}`;
+    const labels = { "github.pr": ref, "github.event": "link", "github.state": "following" };
+    const key = `github:link:${ref}:${crypto.randomUUID()}`;
+    const sent = this.send(
+      tenant,
+      channel,
+      GITHUB_SENDER,
+      text,
+      "text/plain",
+      {},
+      key,
+      await digest(JSON.stringify([payload(GITHUB_SENDER, text, "text/plain", {}), labels])),
+      null,
+      false,
+      labels,
+    );
+    const { message } = await sent.json<{ message: Message }>();
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO github_links(repo, number, channel, anchorId, headSha, createdAt) VALUES (?, ?, ?, ?, NULL, ?)",
+      pull.repo,
+      pull.number,
+      channel,
+      message.id,
+      new Date().toISOString(),
+    );
+    return json({ link: this.githubLink(pull, channel), created: true }, 201);
+  }
+
+  private githubLink(pull: PullRef, channel: string) {
+    return this.ctx.storage.sql
+      .exec<{ repo: string; number: number; channel: string; anchorId: number; createdAt: string }>(
+        "SELECT repo, number, channel, anchorId, createdAt FROM github_links WHERE repo = ? AND number = ? AND channel = ?",
+        pull.repo,
+        pull.number,
+        channel,
+      )
+      .toArray()[0];
+  }
+
+  /**
+   * `POST /api/github/hooks/:tenant` from GitHub. No bearer: the HMAC signature with this
+   * workspace's secret is the only credential. Each delivery becomes at most one message per
+   * linked board, keyed by GitHub's delivery id so redeliveries replay instead of duplicating.
+   */
+  private async githubDelivery(request: Request, tenant: string): Promise<Response> {
+    const bytes = await readDelivery(request);
+    const secret = this.tenantRow() ? this.githubSecret() : undefined;
+    // An unknown workspace, one without a webhook secret and a wrong signature look the same.
+    if (!secret || !(await verifySignature(secret, bytes, request.headers.get("X-Hub-Signature-256"))))
+      throw new HttpError(401, "invalid_signature", "The GitHub signature does not match this workspace.");
+    const event = request.headers.get("X-GitHub-Event") ?? "";
+    const delivery = request.headers.get("X-GitHub-Delivery") ?? "";
+    if (!/^[a-z_]{1,64}$/.test(event))
+      throw new HttpError(400, "invalid_event", "X-GitHub-Event is required.");
+    if (event === "ping") return json({ ok: true, pong: true });
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(delivery))
+      throw new HttpError(400, "invalid_delivery", "X-GitHub-Delivery is required.");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+    } catch {
+      throw new HttpError(400, "invalid_json", "Set the webhook content type to application/json.");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new HttpError(400, "invalid_json", "Set the webhook content type to application/json.");
+    const item = notice(event, parsed as Record<string, unknown>);
+    if (!item) return json({ posted: 0, ignored: true }, 202);
+    const targets = this.githubTargets(item);
+    let posted = 0;
+    let skipped = 0;
+    const failed: { channel: string; code: string }[] = [];
+    for (const target of targets) {
+      const pull = { repo: target.repo, number: target.number };
+      // Workflow runs: every failure, but only the first success per head commit and board, so a
+      // busy CI cannot fill the board (ADR 0036).
+      if (item.event === "workflow" && item.state !== "success" && QUIET_CONCLUSIONS.has(item.state)) {
+        skipped++;
+        continue;
+      }
+      if (item.event === "workflow" && item.state === "success" && item.headSha === target.greenSha) {
+        skipped++;
+        continue;
+      }
+      const text = item.text(pull);
+      const labels = noticeLabels(item, pull);
+      const correlation = { replyTo: target.anchorId };
+      try {
+        const response = this.send(
+          tenant,
+          target.channel,
+          GITHUB_SENDER,
+          text,
+          "text/plain",
+          correlation,
+          `github:${delivery}:${pull.number}`,
+          await digest(JSON.stringify([payload(GITHUB_SENDER, text, "text/plain", correlation), labels])),
+          null,
+          true,
+          labels,
+        );
+        // Only a delivery that posted something moves the link's commits, so a late redelivery
+        // of an older push cannot roll the head back.
+        if (response.status !== 201) continue;
+        posted++;
+        if (item.newHead)
+          this.ctx.storage.sql.exec(
+            "UPDATE github_links SET headSha = ? WHERE repo = ? AND number = ? AND channel = ?",
+            item.newHead.sha,
+            target.repo,
+            target.number,
+            target.channel,
+          );
+        if (item.event === "workflow" && item.state === "success")
+          this.ctx.storage.sql.exec(
+            "UPDATE github_links SET greenSha = ? WHERE repo = ? AND number = ? AND channel = ?",
+            item.headSha ?? null,
+            target.repo,
+            target.number,
+            target.channel,
+          );
+      } catch (error) {
+        // A redelivery of a message an admin deleted is already handled; nothing to post again.
+        if (error instanceof HttpError && error.code === "message_deleted") continue;
+        // One board's quota must not block the others, or every redelivery fails the same way.
+        failed.push({
+          channel: target.channel,
+          code: error instanceof HttpError ? error.code : "internal_error",
+        });
+      }
+    }
+    return json(
+      {
+        posted,
+        matched: targets.length,
+        ...(skipped ? { skipped } : {}),
+        ...(failed.length ? { failed } : {}),
+      },
+      targets.length ? 200 : 202,
+    );
+  }
+
+  /** Linked boards for a delivery: by pull number, or by head commit for fork workflow runs. */
+  private githubTargets(item: GithubNotice) {
+    type Target = {
+      repo: string;
+      number: number;
+      channel: string;
+      anchorId: number;
+      greenSha: string | null;
+    };
+    const found = new Map<string, Target>();
+    const add = (rows: Target[]) => {
+      for (const row of rows) found.set(JSON.stringify([row.channel, row.number]), row);
+    };
+    for (const pull of item.pulls)
+      add(
+        this.ctx.storage.sql
+          .exec<Target>(
+            "SELECT repo, number, channel, anchorId, greenSha FROM github_links WHERE repo = ? AND number = ?",
+            pull.repo,
+            pull.number,
+          )
+          .toArray(),
+      );
+    if (item.event === "workflow" && !item.pulls.length && item.headSha)
+      add(
+        this.ctx.storage.sql
+          .exec<Target>(
+            "SELECT repo, number, channel, anchorId, greenSha FROM github_links WHERE repo = ? AND headSha = ?",
+            item.repo,
+            item.headSha,
+          )
+          .toArray(),
+      );
+    return [...found.values()].sort((a, b) => a.channel.localeCompare(b.channel) || a.number - b.number);
+  }
 
   private requireOwner(capability: TenantRow) {
     if (!capability.owner_access)
@@ -1715,6 +2000,8 @@ export class MsnDurableObject extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
+      const hook = /^\/api\/github\/hooks\/([^/]+)$/.exec(url.pathname);
+      if (hook && request.method === "POST") return await this.githubDelivery(request, slug(hook[1]));
       const parts = url.pathname.split("/").slice(1);
       const isAdmin = parts[1] === "admin";
       const tenantIndex = isAdmin ? 3 : 2;
@@ -1763,6 +2050,9 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.ctx.storage.sql.exec("DELETE FROM invites");
             // Owner devices subscribed under the old credentials stop receiving notifications.
             this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
+            // The webhook secret was readable with the old owner credential; GitHub deliveries
+            // fail until the owner copies the new one (links stay).
+            this.ctx.storage.sql.exec("DELETE FROM github_hook");
           });
           this.wakeAllWaiters();
           return json(this.identity(tenant, this.authorize(hash), token));
@@ -1942,6 +2232,13 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         // Bound-name check precedes any transaction: a rejected send stores nothing and wakes nobody.
         if (input) this.requireBoundName(capability, username);
+        // Only signed GitHub deliveries post as `github` (ADR 0036).
+        if (input && username === GITHUB_SENDER)
+          throw new HttpError(
+            403,
+            "reserved_name",
+            "The display name github is reserved for GitHub messages.",
+          );
         if (input && personaId) {
           const persona = this.ctx.storage.sql
             .exec<{ displayName: string }>(
@@ -1967,6 +2264,9 @@ export class MsnDurableObject extends DurableObject<Env> {
           return new Response(null, { status: 204 });
         }
         if (rest[0] === "push") return await this.pushRoute(request, url, rest.slice(1), capability);
+        if (rest[0] === "github") return this.githubRoute(request, url, tenant, rest.slice(1), capability);
+        if (rest[0] === "channels" && rest[2] === "github")
+          return await this.githubLinkRoute(request, tenant, slug(rest[1]), rest.slice(3), capability);
         if (rest.length === 1 && rest[0] === "events" && request.method === "GET") {
           const channelParam = url.searchParams.get("channel");
           const channel = channelParam === null ? null : slug(channelParam);

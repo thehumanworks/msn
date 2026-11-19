@@ -24,6 +24,9 @@ const SCHEMA_HISTORY = [
   { version: 11 },
   { version: 12 },
   { version: 13 },
+  { version: 14 },
+  { version: 15 },
+  { version: 16 },
 ];
 /**
  * Rewinds a live database to an older schema version — dropping every column added after it —
