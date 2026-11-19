@@ -112,7 +112,10 @@
             <input id="recipient" placeholder="To (optional)" maxlength="128" autocomplete="off" spellcheck="false" disabled>
             <label for="message" class="sr-only">Message</label>
             <textarea id="message" rows="1" placeholder="Message" enterkeyhint="send" required disabled></textarea>
+            <ul id="attach-list" class="attach-list" aria-label="Files to send" hidden></ul>
           </div>
+          <input type="file" id="attach-input" multiple hidden>
+          <button type="button" id="attach" class="icon" aria-label="Attach files" title="Attach files (up to 4, 1 MiB each)" disabled>+</button>
           <button type="submit" id="send" class="primary icon" aria-label="Send message" title="Send message (Enter)" disabled>↑</button>
         </form>
       </div>

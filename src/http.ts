@@ -329,3 +329,155 @@ export function labelFilters(params: URLSearchParams): LabelFilter[] {
     return { key, values: values.map((value) => labelValue(value, key)) };
   });
 }
+
+/** Attachments (ADR 0035): small files stored in the workspace's own SQLite, never a new binding. */
+export const MAX_ATTACHMENT_BYTES = 1024 * 1024;
+export const MAX_ATTACHMENTS_PER_MESSAGE = 4;
+/** An uploaded file that no message references after this long is deleted on a later upload. */
+export const ATTACHMENT_ORPHAN_MS = 24 * 60 * 60 * 1000;
+/** Images a browser may render inline; every other type is served as a download. */
+export const INLINE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+export type AttachmentRef = { id: string; name: string; mediaType: string };
+
+/** Reads a raw request body of at most `maxBytes`; an empty body is rejected. */
+export async function rawBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null && Number(declared) > maxBytes)
+    throw new HttpError(413, "attachment_too_large", `An attachment cannot exceed ${maxBytes} bytes.`);
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (reader) {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) {
+          await reader.cancel();
+          throw new HttpError(413, "attachment_too_large", `An attachment cannot exceed ${maxBytes} bytes.`);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  if (!size) throw new HttpError(400, "invalid_attachment", "An attachment needs a non-empty body.");
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return bytes;
+}
+
+export async function sha256(bytes: Uint8Array): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function attachmentId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value))
+    throw new HttpError(
+      400,
+      "invalid_attachment",
+      "Attachment id must be the 64-hex SHA-256 the upload returned.",
+    );
+  return value;
+}
+
+const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/;
+const EXTENSION_TYPES: Record<string, string> = {
+  txt: "text/plain",
+  log: "text/plain",
+  md: "text/markdown",
+  json: "application/json",
+  csv: "text/csv",
+  diff: "text/x-diff",
+  patch: "text/x-diff",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  pdf: "application/pdf",
+};
+
+/** A display file name: no path separators or control characters, at most 255 UTF-8 bytes. */
+export function attachmentName(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value === "." ||
+    value === ".." ||
+    [...value].some(
+      (c) =>
+        c === "/" ||
+        c === "\\" ||
+        c.charCodeAt(0) < 0x20 ||
+        (c.charCodeAt(0) >= 0x7f && c.charCodeAt(0) <= 0x9f) ||
+        // Bidirectional overrides can make "gpj.exe" read as "exe.jpg".
+        (c.charCodeAt(0) >= 0x202a && c.charCodeAt(0) <= 0x202e) ||
+        (c.charCodeAt(0) >= 0x2066 && c.charCodeAt(0) <= 0x2069),
+    ) ||
+    new TextEncoder().encode(value).length > 255
+  )
+    throw new HttpError(
+      400,
+      "invalid_attachment",
+      "Attachment name must be a file name of at most 255 UTF-8 bytes, without slashes, control or bidirectional override characters.",
+    );
+  return value;
+}
+
+/** Omitted means a guess from the name's extension, else application/octet-stream. */
+export function mediaType(value: unknown, name: string): string {
+  if (value === undefined || value === null) {
+    const extension = /\.([A-Za-z0-9]+)$/.exec(name)?.[1].toLowerCase() ?? "";
+    return EXTENSION_TYPES[extension] ?? "application/octet-stream";
+  }
+  if (typeof value !== "string" || !MEDIA_TYPE.test(value))
+    throw new HttpError(
+      400,
+      "invalid_attachment",
+      "mediaType must be a lowercase type/subtype such as text/plain.",
+    );
+  return value;
+}
+
+/** Optional `attachments` send field: absent/null means none; otherwise 1–4 distinct references. */
+export function attachmentRefs(value: unknown): AttachmentRef[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || !value.length || value.length > MAX_ATTACHMENTS_PER_MESSAGE)
+    throw new HttpError(
+      400,
+      "invalid_attachment",
+      `attachments must be a list of 1 to ${MAX_ATTACHMENTS_PER_MESSAGE} uploaded files.`,
+    );
+  const refs = value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      throw new HttpError(400, "invalid_attachment", "Each attachment is an object with id and name.");
+    const { id, name, mediaType: type, ...extra } = item as Record<string, unknown>;
+    if (Object.keys(extra).length)
+      throw new HttpError(400, "invalid_attachment", "An attachment takes only id, name and mediaType.");
+    const fileName = attachmentName(name);
+    return { id: attachmentId(id), name: fileName, mediaType: mediaType(type, fileName) };
+  });
+  if (new Set(refs.map((ref) => ref.name)).size !== refs.length)
+    throw new HttpError(400, "invalid_attachment", "Attachment names must be distinct within a message.");
+  return refs;
+}
+
+/** RFC 6266 filename for Content-Disposition: an ASCII fallback plus the exact UTF-8 name. */
+export function contentDisposition(inline: boolean, name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
+  // RFC 5987 attr-chars exclude ' ( ) *, which encodeURIComponent leaves as they are.
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}

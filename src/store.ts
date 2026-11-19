@@ -12,18 +12,23 @@ import {
   verifySignature,
 } from "./github";
 import {
+  ATTACHMENT_ORPHAN_MS,
+  type AttachmentRef,
   admin,
+  attachmentRefs,
   type Binding,
   bearer,
   binding,
   body,
   type ContentType,
+  contentDisposition,
   contentType,
   correlationId,
   digest,
   equalHash,
   failure,
   HttpError,
+  INLINE_MEDIA_TYPES,
   idempotencyKey,
   integer,
   json,
@@ -32,12 +37,15 @@ import {
   type Labels,
   labelChange,
   labelFilters,
+  MAX_ATTACHMENT_BYTES,
   MAX_LABELS,
   newToken,
   optionalBody,
   labels as parseLabels,
+  rawBody,
   recipient,
   replyTarget,
+  sha256,
   slug,
   snapshotInteger,
   text,
@@ -66,7 +74,11 @@ export type Message = {
   personaId?: string;
   /** key=value labels (ADR 0032); absent from JSON when the message has none. */
   labels?: Labels;
+  /** Files sent with the message (ADR 0035); absent from JSON when it has none. */
+  attachments?: Attachment[];
 };
+/** Attachment metadata on a message; the bytes come from the per-message download route. */
+export type Attachment = { index: number; id: string; name: string; mediaType: string; bytes: number };
 /** Optional annotation input on send; `undefined` means "not supplied". */
 export type Correlation = { replyTo?: number; correlationId?: string; to?: string };
 type MessageRow = {
@@ -329,6 +341,17 @@ export class MsnDurableObject extends DurableObject<Env> {
           updatedAt TEXT NOT NULL, PRIMARY KEY(channel, messageId, key)
         );
         CREATE INDEX IF NOT EXISTS label_values ON message_labels(channel, key, value, messageId);
+        CREATE TABLE IF NOT EXISTS attachments (
+          channel TEXT NOT NULL, id TEXT NOT NULL, bytes INTEGER NOT NULL, createdAt TEXT NOT NULL,
+          data BLOB NOT NULL, PRIMARY KEY(channel, id)
+        );
+        CREATE INDEX IF NOT EXISTS attachment_age ON attachments(createdAt);
+        CREATE TABLE IF NOT EXISTS message_attachments (
+          messageId INTEGER NOT NULL, position INTEGER NOT NULL, channel TEXT NOT NULL,
+          attachmentId TEXT NOT NULL, name TEXT NOT NULL, mediaType TEXT NOT NULL,
+          PRIMARY KEY(messageId, position)
+        );
+        CREATE INDEX IF NOT EXISTS attachment_refs ON message_attachments(channel, attachmentId);
         CREATE TABLE IF NOT EXISTS github_hook (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), secret TEXT NOT NULL, createdAt TEXT NOT NULL
         );
@@ -412,6 +435,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         // v13 → v14: resumable processing cursors (ADR 0034). The table is created above and starts
         // empty; agents that never opt in keep local-only progress.
         if (version < 14) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (14)");
+        // v14 → v15: message attachments (ADR 0035). Both tables are created above and start
+        // empty; existing messages have no attachments.
         // v15 → v16: boards follow GitHub pull requests (ADR 0036). Both tables are created above and
         // start empty; nothing arrives until the owner links a pull request and adds the webhook.
         // v14 (ADR 0034) and v15 (ADR 0035) belong to other changes; both only add tables with
@@ -1372,7 +1397,12 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** Adds each message's current labels; one range query per page. */
+  /** Every message output carries its labels (ADR 0032) and attachments (ADR 0035). */
   private withLabels(channel: string, messages: Message[]): Message[] {
+    return this.withAttachments(channel, this.labelsOnly(channel, messages));
+  }
+
+  private labelsOnly(channel: string, messages: Message[]): Message[] {
     if (!messages.length) return messages;
     const byId = new Map(messages.map((message) => [message.id, message]));
     const rows = this.ctx.storage.sql
@@ -1560,6 +1590,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     personaId: string | null = null,
     notify = true,
     labels: Labels | undefined = undefined,
+    attachments: AttachmentRef[] = [],
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       if (key) {
@@ -1604,6 +1635,18 @@ export class MsnDurableObject extends DurableObject<Env> {
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
+      // Every referenced file must already be uploaded to this channel; the upload counted its bytes.
+      for (const ref of attachments)
+        if (
+          !this.ctx.storage.sql
+            .exec("SELECT 1 FROM attachments WHERE channel = ? AND id = ?", channel, ref.id)
+            .toArray().length
+        )
+          throw new HttpError(
+            400,
+            "attachment_not_found",
+            "Upload each attachment to this channel first; unused uploads expire after 24 hours.",
+          );
       const bytes = new TextEncoder().encode(username + content).length;
       if (usage.messages >= MAX_MESSAGES || usage.bytes + bytes > MAX_CONTENT_BYTES) {
         throw new HttpError(
@@ -1643,6 +1686,16 @@ export class MsnDurableObject extends DurableObject<Env> {
           value,
           message.createdAt,
         );
+      for (const [position, ref] of attachments.entries())
+        this.ctx.storage.sql.exec(
+          "INSERT INTO message_attachments(messageId, position, channel, attachmentId, name, mediaType) VALUES (?, ?, ?, ?, ?, ?)",
+          message.id,
+          position,
+          channel,
+          ref.id,
+          ref.name,
+          ref.mediaType,
+        );
       this.insertEvent(channel, "message.created", message.id);
       return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: false };
     });
@@ -1653,6 +1706,158 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (notify) this.notifyOwner(result.message);
     }
     return json(result, result.replayed ? 200 : 201);
+  }
+
+  /** Adds attachment metadata to a page of same-channel messages with one range query. */
+  private withAttachments(channel: string, messages: Message[]): Message[] {
+    if (!messages.length) return messages;
+    const rows = this.ctx.storage.sql
+      .exec<{
+        messageId: number;
+        position: number;
+        id: string;
+        name: string;
+        mediaType: string;
+        bytes: number;
+      }>(
+        `SELECT r.messageId, r.position, r.attachmentId AS id, r.name, r.mediaType, a.bytes
+         FROM message_attachments r JOIN attachments a ON a.channel = r.channel AND a.id = r.attachmentId
+         WHERE r.channel = ? AND r.messageId BETWEEN ? AND ? ORDER BY r.messageId, r.position`,
+        channel,
+        Math.min(...messages.map((m) => m.id)),
+        Math.max(...messages.map((m) => m.id)),
+      )
+      .toArray();
+    if (!rows.length) return messages;
+    const byMessage = new Map<number, Attachment[]>();
+    for (const { messageId, position, ...file } of rows) {
+      const list = byMessage.get(messageId) ?? [];
+      list.push({ index: position, ...file });
+      byMessage.set(messageId, list);
+    }
+    return messages.map((m) => (byMessage.has(m.id) ? { ...m, attachments: byMessage.get(m.id) } : m));
+  }
+
+  /**
+   * Stores one file under its SHA-256 (ADR 0035). The same bytes in the same channel are stored
+   * once, so a retried upload returns the same id and costs nothing. Counted in the content quota.
+   */
+  private async upload(channel: string, request: Request): Promise<Response> {
+    const data = await rawBody(request, MAX_ATTACHMENT_BYTES);
+    const id = await sha256(data);
+    const result = this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      this.dropOrphans(now);
+      const existing = this.ctx.storage.sql
+        .exec<{ bytes: number }>("SELECT bytes FROM attachments WHERE channel = ? AND id = ?", channel, id)
+        .toArray()[0];
+      if (existing) {
+        // Refresh the clock so a retry just before expiry keeps the upload for a full window.
+        this.ctx.storage.sql.exec(
+          "UPDATE attachments SET createdAt = ? WHERE channel = ? AND id = ?",
+          new Date(now).toISOString(),
+          channel,
+          id,
+        );
+        return { created: false };
+      }
+      const usage = this.ctx.storage.sql.exec<{ bytes: number }>("SELECT bytes FROM usage").one();
+      if (usage.bytes + data.byteLength > MAX_CONTENT_BYTES)
+        throw new HttpError(
+          409,
+          "storage_quota",
+          "Tenant quota reached (128 MiB active content, attachments included). Contact the administrator.",
+        );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO attachments(channel, id, data, bytes, createdAt) VALUES (?, ?, ?, ?, ?)",
+        channel,
+        id,
+        data,
+        data.byteLength,
+        new Date(now).toISOString(),
+      );
+      this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes + ? WHERE singleton = 1", data.byteLength);
+      return { created: true };
+    });
+    return json({ attachment: { id, bytes: data.byteLength } }, result.created ? 201 : 200);
+  }
+
+  /** Serves one file of a live message. Only common image types render inline. */
+  private download(channel: string, message: number, index: number): Response {
+    const row = this.ctx.storage.sql
+      .exec<{ deleted: number; name: string | null; mediaType: string | null; data: ArrayBuffer | null }>(
+        `SELECT m.deleted, r.name, r.mediaType, a.data FROM messages m
+         LEFT JOIN message_attachments r ON r.messageId = m.id AND r.position = ?
+         LEFT JOIN attachments a ON a.channel = r.channel AND a.id = r.attachmentId
+         WHERE m.channel = ? AND m.id = ?`,
+        index,
+        channel,
+        message,
+      )
+      .toArray()[0];
+    if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+    if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+    if (!row.data || !row.name || !row.mediaType)
+      throw new HttpError(404, "attachment_not_found", "This message has no attachment at that index.");
+    const inline = INLINE_MEDIA_TYPES.includes(row.mediaType);
+    return new Response(row.data, {
+      headers: {
+        "Content-Type": row.mediaType,
+        "Content-Disposition": contentDisposition(inline, row.name),
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  /** Deletes uploads no message references once they are older than the orphan window. */
+  private dropOrphans(now: number): void {
+    const cutoff = new Date(now - ATTACHMENT_ORPHAN_MS).toISOString();
+    const freed = this.ctx.storage.sql
+      .exec<{ bytes: number }>(
+        `DELETE FROM attachments WHERE createdAt < ? AND NOT EXISTS (
+           SELECT 1 FROM message_attachments r WHERE r.channel = attachments.channel AND r.attachmentId = attachments.id
+         ) RETURNING bytes`,
+        cutoff,
+      )
+      .toArray()
+      .reduce((sum, row) => sum + row.bytes, 0);
+    if (freed) this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes - ? WHERE singleton = 1", freed);
+  }
+
+  /**
+   * Redaction: removes a deleted message's file references and, at once, every file in the channel
+   * that no live reference still needs. Returns the bytes freed for the caller's usage update.
+   */
+  private dropAttachments(channel: string, message: number): number {
+    const ids = this.ctx.storage.sql
+      .exec<{ attachmentId: string }>(
+        "DELETE FROM message_attachments WHERE messageId = ? RETURNING attachmentId",
+        message,
+      )
+      .toArray()
+      .map((row) => row.attachmentId);
+    let freed = 0;
+    for (const id of new Set(ids)) {
+      if (
+        this.ctx.storage.sql
+          .exec(
+            "SELECT 1 FROM message_attachments WHERE channel = ? AND attachmentId = ? LIMIT 1",
+            channel,
+            id,
+          )
+          .toArray().length
+      )
+        continue;
+      freed += this.ctx.storage.sql
+        .exec<{ bytes: number }>(
+          "DELETE FROM attachments WHERE channel = ? AND id = ? RETURNING bytes",
+          channel,
+          id,
+        )
+        .toArray()
+        .reduce((sum, row) => sum + row.bytes, 0);
+    }
+    return freed;
   }
 
   private historyRevision(channel: string): number {
@@ -2351,7 +2556,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             );
             this.ctx.storage.sql.exec(
               "UPDATE usage SET bytes = bytes - ? WHERE singleton = 1",
-              row.bytes + snapshotBytes,
+              row.bytes + snapshotBytes + this.dropAttachments(channel, id),
             );
             // After the revision bump, so this event's historyRevision is the post-deletion value.
             this.insertEvent(channel, "message.deleted", id);
@@ -2387,8 +2592,11 @@ export class MsnDurableObject extends DurableObject<Env> {
             ? JSON.stringify([payload(username, content, type, correlation), personaId])
             : payload(username, content, type, correlation)
           : "";
-        // Unlabeled sends hash exactly as before ADR 0032, so older retries still replay.
-        const payloadHash = input ? await digest(sendLabels ? JSON.stringify([base, sendLabels]) : base) : "";
+        const files = input ? attachmentRefs(input.attachments) : [];
+        // Sends without labels or files hash exactly as before ADR 0032, so older retries still replay.
+        let hashInput = sendLabels ? JSON.stringify([base, sendLabels]) : base;
+        if (files.length) hashInput = JSON.stringify([hashInput, files]);
+        const payloadHash = input ? await digest(hashInput) : "";
         const change =
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "labels"
             ? labelChange(await body(request))
@@ -2593,6 +2801,19 @@ export class MsnDurableObject extends DurableObject<Env> {
               });
             }
           }
+          if (rest.length === 3 && rest[2] === "attachments" && request.method === "POST") {
+            this.requireChannel(channel);
+            return await this.upload(channel, request);
+          }
+          if (
+            rest.length === 6 &&
+            rest[2] === "messages" &&
+            rest[4] === "attachments" &&
+            request.method === "GET"
+          ) {
+            this.requireChannel(channel);
+            return this.download(channel, messageId(rest[3]), integer(rest[5], 0, 1000));
+          }
           if (change) {
             this.requireChannel(channel);
             return this.relabel(tenant, channel, messageId(rest[3]), change);
@@ -2623,6 +2844,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                 // The owner's own messages never notify the owner.
                 !capability.owner_access,
                 sendLabels,
+                files,
               );
             }
             if (request.method === "GET") {
