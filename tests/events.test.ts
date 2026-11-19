@@ -273,7 +273,7 @@ describe("durable coordination event feed", () => {
         .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
         .toArray(),
     );
-    expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     const messages = await call(`${t.path}/channels/general/messages`, t.token);
     expect((await messages.json<{ messages: { text: string }[] }>()).messages.map((m) => m.text)).toEqual([
       "before migration",
@@ -289,8 +289,8 @@ describe("durable coordination event feed", () => {
   it("fails closed without silently pruning when the event journal reaches capacity", async () => {
     const t = await tenant();
     await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
-    // Mirrors store.ts's MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS.
-    const MAX_EVENTS = 100000 * 2 + 1000 + 1000;
+    // Mirrors store.ts: MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES.
+    const MAX_EVENTS = 100000 * 2 + 1000 + 1000 + 100000;
     await runInDurableObject(t.stub, (_, state) => {
       state.storage.transactionSync(() => {
         const existing = state.storage.sql
