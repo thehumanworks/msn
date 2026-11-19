@@ -262,7 +262,7 @@ describe("message labels (ADR 0032)", () => {
       state.storage.transactionSync(() => {
         state.storage.sql.exec("DROP TABLE message_labels");
         state.storage.sql.exec("ALTER TABLE usage DROP COLUMN labelChanges");
-        state.storage.sql.exec("DELETE FROM schema_version WHERE version = 13");
+        state.storage.sql.exec("DELETE FROM schema_version WHERE version >= 13");
       });
     });
     await abortAllDurableObjects();
@@ -270,7 +270,7 @@ describe("message labels (ADR 0032)", () => {
     const versions = await runInDurableObject(restarted, (_, state) =>
       state.storage.sql.exec<{ version: number }>("SELECT MAX(version) AS version FROM schema_version").one(),
     );
-    expect(versions.version).toBe(13);
+    expect(versions.version).toBe(16);
     expect((await list(t, "")).messages[0]).not.toHaveProperty("labels");
     expect((await relabel(t, before.id, { set: { state: "open" } })).status).toBe(200);
   });

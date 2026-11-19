@@ -60,6 +60,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         &cli.command,
         Command::Login { .. }
             | Command::Board { .. }
+            | Command::Github { .. }
             | Command::Persona { .. }
             | Command::ConnectionExport { .. }
             | Command::Invite {
@@ -91,6 +92,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     match cli.command {
         Command::Login { .. }
         | Command::Board { .. }
+        | Command::Github { .. }
         | Command::Persona { .. }
         | Command::ConnectionExport { .. }
         | Command::Run { .. }
