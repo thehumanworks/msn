@@ -294,6 +294,26 @@ describe("message search (ADR 0037)", () => {
     expect(rows).toEqual([{ rowid: before.id }, { rowid: during.id }]);
   });
 
+  it("backfills a database that a later schema (v18) reached without the search index", async () => {
+    const w = await workspace();
+    const old = [];
+    for (let i = 0; i < 3; i++) old.push(await send(w, `pinned era ${i}`));
+    // PR order can record rows 17 and 18 before this code first runs: no index, no backfill row.
+    await runInDurableObject(w.stub(), (_, state) => {
+      state.storage.transactionSync(() => {
+        state.storage.sql.exec("DROP TABLE message_search");
+        state.storage.sql.exec("DROP TABLE search_backfill");
+        state.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (17), (18)");
+      });
+    });
+    await abortAllDurableObjects();
+    await found(w, "q=pinned");
+    await runDurableObjectAlarm(w.stub());
+    const after = await found(w, "q=pinned");
+    expect(after.complete).toBe(true);
+    expect(ids(after)).toEqual(old.map((message) => message.id).reverse());
+  });
+
   it("migrates a v16 database: the alarm indexes every live message that existed before", async () => {
     const w = await workspace();
     const old = [];
