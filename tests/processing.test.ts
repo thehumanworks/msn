@@ -13,7 +13,7 @@ const call = (tenant: string, suffix = "", token?: string, method = "GET", input
 type Connection = { tenant: string; token: string };
 type Cursor = { reader: string; generation: number; committedThrough: number; holder: string | null };
 type ErrorBody = { error: { code: string; message: string; details?: Record<string, unknown> } };
-const P = "/channels/work/processing/agent%201";
+const P = "/channels/work/processing/human%2Fagent%201";
 
 async function fixture(messages = 3) {
   const tenant = `proc-${crypto.randomUUID()}`;
@@ -38,7 +38,7 @@ const commit = (f: Connection, generation: number, through: number) =>
 const peek = (f: Connection, generation: number, query = "") =>
   call(
     f.tenant,
-    `/channels/work/messages?processingReader=${encodeURIComponent("agent 1")}&generation=${generation}${query}`,
+    `/channels/work/messages?processingReader=${encodeURIComponent("human/agent 1")}&generation=${generation}${query}`,
     f.token,
   );
 
@@ -129,5 +129,51 @@ describe("resumable processing cursors", () => {
     expect((await call(f.tenant, "/channels/work/messages?processingReader=x", f.token)).status).toBe(400);
     expect((await call(f.tenant, `${P}/claim`, f.token, "POST", { expectGeneration: -1 })).status).toBe(400);
     expect((await call(f.tenant, P, "x".repeat(40))).status).toBe(401);
+  });
+  it("lets a key bound to a name claim, take over or commit only that name's reader", async () => {
+    const ADMIN = "test-admin-secret-000000000000000000000";
+    const tenant = `proc-bound-${crypto.randomUUID()}`;
+    const admin = (suffix: string, input?: unknown) =>
+      exports.default.fetch(`https://msn.test/api/admin/tenants/${tenant}${suffix}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${ADMIN}`, "Content-Type": "application/json" },
+        ...(input ? { body: JSON.stringify(input) } : {}),
+      });
+    const created = await admin("", {});
+    const owner = await created.json<{ token: string }>();
+    expect(created.status, JSON.stringify(owner)).toBe(201);
+    expect((await call(tenant, "/channels/work", owner.token, "PUT")).status).toBe(201);
+    const alice = await (await admin("/keys/alice", { username: "alice" })).json<{ token: string }>();
+    const bob = { tenant, token: owner.token };
+    const bobPath = "/channels/work/processing/bob";
+    expect((await call(tenant, `${bobPath}/claim`, bob.token, "POST", { expectGeneration: 0 })).status).toBe(
+      201,
+    );
+    // Alice's key cannot take over (and so fence) bob's agent, nor commit for it.
+    for (const [suffix, input] of [
+      ["claim", { expectGeneration: 1 }],
+      ["commit", { generation: 1, through: 0 }],
+    ] as const) {
+      const refused = await call(tenant, `${bobPath}/${suffix}`, alice.token, "POST", input);
+      expect(refused.status).toBe(403);
+      expect((await refused.json<ErrorBody>()).error.code).toBe("username_bound");
+    }
+    expect(await (await call(tenant, bobPath, alice.token)).json<Cursor>()).toMatchObject({ generation: 1 });
+    for (const reader of ["alice", "alice%2Fworker-2"])
+      expect(
+        (
+          await call(tenant, `/channels/work/processing/${reader}/claim`, alice.token, "POST", {
+            expectGeneration: 0,
+          })
+        ).status,
+      ).toBe(201);
+    // `alice/…` is alice's namespace, not a prefix match on another name.
+    expect(
+      (
+        await call(tenant, "/channels/work/processing/alicex/claim", alice.token, "POST", {
+          expectGeneration: 0,
+        })
+      ).status,
+    ).toBe(403);
   });
 });

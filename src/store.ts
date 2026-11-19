@@ -1442,7 +1442,12 @@ export class MsnDurableObject extends DurableObject<Env> {
     return row;
   }
 
-  private async processingRoute(request: Request, channel: string, rest: string[]): Promise<Response> {
+  private async processingRoute(
+    request: Request,
+    channel: string,
+    rest: string[],
+    capability: TenantRow,
+  ): Promise<Response> {
     this.requireChannel(channel);
     const reader = processingReader(rest[0]);
     if (rest.length === 1 && request.method === "GET") {
@@ -1451,6 +1456,12 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     if (rest.length !== 2 || request.method !== "POST")
       throw new HttpError(404, "route_not_found", "Unknown processing operation.");
+    // A key bound to a name may only claim, take over or commit that name's readers, as with
+    // sends: the name itself or `name/<worker>` (for `--reader` on concurrent consumers). Prefix
+    // keys already allow any suffix. Unbound and shared board keys stay cooperative (ADR 0026).
+    const bound = capability.bound_username;
+    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
+      this.requireBoundName(capability, reader);
     const input = await body(request);
     if (rest[1] === "claim") {
       const expected = processingInteger(input.expectGeneration, "expectGeneration");
@@ -1997,7 +2008,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
             return this.catchup(tenant, channel, url);
-          if (rest[2] === "processing") return await this.processingRoute(request, channel, rest.slice(3));
+          if (rest[2] === "processing")
+            return await this.processingRoute(request, channel, rest.slice(3), capability);
           if (rest[2] === "snapshots") {
             this.requireChannel(channel);
             if (rest.length === 3 && request.method === "POST" && snapshotData) {

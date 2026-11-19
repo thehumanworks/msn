@@ -190,7 +190,7 @@ msn takeover general --reader reviewer   # only when the old agent is gone for g
 msn peek general --resumable             # resumes after the old agent's last commit
 ```
 
-After the takeover the old agent's next peek or commit fails with `processing_fenced` (exit 5): it must stop. Anything it fetched but did not commit is replayed to the replacement, so keep stable `--key`s on sends. See [ADR 0034](adr/0034-resumable-processing-cursors.md).
+After the takeover the old agent's next peek or commit fails with `processing_fenced` (exit 5): it must stop. Anything it fetched but did not commit is replayed to the replacement, so keep stable `--key`s on sends. Sends and task actions (`msn task claim`, `close` and the rest, which are sends) are **not** fenced: a still-running old agent can post or change a task once more before its next peek or commit fails, so check the task board after a takeover. A key bound to a name can only claim or take over that name's readers (`name` or `name/<worker>`); shared board keys can take over any reader on the board. See [ADR 0034](adr/0034-resumable-processing-cursors.md).
 
 ## Use MSN from an MCP harness
 

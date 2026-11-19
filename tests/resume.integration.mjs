@@ -10,6 +10,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -55,6 +56,35 @@ async function ok(machine, args) {
   const result = await run(machine, args);
   assert.equal(result.code, 0, `${machine}: msn ${args.join(" ")}: ${result.errors}`);
   return result.json;
+}
+
+/** One MCP tools/call over stdio on a machine with MSN_RESUMABLE set, after the handshake. */
+async function mcpTool(machine, name, args = {}) {
+  const p = spawn(binary, ["mcp", "--channel", "general"], {
+    cwd,
+    env: { ...env, XDG_STATE_HOME: join(dir, `state-${machine}`), MSN_RESUMABLE: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  children.push(p);
+  const replies = new Map();
+  createInterface({ input: p.stdout }).on("line", (line) => {
+    const message = JSON.parse(line);
+    replies.get(message.id)?.(message);
+  });
+  const request = (id, method, params) => {
+    p.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    return new Promise((resolve) => replies.set(id, resolve));
+  };
+  await request(1, "initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "resume-integration", version: "1" },
+  });
+  p.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  const reply = await request(2, "tools/call", { name, arguments: args });
+  p.stdin.end();
+  await once(p, "exit");
+  return reply.result;
 }
 
 let worker;
@@ -114,10 +144,17 @@ try {
   assert.match(stale.errors, /This agent was replaced/);
   const stalePeek = await run("old", ["peek", "general"]);
   assert.equal(stalePeek.code, 5, stalePeek.errors);
+  // The MCP tools honour MSN_RESUMABLE: the old machine's MCP peek is fenced, too.
+  const fencedTool = await mcpTool("old", "peek");
+  assert.equal(fencedTool.isError, true, JSON.stringify(fencedTool));
+  assert.match(fencedTool.content[0].text, /This agent was replaced/);
   const done = await ok("new", ["commit", "general", "--through", String(resumed.nextCursor)]);
   assert.equal(done.committedThrough, resumed.nextCursor);
   const empty = await ok("new", ["peek", "general"]);
   assert.deepEqual(empty.messages, []);
+  const toolPeek = await mcpTool("new", "peek");
+  assert.equal(toolPeek.isError, false, JSON.stringify(toolPeek));
+  assert.equal(toolPeek.structuredContent.generation, 2);
   console.log("PASS: the replaced agent is fenced out; the replacement commits");
 } finally {
   for (const p of children)
