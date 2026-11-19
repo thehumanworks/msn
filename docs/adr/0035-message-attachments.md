@@ -22,7 +22,7 @@ Small files are stored in the workspace's own Durable Object SQLite, next to the
 
 ## Schema
 
-v15. v13 (labels, ADR 0032) and v14 (resume) are held by open changes; both are additive, create their tables on every start, and are recorded by this migration as well, so the merge order does not matter.
+v15. v13 (labels, ADR 0032) is on main; v14 (resume, ADR 0034) is held by an open change. v14 is additive and creates its table on every start, so this migration records 14 as well and the merge order does not matter. Whichever lands last keeps `SCHEMA_VERSION` at the highest number.
 
 ## Rejected or deferred
 
