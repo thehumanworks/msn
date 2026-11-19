@@ -286,7 +286,9 @@ describe("participant point lookup of canonical channel messages", () => {
         .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
         .toArray(),
     );
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(versions.map((row) => row.version)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
   });
 
   it("accepts participant keys and isolates tenants", async () => {

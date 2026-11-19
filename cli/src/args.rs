@@ -218,6 +218,11 @@ pub enum Command {
         #[command(subcommand)]
         command: BoardCommand,
     },
+    /// Follow GitHub pull requests on a board (owner account only).
+    Github {
+        #[command(subcommand)]
+        command: GithubCommand,
+    },
     /// Lightweight personas. They share the channel credential.
     Persona {
         #[command(subcommand)]
@@ -833,6 +838,28 @@ pub enum BoardCommand {
         out: String,
     },
 }
+#[derive(Debug, Subcommand)]
+pub enum GithubCommand {
+    /// Print the webhook URL, secret and events to add on each GitHub repository
+    Hook {
+        /// Make a new secret; deliveries signed with the old one stop being accepted
+        #[arg(long)]
+        rotate: bool,
+    },
+    /// Post a pull request's reviews, comments and check results to a board
+    Link {
+        channel: String,
+        /// OWNER/REPO#NUMBER or the pull request URL
+        pull_request: String,
+    },
+    /// Stop posting a pull request to a board
+    Unlink {
+        channel: String,
+        /// OWNER/REPO#NUMBER or the pull request URL
+        pull_request: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum PersonaCommand {
     Add {
