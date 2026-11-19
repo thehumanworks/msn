@@ -121,8 +121,6 @@ export const SEARCH_BACKFILL_BATCH = 500;
 const SEARCH_KINDS: Record<string, ContentType | undefined> = Object.assign(Object.create(null), {
   text: "text/plain",
   json: "application/json",
-  "text/plain": "text/plain",
-  "application/json": "application/json",
 });
 /** Lifetime label changes per workspace; each one writes a journal event (ADR 0032). */
 const MAX_LABEL_CHANGES = 100000;
@@ -483,6 +481,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
       }
     });
+    ctx.storage.transactionSync(() => this.coverSearchGap());
     if (!this.searchIndexed()) void ctx.storage.setAlarm(Date.now());
   }
 
@@ -492,6 +491,32 @@ export class MsnDurableObject extends DurableObject<Env> {
       .exec<{ indexedThrough: number; target: number }>("SELECT indexedThrough, target FROM search_backfill")
       .toArray()[0];
     return !state || state.indexedThrough >= state.target;
+  }
+
+  /**
+   * Messages newer than every indexed row and the backfill target were sent while code without
+   * search ran (a rollback after v17 shipped). Extends the backfill over them; re-indexing a row
+   * that is already indexed is harmless because backfill replaces rows.
+   */
+  private coverSearchGap(): void {
+    const state = this.ctx.storage.sql
+      .exec<{ target: number }>("SELECT target FROM search_backfill")
+      .toArray()[0];
+    const indexed =
+      this.ctx.storage.sql
+        .exec<{ rowid: number }>("SELECT rowid FROM message_search ORDER BY rowid DESC LIMIT 1")
+        .toArray()[0]?.rowid ?? 0;
+    const newest =
+      this.ctx.storage.sql.exec<{ id: number | null }>("SELECT MAX(id) AS id FROM messages").one().id ?? 0;
+    const covered = Math.max(indexed, state?.target ?? 0);
+    if (newest <= covered) return;
+    this.ctx.storage.sql.exec(
+      `INSERT INTO search_backfill(singleton, indexedThrough, target) VALUES (1, ?, ?)
+       ON CONFLICT(singleton) DO UPDATE SET target = excluded.target,
+         indexedThrough = CASE WHEN indexedThrough >= target THEN excluded.indexedThrough ELSE indexedThrough END`,
+      covered,
+      newest,
+    );
   }
 
   /** Indexes the next batch of pre-v17 messages; returns true when nothing is left (ADR 0037). */
@@ -511,8 +536,11 @@ export class MsnDurableObject extends DurableObject<Env> {
           batch,
         )
         .toArray();
-      for (const row of rows)
+      for (const row of rows) {
+        // Replace, never duplicate: a gap backfill can reach rows a send already indexed.
+        this.ctx.storage.sql.exec("DELETE FROM message_search WHERE rowid = ?", row.id);
         this.ctx.storage.sql.exec("INSERT INTO message_search(rowid, text) VALUES (?, ?)", row.id, row.text);
+      }
       const through = rows.length < batch ? state.target : (rows.at(-1)?.id ?? state.target);
       this.ctx.storage.sql.exec("UPDATE search_backfill SET indexedThrough = ? WHERE singleton = 1", through);
       return through >= state.target;

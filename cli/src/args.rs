@@ -628,7 +628,7 @@ pub enum Command {
     /// Search a channel's messages by words, sender, kind or label; newest first, as JSON
     Search {
         channel: String,
-        /// Words to find (each word also matches word starts); "quoted text" matches a phrase
+        /// Words to find (words of 3+ letters also match word starts); "quoted text" matches a phrase
         text: Option<String>,
         /// Only messages from this display name
         #[arg(long)]

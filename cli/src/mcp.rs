@@ -907,7 +907,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "search",
             "Search messages",
-            "Find past messages in the channel by words, sender, kind or labels, newest first. Every word must appear; a word also matches longer words it starts (deplo finds deployed); \"quoted text\" matches that exact phrase. Give at least one of text, from, kind or labels. Continue with before=nextBefore while hasMore is true. complete is false while older messages are still being indexed.",
+            "Find past messages in the channel by words, sender, kind or labels, newest first. Every word must appear; a word of three or more letters also matches longer words it starts (deplo finds deployed); \"quoted text\" matches that exact phrase. Give at least one of text, from, kind or labels. Continue with before=nextBefore while hasMore is true. complete is false while older messages are still being indexed.",
             json!({
                 "text": {"type":"string","maxLength":256,"description":"Words or \"a phrase\" to find."},
                 "from": {"type":"string","minLength":1,"maxLength":128,"description":"Only messages from this display name."},

@@ -59,10 +59,16 @@ describe("searchMatch", () => {
   });
 
   it("never passes FTS5 syntax through", () => {
-    expect(searchMatch('NEAR(a b) OR c* -d ^e "f')).toBe('"NEAR"* "a"* "b"* "OR"* "c"* "d"* "e"* "f"');
+    expect(searchMatch('NEAR(a b) OR c* -d ^e "f')).toBe('"NEAR"* "a" "b" "OR" "c" "d" "e" "f"');
     expect(searchMatch("text: AND")).toBe('"text"* "AND"*');
     expect(searchMatch("!!! ...")).toBeNull();
+    expect(searchMatch("___ \u0301")).toBeNull();
     expect(searchMatch("")).toBeNull();
+  });
+
+  it("matches word starts only for words of three or more characters", () => {
+    expect(searchMatch("ci is red")).toBe('"ci" "is" "red"*');
+    expect(searchMatch("née")).toBe('"née"*');
   });
 
   it("limits length and the number of terms", () => {
@@ -165,10 +171,57 @@ describe("message search (ADR 0037)", () => {
   it("rejects bad input and other channels' credentials", async () => {
     const w = await workspace();
     await send(w, "hello");
-    for (const query of ["", "q=!!!", "kind=xml", "q=a&limit=0", "q=a&sort=old", `q=${"a".repeat(257)}`])
+    for (const query of [
+      "",
+      "q=!!!",
+      "q=___",
+      "kind=text/plain",
+      "kind=xml",
+      "q=a&limit=0",
+      "q=a&sort=old",
+      `q=${"a".repeat(257)}`,
+    ])
       expect((await search(w, query)).status).toBe(400);
     expect((await search(w, "q=hello", "missing")).status).toBe(404);
     expect((await call(`${w.path}/channels/general/search?q=hello`, "wrong-token")).status).toBe(401);
+  });
+
+  it("lets short words match only whole words", async () => {
+    const w = await workspace();
+    const ci = await send(w, "CI is red again");
+    await send(w, "circle back on the cinema plan");
+    expect(ids(await found(w, "q=ci"))).toEqual([ci.id]);
+    expect(ids(await found(w, "q=cir"))).toHaveLength(1);
+  });
+
+  it("keeps a channel-scoped key to its own channel", async () => {
+    const w = await workspace();
+    await send(w, "secret plan", { channel: "private" });
+    await send(w, "open plan");
+    const created = await call(`${w.path}/invites`, w.token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: "general" }),
+    });
+    expect(created.status).toBe(201);
+    const { code } = await created.json<{ code: string }>();
+    const redeemed = await call(`${w.path}/invites/redeem`, undefined, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, username: "guest" }),
+    });
+    expect(redeemed.status).toBe(201);
+    const { token } = await redeemed.json<{ token: string }>();
+    expect((await call(`${w.path}/channels/private/search?q=plan`, token)).status).toBe(403);
+    const own = await call(`${w.path}/channels/general/search?q=plan`, token);
+    expect(own.status).toBe(200);
+    expect((await own.json<Result>()).messages.map((m) => m.text)).toEqual(["open plan"]);
+  });
+
+  it("sets no alarm on a fresh workspace", async () => {
+    const w = await workspace();
+    await send(w, "hello");
+    expect(await runInDurableObject(w.stub(), (_, state) => state.storage.getAlarm())).toBeNull();
   });
 
   it("indexes older messages in batches and reports complete only at the end", async () => {
@@ -194,6 +247,51 @@ describe("message search (ADR 0037)", () => {
     expect(after.complete).toBe(true);
     expect(ids(after)).toEqual([fresh.id, ...old.map((message) => message.id).reverse()]);
     expect(await step()).toBe(true);
+  });
+
+  it("never indexes a message deleted before the backfill reaches it", async () => {
+    const w = await workspace();
+    const kept = await send(w, "legacy keep");
+    const gone = await send(w, "legacy hunter2");
+    await runInDurableObject(w.stub(), (_, state) => {
+      state.storage.sql.exec("DELETE FROM message_search");
+      state.storage.sql.exec("INSERT OR REPLACE INTO search_backfill SELECT 1, 0, MAX(id) FROM messages");
+    });
+    const deleted = await call(`/api/admin/tenants/${w.name}/channels/general/messages/${gone.id}`, ADMIN, {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(204);
+    expect(
+      await runInDurableObject(w.stub(), (instance: MsnDurableObject) => instance.backfillSearch()),
+    ).toBe(true);
+    expect(ids(await found(w, "q=legacy"))).toEqual([kept.id]);
+    const rows = await runInDurableObject(w.stub(), (_, state) =>
+      state.storage.sql.exec("SELECT rowid FROM message_search").toArray(),
+    );
+    expect(rows).toEqual([{ rowid: kept.id }]);
+  });
+
+  it("indexes messages sent while code without search ran (a rollback), on the next start", async () => {
+    const w = await workspace();
+    const before = await send(w, "rollback before");
+    const during = await send(w, "rollback during");
+    // Simulate v16 code handling the second send: its index row is missing, backfill says done.
+    await runInDurableObject(w.stub(), (_, state) => {
+      state.storage.sql.exec("DELETE FROM message_search WHERE rowid = ?", during.id);
+      state.storage.sql.exec("UPDATE search_backfill SET indexedThrough = 0, target = 0");
+    });
+    expect(ids(await found(w, "q=rollback"))).toEqual([before.id]);
+    await abortAllDurableObjects();
+    await found(w, "q=rollback");
+    await runDurableObjectAlarm(w.stub());
+    const after = await found(w, "q=rollback");
+    expect(ids(after)).toEqual([during.id, before.id]);
+    expect(after.complete).toBe(true);
+    // The re-indexed range held no duplicates.
+    const rows = await runInDurableObject(w.stub(), (_, state) =>
+      state.storage.sql.exec("SELECT rowid FROM message_search ORDER BY rowid").toArray(),
+    );
+    expect(rows).toEqual([{ rowid: before.id }, { rowid: during.id }]);
   });
 
   it("migrates a v16 database: the alarm indexes every live message that existed before", async () => {
@@ -227,5 +325,6 @@ describe("message search (ADR 0037)", () => {
         .map((row) => row.version),
     );
     expect(versions.at(-1)).toBe(17);
+    expect(await runInDurableObject(w.stub(), (_, state) => state.storage.getAlarm())).toBeNull();
   });
 });

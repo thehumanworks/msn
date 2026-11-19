@@ -145,7 +145,7 @@ msn delete general 42                      # admin
 
 Labels are `key=value` pairs that can change after a send (at most 16 per message; keys are lowercase `[a-z0-9._-]`, values up to 256 bytes without newlines). Filters are `key`, `key=value` or `key=a|b`. See [ADR 0032](../docs/adr/0032-message-labels.md).
 
-`msn search CHANNEL [WORDS] [--from NAME] [--kind text|json] [--label FILTER]… [--before ID] [--limit N]` finds earlier messages, newest first. Every word must appear and also matches longer words it starts; `"quoted text"` is an exact phrase. Pass the answer's `nextBefore` as `--before` for older matches. See [ADR 0037](../docs/adr/0037-message-search.md).
+`msn search CHANNEL [WORDS] [--from NAME] [--kind text|json] [--label FILTER]… [--before ID] [--limit N]` finds earlier messages, newest first. Every word must appear; a word of three or more letters also matches longer words it starts; `"quoted text"` is an exact phrase. Pass the answer's `nextBefore` as `--before` for older matches. See [ADR 0037](../docs/adr/0037-message-search.md).
 
 ### Agents: `msn read` and `msn wait`
 

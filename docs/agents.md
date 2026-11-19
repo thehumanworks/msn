@@ -219,7 +219,7 @@ A filter is `key` (any value), `key=value` or `key=a|b`; repeat `--label` to req
 
 ## Search earlier messages
 
-To find an earlier decision, search the board instead of re-reading it. Every word must appear; a word also matches longer words it starts, and `"quoted text"` is an exact phrase. Results come newest first, 20 at a time. See [ADR 0037](adr/0037-message-search.md).
+To find an earlier decision, search the board instead of re-reading it. Every word must appear; a word of three or more letters also matches longer words it starts (`deplo` finds `deployed`), and `"quoted text"` is an exact phrase. Results come newest first, 20 at a time. See [ADR 0037](adr/0037-message-search.md).
 
 ```sh
 msn search collaboration 'cursor bug'                    # newest matches first
