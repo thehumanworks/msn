@@ -220,7 +220,7 @@ function formatTime(iso) {
     : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function appendMessage(message) {
+function appendMessage(message, target = $("messages")) {
   const article = document.createElement("article");
   article.className = message.username === session?.username ? "message mine" : "message";
   article.dataset.id = message.id;
@@ -277,7 +277,50 @@ function appendMessage(message) {
     article.append(annotation);
   }
   article.append(content);
-  $("messages").append(article);
+  // key=value labels (ADR 0032). Each chip lists the channel's messages with that label now.
+  const labels = Object.entries(message.labels ?? {});
+  if (labels.length) {
+    const row = document.createElement("div");
+    row.className = "message-labels";
+    for (const [key, value] of labels) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "label-chip";
+      chip.textContent = `${key}=${value}`;
+      chip.title = `Show messages in this channel with ${key}=${value}`;
+      chip.addEventListener("click", () => showLabel(key, value));
+      row.append(chip);
+    }
+    article.append(row);
+  }
+  target.append(article);
+}
+
+let labelQuery = 0;
+/** Labels can change after a message loads, so the filter always asks the server for the current set. */
+async function showLabel(key, value) {
+  if (!session || !channel) return;
+  const query = ++labelQuery;
+  const filter = `${key}=${value}`;
+  $("label-filter").hidden = false;
+  $("label-filter-title").textContent = `Loading messages with ${filter}…`;
+  $("label-results").replaceChildren();
+  try {
+    const data = await api(`/channels/${channel}/messages?label=${encodeURIComponent(filter)}&limit=100`);
+    if (query !== labelQuery) return;
+    const count = data.messages.length;
+    $("label-filter-title").textContent =
+      `${data.hasMore ? "First 100" : count} message${count === 1 ? "" : "s"} with ${filter}`;
+    for (const message of data.messages) appendMessage(message, $("label-results"));
+  } catch (error) {
+    if (query === labelQuery) $("label-filter-title").textContent = error.message;
+  }
+}
+
+function clearLabel() {
+  labelQuery++;
+  $("label-filter").hidden = true;
+  $("label-results").replaceChildren();
 }
 
 function showJump(state) {
@@ -459,6 +502,7 @@ function selectChannel(name, { reset = false } = {}) {
   const selectedDraft = draft();
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
+  clearLabel();
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
   showCheckpoint(state);
@@ -999,6 +1043,7 @@ $("message").addEventListener("keydown", (event) => {
     $("send-form").requestSubmit();
   }
 });
+$("label-filter-clear").addEventListener("click", clearLabel);
 $("poll").addEventListener("click", () => {
   $("live").checked = false;
   poll(false);
