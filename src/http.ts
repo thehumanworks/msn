@@ -506,11 +506,12 @@ export function searchMatch(input: string): string | null {
     if (index % 2) {
       const phrase = words(part);
       if (phrase.length) clauses.push(`"${phrase.join(" ")}"`);
-    } else
+    } else {
       // Only words of 3+ characters match word starts: a one- or two-letter prefix would
       // expand to most of the index, and the index keeps no prefix tables.
       for (const word of words(part))
         clauses.push([...word].length >= MIN_PREFIX_CHARS ? `"${word}"*` : `"${word}"`);
+    }
   });
   if (clauses.length > MAX_SEARCH_TERMS)
     throw new HttpError(400, "invalid_query", `Use at most ${MAX_SEARCH_TERMS} words or phrases.`);
