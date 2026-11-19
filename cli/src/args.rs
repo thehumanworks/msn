@@ -733,13 +733,21 @@ pub enum BoardCommand {
         #[arg(long)]
         save_as: String,
     },
+    /// Create a board. With --template, also add its personas and save a profile for each.
     Create {
         channel: String,
+        /// The board goal. Optional with --template, which supplies a default.
+        #[arg(long, required_unless_present = "template")]
+        goal: Option<String>,
+        /// A ready team from `msn board templates`, such as lead-reviewer
         #[arg(long)]
-        goal: String,
-        #[arg(long)]
-        save_as: String,
+        template: Option<String>,
+        /// Profile for the lead. Default with --template: CHANNEL-lead
+        #[arg(long, required_unless_present = "template")]
+        save_as: Option<String>,
     },
+    /// List the ready board templates for `board create --template`.
+    Templates,
     Show {
         channel: String,
     },

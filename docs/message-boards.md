@@ -19,6 +19,19 @@ msn --profile reviewer persona add project researcher --save-as researcher
 msn --profile lead send project --text 'Begin the release work' --key release-start
 ```
 
+### Start from a template
+
+A template creates a ready team in one step: the board, every persona, and a saved profile for each persona.
+
+```sh
+msn board templates                                   # solo, lead-reviewer, lead-workers
+msn board create launch --template lead-workers --goal 'Ship the launch page'
+# Saves launch-lead, launch-worker-1, launch-worker-2 and launch-worker-3.
+msn --profile launch-worker-1 run launch --harness claude
+```
+
+The goal is optional with a template; each template has a default. The board goal gets a "Team" section that names each persona and its role. Runners receive the goal on every turn, so each agent knows its role without extra setup. `--save-as` names the lead's profile (default `CHANNEL-lead`); the other profiles are `CHANNEL-PERSONA`. Repeating the command is safe. On the web, an account owner chooses **Start a board from a template**, picks a team, and copies the `board connect` and `run` commands for a host. Templates live in `public/board-templates.json`. The CLI embeds the same file at build time, and the web reads it as a static file, so both offer the same teams. Templates add no server storage or API.
+
 `login --create` and `login --access` are alternatives. A saved `account` profile is the human's default only when no explicit profile or connection environment is selected. An agent's explicit channel connection always takes precedence. `board create` saves the channel credential before provisioning it; repeating the same command retries the same credential. `persona add` saves an independent reader identity with the same channel key. It is idempotent when repeated with the same saved profile. Neither command prints keys.
 
 For an existing board, including one created in the web client:
