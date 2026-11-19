@@ -1521,3 +1521,81 @@ test("the Agents list shows which board personas are listening and when each las
   });
   expect((await poll).status()).toBe(200);
 });
+
+test("the owner turns notifications on and off; disconnecting turns them off", async ({
+  page,
+  context,
+  request,
+}) => {
+  // Headless browsers have no push service. Stand in for the browser's PushManager only; the
+  // subscription still goes through the real app, service worker registration and Worker API.
+  await context.grantPermissions(["notifications"]);
+  await page.addInitScript(() => {
+    let current = null;
+    const b64 = (bytes) =>
+      btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+    PushManager.prototype.getSubscription = async () => current;
+    PushManager.prototype.subscribe = async (options) => {
+      const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, [
+        "deriveBits",
+      ]);
+      const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+      const auth = crypto.getRandomValues(new Uint8Array(16));
+      window.applicationServerKey = b64(new Uint8Array(options.applicationServerKey));
+      current = {
+        endpoint: "https://fcm.googleapis.com/fcm/send/browser-test",
+        toJSON() {
+          return { endpoint: this.endpoint, keys: { p256dh: b64(raw), auth: b64(auth) } };
+        },
+        unsubscribe: async () => {
+          current = null;
+          return true;
+        },
+      };
+      return current;
+    };
+  });
+  const t = await provision(request, { username: "human" });
+  const devices = async () =>
+    (await (await request.get(`${t.path}/push`, { headers: t.headers })).json()).devices;
+  await connect(page, t, "human");
+  await channelsPane(page);
+  const notify = page.locator("#notify");
+  await expect(notify).toHaveText("Notify me when agents need me");
+  await notify.click();
+  await expect(page.locator("#status")).toContainText("Notifications are on");
+  await expect(notify).toHaveText("Notifications on · turn off");
+  await expect(notify).toHaveAttribute("aria-pressed", "true");
+  expect(await devices()).toBe(1);
+  const { publicKey } = await (await request.get(`${t.path}/push`, { headers: t.headers })).json();
+  expect(await page.evaluate(() => window.applicationServerKey)).toBe(publicKey);
+  expect(
+    await page.evaluate(async () => (await navigator.serviceWorker.getRegistration("/"))?.active?.scriptURL),
+  ).toMatch(/\/sw\.js$/);
+
+  await notify.click();
+  await expect(page.locator("#status")).toContainText("Notifications are off");
+  await expect(notify).toHaveText("Notify me when agents need me");
+  expect(await devices()).toBe(0);
+
+  await notify.click();
+  await expect(notify).toHaveText("Notifications on · turn off");
+  expect(await devices()).toBe(1);
+  await disconnect(page);
+  await expect.poll(devices).toBe(0);
+  await expect(page.locator("#notify")).toBeHidden();
+});
+
+test("only the owner account is offered notifications", async ({ page, request }) => {
+  const t = await provision(request);
+  const key = await request.put(`/api/admin/tenants/${t.tenant}/keys/agent`, {
+    headers: { Authorization: `Bearer ${ADMIN}` },
+    data: { username: "agent" },
+  });
+  await connect(page, { tenant: t.tenant, token: (await key.json()).token }, "agent");
+  await channelsPane(page);
+  await expect(page.locator("#notify")).toBeHidden();
+});
