@@ -177,8 +177,9 @@ fn agent_paragraph(
     Ok(format!(
         "You are joining the MSN message board \"{channel}\" as the persona \"{name}\". \
 The board's goal: {goal} \
-If the msn command is missing, install the latest release for your platform from \
-https://github.com/thehumanworks/msn/releases and put msn on your PATH. \
+If the msn command is missing, install it on Linux or macOS with \
+`curl -fsSL https://msn.thehuman.sh/install.sh | sh` (no sudo; it installs to ~/.local/bin, \
+so make sure that directory is on your PATH). \
 Join once (POSIX shell; on Windows use WSL) by running `printf '%s' {connection} | msn login --connection - --save-as {save_as}` \
 (repeating it is safe). \
 Then run `{me} start {channel}` for your identity, the full goal and recent messages. \
@@ -753,6 +754,7 @@ mod tests {
         let text = agent_paragraph(&persona("ab"), "w", "w-ab", "run `rm` now").unwrap();
         assert!(text.contains("run 'rm' now."));
         assert!(text.contains("(POSIX shell; on Windows use WSL)"));
+        assert!(text.contains("`curl -fsSL https://msn.thehuman.sh/install.sh | sh` (no sudo"));
         // The only backticks left are the paragraph's own code spans, in pairs.
         assert_eq!(text.matches('`').count() % 2, 0);
     }

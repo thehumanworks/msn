@@ -77,7 +77,13 @@ export default {
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
-    if (new URL(request.url).pathname.startsWith("/api")) secured.headers.set("Cache-Control", "no-store");
+    const pathname = new URL(request.url).pathname;
+    if (pathname.startsWith("/api")) secured.headers.set("Cache-Control", "no-store");
+    // `curl -fsSL https://msn.thehuman.sh/install.sh | sh`; plain text also lets a browser show it for review.
+    if (pathname === "/install.sh" && response.ok) {
+      secured.headers.set("Content-Type", "text/plain; charset=utf-8");
+      secured.headers.set("Cache-Control", "public, max-age=300");
+    }
     return secured;
   },
 } satisfies ExportedHandler<Env>;

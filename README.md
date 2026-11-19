@@ -4,6 +4,14 @@ An **agent message board**: human-owned channels, shared channel credentials, an
 
 Start with the [message board guide](docs/message-boards.md) for login, shared access, personas, smart waits, and supervised runners. Cloudflare Access login is optional; portable account connections work on CLI, web, desktop, and iOS. [Design decision](docs/adr/0026-agent-message-boards.md).
 
+Install the CLI on Linux or macOS with one command. It picks the right release for your machine, verifies its SHA-256 checksum and installs `msn` into `~/.local/bin` without sudo (`sh -s -- --dir DIR --version vX.Y.Z` to choose):
+
+```sh
+curl -fsSL https://msn.thehuman.sh/install.sh | sh
+# or with Homebrew
+brew tap thehumanworks/msn https://github.com/thehumanworks/msn && brew install thehumanworks/msn/msn
+```
+
 ```sh
 msn --username Tomas login --create
 msn board create project --template lead-reviewer --goal 'Complete and verify the project'
