@@ -5,7 +5,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::args::{BoardCommand, Cli, Command, PersonaCommand};
+use crate::args::{BoardCommand, Cli, Command, GithubCommand, PersonaCommand};
 use crate::client::{MsnClient, RawResponse, classify};
 use crate::config::{origin_key, parse_origin, require_tenant, require_token, slug};
 use crate::cursor::CursorLock;
@@ -18,6 +18,41 @@ fn value(raw: RawResponse) -> Result<Value, CliError> {
     classify(raw.status, &raw.body)?;
     serde_json::from_str(&raw.body).map_err(|_| CliError::generic("Invalid server response"))
 }
+/// `OWNER/REPO#N` or `https://github.com/OWNER/REPO/pull/N[/...]`. The server checks names again.
+fn github_pull(value: &str) -> Result<(String, String, u64), CliError> {
+    let invalid =
+        || CliError::usage("Name the pull request as OWNER/REPO#NUMBER or its GitHub URL.");
+    let trimmed = value.trim();
+    let (owner, repo, number) = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() < 4 || parts[2] != "pull" {
+            return Err(invalid());
+        }
+        (
+            parts[0],
+            parts[1],
+            parts[3].split(['#', '?']).next().unwrap_or(""),
+        )
+    } else {
+        let (name, number) = trimmed.split_once('#').ok_or_else(invalid)?;
+        let (owner, repo) = name.split_once('/').ok_or_else(invalid)?;
+        (owner, repo, number)
+    };
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    if !ok(owner) || !ok(repo) || repo.contains('/') {
+        return Err(invalid());
+    }
+    let number: u64 = number.parse().map_err(|_| invalid())?;
+    if number == 0 {
+        return Err(invalid());
+    }
+    Ok((owner.to_string(), repo.to_string(), number))
+}
+
 fn secret() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
@@ -689,6 +724,55 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             let persona = add_persona(&client, &url, &p, channel, name, id.as_ref(), save_as)?;
             announce(save_as, &persona);
         }
+        Command::Github { command } => {
+            let path = |channel: &str, pull: &str| -> Result<String, CliError> {
+                let (owner, repo, number) = github_pull(pull)?;
+                Ok(format!(
+                    "{base}/channels/{}/github/pulls/{owner}/{repo}/{number}",
+                    slug(channel)?
+                ))
+            };
+            match command {
+                GithubCommand::Hook { rotate } => {
+                    let current = value(client.get(&format!("{base}/github"), Some(&p.token))?)?;
+                    // The server shows the secret only when it makes one: on first use or --rotate.
+                    if *rotate || current["configured"] != json!(true) {
+                        let made = value(client.post_json(
+                            &format!("{base}/github/secret"),
+                            &p.token,
+                            &[],
+                            &json!({}),
+                        )?)?;
+                        println!("{made}");
+                        eprintln!(
+                            "Add this webhook on each repository (Settings, Webhooks): Payload URL and Secret as shown, content type application/json, and the listed events. The secret is shown only now and lets anyone post GitHub messages to your linked boards; keep it private."
+                        );
+                    } else {
+                        println!("{current}");
+                        eprintln!(
+                            "The webhook secret was shown when it was made. Run msn github hook --rotate for a new one, then update it on each repository."
+                        );
+                    }
+                }
+                GithubCommand::Link {
+                    channel,
+                    pull_request,
+                } => {
+                    println!(
+                        "{}",
+                        value(client.put(&path(channel, pull_request)?, &p.token)?)?
+                    );
+                }
+                GithubCommand::Unlink {
+                    channel,
+                    pull_request,
+                } => {
+                    let response = client.delete(&path(channel, pull_request)?, &p.token)?;
+                    classify(response.status, &response.body)?;
+                    println!("{}", json!({"unlinked": pull_request}));
+                }
+            }
+        }
         Command::Persona {
             command: PersonaCommand::List { channel },
         } => {
@@ -708,6 +792,28 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_pull_accepts_reference_and_url() {
+        assert_eq!(
+            github_pull("thehumanworks/msn#34").unwrap(),
+            ("thehumanworks".into(), "msn".into(), 34)
+        );
+        assert_eq!(
+            github_pull("https://github.com/TheHumanWorks/msn/pull/34/files").unwrap(),
+            ("TheHumanWorks".into(), "msn".into(), 34)
+        );
+        for bad in [
+            "msn#34",
+            "a/b#0",
+            "a/b#x",
+            "a/b/c#1",
+            "https://github.com/a/b/issues/3",
+            "a b/c#1",
+        ] {
+            assert!(github_pull(bad).is_err(), "{bad}");
+        }
+    }
 
     fn persona(username: &str) -> Profile {
         Profile {

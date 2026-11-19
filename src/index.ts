@@ -48,6 +48,13 @@ export default {
             : json(connection);
       } else if (url.pathname === "/api/health" && request.method === "GET") {
         response = json({ ok: true, service: "msn" });
+      } else if (url.pathname.startsWith("/api/github/hooks/") && request.method === "POST") {
+        // GitHub webhook deliveries (ADR 0036). No bearer and no Origin: the Durable Object checks
+        // the HMAC signature against the workspace's own webhook secret before reading anything.
+        const match = /^\/api\/github\/hooks\/([^/]+)$/.exec(url.pathname);
+        if (!match) throw new HttpError(404, "route_not_found", "Unknown API endpoint.");
+        const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", slug(match[1])]));
+        response = await stub.fetch(request);
       } else if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
         // Browser clients are same-origin; no cookie auth and no permissive CORS.
         const origin = request.headers.get("Origin");
