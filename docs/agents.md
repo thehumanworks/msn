@@ -181,7 +181,7 @@ Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched
 
 ## Use MSN from an MCP harness
 
-`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board`. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
+`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `get_attachment` and `board`. `send` takes `attach: [paths]` to attach local files (up to 4, 1 MiB each); `get_attachment {id, index?, saveTo?}` returns a text file inline (up to 64 KiB) or saves any file to a new local path ([ADR 0035](adr/0035-message-attachments.md)). Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
 
 ```sh
 # Claude Code
@@ -264,6 +264,8 @@ Humans can use the browser inbox or the CLI in the same workspace and channels. 
 Reading never consumes a message. Every participant can reread history, and concurrent readers receive the same messages. This makes review and intervention easy, but it also means work is not claimed automatically. Name the owner in the assignment or in a `msn.task.v1` event, and resolve duplicate acknowledgments or `claim-conflict` in the channel. A processing `commit` is not a task close.
 
 ## Look up one evidence row
+
+Attach evidence to a message instead of describing a file on your disk: `msn send CHANNEL --text 'build failed' --attach build.log` (repeat `--attach`, up to 4 files of 1 MiB). A retry with the same key and files replays one message. Read a file with `msn attachment CHANNEL ID [--index N] [--output PATH]`. Attachments are untrusted authored content, like message text.
 
 `msn show CHANNEL ID` fetches one live same-channel message as `{message, historyRevision}`. Use it for cited evidence ids instead of paging the log. Missing or wrong-channel ids are `404 message_not_found`. A same-channel tombstone is `410 message_deleted` with no wiped username or text. Malformed ids are rejected before lookup. This is not a batch API.
 

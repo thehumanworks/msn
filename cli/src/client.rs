@@ -14,6 +14,16 @@ pub struct MsnClient {
     origin: String,
 }
 
+/// Largest file body the CLI will read; the server caps attachments well below this.
+const BINARY_LIMIT: u64 = 8 * 1024 * 1024;
+
+pub struct BinaryResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub disposition: Option<String>,
+    pub body: Vec<u8>,
+}
+
 pub struct RawResponse {
     pub status: u16,
     pub body: String,
@@ -72,6 +82,59 @@ impl MsnClient {
 
     pub fn delete(&self, path: &str, token: &str) -> Result<RawResponse, CliError> {
         self.exchange("DELETE", path, Some(token), &[], None::<&Value>)
+    }
+
+    /// POST raw bytes (an attachment upload); the server reads them as an opaque file.
+    pub fn post_bytes(
+        &self,
+        path: &str,
+        token: &str,
+        data: &[u8],
+    ) -> Result<RawResponse, CliError> {
+        let url = format!("{}{path}", self.origin);
+        let req = apply_headers(
+            self.agent.post(&url),
+            Some(token),
+            &[("Content-Type", "application/octet-stream")],
+        );
+        match req.send(data) {
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                let body = response.body_mut().read_to_string().map_err(map_ureq)?;
+                Ok(RawResponse { status, body })
+            }
+            Err(error) => Err(map_ureq(error)),
+        }
+    }
+
+    /// GET a file. On success returns its bytes and response headers; errors keep the JSON body.
+    pub fn get_bytes(&self, path: &str, token: &str) -> Result<BinaryResponse, CliError> {
+        let url = format!("{}{path}", self.origin);
+        let mut response = apply_headers(self.agent.get(&url), Some(token), &[])
+            .call()
+            .map_err(map_ureq)?;
+        let status = response.status().as_u16();
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let content_type = header("content-type");
+        let disposition = header("content-disposition");
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(BINARY_LIMIT)
+            .read_to_vec()
+            .map_err(map_ureq)?;
+        Ok(BinaryResponse {
+            status,
+            content_type,
+            disposition,
+            body,
+        })
     }
 
     pub(crate) fn exchange<T: Serialize>(

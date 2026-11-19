@@ -85,7 +85,7 @@ function advanceMark() {
 
 function draft(connection = session, name = channel) {
   if (!connection.drafts.has(name))
-    connection.drafts.set(name, { content: "", recipient: "", retry: null, sending: false });
+    connection.drafts.set(name, { content: "", recipient: "", files: [], retry: null, sending: false });
   return connection.drafts.get(name);
 }
 
@@ -161,6 +161,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
     for (const state of connection.drafts.values()) {
       state.content = "";
       state.recipient = "";
+      state.files = [];
       state.retry = null;
     }
     connection.drafts.clear();
@@ -184,6 +185,8 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("recipient").value = "";
   $("new-channel").value = "";
   autosize();
+  $("attach-list").replaceChildren();
+  $("attach-list").hidden = true;
   $("messages").replaceChildren();
   showCheckpoint(null);
   showSince(null);
@@ -196,7 +199,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   $("jump").hidden = true;
-  for (const id of ["poll", "catchup", "reread", "recipient", "message", "send", "invite-channel"])
+  for (const id of ["poll", "catchup", "reread", "recipient", "message", "send", "attach", "invite-channel"])
     $(id).disabled = true;
   $("notify").hidden = true;
   $("workspace").hidden = true;
@@ -257,6 +260,93 @@ function formatTime(iso) {
     : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+const INLINE_IMAGES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const MAX_ATTACHMENT_BYTES = 1024 * 1024;
+const MAX_ATTACHMENTS = 4;
+
+function fileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+/** Fetches one attachment with the bearer key; the browser cannot send it on a plain link. */
+async function attachmentBlob(message, index, connection = session) {
+  if (!connection || session !== connection) throw new DOMException("Connection ended", "AbortError");
+  const response = await fetch(
+    `/api/tenants/${connection.tenant}/channels/${message.channel}/messages/${message.id}/attachments/${index}`,
+    { headers: { Authorization: `Bearer ${connection.token}` } },
+  );
+  if (!response.ok) throw new Error(`Attachment unavailable (${response.status})`);
+  return response.blob();
+}
+
+/** Saves through a temporary object URL; the file's own name comes from the message, as text. */
+async function saveAttachment(message, file) {
+  try {
+    const url = URL.createObjectURL(await attachmentBlob(message, file.index));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = file.name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) {
+    status(error.message, true);
+  }
+}
+
+/** Files under a message: a chip per file, and a preview for common image types. */
+function attachmentList(message) {
+  const list = document.createElement("ul");
+  list.className = "attachments";
+  for (const file of message.attachments) {
+    const item = document.createElement("li");
+    if (INLINE_IMAGES.includes(file.mediaType)) {
+      const image = document.createElement("img");
+      image.alt = file.name;
+      image.loading = "lazy";
+      image.className = "attachment-preview";
+      const connection = session;
+      attachmentBlob(message, file.index, connection)
+        .then((blob) => {
+          image.src = URL.createObjectURL(blob);
+        })
+        .catch(() => image.remove());
+      item.append(image);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "attachment";
+    button.textContent = `${file.name} · ${fileSize(file.bytes)}`;
+    button.title = `Download ${file.name} (${file.mediaType})`;
+    button.addEventListener("click", () => saveAttachment(message, file));
+    item.append(button);
+    list.append(item);
+  }
+  return list;
+}
+
+/** The composer's pending files for the selected channel. */
+function showFiles(state) {
+  const list = $("attach-list");
+  list.replaceChildren();
+  for (const [index, file] of state.files.entries()) {
+    const item = document.createElement("li");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "quiet";
+    remove.textContent = `${file.name} · ${fileSize(file.size)} ✕`;
+    remove.title = `Remove ${file.name}`;
+    remove.addEventListener("click", () => {
+      state.files.splice(index, 1);
+      showFiles(state);
+    });
+    item.append(remove);
+    list.append(item);
+  }
+  list.hidden = !state.files.length;
+}
+
 function appendMessage(message) {
   const article = document.createElement("article");
   article.className = message.username === session?.username ? "message mine" : "message";
@@ -314,6 +404,8 @@ function appendMessage(message) {
     article.append(annotation);
   }
   article.append(content);
+  if (Array.isArray(message.attachments) && message.attachments.length)
+    article.append(attachmentList(message));
   if (session?.channels.get(channel)?.since?.firstId === message.id) article.classList.add("since-start");
   $("messages").append(article);
 }
@@ -580,6 +672,7 @@ function selectChannel(name, { reset = false } = {}) {
   const selectedDraft = draft();
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
+  showFiles(selectedDraft);
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
   showCheckpoint(state);
@@ -595,7 +688,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("cursor").textContent = `Cursor ${state.cursor}`;
   $("more").hidden = !state.hasMore;
   showJump(state);
-  for (const id of ["poll", "catchup", "reread", "recipient", "message"]) $(id).disabled = false;
+  for (const id of ["poll", "catchup", "reread", "recipient", "message", "attach"]) $(id).disabled = false;
   $("send").disabled = draft().sending;
   for (const button of $("channels").children)
     button.setAttribute("aria-current", String(button.dataset.channel === name));
@@ -1073,16 +1166,32 @@ $("send-form").addEventListener("submit", async (event) => {
     status("Recipient must be at most 128 UTF-8 bytes.", true);
     return;
   }
-  const payload = JSON.stringify({
-    username: connection.username,
-    text: content,
-    ...(recipient.trim() ? { to: recipient } : {}),
-  });
-  if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
-  const attempt = state.retry;
+  const files = [...state.files];
   state.sending = true;
   $("send").disabled = true;
   try {
+    // Uploads are keyed by content, so retrying this draft yields the same ids and the same key.
+    const attachments = [];
+    for (const file of files) {
+      const { attachment } = await api(
+        `/channels/${selected}/attachments`,
+        { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file },
+        connection,
+      );
+      attachments.push({
+        id: attachment.id,
+        name: file.name,
+        ...(file.type ? { mediaType: file.type } : {}),
+      });
+    }
+    const payload = JSON.stringify({
+      username: connection.username,
+      text: content,
+      ...(recipient.trim() ? { to: recipient } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    });
+    if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
+    const attempt = state.retry;
     await api(
       `/channels/${selected}/messages`,
       {
@@ -1096,10 +1205,12 @@ $("send-form").addEventListener("submit", async (event) => {
       state.content = "";
       state.recipient = "";
     }
+    state.files = state.files.filter((file) => !files.includes(file));
     if (state.retry === attempt) state.retry = null;
     if (session !== connection || selected !== channel) return;
     $("message").value = state.content;
     $("recipient").value = state.recipient;
+    showFiles(state);
     autosize();
     poll($("live").checked); // Read from the last cursor, not the sent ID: no skipped concurrent replies.
   } catch (error) {
@@ -1109,6 +1220,29 @@ $("send-form").addEventListener("submit", async (event) => {
     state.sending = false;
     if (session === connection && selected === channel) $("send").disabled = false;
   }
+});
+
+$("attach").addEventListener("click", () => $("attach-input").click());
+$("attach-input").addEventListener("change", () => {
+  if (!session || !channel) return;
+  const state = draft();
+  for (const file of $("attach-input").files) {
+    if (state.files.length >= MAX_ATTACHMENTS) {
+      status(`A message can carry at most ${MAX_ATTACHMENTS} files.`, true);
+      break;
+    }
+    if (!file.size || file.size > MAX_ATTACHMENT_BYTES) {
+      status(`${file.name} must be 1 byte to 1 MiB.`, true);
+      continue;
+    }
+    if (state.files.some((pending) => pending.name === file.name)) {
+      status(`A file named ${file.name} is already attached.`, true);
+      continue;
+    }
+    state.files.push(file);
+  }
+  $("attach-input").value = "";
+  showFiles(state);
 });
 
 $("message").addEventListener("input", () => {

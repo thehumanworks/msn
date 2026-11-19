@@ -320,6 +320,17 @@ pub enum Command {
     },
     /// Fetch one exact message by channel and ID (404 absent, 410 deleted)
     Show { channel: String, message_id: String },
+    /// Download one file attached to a message (to stdout, or to --output)
+    Attachment {
+        channel: String,
+        message_id: String,
+        /// Which file, counted from 0 in the message's attachments list (default 0)
+        #[arg(long)]
+        index: Option<String>,
+        /// Write the file here instead of stdout; refuses to overwrite an existing file
+        #[arg(long, short)]
+        output: Option<String>,
+    },
     /// Publish readable task events or project a complete, bounded task board
     Task {
         #[command(subcommand)]
@@ -394,6 +405,9 @@ pub enum Command {
         /// Address a username (visible to everyone in the channel; not a private message)
         #[arg(long)]
         to: Option<String>,
+        /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
+        #[arg(long = "attach", value_name = "PATH")]
+        attach: Vec<String>,
     },
     /// GET …/messages (single page; wait defaults to 0)
     Poll {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -127,7 +127,7 @@ try {
   const { result } = await lead.request("tools/list", {});
   assert.deepEqual(
     result.tools.map((t) => t.name),
-    ["start", "catch_up", "send", "peek", "commit", "show_message", "board"],
+    ["start", "catch_up", "send", "peek", "commit", "show_message", "get_attachment", "board"],
   );
 
   const entered = await lead.ok("start");
@@ -170,8 +170,75 @@ try {
     ["approved"],
     "peek resumes after committed progress",
   );
+  await reviewer.ok("commit", { through: empty.nextCursor });
+
+  // Attachments (ADR 0035): evidence travels with the message, not on one agent's disk.
+  await writeFile(join(dir, "build.log"), "step 1 ok\nstep 2 FAILED\n");
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
+  await writeFile(join(dir, "shot.png"), png);
+  const attached = await lead.ok("send", {
+    text: "build failed, log and screenshot attached",
+    key: "mcp-attach-1",
+    attach: [join(dir, "build.log"), join(dir, "shot.png")],
+  });
+  assert.deepEqual(
+    attached.message.attachments.map((a) => [a.index, a.name, a.mediaType, a.bytes]),
+    [
+      [0, "build.log", "text/plain", 24],
+      [1, "shot.png", "image/png", 12],
+    ],
+  );
+  // A retry with the same key and files re-uploads the same bytes and replays one message.
+  const attachedAgain = await lead.ok("send", {
+    text: "build failed, log and screenshot attached",
+    key: "mcp-attach-1",
+    attach: [join(dir, "build.log"), join(dir, "shot.png")],
+  });
+  assert.equal(attachedAgain.message.id, attached.message.id);
+  const seen = await reviewer.ok("peek", { wait: 0 });
+  assert.equal(seen.messages.at(-1).attachments.length, 2);
+  const log = await reviewer.ok("get_attachment", { id: attached.message.id });
+  assert.equal(log.text, "step 1 ok\nstep 2 FAILED\n");
+  const binaryResult = await reviewer.tool("get_attachment", { id: attached.message.id, index: 1 });
+  assert.equal(binaryResult.isError, true, "binary files are never returned inline");
+  const saved = await reviewer.ok("get_attachment", {
+    id: attached.message.id,
+    index: 1,
+    saveTo: join(dir, "copy.png"),
+  });
+  assert.equal(saved.savedTo, join(dir, "copy.png"));
+  assert.deepEqual(await readFile(join(dir, "copy.png")), png);
+  const missing = await lead.tool("send", { text: "x", attach: [join(dir, "nope.txt")] });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.structuredContent.idempotencyKey, undefined, "a bad path posts nothing");
   await reviewer.close();
   await lead.close();
+
+  const cliCopy = join(dir, "cli.log");
+  const download = child(binary, [
+    "--profile",
+    "reviewer",
+    "attachment",
+    "work",
+    String(attached.message.id),
+    "--output",
+    cliCopy,
+  ]);
+  assert.equal((await download.done)[0], 0, download.errors);
+  assert.equal(await readFile(cliCopy, "utf8"), "step 1 ok\nstep 2 FAILED\n");
+  await writeFile(join(dir, "fix.patch"), "--- a\n+++ b\n");
+  const cliSent = await cli([
+    "--profile",
+    "lead",
+    "send",
+    "work",
+    "--text",
+    "patch",
+    "--attach",
+    join(dir, "fix.patch"),
+  ]);
+  assert.equal(cliSent.message.attachments[0].mediaType, "text/x-diff");
+  console.log("PASS: attachments over MCP and the CLI: upload, replay, inline text, save, download");
 
   const history = await cli(["--profile", "lead", "poll", "work", "--after", "0"]);
   assert.equal(history.messages.filter((m) => m.text === "please review").length, 1);
