@@ -848,3 +848,84 @@ body > footer {
 .agents small {
   color: var(--muted);
 }
+.since {
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  font-size: 12px;
+  flex-shrink: 0;
+  max-height: 35%;
+  overflow-y: auto;
+}
+.since-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.since-head strong {
+  flex: 1;
+  min-width: 0;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+.since-head button,
+.since li button {
+  font: inherit;
+  font-size: 11px;
+}
+.since ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.since li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  min-height: 24px;
+  padding: 3px 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.since li.attention button::before {
+  content: "● ";
+  color: var(--accent);
+}
+.since-more {
+  color: var(--muted);
+  padding: 3px 0;
+}
+.message.since-start {
+  position: relative;
+  margin-top: 26px;
+}
+.message.since-start::before {
+  content: "New since you last looked";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -20px;
+  border-top: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 11px;
+  padding-top: 2px;
+  text-align: center;
+}
+.message.flash {
+  animation: since-flash 1.2s ease-out;
+}
+@keyframes since-flash {
+  from {
+    background: var(--accent-soft);
+  }
+}
+@media (pointer: coarse) {
+  .since li button {
+    min-height: 32px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message.flash {
+    animation: none;
+  }
+}

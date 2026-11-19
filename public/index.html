@@ -97,6 +97,14 @@
           </div>
           <div id="label-results"></div>
         </section>
+        <section id="since" class="since" aria-labelledby="since-title" aria-live="polite" hidden>
+          <div class="since-head">
+            <strong id="since-title">Since you last looked</strong>
+            <button type="button" id="since-jump" class="quiet">Where I stopped</button>
+            <button type="button" id="since-done" class="quiet">Done</button>
+          </div>
+          <ul id="since-list"></ul>
+        </section>
         <div id="messages" role="log" aria-label="Messages" aria-live="polite"><div class="empty">Nothing here yet.</div></div>
         <form id="send-form" class="compose">
           <div class="compose-fields">

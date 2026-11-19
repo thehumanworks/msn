@@ -1640,3 +1640,146 @@ test("only the owner account is offered notifications", async ({ page, request }
   await channelsPane(page);
   await expect(page.locator("#notify")).toBeHidden();
 });
+
+test("a board shows what changed since you last looked, with a marker where you stopped", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const post = async (username, text, extra = {}) => {
+    const response = await request.post(`${t.path}/channels/work/messages`, {
+      headers: t.headers,
+      data: { username, text, ...extra },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message.id;
+  };
+  const typed = (username, data) => post(username, JSON.stringify(data), { contentType: "application/json" });
+  await post("lead", "Plan is up");
+  await connect(page, t, "Tomas");
+  await expect(page.locator(".message")).toHaveCount(1);
+  // The first visit only records where you are; there is nothing to summarise yet.
+  await expect(page.locator("#since")).toBeHidden();
+  await expect
+    .poll(() => page.evaluate((key) => localStorage.getItem(key), `msn.read.${t.tenant}`))
+    .toContain('"Tomas\\nwork"');
+
+  // While the reader is away, the board moves on.
+  await page.goto("about:blank");
+  const first = await typed("lead", {
+    schema: "msn.task.v1",
+    action: "open",
+    task: "login",
+    title: "Fix <b>login</b>",
+    reviewer: "Tomas",
+  });
+  await typed("worker", { schema: "msn.task.v1", action: "claim", task: "login" });
+  await post("worker", "Which region should I deploy to?", { to: "Tomas" });
+  await typed("worker", { schema: "msn.task.v1", action: "block", task: "login", reason: "needs a key" });
+  await post("worker", "chatter");
+
+  await page.goto("/");
+  await expect(page.locator("#channel-title")).toHaveText("# work");
+  await expect(page.locator(".message")).toHaveCount(6);
+  const since = page.locator("#since");
+  await expect(since).toBeVisible();
+  await expect(page.locator("#since-title")).toHaveText(
+    "Since you last looked: 5 new messages from lead and worker",
+  );
+  await expect(page.locator("#since-list li")).toHaveText([
+    "worker to you: “Which region should I deploy to?”",
+    "worker blocked Fix <b>login</b>: needs a key",
+    "lead opened Fix <b>login</b>",
+    "worker claimed Fix <b>login</b>",
+  ]);
+  await expect(page.locator("#since-list b")).toHaveCount(0);
+  await expect(page.locator(".message.since-start")).toHaveCount(1);
+  await expect(page.locator(".message.since-start")).toHaveAttribute("data-id", String(first));
+  await page.screenshot({ path: testInfo.outputPath("since-you-left.png") });
+  await page.getByRole("button", { name: "Where I stopped" }).click();
+  await expect(page.locator(".message.since-start")).toBeInViewport();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(since).toBeHidden();
+  await expect(page.locator(".message.since-start")).toHaveCount(0);
+
+  // Having read to the end, the next visit has nothing new.
+  await page.locator("#messages").evaluate((box) => {
+    box.scrollTop = box.scrollHeight;
+  });
+  await page.reload();
+  await expect(page.locator(".message")).toHaveCount(6);
+  await post("lead", "One more thing");
+  await expect(page.locator(".message")).toHaveCount(7);
+  await page.reload();
+  await expect(page.locator(".message")).toHaveCount(7);
+  await expect(since).toBeHidden();
+
+  // Switching tabs: what arrives while the page is hidden is listed on return.
+  const visibility = (state) =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, "visibilityState", { value, configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    }, state);
+  await visibility("hidden");
+  await post("worker", "Ready for review?", { to: "Tomas" });
+  await expect(page.locator(".message")).toHaveCount(8);
+  await expect(since).toBeHidden();
+  await visibility("visible");
+  await expect(page.locator("#since-title")).toHaveText("Since you last looked: 1 new message from worker");
+  await expect(page.locator("#since-list li")).toHaveText(["worker to you: “Ready for review?”"]);
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await page.reload();
+  await expect(page.locator(".message")).toHaveCount(8);
+  await expect(since).toBeHidden();
+  const disk = await page.evaluate(() => JSON.stringify({ ...localStorage }));
+  expect(disk).not.toContain("region");
+  await disconnect(page);
+  expect(await stored(page)).toEqual([0, 0]);
+});
+
+test("with more than 300 unread, opening a board does not mark the rest as read", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  const post = async (text) => {
+    const response = await request.post(`${t.path}/channels/work/messages`, {
+      headers: t.headers,
+      data: { username: "worker", text },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message.id;
+  };
+  const start = await post("start");
+  await connect(page, t, "Tomas");
+  await expect(page.locator(".message")).toHaveCount(1);
+  const mark = () =>
+    page.evaluate(
+      (key) => JSON.parse(localStorage.getItem(key) ?? "{}")["Tomas\nwork"],
+      `msn.read.${t.tenant}`,
+    );
+  await expect.poll(mark).toBe(start);
+  await page.goto("about:blank");
+  for (let i = 0; i < 320; i += 40)
+    await Promise.all(Array.from({ length: 40 }, (_, j) => post(`update ${i + j}`)));
+  await page.goto("/");
+  await expect(page.locator("#since-title")).toHaveText(
+    "Since you last looked: 300+ new messages from worker",
+  );
+  await expect(page.locator(".message")).toHaveCount(321);
+  await expect.poll(() => bottomGap(page)).toBeLessThan(2);
+  // Live followed to the newest message, but the mark stops at the last summarised one.
+  const covered = await page.evaluate(
+    (first) =>
+      [...document.querySelectorAll(".message")]
+        .map((n) => Number(n.dataset.id))
+        .filter((id) => id > first)[299],
+    start,
+  );
+  await expect.poll(mark).toBe(covered);
+  await page.reload();
+  await expect(page.locator("#since-title")).toHaveText("Since you last looked: 20 new messages from worker");
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  const newest = await page.locator(".message").last().getAttribute("data-id");
+  await expect.poll(mark).toBe(Number(newest));
+});

@@ -1,6 +1,7 @@
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches};
 use msn_cli::args::{Cli, Command};
+use msn_cli::doctor;
 use msn_cli::error::write_err;
 use msn_cli::profile;
 use msn_cli::{execute, install_stop_signals};
@@ -19,6 +20,10 @@ fn main() {
     }
     if cli.token.is_none() {
         cli.token = std::env::var("MSN_TOKEN").ok();
+    }
+    // Doctor reports a broken profile selection as a finding instead of exiting on it.
+    if matches!(cli.command, Command::Doctor { .. }) {
+        std::process::exit(doctor::run(cli, &matches));
     }
     match profile::prepare(&mut cli, &matches) {
         Ok(true) => return,

@@ -19,6 +19,8 @@ Exit codes: 0 ok; 1 generic; 2 usage/config; 3 auth (401/403); 4 not found (404)
   5 conflict (409/410); 6 network (connect/TLS/redirect)
 
 EXAMPLES:
+  msn doctor                        # check this setup; prints the fix for each problem
+  msn doctor general --json         # one JSON report for agents; exit 1 when a check fails
   msn health
   msn channels
   msn create general
@@ -259,13 +261,23 @@ pub enum Command {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
-    /// Invite people or agents (omit CHANNEL for workspace access)
+    /// Invite people or agents (omit CHANNEL for workspace access; --for-agent prints a paste-ready board handoff)
     Invite {
         channel: Option<String>,
         #[arg(long, default_value_t = 25)]
         uses: u32,
         #[arg(long, default_value_t = 86400)]
         expires_in: u32,
+        /// Print one paragraph to paste into any agent: how to join this board as a persona,
+        /// the board goal and how to wait for work. Needs CHANNEL and --name.
+        #[arg(long, requires_all = ["channel", "name"], conflicts_with_all = ["uses", "expires_in"])]
+        for_agent: bool,
+        /// The agent's persona name on the board (with --for-agent)
+        #[arg(long, requires = "for_agent")]
+        name: Option<String>,
+        /// The agent's profile name in the paragraph. Default: CHANNEL-NAME
+        #[arg(long, requires = "for_agent")]
+        save_as: Option<String>,
     },
     /// Redeem an invitation link or code and cache your own access key
     Join {
@@ -329,6 +341,15 @@ pub enum Command {
     },
     /// GET /api/health (no token)
     Health,
+    /// Check login, active profile, workspace, board, Node and runner; print the fix for each problem.
+    /// Read-only. Exits 1 when a check fails; --json prints one report for agents.
+    Doctor {
+        /// Board to check (default: the board your access key is scoped to)
+        channel: Option<String>,
+        /// Print one JSON object instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// GET /api/tenants/{tenant}; show this token's tenant and username binding
     Whoami,
     /// Admin PUT …/keys/{key}; requires explicit --username or --username-prefix

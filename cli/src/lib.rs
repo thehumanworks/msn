@@ -5,6 +5,7 @@ pub mod board;
 pub mod client;
 pub mod config;
 pub mod cursor;
+pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod export;
@@ -61,6 +62,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             | Command::Board { .. }
             | Command::Persona { .. }
             | Command::ConnectionExport { .. }
+            | Command::Invite {
+                for_agent: true,
+                ..
+            }
     ) {
         return board::execute(&cli);
     }
@@ -90,6 +95,9 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         | Command::ConnectionExport { .. }
         | Command::Run { .. }
         | Command::Mcp { .. } => unreachable!(),
+        Command::Doctor { .. } => Err(CliError::generic(
+            "msn doctor runs before connection setup; call doctor::run.",
+        )),
         Command::Workspace { .. }
         | Command::Invite { .. }
         | Command::Join { .. }

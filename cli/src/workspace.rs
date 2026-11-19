@@ -240,6 +240,8 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             channel,
             uses,
             expires_in,
+            for_agent: false,
+            ..
         } => {
             if *uses == 0 || *uses > 100 || !(60..=604800).contains(expires_in) {
                 return Err(CliError::usage(

@@ -6,7 +6,15 @@ use crate::client::{MsnClient, classify};
 use crate::error::CliError;
 
 pub fn fetch_identity(url: &Url, tenant: &str, token: &str) -> Result<Value, CliError> {
-    let response = MsnClient::new(url)?.get(&format!("/api/tenants/{tenant}"), Some(token))?;
+    fetch_identity_with(&MsnClient::new(url)?, tenant, token)
+}
+
+pub fn fetch_identity_with(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+) -> Result<Value, CliError> {
+    let response = client.get(&format!("/api/tenants/{tenant}"), Some(token))?;
     classify(response.status, &response.body)?;
     let identity: Value = serde_json::from_str(&response.body)
         .map_err(|_| CliError::generic("Identity response was not JSON."))?;
