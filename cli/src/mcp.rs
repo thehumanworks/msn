@@ -34,8 +34,8 @@ use crate::config::{
 use crate::error::CliError;
 use crate::identity::{resolve_username, validate_username};
 use crate::labels::{self, Labels};
-use crate::processing;
 use crate::{Correlation, Payload, send_body_with, with_labels};
+use crate::{processing, resumable};
 
 /// Newest first. The client's version is echoed when listed, otherwise the newest is offered.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -403,9 +403,17 @@ impl Server {
         positive(limit, "limit")?;
         let reader = self.processing_reader(&tenant, &token)?;
         let mut out = Vec::new();
-        processing::peek_to(
-            &mut out, &self.url, &tenant, &token, &channel, &reader, None, wait, limit, &self.stop,
-        )?;
+        if resumable::enabled_by_env() {
+            resumable::peek_to(
+                &mut out, &self.url, &tenant, &token, &channel, &reader, None, wait, limit,
+                &self.stop,
+            )?;
+        } else {
+            processing::peek_to(
+                &mut out, &self.url, &tenant, &token, &channel, &reader, None, wait, limit,
+                &self.stop,
+            )?;
+        }
         Ok(parse_printed(&out)?)
     }
 
@@ -417,9 +425,15 @@ impl Server {
         })?;
         let reader = self.processing_reader(&tenant, &token)?;
         let mut out = Vec::new();
-        processing::commit_to(
-            &mut out, &self.url, &tenant, &channel, &reader, None, through,
-        )?;
+        if resumable::enabled_by_env() {
+            resumable::commit_to(
+                &mut out, &self.url, &tenant, &token, &channel, &reader, None, through,
+            )?;
+        } else {
+            processing::commit_to(
+                &mut out, &self.url, &tenant, &channel, &reader, None, through,
+            )?;
+        }
         Ok(parse_printed(&out)?)
     }
 
@@ -790,7 +804,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "peek",
             "Wait for work",
-            "Read messages after your committed processing progress, waiting up to `wait` seconds for new ones. Does not commit: process every message, then call commit with this result's nextCursor. Shares progress with `msn peek` for the same reader.",
+            "Read messages after your committed processing progress, waiting up to `wait` seconds for new ones. Does not commit: process every message, then call commit with this result's nextCursor. Shares progress with `msn peek` for the same reader. With MSN_RESUMABLE=1 in the server's environment, progress is kept on the server (like `msn peek --resumable`) so a replacement on another machine can resume after `msn takeover`; a replaced agent gets a processing_fenced error and must stop.",
             json!({
                 "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for new messages (default 0)."},
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Page size (default 100)."},
@@ -801,7 +815,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "commit",
             "Commit processed work",
-            "Mark every message through `through` as processed. Use the nextCursor of the peek you finished; it must not be ahead of what was fetched or behind committed progress.",
+            "Mark every message through `through` as processed. Use the nextCursor of the peek you finished; it must not be ahead of what was fetched or behind committed progress. With MSN_RESUMABLE=1 the commit goes to the server and fails with processing_fenced once another machine has taken over.",
             json!({"through": cursor("Processed watermark: the peek result's nextCursor.")}),
             &["through"],
             (false, true),

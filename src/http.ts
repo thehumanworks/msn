@@ -3,6 +3,8 @@ export class HttpError extends Error {
     public status: number,
     public code: string,
     message: string,
+    /** Optional structured context, returned beside code and message (additive). */
+    public details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -14,7 +16,16 @@ export function json(value: unknown, status = 200): Response {
 
 export function failure(error: unknown): Response {
   if (error instanceof HttpError) {
-    return json({ error: { code: error.code, message: error.message } }, error.status);
+    return json(
+      {
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details ? { details: error.details } : {}),
+        },
+      },
+      error.status,
+    );
   }
   // Do not log request bodies, bearer credentials, or database errors containing data.
   console.error("Unexpected messaging service failure");

@@ -16,6 +16,7 @@ pub mod labels;
 pub mod mcp;
 pub mod processing;
 pub mod profile;
+pub mod resumable;
 pub mod runner;
 pub mod task_client;
 pub mod tasks;
@@ -155,6 +156,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             wait,
             limit,
             cursor_file,
+            resumable,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -168,7 +170,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
-            processing::peek(
+            let peek = if resumable {
+                resumable::peek
+            } else {
+                processing::peek
+            };
+            peek(
                 &url,
                 &tenant,
                 &token,
@@ -184,6 +191,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             channel,
             through,
             cursor_file,
+            resumable,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -195,13 +203,41 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
-            processing::commit(
+            let cursor_file = cursor_file.as_deref().map(Path::new);
+            if resumable {
+                resumable::commit(
+                    &url,
+                    &tenant,
+                    &token,
+                    channel,
+                    &reader,
+                    cursor_file,
+                    through,
+                )
+            } else {
+                processing::commit(&url, &tenant, channel, &reader, cursor_file, through)
+            }
+        }
+        Command::Takeover {
+            channel,
+            cursor_file,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let reader = identity::resolve_username(
                 &url,
                 &tenant,
+                &token,
+                cli.reader.as_deref().or(cli.username.as_deref()),
+            )?;
+            resumable::takeover(
+                &url,
+                &tenant,
+                &token,
                 channel,
                 &reader,
                 cursor_file.as_deref().map(Path::new),
-                through,
             )
         }
         Command::Task { command } => {
