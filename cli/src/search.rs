@@ -67,9 +67,33 @@ pub fn path(tenant: &str, channel: &str, search: &Search<'_>) -> Result<String, 
     ))
 }
 
+/// Splits what a person typed into search words and a `from:name` sender, as the web, desktop and
+/// iOS search boxes do. The last `from:` wins; the rest is the search text.
+pub fn split_from(input: &str) -> (String, Option<String>) {
+    let mut from = None;
+    let mut words = Vec::new();
+    for word in input.split_whitespace() {
+        match word.strip_prefix("from:") {
+            Some(name) if !name.is_empty() => from = Some(name.to_owned()),
+            _ => words.push(word),
+        }
+    }
+    (words.join(" "), from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn given_from_word_when_split_then_sender_and_text() {
+        assert_eq!(
+            split_from("deploy from:ada  \"on friday\""),
+            ("deploy \"on friday\"".to_owned(), Some("ada".to_owned()))
+        );
+        assert_eq!(split_from("from: plain"), ("from: plain".to_owned(), None));
+        assert_eq!(split_from("from:a from:b"), (String::new(), Some("b".to_owned())));
+    }
 
     fn search(text: Option<&str>) -> Search<'_> {
         Search {
