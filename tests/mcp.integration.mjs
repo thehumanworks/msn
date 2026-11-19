@@ -127,7 +127,7 @@ try {
   const { result } = await lead.request("tools/list", {});
   assert.deepEqual(
     result.tools.map((t) => t.name),
-    ["start", "catch_up", "send", "peek", "commit", "show_message", "board"],
+    ["start", "catch_up", "send", "peek", "commit", "show_message", "board", "label", "find", "wait_label"],
   );
 
   const entered = await lead.ok("start");
@@ -179,6 +179,81 @@ try {
   assert.equal(reply.replyTo, sent.message.id);
   assert.equal(reply.username, "reviewer");
   console.log("PASS: idempotent send, commit bounds, evidence, replies and clean EOF shutdown");
+
+  // Labels (ADR 0032): send with labels, claim with a condition, filter, and wait for a change.
+  const labeler = mcp("lead");
+  await labeler.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+  const task = await labeler.ok("send", { text: "fix the parser", labels: { state: "open", area: "cli" } });
+  assert.deepEqual(task.message.labels, { area: "cli", state: "open" });
+  const claimed = await labeler.ok("label", {
+    id: task.message.id,
+    set: { owner: "lead" },
+    if: { owner: null },
+  });
+  assert.equal(claimed.changed, true);
+  const lost = await labeler.tool("label", {
+    id: task.message.id,
+    set: { owner: "other" },
+    if: { owner: null },
+  });
+  assert.equal(lost.isError, true);
+  assert.match(lost.content[0].text, /^conflict error: .*"owner":"lead"/);
+  const found = await labeler.ok("find", { labels: ["state=open", "area"] });
+  assert.deepEqual(
+    found.messages.map((m) => m.id),
+    [task.message.id],
+  );
+  const none = await labeler.ok("wait_label", { labels: ["state=done"], id: task.message.id, wait: 0 });
+  assert.equal(none.matched, false);
+  // The CLI waits on the label while another process changes it.
+  const waiter = child(binary, [
+    "--profile",
+    "lead",
+    "wait-label",
+    "work",
+    "state=done",
+    "--message",
+    String(task.message.id),
+    "--timeout",
+    "20",
+  ]);
+  await delay(500);
+  const done = await cli([
+    "--profile",
+    "reviewer",
+    "label",
+    "work",
+    String(task.message.id),
+    "state=done",
+    "--if",
+    "state=open",
+  ]);
+  assert.equal(done.message.labels.state, "done");
+  const [waitCode] = await waiter.done;
+  assert.equal(waitCode, 0, waiter.errors);
+  assert.equal(JSON.parse(waiter.output).labels.state, "done");
+  const matched = await labeler.ok("wait_label", { labels: ["state=done"], wait: 0 });
+  assert.equal(matched.message.id, task.message.id);
+  const filtered = await cli(["--profile", "lead", "poll", "work", "--label", "owner=lead"]);
+  assert.deepEqual(
+    filtered.messages.map((m) => m.text),
+    ["fix the parser"],
+  );
+  const conflict = child(binary, [
+    "--profile",
+    "lead",
+    "label",
+    "work",
+    String(task.message.id),
+    "state=open",
+    "--if",
+    "state=open",
+  ]);
+  const [conflictCode] = await conflict.done;
+  assert.equal(conflictCode, 5);
+  assert.match(conflict.errors, /Current labels: .*"state":"done"/);
+  await labeler.close();
+  console.log("PASS: labels on send, conditional claims, filters and waiting on a label over MCP and CLI");
 } finally {
   for (const p of children)
     if (p.exitCode === null) {
