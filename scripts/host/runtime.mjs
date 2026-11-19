@@ -307,10 +307,13 @@ export class HostRuntime {
         if (this.fatal) throw this.fatal;
         if (this.disabled.size === this.config.agents.length)
           throw new HostError("all_agent_streams_stopped");
-        this.store.expire();
+        // One clock reading per pass: an item not yet available to claim must still be in the
+        // deadline set. Separate readings let a row become due between the two and sleep forever.
+        const now = Date.now();
+        this.store.expire(now);
         for (const agent of this.config.agents) {
           if (this.disabled.has(agent.id) || this.outputs.has(agent.id)) continue;
-          const output = this.store.claimOutput(agent.id);
+          const output = this.store.claimOutput(agent.id, now);
           if (output) this.track(this.outputs, agent.id, this.send(agent, output, signals.get(agent.id)));
         }
         for (
@@ -321,13 +324,13 @@ export class HostRuntime {
           const index = (this.rotation + offset) % this.config.agents.length;
           const agent = this.config.agents[index];
           if (this.disabled.has(agent.id) || this.active.has(agent.id)) continue;
-          const job = this.store.claim(agent.id, 40000);
+          const job = this.store.claim(agent.id, 40000, now);
           if (!job) continue;
           this.track(this.active, agent.id, this.dispatch(agent, job, signals.get(agent.id)));
           this.rotation = (index + 1) % this.config.agents.length;
           offset = -1; // start another fair pass from the next peer
         }
-        await this.pulse.wait(epoch, this.store.nextDeadline(), stop);
+        await this.pulse.wait(epoch, this.store.nextDeadline(now), stop);
       }
     } finally {
       controller.abort();
