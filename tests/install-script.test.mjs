@@ -25,11 +25,16 @@ const assets = new Map();
 let server;
 let base;
 
-function release(version, target, { corrupt = false } = {}) {
+function release(version, target, { corrupt = false, broken = false } = {}) {
   const stage = `msn-${version}-${target}`;
   const src = join(work, "build", stage);
   mkdirSync(src, { recursive: true });
-  writeFileSync(join(src, "msn"), `#!/bin/sh\necho "msn ${version.slice(1)}"\n`);
+  writeFileSync(
+    join(src, "msn"),
+    broken
+      ? "#!/bin/sh\necho \"msn: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.39' not found\" >&2\nexit 1\n"
+      : `#!/bin/sh\necho "msn ${version.slice(1)}"\n`,
+  );
   chmodSync(join(src, "msn"), 0o755);
   const tarball = join(work, "build", `${stage}.tar.gz`);
   execFileSync("tar", ["-czf", tarball, "-C", join(work, "build"), stage]);
@@ -45,6 +50,7 @@ before(async () => {
   release(VERSION, TARGET);
   release(VERSION, "aarch64-apple-darwin");
   release("v1.0.0", TARGET, { corrupt: true });
+  release("v2.0.0", TARGET, { broken: true });
   server = createServer((req, res) => {
     if (req.url === "/latest") {
       res.writeHead(302, { Location: `/tag/${VERSION}` }).end();
@@ -127,6 +133,41 @@ test("an unwritable directory fails with a --dir hint and never escalates", asyn
     .filter((line) => !line.trimStart().startsWith("#"))
     .join("\n");
   assert.doesNotMatch(commands, /(^|[;&|(]|\$\()\s*sudo\s/m);
+});
+
+test("a binary that cannot run on this system fails loudly and names the glibc floor", async () => {
+  const { code, stderr } = await install(["--version", "v2.0.0", "--dir", join(work, "old-glibc")]);
+  assert.equal(code, 1);
+  assert.match(stderr, /does not run on this system/);
+  assert.match(stderr, /GLIBC_2\.39' not found/);
+  assert.match(stderr, /glibc 2\.39 or newer/);
+  assert.match(stderr, /cargo install --git https:\/\/github\.com\/thehumanworks\/msn msn-cli/);
+  assert.doesNotMatch(stderr, /installed msn 2\.0\.0 to/);
+});
+
+test("a partially downloaded script runs nothing", async () => {
+  const source = readFileSync(script, "utf8");
+  const partial = join(work, "partial.sh");
+  writeFileSync(partial, source.slice(0, source.indexOf('say "downloading') + 200));
+  const result = await new Promise((resolve) => {
+    const child = spawn("sh", [partial], {
+      env: { PATH: process.env.PATH, HOME: join(work, "partial-home") },
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+  assert.notEqual(result.code, 0);
+  assert.doesNotMatch(result.stderr, /downloading/);
+  assert.ok(!existsSync(join(work, "partial-home")));
+});
+
+test("the zsh PATH hint names ~/.zprofile", async () => {
+  const { code, stderr } = await install(["--dir", join(work, "zsh")], { SHELL: "/bin/zsh" });
+  assert.equal(code, 0, stderr);
+  assert.match(stderr, />> ~\/\.zprofile/);
 });
 
 test("works with wget when curl is missing", async (t) => {

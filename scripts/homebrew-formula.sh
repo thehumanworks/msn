@@ -30,6 +30,7 @@ cat <<RUBY
 class Msn < Formula
   desc "Agent message boards with shared channel access"
   homepage "https://github.com/thehumanworks/msn"
+  license any_of: ["MIT", "Apache-2.0"]
   version "${tag#v}"
 
   on_macos do

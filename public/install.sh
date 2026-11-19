@@ -14,6 +14,9 @@
 #   MSN_RELEASES_URL release base URL (default: https://github.com/thehumanworks/msn/releases)
 #   MSN_TARGET       Rust target triple to install instead of the detected one
 
+# Everything runs inside main, called on the last line, so a partial download
+# (for example a dropped `curl | sh` connection) runs nothing.
+main() {
 set -eu
 
 REPO_RELEASES="${MSN_RELEASES_URL:-https://github.com/thehumanworks/msn/releases}"
@@ -73,27 +76,53 @@ if [ -z "$dir" ]; then
   dir="$HOME/.local/bin"
 fi
 
-# Pick a downloader. Both fail on HTTP errors.
-# Only HTTPS, unless MSN_RELEASES_URL itself is a plain-HTTP test server.
+# Pick a downloader. Both fail on HTTP errors and refuse non-HTTPS URLs,
+# including redirects, unless MSN_RELEASES_URL itself is a plain-HTTP test server.
+allow_http=0
 proto='=https'
-https_only='--https-only'
 case "$REPO_RELEASES" in
 http://*)
+  allow_http=1
   proto='=https,http'
-  https_only=''
   ;;
 esac
 if command -v curl >/dev/null 2>&1; then
   fetch() { curl --proto "$proto" --proto-redir "$proto" -fsSL --retry 3 -o "$2" "$1"; }
   final_url() { curl --proto "$proto" --proto-redir "$proto" -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  # shellcheck disable=SC2086 # $https_only is one flag or empty.
-  fetch() { wget $https_only -q -O "$2" "$1"; }
-  final_url() {
-    # shellcheck disable=SC2086
-    wget $https_only -q -O /dev/null --server-response "$1" 2>&1 |
-      sed -n 's/^ *[Ll]ocation: *//p' | tr -d '\r' | tail -n 1
+  # wget's --https-only covers only recursive downloads, so check the start URL
+  # and every redirect it followed; anything fetched over plain HTTP is
+  # discarded before it is used.
+  https_ok() {
+    case "$1" in
+    https://* | /*) return 0 ;;
+    http://*) [ "$allow_http" = 1 ] ;;
+    *) return 1 ;;
+    esac
   }
+  wget_get() { # URL OUT; prints the final URL
+    https_ok "$1" || fail "refusing non-HTTPS URL $1"
+    log="$(mktemp)"
+    if ! wget -q --server-response -O "$2" "$1" 2>"$log"; then
+      rm -f "$log"
+      return 1
+    fi
+    final="$1"
+    for location in $(sed -n 's/^ *[Ll]ocation: *//p' "$log" | tr -d '\r'); do
+      if ! https_ok "$location"; then
+        rm -f "$log" "$2"
+        fail "refusing redirect to non-HTTPS URL $location"
+      fi
+      case "$location" in
+      /*) final="$(printf '%s' "$final" | sed 's#^\([a-z]*://[^/]*\).*#\1#')$location" ;;
+      *) final="$location" ;;
+      esac
+    done
+    rm -f "$log"
+    printf '%s\n' "$final"
+  }
+  fetch() { wget_get "$1" "$2" >/dev/null; }
+  final_url() { wget_get "$1" /dev/null; }
 else
   fail "curl or wget is required"
 fi
@@ -120,7 +149,7 @@ detect_target() {
   case "$os" in
   Linux)
     if ldd --version 2>&1 | grep -qi musl || ls /lib/ld-musl-* >/dev/null 2>&1; then
-      fail "this system uses musl libc (for example Alpine); msn releases need glibc. Build from source with cargo instead"
+      fail "this system uses musl libc (for example Alpine); msn releases need glibc. Build it instead: cargo install --git https://github.com/thehumanworks/msn msn-cli"
     fi
     echo "${arch}-unknown-linux-gnu"
     ;;
@@ -184,13 +213,33 @@ mv -f "$dir/.msn.tmp.$$" "$dir/msn" || {
   fail "cannot replace $dir/msn"
 }
 
-installed="$("$dir/msn" --version 2>/dev/null || true)"
-say "installed ${installed:-msn $version} to $dir/msn"
+if installed="$("$dir/msn" --version 2>"$tmp/run.err")"; then
+  say "installed $installed to $dir/msn"
+else
+  say "installed msn $version to $dir/msn, but it does not run on this system:"
+  sed 's/^/  /' "$tmp/run.err" >&2
+  case "$target" in
+  *-linux-gnu)
+    say "Linux releases need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later)."
+    say "On an older system, build it instead: cargo install --git https://github.com/thehumanworks/msn msn-cli"
+    ;;
+  esac
+  exit 1
+fi
 
 case ":${PATH:-}:" in
 *":$dir:"*) ;;
 *)
-  say "$dir is not on your PATH. Add it, for example:"
-  say "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.profile && export PATH=\"$dir:\$PATH\""
+  # zsh (the macOS default) reads ~/.zprofile; most other login shells read ~/.profile.
+  # shellcheck disable=SC2088 # The tilde is shown to the person, not expanded.
+  case "${SHELL:-}" in
+  */zsh) profile='~/.zprofile' ;;
+  *) profile='~/.profile' ;;
+  esac
+  say "$dir is not on your PATH. Add it to $profile (~/.zprofile for zsh, ~/.profile otherwise), for example:"
+  say "  echo 'export PATH=\"$dir:\$PATH\"' >> $profile && export PATH=\"$dir:\$PATH\""
   ;;
 esac
+}
+
+main "$@"
