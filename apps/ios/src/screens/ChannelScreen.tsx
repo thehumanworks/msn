@@ -7,6 +7,7 @@ import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
 import { OutboxRow } from "../components/OutboxRow.tsx";
+import { SearchView } from "../components/SearchView.tsx";
 import { SnapshotView } from "../components/SnapshotView.tsx";
 import { TaskActivityView } from "../components/TaskActivityView.tsx";
 import { colors, spacing } from "../components/theme.ts";
@@ -14,10 +15,11 @@ import { Banner, Button, EmptyState, Segmented, Text } from "../components/ui.ts
 import { useChannel } from "../hooks/useChannelController.ts";
 import { useStore } from "../hooks/useStore.ts";
 
-type Tab = "chat" | "snapshot" | "tasks";
+type Tab = "chat" | "search" | "snapshot" | "tasks";
 
 const TABS = [
   { value: "chat", label: "Chat" },
+  { value: "search", label: "Search" },
   { value: "snapshot", label: "Snapshot" },
   { value: "tasks", label: "Task activity" },
 ] as const;
@@ -110,6 +112,9 @@ function ChannelBody({
       </Banner>
     ) : null;
 
+  if (tab === "search") {
+    return <SearchView api={session.api} channel={controller.channel} me={me} />;
+  }
   if (tab === "snapshot") {
     return (
       <View style={{ flex: 1 }}>
