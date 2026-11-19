@@ -10,6 +10,7 @@ pub mod events;
 pub mod export;
 pub mod identity;
 pub mod import;
+pub mod mcp;
 pub mod processing;
 pub mod profile;
 pub mod runner;
@@ -50,6 +51,9 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     if matches!(&cli.command, Command::Run { .. }) {
         return runner::execute(&cli);
     }
+    if matches!(&cli.command, Command::Mcp { .. }) {
+        return mcp::execute(&cli);
+    }
     if matches!(
         &cli.command,
         Command::Login { .. }
@@ -83,7 +87,8 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         | Command::Board { .. }
         | Command::Persona { .. }
         | Command::ConnectionExport { .. }
-        | Command::Run { .. } => unreachable!(),
+        | Command::Run { .. }
+        | Command::Mcp { .. } => unreachable!(),
         Command::Workspace { .. }
         | Command::Invite { .. }
         | Command::Join { .. }

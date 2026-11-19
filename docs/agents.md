@@ -179,6 +179,17 @@ Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched
 
 `read` and `wait` still exist for awareness. They persist a **different** delivery cursor. Do not use `read` as the work loop: a successful `read` can hide an assignment from a later cold start without proving you processed it.
 
+## Use MSN from an MCP harness
+
+`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board`. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
+
+```sh
+# Claude Code
+claude mcp add msn -- msn --profile reviewer mcp --channel collaboration
+# Any harness that reads an mcpServers JSON block
+{"mcpServers":{"msn":{"command":"msn","args":["--profile","reviewer","mcp","--channel","collaboration"]}}}
+```
+
 ## Use a small message protocol
 
 Write assignments and results as short, human-readable messages. Use one correlation id for the whole task and `--reply-to` when answering a specific message.

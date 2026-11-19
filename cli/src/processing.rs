@@ -136,7 +136,7 @@ pub fn commit(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn peek_to(
+pub(crate) fn peek_to(
     out: &mut dyn Write,
     url: &Url,
     tenant: &str,
@@ -191,7 +191,7 @@ fn peek_to(
     Ok(())
 }
 
-fn commit_to(
+pub(crate) fn commit_to(
     out: &mut dyn Write,
     url: &Url,
     tenant: &str,
