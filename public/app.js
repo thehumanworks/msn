@@ -505,7 +505,9 @@ async function refreshChannels(connection = session) {
   if (!channels.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "No channels yet. Create the first one below.";
+    empty.textContent = connection.owner
+      ? "No boards yet. Start one from a template, or name a channel below."
+      : "No channels yet. Create the first one below.";
     $("channels").append(empty);
   }
   return channels;
@@ -561,6 +563,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("display-name").textContent = connection.username;
     $("channel-form").hidden = Boolean(identity.channel);
     $("invite-workspace").hidden = Boolean(identity.channel);
+    $("start-template").hidden = !connection.owner;
     void showNotify(connection);
     $("credential-name").value = `${connection.tenant}/${connection.username}`;
     $("credential-token").value = connection.token;
@@ -778,6 +781,143 @@ $("channel-form").addEventListener("submit", async (event) => {
   } catch (error) {
     if (session === connection) status(error.message, true);
   }
+});
+
+// Board templates: the same file the CLI embeds. Only the account owner can create boards.
+let templates = null;
+const randomHex = () =>
+  Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+/** The board goal: objective, then each persona's role. Must match `templates::goal` in the CLI. */
+function templateGoal(template, objective) {
+  const roles = template.personas.map((p) => `\n- ${p.name}: ${p.role}`).join("");
+  return `${objective.trim()}\n\nTeam (${template.title}):${roles}`;
+}
+
+function chosenTemplate() {
+  const id = new FormData($("template-form")).get("template");
+  return templates.find((t) => t.id === id) ?? templates[0];
+}
+
+$("start-template").addEventListener("click", async () => {
+  try {
+    if (!templates) {
+      const data = await (await fetch("/board-templates.json")).json();
+      if (!Array.isArray(data?.templates) || !data.templates.length) throw new Error("No templates");
+      templates = data.templates;
+    }
+  } catch {
+    status("Templates are unavailable. Reload and try again.", true);
+    return;
+  }
+  const choices = $("template-choices");
+  choices.querySelectorAll(".template-choice").forEach((node) => {
+    node.remove();
+  });
+  for (const [index, template] of templates.entries()) {
+    const label = document.createElement("label");
+    label.className = "template-choice";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "template";
+    input.value = template.id;
+    input.checked = index === (templates.length > 1 ? 1 : 0);
+    const text = document.createElement("span");
+    text.className = "template-text";
+    const title = document.createElement("strong");
+    title.textContent = template.title;
+    const summary = document.createElement("small");
+    summary.textContent = template.summary;
+    const team = document.createElement("small");
+    team.className = "template-team";
+    team.textContent = template.personas.map((p) => p.name).join(" · ");
+    text.append(title, summary, team);
+    label.append(input, text);
+    choices.append(label);
+  }
+  $("template-goal").placeholder = chosenTemplate().goal;
+  $("template-form").hidden = false;
+  $("template-result").hidden = true;
+  $("template-error").hidden = true;
+  $("template-dialog").showModal();
+  $("template-channel").focus();
+});
+$("template-choices").addEventListener("change", () => {
+  $("template-goal").placeholder = chosenTemplate().goal;
+});
+$("close-template").addEventListener("click", () => $("template-dialog").close());
+$("copy-template").addEventListener("click", () =>
+  copy($("template-commands").textContent, "Commands copied."),
+);
+$("template-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const connection = session;
+  const template = chosenTemplate();
+  const name = $("template-channel").value.trim();
+  const goal = templateGoal(template, $("template-goal").value.trim() || template.goal);
+  $("template-submit").disabled = true;
+  $("template-error").hidden = true;
+  let created = false;
+  let failure = null;
+  try {
+    await api(
+      `/channels/${name}/board`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential: randomHex(), goal }),
+      },
+      connection,
+    );
+    created = true;
+    for (const persona of template.personas)
+      await api(
+        `/channels/${name}/personas/persona-${crypto.randomUUID()}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ displayName: persona.name }),
+        },
+        connection,
+      );
+  } catch (error) {
+    failure = error;
+  }
+  $("template-submit").disabled = false;
+  if (session !== connection) return;
+  if (!created) {
+    $("template-error").textContent =
+      failure.code === "board_exists"
+        ? "A board with this name already exists. Choose another name."
+        : failure.message;
+    $("template-error").hidden = false;
+    return;
+  }
+  // The board exists even if a persona failed: board connect registers any missing persona,
+  // so the same commands finish the setup and a retry is never needed.
+  const profiles = template.personas.map((p) => [p.name, `${name}-${p.name}`]);
+  $("template-commands").textContent = [
+    ...profiles.map(
+      ([persona, profile]) => `msn board connect ${name} --name ${persona} --save-as ${profile}`,
+    ),
+    "# Start each agent you want running on this computer, for example:",
+    ...profiles.map(([, profile]) => `msn --profile ${profile} run ${name} --harness codex`),
+  ].join("\n");
+  const count = template.personas.length === 1 ? "1 agent" : `${template.personas.length} agents`;
+  $("template-ready").textContent = `# ${name} is ready with ${count}`;
+  $("template-partial").textContent = failure
+    ? `Some agents were not added yet (${failure.message}). The connect commands below add them.`
+    : "";
+  $("template-partial").hidden = !failure;
+  $("template-form").hidden = true;
+  $("template-result").hidden = false;
+  $("template-form").reset();
+  try {
+    await refreshChannels(connection);
+  } catch (error) {
+    if (session === connection) status(error.message, true);
+  }
+  if (session === connection) selectChannel(name);
 });
 
 function autosize() {

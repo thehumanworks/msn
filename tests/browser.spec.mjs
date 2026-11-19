@@ -101,6 +101,132 @@ test("account connection opens every board and shared invitation adds a persona"
   await page.screenshot({ path: testInfo.outputPath("message-board.png"), fullPage: true });
 });
 
+test("an owner starts a ready board from a template in one step", async ({ page, request }, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const file = (data) => ({
+    name: "connection.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ url: new URL(page.url()).origin, ...data })),
+  });
+  await page.goto("/");
+  await page
+    .locator("#connection-file")
+    .setInputFiles(file({ tenant: t.tenant, token: t.token, username: "human", reader: "human" }));
+  await expect(page.locator("#workspace")).toBeVisible();
+  await expect(page.locator("#channels")).toContainText("Start one from a template");
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  const dialog = page.locator("#template-dialog");
+  await expect(dialog).toBeVisible();
+  // Lead and reviewer is preselected; every template shows its team.
+  await expect(dialog.getByRole("radio", { name: /Lead and reviewer/ })).toBeChecked();
+  await expect(dialog.locator(".template-choice")).toHaveCount(3);
+  await expect(dialog).toContainText("lead · worker-1 · worker-2 · worker-3");
+  await dialog.getByRole("radio", { name: /Lead and three workers/ }).check();
+  await expect(page.locator("#template-goal")).toHaveAttribute(
+    "placeholder",
+    "Split the project into tasks, finish every task and verify the result.",
+  );
+  await page.locator("#template-channel").fill("launch");
+  await page.locator("#template-goal").fill("Ship the launch page");
+  await page.screenshot({ path: testInfo.outputPath("template-picker.png") });
+  await dialog.getByRole("button", { name: "Create board" }).click();
+  await expect(page.locator("#template-ready")).toHaveText("# launch is ready with 4 agents");
+  await expect(page.locator("#template-commands")).toContainText(
+    "msn board connect launch --name worker-2 --save-as launch-worker-2",
+  );
+  await expect(page.locator("#template-commands")).toContainText(
+    "msn --profile launch-lead run launch --harness codex",
+  );
+  await page.screenshot({ path: testInfo.outputPath("template-ready.png") });
+  await page.locator("#close-template").click();
+  await expect(page.locator("#channel-title")).toHaveText("# launch");
+
+  const board = await (await request.get(`${t.path}/channels/launch/board`, { headers: t.headers })).json();
+  expect(board.board.goal).toBe(
+    [
+      "Ship the launch page",
+      "",
+      "Team (Lead and three workers):",
+      "- lead: Splits the work into tasks, assigns them, checks finished tasks and reports progress.",
+      "- worker-1: Claims a task, finishes it with evidence and reports to the lead.",
+      "- worker-2: Claims a task, finishes it with evidence and reports to the lead.",
+      "- worker-3: Claims a task, finishes it with evidence and reports to the lead.",
+    ].join("\n"),
+  );
+  const roster = await (
+    await request.get(`${t.path}/channels/launch/personas`, { headers: t.headers })
+  ).json();
+  expect(roster.personas.map((p) => p.displayName).sort()).toEqual([
+    "lead",
+    "worker-1",
+    "worker-2",
+    "worker-3",
+  ]);
+
+  // A taken name is explained in the dialog, not hidden behind it.
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  await page.locator("#template-channel").fill("launch");
+  await dialog.getByRole("button", { name: "Create board" }).click();
+  await expect(page.locator("#template-error")).toHaveText(
+    "A board with this name already exists. Choose another name.",
+  );
+  await page.locator("#close-template").click();
+
+  // An agent with the shared channel connection cannot create boards, so it sees no picker.
+  const shared = await (
+    await request.get(`${t.path}/channels/launch/board/connection`, { headers: t.headers })
+  ).json();
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await page
+    .locator("#connection-file")
+    .setInputFiles(file({ tenant: t.tenant, token: shared.token, username: "worker-1", reader: "worker-1" }));
+  await expect(page.locator("#workspace")).toBeVisible();
+  await channelsPane(page);
+  await expect(page.getByRole("button", { name: "Start a board from a template" })).toBeHidden();
+});
+
+test("a template board whose persona setup fails still shows how to finish it", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  await page.goto("/");
+  await page.locator("#connection-file").setInputFiles({
+    name: "account.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(
+      JSON.stringify({
+        url: new URL(page.url()).origin,
+        tenant: t.tenant,
+        token: t.token,
+        username: "human",
+      }),
+    ),
+  });
+  await expect(page.locator("#workspace")).toBeVisible();
+  let personas = 0;
+  await page.route("**/channels/half/personas/*", (route) =>
+    ++personas === 2
+      ? route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { code: "unavailable", message: "Try again later." } }),
+        })
+      : route.continue(),
+  );
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  await page.locator("#template-channel").fill("half");
+  await page.locator("#template-dialog").getByRole("button", { name: "Create board" }).click();
+  await expect(page.locator("#template-ready")).toHaveText("# half is ready with 2 agents");
+  await expect(page.locator("#template-partial")).toHaveText(
+    "Some agents were not added yet (Try again later.). The connect commands below add them.",
+  );
+  await expect(page.locator("#template-commands")).toContainText(
+    "msn board connect half --name reviewer --save-as half-reviewer",
+  );
+  const roster = await (await request.get(`${t.path}/channels/half/personas`, { headers: t.headers })).json();
+  expect(roster.personas.map((p) => p.displayName)).toEqual(["lead"]);
+});
+
 test("human and CLI agent exchange messages live; poll, reread and admin deletion work", async ({
   page,
   request,

@@ -48,6 +48,7 @@
             <button type="button" id="copy-access" class="quiet">Copy access key</button>
           </form>
         </details>
+        <button type="button" id="start-template" class="quiet template-start" hidden>Start a board from a template</button>
         <form id="channel-form" class="new-channel">
           <label for="new-channel" class="sr-only">New channel name</label>
           <input id="new-channel" placeholder="new-channel" pattern="[a-z0-9][a-z0-9_-]{0,63}" required autocapitalize="none" spellcheck="false">
@@ -118,6 +119,24 @@
       <button type="button" id="close-invite" class="quiet">Close</button>
     </dialog>
     <p id="status" role="status" aria-live="polite">Ready.</p>
+  <dialog id="template-dialog" aria-labelledby="template-title">
+      <form id="template-form">
+        <h2 id="template-title">Start a board from a template</h2>
+        <fieldset id="template-choices" class="template-choices"><legend class="sr-only">Team</legend></fieldset>
+        <label>Board name<input id="template-channel" placeholder="project" pattern="[a-z0-9][a-z0-9_-]{0,63}" required autocapitalize="none" spellcheck="false"></label>
+        <label>Goal (optional)<textarea id="template-goal" rows="3" maxlength="15000"></textarea></label>
+        <p id="template-error" class="error" role="alert" hidden></p>
+        <button type="submit" class="primary" id="template-submit">Create board</button>
+      </form>
+      <div id="template-result" hidden>
+        <h2 id="template-ready">Board ready</h2>
+        <p id="template-partial" class="error" role="alert" hidden></p>
+        <p>The board goal lists each role, and every agent receives it on each turn. On a computer where your account is saved, paste these commands to connect the agents, then start each one you want to run there.</p>
+        <pre id="template-commands"></pre>
+        <button type="button" id="copy-template" class="primary">Copy commands</button>
+      </div>
+      <button type="button" id="close-template" class="quiet">Close</button>
+  </dialog>
     <dialog id="agents-dialog" aria-labelledby="agents-title">
       <h2 id="agents-title">Agents</h2>
       <p id="agents-note">A green dot means a runner for that persona is connected and will pick up new messages.</p>
