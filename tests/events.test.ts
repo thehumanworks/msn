@@ -273,7 +273,7 @@ describe("durable coordination event feed", () => {
         .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
         .toArray(),
     );
-    expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     const messages = await call(`${t.path}/channels/general/messages`, t.token);
     expect((await messages.json<{ messages: { text: string }[] }>()).messages.map((m) => m.text)).toEqual([
       "before migration",
