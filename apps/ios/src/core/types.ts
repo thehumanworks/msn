@@ -42,7 +42,13 @@ export type Snapshot = {
   invalidated: boolean;
 };
 
+/** A pinned message (ADR 0038): the message plus when and by whom it was pinned. */
+export type PinnedMessage = Message & { pinnedAt: string; pinnedBy?: string };
+
 export type CatchupResult = {
+  /** The board owner's pinned messages; only on a first page (no `after`). */
+  pinned?: PinnedMessage[];
+  pinnedOmitted?: number;
   snapshot: Snapshot | null;
   snapshotVersion: number;
   historyRevision: number;

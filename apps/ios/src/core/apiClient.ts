@@ -5,6 +5,7 @@ import {
   decodeIdentity,
   decodeMessage,
   decodeMessagePage,
+  decodePins,
   decodeSendResult,
   decodeSnapshot,
 } from "./decode.ts";
@@ -18,6 +19,7 @@ import type {
   Identity,
   Message,
   MessagePage,
+  PinnedMessage,
   Snapshot,
 } from "./types.ts";
 import { ProtocolError } from "./errors.ts";
@@ -129,7 +131,16 @@ export class ApiClient {
         signal,
       }),
       options.after,
+      { tenant: this.tenant, channel },
     );
+  }
+
+  /** GET …/pins: the board owner's pinned messages (ADR 0038). */
+  async listPins(channel: string, signal?: AbortSignal): Promise<PinnedMessage[]> {
+    const r = await this.http.request<{ pins: unknown }>(`/channels/${encodeURIComponent(channel)}/pins`, {
+      signal,
+    });
+    return decodePins(r?.pins, this.tenant, channel);
   }
 
   async getSnapshot(
