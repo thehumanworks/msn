@@ -497,7 +497,6 @@ impl AppState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn apply_sync(
         &mut self,
         generation: u64,
