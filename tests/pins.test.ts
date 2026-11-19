@@ -179,6 +179,42 @@ describe("pinned messages (ADR 0038)", () => {
     expect(small.byteLimitReached).toBe(true);
   });
 
+  it("keeps a channel-scoped key inside its own board", async () => {
+    const f = await fixture();
+    expect((await call(f.tenant, "/channels/other", f.owner, "PUT")).status).toBe(201);
+    const response = await call(f.tenant, "/channels/other/messages", f.owner, "POST", {
+      username: "human",
+      text: "elsewhere",
+    });
+    const other = ((await response.json()) as { message: Message }).message;
+    expect((await call(f.tenant, `/channels/other/pins/${other.id}`, f.owner, "PUT")).status).toBe(201);
+    expect((await call(f.tenant, "/channels/other/pins", f.agent)).status).toBe(403);
+    expect((await call(f.tenant, `/channels/other/pins/${other.id}`, f.agent, "PUT")).status).toBe(403);
+    expect((await call(f.tenant, `/channels/other/pins/${other.id}`, f.agent, "DELETE")).status).toBe(403);
+    expect((await call(f.tenant, "/channels/other/catchup", f.agent)).status).toBe(403);
+    const own = (await (await call(f.tenant, "/channels/work/catchup", f.agent)).json()) as Catchup;
+    expect(own.pinned).toEqual([]);
+  });
+
+  it("keeps the oldest pins when a tight budget drops some, and counts the rest", async () => {
+    const f = await fixture();
+    const pinnedIds: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const message = await f.send(`pin ${i} ${"p".repeat(1500)}`);
+      pinnedIds.push(message.id);
+      await pin(f, message.id, f.owner);
+    }
+    await f.send("tail");
+    const response = await call(f.tenant, "/channels/work/catchup?limit=10&maxBytes=6500", f.agent);
+    const body = await response.text();
+    expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(6500);
+    const page = JSON.parse(body) as Catchup;
+    expect(page.messages).toHaveLength(1);
+    expect(page.pinned?.map((m) => m.id)).toEqual(pinnedIds.slice(0, 2));
+    expect(page.pinnedOmitted).toBe(1);
+    expect(page.byteLimitReached).toBe(true);
+  });
+
   it("records schema version 18 and creates the pins table", async () => {
     const f = await fixture();
     const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));

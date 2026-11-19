@@ -1880,7 +1880,6 @@ export class MsnDurableObject extends DurableObject<Env> {
     );
   }
 
-  /** Same-channel live row only; tombstones and other channels do not leak bodies. */
   /** Pinned messages in message order, each with when and by whom it was pinned (ADR 0038). */
   private pinned(tenant: string, channel: string): Message[] {
     const columns = MESSAGE_COLUMNS.split(", ")
@@ -1961,6 +1960,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     return json({ pin, created }, created ? 201 : 200);
   }
 
+  /** Same-channel live row only; tombstones and other channels do not leak bodies. */
   private showMessage(tenant: string, channel: string, id: number): Response {
     const row = this.ctx.storage.sql
       .exec<MessageRow & { deleted: number }>(
