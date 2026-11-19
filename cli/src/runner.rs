@@ -59,8 +59,9 @@ fn runtime_root(base: &std::path::Path) -> PathBuf {
 pub(crate) enum RuntimeHealth {
     /// `MSN_AGENT_RUNNER` points at a complete runtime.
     Custom(PathBuf),
-    /// The bundled runtime is unpacked and matches this binary.
-    Unpacked(PathBuf),
+    /// The bundled runtime is unpacked and matches this binary. `missing` files are still to
+    /// be unpacked (an interrupted first run); the next `msn run` adds them.
+    Unpacked { root: PathBuf, missing: usize },
     /// Nothing unpacked yet; the first `msn run` does it.
     NotUnpacked(PathBuf),
     /// `msn run` would refuse to start. `fix` is the exact repair.
@@ -113,16 +114,18 @@ pub(crate) fn runtime_health() -> RuntimeHealth {
             }
         }
     }
+    let mut missing = 0;
     for (name, bytes) in RUNTIME {
         let path = root.join(name);
         if std::fs::symlink_metadata(&path).is_err() {
+            missing += 1;
             continue;
         }
         if let Err(error) = verify_runtime_file(&path, bytes) {
             return broken(error.to_string());
         }
     }
-    RuntimeHealth::Unpacked(root)
+    RuntimeHealth::Unpacked { root, missing }
 }
 
 const RUNTIME: &[(&str, &[u8])] = &[

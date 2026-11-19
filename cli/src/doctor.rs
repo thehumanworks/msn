@@ -6,6 +6,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::Command as Process;
+use std::time::Duration;
 
 use clap::ArgMatches;
 use clap::parser::ValueSource;
@@ -17,9 +18,13 @@ use crate::args::{Cli, Command};
 use crate::client::{MsnClient, error_message};
 use crate::config::{DEFAULT_URL, is_slug, parse_origin};
 use crate::error::CliError;
-use crate::identity::fetch_identity;
+use crate::identity::fetch_identity_with;
 use crate::profile;
 use crate::runner::{RuntimeHealth, runtime_health};
+
+/// Doctor is a quick check: a hung server must not hold it for the long-poll timeout.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The oldest Node major that `msn run` accepts (scripts/agent-runner.mjs).
 const MIN_NODE_MAJOR: u64 = 24;
@@ -282,7 +287,7 @@ fn check_profile(
                 "Using profile \"{name}\" ({source}): {} in workspace {} at {}",
                 cli.username.as_deref().unwrap_or("(no name)"),
                 cli.tenant.as_deref().unwrap_or_default(),
-                cli.url
+                redact_url(&cli.url)
             ),
         );
     }
@@ -291,7 +296,7 @@ fn check_profile(
             "profile",
             format!(
                 "No saved profile; using workspace {tenant} at {} from flags or environment variables.",
-                cli.url
+                redact_url(&cli.url)
             ),
         ),
         (None, None) if !logged_in => Check::skip("profile", "Log in first."),
@@ -345,8 +350,38 @@ fn permission_fix(directory: Option<&Path>, file: Option<&Path>, error: &CliErro
     format!("Repair the profile store, then run msn doctor again ({message}).")
 }
 
+fn client(url: &Url) -> Result<MsnClient, CliError> {
+    MsnClient::with_timeouts(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+}
+
+/// Scheme, host and port only. Doctor output gets pasted into boards and agent prompts, so a
+/// mistyped MSN_URL must never leak its userinfo, path, query or fragment.
+pub fn redact_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(url) if url.has_host() => {
+            let mut shown = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
+            if let Some(port) = url.port() {
+                shown.push_str(&format!(":{port}"));
+            }
+            let hidden = !url.username().is_empty()
+                || url.password().is_some()
+                || !matches!(url.path(), "" | "/")
+                || url.query().is_some()
+                || url.fragment().is_some();
+            if hidden {
+                shown.push_str(" (rest hidden)");
+            }
+            shown
+        }
+        _ => "(an address that is not a URL)".into(),
+    }
+}
+
 fn check_server(raw: &str) -> Check {
-    let url = match parse_origin(raw) {
+    let url = parse_origin(raw);
+    let shown = redact_url(raw);
+    let raw = shown.as_str();
+    let url = match url {
         Ok(url) => url,
         Err(error) => {
             return Check::fail(
@@ -361,7 +396,7 @@ fn check_server(raw: &str) -> Check {
     let fix = format!(
         "Check your network, and that {raw} is the MSN server (set by MSN_URL, --url or the profile). msn does not use HTTP proxies."
     );
-    match MsnClient::new(&url).and_then(|client| client.get("/api/health", None)) {
+    match client(&url).and_then(|client| client.get("/api/health", None)) {
         Ok(response) if (200..300).contains(&response.status) => {
             Check::ok("server", format!("{raw} is reachable."))
         }
@@ -383,7 +418,7 @@ fn check_workspace(
     token: &str,
     username: Option<&str>,
 ) -> (Check, Option<Value>) {
-    match fetch_identity(url, tenant, token) {
+    match client(url).and_then(|client| fetch_identity_with(&client, tenant, token)) {
         Ok(identity) => {
             let name = identity["username"]
                 .as_str()
@@ -460,7 +495,7 @@ fn check_board(
             ),
         );
     }
-    let client = match MsnClient::new(url) {
+    let client = match client(url) {
         Ok(client) => client,
         Err(error) => return Check::fail("board", error.to_string(), "Run msn doctor again."),
     };
@@ -579,11 +614,19 @@ fn check_runner() -> Check {
                 path.display()
             ),
         ),
-        RuntimeHealth::Unpacked(path) => Check::ok(
+        RuntimeHealth::Unpacked { root, missing: 0 } => Check::ok(
             "runner",
             format!(
                 "Listener runtime at {} matches this msn. See a listener with msn run BOARD --status.",
-                path.display()
+                root.display()
+            ),
+        ),
+        RuntimeHealth::Unpacked { root, missing } => Check::ok(
+            "runner",
+            format!(
+                "Listener runtime at {} is partly unpacked ({missing} {} still to add); the next msn run completes it.",
+                root.display(),
+                plural(missing, "file")
             ),
         ),
         RuntimeHealth::NotUnpacked(path) => Check::ok(
@@ -593,13 +636,33 @@ fn check_runner() -> Check {
                 path.display()
             ),
         ),
-        RuntimeHealth::Broken { problem, fix } => Check::fail("runner", problem, fix),
+        // Like Node, the runtime matters only to msn run, so a problem here is a warning.
+        RuntimeHealth::Broken { problem, fix } => Check::warn("runner", problem, fix),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_url_keeps_only_scheme_host_and_port() {
+        assert_eq!(redact_url("https://msn.test"), "https://msn.test");
+        assert_eq!(
+            redact_url("http://127.0.0.1:8787/"),
+            "http://127.0.0.1:8787"
+        );
+        for leaky in [
+            "https://u:hunter2@example.com",
+            "https://example.com/?token=hunter2",
+            "https://example.com/hunter2#hunter2",
+        ] {
+            let shown = redact_url(leaky);
+            assert!(!shown.contains("hunter2"), "{shown}");
+            assert_eq!(shown, "https://example.com (rest hidden)");
+        }
+        assert_eq!(redact_url("hunter2"), "(an address that is not a URL)");
+    }
 
     #[test]
     fn node_major_parses_release_strings_only() {

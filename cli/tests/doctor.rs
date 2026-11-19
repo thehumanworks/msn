@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use common::{MockServer, Scripted};
 use serde_json::Value;
@@ -431,7 +432,7 @@ fn old_or_missing_node_warns_without_failing() {
 }
 
 #[test]
-fn broken_custom_runner_fails_with_the_fix() {
+fn broken_custom_runner_warns_with_the_fix() {
     let env = Env::new(Some("v24.0.0"));
     let out = env
         .command(&env_connection("http://127.0.0.1:9", &["--json"]))
@@ -440,7 +441,8 @@ fn broken_custom_runner_fails_with_the_fix() {
         .unwrap();
     let report = report(&out);
     let runner = check(&report, "runner");
-    assert_eq!(runner["status"], "fail");
+    // Like Node, the runtime matters only to msn run.
+    assert_eq!(runner["status"], "warn");
     assert!(
         runner["fix"]
             .as_str()
@@ -464,4 +466,43 @@ fn text_report_lists_each_check_and_its_fix() {
     );
     assert!(text.contains("problems found. Run each fix"), "{text}");
     assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn server_address_secrets_never_reach_the_output() {
+    let env = Env::new(Some("v24.0.0"));
+    for leaky in [
+        "https://u:hunter2@example.com",
+        "https://example.com/?token=hunter2",
+    ] {
+        for json in [true, false] {
+            let mut args = vec!["--tenant", "team", "--token", "tenant-secret", "doctor"];
+            if json {
+                args.push("--json");
+            }
+            let out = env.command(&args).env("MSN_URL", leaky).output().unwrap();
+            assert_eq!(out.status.code(), Some(1), "{leaky}");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(!stdout.contains("hunter2"), "{leaky} leaked: {stdout}");
+            assert!(
+                stdout.contains("https://example.com (rest hidden)"),
+                "{stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_hung_server_cannot_hold_doctor_for_the_long_poll_timeout() {
+    let env = Env::new(Some("v24.0.0"));
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, r#"{"ok":true}"#).delayed(Duration::from_secs(30)),
+    ]);
+    let url = server.url();
+    let started = Instant::now();
+    let out = env.run(&env_connection(&url, &["--json"]));
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(15), "doctor took {elapsed:?}");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(check(&report(&out), "server")["status"], "fail");
 }
