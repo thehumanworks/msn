@@ -9,19 +9,27 @@ use std::process::Command as Process;
 
 fn runtime_path() -> Result<PathBuf, CliError> {
     if let Some(path) = std::env::var_os("MSN_AGENT_RUNNER") {
-        let path = PathBuf::from(path);
-        let path = path.canonicalize().ok().filter(|p| p.is_file()).ok_or_else(|| CliError::usage(
-            "MSN_AGENT_RUNNER is missing; point it at scripts/agent-runner.mjs from a complete MSN checkout."))?;
-        if !RUNTIME
-            .iter()
-            .all(|(name, _)| path.parent().unwrap().join(name).is_file())
-        {
-            return Err(CliError::usage(
-                "MSN_AGENT_RUNNER runtime is incomplete. Keep the complete scripts/host tree, host-runner.mjs, event-runner.mjs, and onboarding-check.mjs beside agent-runner.mjs.",
-            ));
-        }
-        return Ok(path);
+        return custom_runtime(PathBuf::from(path));
     }
+    materialize_runtime(&config_base()?)
+}
+
+/// `MSN_AGENT_RUNNER`: a trusted, complete runtime tree outside the bundled cache.
+fn custom_runtime(path: PathBuf) -> Result<PathBuf, CliError> {
+    let path = path.canonicalize().ok().filter(|p| p.is_file()).ok_or_else(|| CliError::usage(
+        "MSN_AGENT_RUNNER is missing; point it at scripts/agent-runner.mjs from a complete MSN checkout."))?;
+    if !RUNTIME
+        .iter()
+        .all(|(name, _)| path.parent().unwrap().join(name).is_file())
+    {
+        return Err(CliError::usage(
+            "MSN_AGENT_RUNNER runtime is incomplete. Keep the complete scripts/host tree, host-runner.mjs, event-runner.mjs, and onboarding-check.mjs beside agent-runner.mjs.",
+        ));
+    }
+    Ok(path)
+}
+
+fn config_base() -> Result<PathBuf, CliError> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
@@ -31,7 +39,93 @@ fn runtime_path() -> Result<PathBuf, CliError> {
     if !base.is_absolute() {
         return Err(CliError::usage("HOME/XDG_CONFIG_HOME must be absolute."));
     }
-    materialize_runtime(&base)
+    Ok(base)
+}
+
+/// The content-addressed cache directory this binary unpacks its listener runtime into.
+fn runtime_root(base: &std::path::Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for (name, bytes) in RUNTIME {
+        hash.update(name.as_bytes());
+        hash.update(bytes);
+    }
+    base.join("msn/runners")
+        .join(format!("runtime-{:x}", hash.finalize()))
+}
+
+/// What `msn doctor` reports about the listener runtime.
+#[derive(Debug)]
+pub(crate) enum RuntimeHealth {
+    /// `MSN_AGENT_RUNNER` points at a complete runtime.
+    Custom(PathBuf),
+    /// The bundled runtime is unpacked and matches this binary. `missing` files are still to
+    /// be unpacked (an interrupted first run); the next `msn run` adds them.
+    Unpacked { root: PathBuf, missing: usize },
+    /// Nothing unpacked yet; the first `msn run` does it.
+    NotUnpacked(PathBuf),
+    /// `msn run` would refuse to start. `fix` is the exact repair.
+    Broken { problem: String, fix: String },
+}
+
+/// Read-only twin of `runtime_path`: it never creates, repairs or removes a file.
+pub(crate) fn runtime_health() -> RuntimeHealth {
+    if let Some(path) = std::env::var_os("MSN_AGENT_RUNNER") {
+        return match custom_runtime(PathBuf::from(&path)) {
+            Ok(path) => RuntimeHealth::Custom(path),
+            Err(error) => RuntimeHealth::Broken {
+                problem: error.to_string(),
+                fix: "Point MSN_AGENT_RUNNER at scripts/agent-runner.mjs in a complete MSN checkout, or run unset MSN_AGENT_RUNNER to use the runtime bundled in msn.".into(),
+            },
+        };
+    }
+    let base = match config_base() {
+        Ok(base) => base,
+        Err(error) => {
+            return RuntimeHealth::Broken {
+                problem: error.to_string(),
+                fix: "Set HOME (or XDG_CONFIG_HOME) to an absolute directory, for example export HOME=/home/you.".into(),
+            };
+        }
+    };
+    let root = runtime_root(&base);
+    if std::fs::symlink_metadata(&root).is_err() {
+        return RuntimeHealth::NotUnpacked(root);
+    }
+    let broken = |problem: String| RuntimeHealth::Broken {
+        problem,
+        fix: format!(
+            "Remove the runtime cache with rm -rf '{}'. The next msn run unpacks it again.",
+            root.display()
+        ),
+    };
+    for directory in [root.clone(), root.join("host")] {
+        let Ok(metadata) = std::fs::symlink_metadata(&directory) else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return broken("Bundled runtime directory must not be a symlink.".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return broken("Bundled runtime directory must be private (0700).".into());
+            }
+        }
+    }
+    let mut missing = 0;
+    for (name, bytes) in RUNTIME {
+        let path = root.join(name);
+        if std::fs::symlink_metadata(&path).is_err() {
+            missing += 1;
+            continue;
+        }
+        if let Err(error) = verify_runtime_file(&path, bytes) {
+            return broken(error.to_string());
+        }
+    }
+    RuntimeHealth::Unpacked { root, missing }
 }
 
 const RUNTIME: &[(&str, &[u8])] = &[
@@ -82,16 +176,8 @@ const RUNTIME: &[(&str, &[u8])] = &[
 ];
 
 fn materialize_runtime(base: &std::path::Path) -> Result<PathBuf, CliError> {
-    use sha2::{Digest, Sha256};
     use std::io::Write;
-    let mut hash = Sha256::new();
-    for (name, bytes) in RUNTIME {
-        hash.update(name.as_bytes());
-        hash.update(bytes);
-    }
-    let root = base
-        .join("msn/runners")
-        .join(format!("runtime-{:x}", hash.finalize()));
+    let root = runtime_root(base);
     for directory in [root.clone(), root.join("host")] {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);

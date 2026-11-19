@@ -21,12 +21,18 @@ pub struct RawResponse {
 
 impl MsnClient {
     pub fn new(url: &Url) -> Result<Self, CliError> {
+        Self::with_timeouts(url, Duration::from_secs(10), Duration::from_secs(40))
+    }
+
+    /// A client whose every request gives up after `total` (connecting after `connect`).
+    /// Long polls need the default; quick checks such as `msn doctor` use a short one.
+    pub fn with_timeouts(url: &Url, connect: Duration, total: Duration) -> Result<Self, CliError> {
         let config = Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(35)))
-            .timeout_global(Some(Duration::from_secs(40)))
+            .timeout_connect(Some(connect.min(total)))
+            .timeout_recv_response(Some(total))
+            .timeout_global(Some(total))
             .proxy(None)
             .build();
         Ok(Self {

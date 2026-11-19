@@ -210,6 +210,7 @@ try {
   assert.ok(paragraph.includes("Finish the integration goal"), "The paragraph quotes the board goal");
   assert.ok(paragraph.includes("msn --profile work-helper peek work --wait 25"), "It says how to wait");
   assert.ok(paragraph.includes("msn --profile work-helper mcp --channel work"), "It offers MCP");
+  assert.ok(paragraph.includes("msn --profile work-helper doctor work"), "It says how to get unstuck");
   const joinCommand = paragraph.match(/`(printf '%s' .*? --save-as work-helper)`/)?.[1];
   assert.ok(joinCommand, "The paragraph has a join command");
   const agentHome = join(dir, "agent-host");
@@ -235,6 +236,17 @@ try {
   const helperStart = await agentRun(["--profile", "work-helper", "start", "work"]);
   assert.equal(helperStart.board.goal, "Finish the integration goal");
   assert.equal(helperStart.identity.sharedChannel, true);
+  // The pasted connection passes doctor against the real Worker, end to end.
+  const doctor = await agentRun(["--profile", "work-helper", "doctor", "work", "--json"]);
+  assert.equal(doctor.ok, true, JSON.stringify(doctor));
+  for (const id of ["login", "profile", "server", "workspace", "board"])
+    assert.equal(
+      doctor.checks.find((c) => c.check === id)?.status,
+      "ok",
+      `doctor ${id}: ${JSON.stringify(doctor)}`,
+    );
+  const sharedKey = joinCommand.match(/"token":"([^"]+)"/)?.[1];
+  assert.ok(sharedKey && !JSON.stringify(doctor).includes(sharedKey), "doctor never prints the key");
   const helpers = (await cli(["--profile", "lead", "persona", "list", "work"])).personas.filter(
     (row) => row.displayName === "helper",
   );
