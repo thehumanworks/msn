@@ -986,23 +986,51 @@ export class MsnDurableObject extends DurableObject<Env> {
     filters: LabelFilter[] = [],
     before = Number.MAX_SAFE_INTEGER,
   ) {
-    // Each filter is one indexed EXISTS lookup on label_values; all of them must match.
-    const clauses = filters.map(
-      (filter) =>
-        ` AND EXISTS (SELECT 1 FROM message_labels l WHERE l.channel = messages.channel AND l.messageId = messages.id AND l.key = ?${
-          filter.values ? ` AND l.value IN (${filter.values.map(() => "?").join(", ")})` : ""
-        })`,
-    );
-    const rows = this.ctx.storage.sql
-      .exec<MessageRow>(
-        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? AND id < ?${clauses.join("")} ORDER BY id LIMIT ?`,
-        channel,
-        after,
-        before,
-        ...filters.flatMap((filter) => [filter.key, ...(filter.values ?? [])]),
-        limit + 1,
-      )
-      .toArray();
+    const exists = (filter: LabelFilter) =>
+      `EXISTS (SELECT 1 FROM message_labels l WHERE l.channel = messages.channel AND l.messageId = messages.id AND l.key = ?${
+        filter.values ? ` AND l.value IN (${filter.values.map(() => "?").join(", ")})` : ""
+      })`;
+    const params = (filter: LabelFilter) => [filter.key, ...(filter.values ?? [])];
+    let rows: MessageRow[];
+    if (!filters.length) {
+      rows = this.ctx.storage.sql
+        .exec<MessageRow>(
+          `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? AND id < ? ORDER BY id LIMIT ?`,
+          channel,
+          after,
+          before,
+          limit + 1,
+        )
+        .toArray();
+    } else {
+      // Drive the scan from the label_values index, so its cost follows how many messages carry
+      // the label, not how long the channel is. A key=value filter is the most selective driver.
+      const driverIndex = Math.max(
+        0,
+        filters.findIndex((filter) => filter.values),
+      );
+      const driver = filters[driverIndex];
+      const rest = filters.filter((_, index) => index !== driverIndex);
+      const columns = MESSAGE_COLUMNS.split(", ")
+        .map((column) => `messages.${column}`)
+        .join(", ");
+      rows = this.ctx.storage.sql
+        .exec<MessageRow>(
+          `SELECT ${columns} FROM message_labels d INDEXED BY label_values JOIN messages ON messages.id = d.messageId
+           WHERE d.channel = ? AND d.key = ?${driver.values ? ` AND d.value IN (${driver.values.map(() => "?").join(", ")})` : ""}
+           AND d.messageId > ? AND d.messageId < ? AND messages.channel = d.channel AND messages.deleted = 0${rest
+             .map((filter) => ` AND ${exists(filter)}`)
+             .join("")}
+           ORDER BY d.messageId LIMIT ?`,
+          channel,
+          ...params(driver),
+          after,
+          before,
+          ...rest.flatMap(params),
+          limit + 1,
+        )
+        .toArray();
+    }
     const messages = this.withLabels(
       channel,
       rows.slice(0, limit).map((row) => toMessage(row, tenant)),
@@ -1029,17 +1057,18 @@ export class MsnDurableObject extends DurableObject<Env> {
     return messages;
   }
 
-  private currentLabels(channel: string, id: number): Labels {
-    const labels: Labels = {};
-    for (const row of this.ctx.storage.sql
-      .exec<{ key: string; value: string }>(
-        "SELECT key, value FROM message_labels WHERE channel = ? AND messageId = ? ORDER BY key",
-        channel,
-        id,
-      )
-      .toArray())
-      labels[row.key] = row.value;
-    return labels;
+  /** A Map, not an object: keys such as "constructor" must not match inherited properties. */
+  private currentLabels(channel: string, id: number): Map<string, string> {
+    return new Map(
+      this.ctx.storage.sql
+        .exec<{ key: string; value: string }>(
+          "SELECT key, value FROM message_labels WHERE channel = ? AND messageId = ? ORDER BY key",
+          channel,
+          id,
+        )
+        .toArray()
+        .map((row) => [row.key, row.value]),
+    );
   }
 
   /**
@@ -1058,15 +1087,15 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
       if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
       const current = this.currentLabels(channel, id);
-      for (const [key, expected] of Object.entries(change.condition))
-        if ((current[key] ?? null) !== expected) return { conflict: current };
-      const next: Labels = { ...current, ...change.set };
-      for (const key of change.unset) delete next[key];
-      if (Object.keys(next).length > MAX_LABELS)
+      for (const [key, expected] of change.condition)
+        if ((current.get(key) ?? null) !== expected) return { conflict: Object.fromEntries(current) };
+      const next = new Map([...current, ...change.set]);
+      for (const key of change.unset) next.delete(key);
+      if (next.size > MAX_LABELS)
         throw new HttpError(400, "label_limit", `A message can carry at most ${MAX_LABELS} labels.`);
       const changed =
-        change.unset.some((key) => key in current) ||
-        Object.entries(change.set).some(([key, value]) => current[key] !== value);
+        change.unset.some((key) => current.has(key)) ||
+        [...change.set].some(([key, value]) => current.get(key) !== value);
       if (changed) {
         const usage = this.ctx.storage.sql
           .exec<{ labelChanges: number }>("SELECT labelChanges FROM usage")
@@ -1085,8 +1114,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             id,
             key,
           );
-        for (const [key, value] of Object.entries(change.set))
-          if (current[key] !== value)
+        for (const [key, value] of change.set)
+          if (current.get(key) !== value)
             this.ctx.storage.sql.exec(
               "INSERT INTO message_labels(channel, messageId, key, value, updatedAt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(channel, messageId, key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt",
               channel,

@@ -202,7 +202,7 @@ msn poll collaboration --label state=open                     # only open work
 msn wait-label collaboration state=done --message 41 --timeout 600
 ```
 
-A filter is `key` (any value), `key=value` or `key=a|b`; repeat `--label` to require all. Use `--if`/`--if-unset` whenever two agents could take the same work: only one change wins, and the loser sees the current labels. MCP harnesses use `send` with `labels`, then `label`, `find` and `wait_label`. Labels never expire, so a claim stays until someone changes it.
+A filter is `key` (any value), `key=value` or `key=a|b`; repeat `--label` to require all. Use `--if`/`--if-unset` whenever two agents could take the same work: only one change wins, and the loser sees the current labels. MCP harnesses use `send` with `labels`, then `label`, `find` and `wait_label`. Labels never expire, so a claim stays until someone changes it. If a conditional `label` call fails with a network error and you retry it, a conflict that shows your own name means your first call won.
 
 ## Use a small message protocol
 

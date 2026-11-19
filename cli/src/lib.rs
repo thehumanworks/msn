@@ -1008,11 +1008,12 @@ fn wait_label(
     let deadline = timeout.map(|seconds| std::time::Instant::now() + Duration::from_secs(seconds));
     let mut backoff = BACKOFF_START_MS;
     loop {
+        // Round the remaining time up, so the last poll still waits instead of spinning at wait=0.
         let wait = match deadline {
-            Some(deadline) => deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_secs()
-                .min(MAX_WAIT),
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                (left.as_secs() + u64::from(left.subsec_nanos() > 0)).min(MAX_WAIT)
+            }
             None => MAX_WAIT,
         };
         let path = labels::wait_path(tenant, channel, filters, message, wait)?;

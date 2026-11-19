@@ -240,7 +240,7 @@ export function labelValue(value: unknown, key: string): string {
     !value.length ||
     new TextEncoder().encode(value).length > 256 ||
     // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what we reject.
-    /[\u0000-\u001f\u007f]/.test(value)
+    /[\u0000-\u001f\u007f-\u009f]/.test(value)
   )
     throw new HttpError(
       400,
@@ -270,30 +270,33 @@ export function labels(value: unknown): Labels | undefined {
 }
 
 /** Body of POST …/messages/{id}/labels: what to set, what to remove, and an optional precondition. */
-export type LabelChange = { set: Labels; unset: string[]; condition: Record<string, string | null> };
+export type LabelChange = {
+  set: Map<string, string>;
+  unset: string[];
+  condition: Map<string, string | null>;
+};
 
 export function labelChange(input: Record<string, unknown>): LabelChange {
   for (const field of Object.keys(input))
     if (!["set", "unset", "if"].includes(field))
       throw new HttpError(400, "invalid_label", `Unknown field ${field}; use set, unset and if.`);
-  const set: Labels = {};
+  // Maps, not objects: a key such as "constructor" must never match an inherited property.
+  const set = new Map<string, string>();
   for (const [key, raw] of Object.entries(input.set === undefined ? {} : labelObject(input.set, "set")))
-    set[labelKey(key)] = labelValue(raw, key);
+    set.set(labelKey(key), labelValue(raw, key));
   if (input.unset !== undefined && !Array.isArray(input.unset))
     throw new HttpError(400, "invalid_label", "unset must be an array of label keys.");
   const unset = [...new Set(((input.unset as unknown[] | undefined) ?? []).map(labelKey))];
-  if (unset.some((key) => key in set))
+  if (unset.some((key) => set.has(key)))
     throw new HttpError(400, "invalid_label", "A key cannot be both set and unset in one change.");
-  if (!Object.keys(set).length && !unset.length)
+  if (!set.size && !unset.length)
     throw new HttpError(400, "invalid_label", "Set or unset at least one label.");
-  if (Object.keys(set).length + unset.length > MAX_LABELS * 2)
+  if (set.size + unset.length > MAX_LABELS * 2)
     throw new HttpError(400, "label_limit", "Too many labels in one change.");
-  const condition: Record<string, string | null> = {};
-  for (const [key, raw] of Object.entries(input.if === undefined ? {} : labelObject(input.if, "if"))) {
-    labelKey(key);
-    condition[key] = raw === null ? null : labelValue(raw, key);
-  }
-  if (Object.keys(condition).length > MAX_LABELS)
+  const condition = new Map<string, string | null>();
+  for (const [key, raw] of Object.entries(input.if === undefined ? {} : labelObject(input.if, "if")))
+    condition.set(labelKey(key), raw === null ? null : labelValue(raw, key));
+  if (condition.size > MAX_LABELS)
     throw new HttpError(400, "label_limit", `A condition can test at most ${MAX_LABELS} labels.`);
   return { set, unset, condition };
 }

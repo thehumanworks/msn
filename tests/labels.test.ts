@@ -149,6 +149,33 @@ describe("message labels (ADR 0032)", () => {
     });
   });
 
+  it("treats keys named like object properties as ordinary keys", async () => {
+    const t = await tenant();
+    const message = await sent(t, "x");
+    const claim = await relabel(t, message.id, { set: { constructor: "a" }, if: { constructor: null } });
+    expect(claim.status).toBe(200);
+    expect((await relabel(t, message.id, { set: { tostring: "b" }, if: { constructor: "a" } })).status).toBe(
+      200,
+    );
+    const removed = await relabel(t, message.id, { set: { valueof: "c" }, unset: ["constructor"] });
+    expect(removed.status).toBe(200);
+    expect((await removed.json<{ message: Message }>()).message.labels).toEqual({
+      tostring: "b",
+      valueof: "c",
+    });
+    expect((await relabel(t, message.id, { unset: ["constructor"], if: { constructor: null } })).status).toBe(
+      200,
+    );
+    expect((await send(t, "y", { constructor: "z" })).status).toBe(201);
+    expect((await list(t, "?label=constructor=z")).messages.map((m) => m.text)).toEqual(["y"]);
+  });
+
+  it("rejects C1 control characters in values, like the CLI", async () => {
+    const t = await tenant();
+    const response = await send(t, "x", { state: "a\u0085b" });
+    expect(response.status).toBe(400);
+  });
+
   it("rejects malformed changes, missing messages and a change past the label limit", async () => {
     const t = await tenant();
     const message = await sent(
@@ -197,6 +224,21 @@ describe("message labels (ADR 0032)", () => {
     expect(await ids(`?label=state&after=${a.id}&limit=1`)).toEqual([b.id]);
     expect(await ids(`?after=${a.id}&before=${c.id}`)).toEqual([b.id]);
     expect((await call(`${t.channel}/messages?label=Bad`, t.token)).status).toBe(400);
+    // The filter's driving index skips deleted messages and other channels' labels.
+    await call(
+      `${t.path}/channels/other/messages`,
+      t.token,
+      post({ username: "agent", text: "o", labels: { state: "open" } }),
+    );
+    expect(
+      (
+        await call(`/api/admin/tenants/${t.name}/channels/general/messages/${a.id}`, ADMIN, {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(204);
+    expect(await ids("?label=state=open")).toEqual([]);
+    expect(await ids(`?label=${encodeURIComponent("state=done|draft")}&label=area`)).toEqual([b.id, c.id]);
   });
 
   it("wakes a filtered long poll when an older message gains the label", async () => {
