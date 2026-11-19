@@ -61,6 +61,8 @@ function readMark(name, connection = session) {
 /**
  * Move this board's read mark to the newest message whose top has reached the visible log.
  * Only while the page is visible: a background tab that keeps receiving does not count as read.
+ * While a summary loads, and while a truncated one is showing, the mark stops at the last
+ * message the summary covered: following Live to the bottom is not reading what it skipped.
  */
 function advanceMark() {
   if (!session || !channel || !chatVisible() || document.visibilityState !== "visible") return;
@@ -73,6 +75,8 @@ function advanceMark() {
       break;
     }
   }
+  const ceiling = session.channels.get(channel)?.markCeiling;
+  if (seen !== null && ceiling !== undefined && ceiling !== null) seen = Math.min(seen, ceiling);
   const next = advance(session.marks ?? {}, markId(session.username, channel), seen);
   if (!next) return;
   session.marks = next;
@@ -364,6 +368,7 @@ function showMessage(id, block = "center") {
 async function loadSince(connection, name, state, mark) {
   const load = Symbol(name);
   state.sinceLoad = load;
+  state.markCeiling = mark;
   const messages = [];
   let after = mark;
   let truncated = false;
@@ -376,16 +381,20 @@ async function loadSince(connection, name, state, mark) {
       if (page === SINCE_PAGES - 1) truncated = true;
     }
   } catch {
-    return; // The summary is a convenience: the messages themselves still load.
+    // The summary is a convenience: the messages themselves still load.
+    if (state.sinceLoad === load) state.markCeiling = null;
+    return;
   }
   if (state.sinceLoad !== load || session !== connection) return;
   const summary = summarize(messages, { after: mark, me: connection.username, truncated });
   state.since = summary.count ? { mark, ...summary } : null;
+  state.markCeiling = truncated ? (messages.at(-1)?.id ?? mark) : null;
   if (channel !== name) return;
   const visible = chatVisible();
   if (visible) savePosition();
   showSince(state);
   if (visible) restorePosition(state);
+  advanceMark();
 }
 
 function showJump(state) {
@@ -1171,24 +1180,31 @@ $("since-done").addEventListener("click", () => {
   const state = session?.channels.get(channel);
   if (!state) return;
   state.since = null;
+  state.markCeiling = null;
   showSince(state);
+  advanceMark();
 });
 // Leaving the tab records where you stopped; coming back summarises what arrived meanwhile.
 document.addEventListener("visibilitychange", () => {
   const state = session?.channels.get(channel);
   if (!state) return;
   if (document.visibilityState !== "visible") {
-    advanceMark();
     state.hiddenAfter = state.messages.at(-1)?.id ?? 0;
     return;
   }
   const away = state.hiddenAfter;
   state.hiddenAfter = undefined;
-  if (away === undefined) return;
   const stored = readMark(channel);
-  const mark = state.since?.mark ?? (stored === undefined ? undefined : Math.max(stored, away));
+  const mark =
+    away === undefined
+      ? undefined
+      : (state.since?.mark ?? (stored === undefined ? undefined : Math.max(stored, away)));
+  // Capture the mark first; then what is on screen now counts as seen (up to any ceiling).
   if (mark !== undefined) void loadSince(session, channel, state, mark);
+  advanceMark();
 });
+// Closing or navigating away records the last position while the page is still visible.
+addEventListener("pagehide", () => advanceMark());
 $("jump").addEventListener("click", () => {
   $("messages").scrollTop = $("messages").scrollHeight;
   savePosition();

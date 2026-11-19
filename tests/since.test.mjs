@@ -110,3 +110,17 @@ test("marks only move forward, survive bad storage, and stay bounded", () => {
   assert.equal(marks.k5, 2);
   assert.equal(marks.k6, undefined);
 });
+
+test("messages and tasks for you match your name with spaces trimmed and case ignored", () => {
+  next = 1;
+  const messages = [
+    text("lead", "Which region?", { to: "  tomas " }),
+    typed("lead", task("assign", "docs", { owner: "TOMAS" })),
+    text("lead", "not for you", { to: "Tomasz" }),
+  ];
+  const summary = summarize(messages, { after: 0, me: "Tomas" });
+  assert.deepEqual(
+    summary.items.map((i) => i.text),
+    ["lead to you: “Which region?”", "lead assigned you docs"],
+  );
+});

@@ -1695,3 +1695,50 @@ test("a board shows what changed since you last looked, with a marker where you 
   await disconnect(page);
   expect(await stored(page)).toEqual([0, 0]);
 });
+
+test("with more than 300 unread, opening a board does not mark the rest as read", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  const post = async (text) => {
+    const response = await request.post(`${t.path}/channels/work/messages`, {
+      headers: t.headers,
+      data: { username: "worker", text },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message.id;
+  };
+  const start = await post("start");
+  await connect(page, t, "Tomas");
+  await expect(page.locator(".message")).toHaveCount(1);
+  const mark = () =>
+    page.evaluate(
+      (key) => JSON.parse(localStorage.getItem(key) ?? "{}")["Tomas\nwork"],
+      `msn.read.${t.tenant}`,
+    );
+  await expect.poll(mark).toBe(start);
+  await page.goto("about:blank");
+  for (let i = 0; i < 320; i += 40)
+    await Promise.all(Array.from({ length: 40 }, (_, j) => post(`update ${i + j}`)));
+  await page.goto("/");
+  await expect(page.locator("#since-title")).toHaveText(
+    "Since you last looked: 300+ new messages from worker",
+  );
+  await expect(page.locator(".message")).toHaveCount(321);
+  await expect.poll(() => bottomGap(page)).toBeLessThan(2);
+  // Live followed to the newest message, but the mark stops at the last summarised one.
+  const covered = await page.evaluate(
+    (first) =>
+      [...document.querySelectorAll(".message")]
+        .map((n) => Number(n.dataset.id))
+        .filter((id) => id > first)[299],
+    start,
+  );
+  await expect.poll(mark).toBe(covered);
+  await page.reload();
+  await expect(page.locator("#since-title")).toHaveText("Since you last looked: 20 new messages from worker");
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  const newest = await page.locator(".message").last().getAttribute("data-id");
+  await expect.poll(mark).toBe(Number(newest));
+});

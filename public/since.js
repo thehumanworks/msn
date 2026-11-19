@@ -24,6 +24,11 @@ function excerpt(value, limit = 120) {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 }
 
+/** Recipient names are matched the way people type them: spaces trimmed, case ignored. */
+function normalize(name) {
+  return String(name).trim().toLowerCase();
+}
+
 function json(message) {
   if (message.contentType !== "application/json") return null;
   try {
@@ -66,6 +71,8 @@ export function advance(marks, key, id) {
  * Message text is untrusted: the result is plain text for textContent, never markup.
  */
 export function summarize(messages, { after, me, truncated = false }) {
+  const self = normalize(me);
+  const isMe = (name) => typeof name === "string" && normalize(name) === self;
   const fresh = messages.filter((m) => Number.isSafeInteger(m.id) && m.id > after);
   const others = fresh.filter((m) => m.username !== me);
   const titles = new Map();
@@ -86,10 +93,10 @@ export function summarize(messages, { after, me, truncated = false }) {
       if (data.action === "assign" && typeof data.owner === "string")
         add(
           "task",
-          data.owner === me
+          isMe(data.owner)
             ? `${who} assigned you ${task(data.task)}`
             : `${who} assigned ${task(data.task)} to ${excerpt(data.owner, 40)}`,
-          data.owner === me,
+          isMe(data.owner),
         );
       else if (TASK_VERBS[data.action])
         add(
@@ -109,8 +116,7 @@ export function summarize(messages, { after, me, truncated = false }) {
       add("failed", `A job failed for ${who}${reason}`, true);
       continue;
     }
-    if (message.to !== undefined && message.to !== null && message.to === me)
-      add("question", `${who} to you: “${excerpt(message.text)}”`, true);
+    if (isMe(message.to)) add("question", `${who} to you: “${excerpt(message.text)}”`, true);
   }
   // What needs you first, then everything else in board order.
   const ordered = [...items.filter((i) => i.attention), ...items.filter((i) => !i.attention)];
