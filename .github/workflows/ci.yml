@@ -48,8 +48,41 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - name: Shellcheck the install scripts
-        run: shellcheck -s sh public/install.sh scripts/homebrew-formula.sh
+        run: shellcheck -s sh public/install.sh scripts/homebrew-formula.sh scripts/linux-compat-smoke.sh
       - run: bun run test
+
+  # Builds the Linux release binaries the way release.yml does and runs them in
+  # older glibc and Alpine containers, so a broken release build shows up on the
+  # pull request and not after merge. Not a deploy gate.
+  linux-compat:
+    name: linux-compat (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-unknown-linux-gnu.2.28
+          - target: x86_64-unknown-linux-musl
+            zig_target: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+          key: linux-compat-${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.1
+      - run: cargo zigbuild --release --locked --target "${{ matrix.zig_target }}"
+        working-directory: cli
+      - run: scripts/linux-compat-smoke.sh "cli/target/${{ matrix.target }}/release/msn" "${{ matrix.target }}"
 
   agent-workflows:
     name: real Worker + agent CLI workflows

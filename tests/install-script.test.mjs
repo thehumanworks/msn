@@ -49,6 +49,7 @@ function release(version, target, { corrupt = false, broken = false } = {}) {
 before(async () => {
   release(VERSION, TARGET);
   release(VERSION, "aarch64-apple-darwin");
+  release(VERSION, "x86_64-unknown-linux-musl");
   release("v1.0.0", TARGET, { corrupt: true });
   release("v2.0.0", TARGET, { broken: true });
   server = createServer((req, res) => {
@@ -140,10 +141,42 @@ test("a binary that cannot run on this system fails loudly and names the glibc f
   assert.equal(code, 1);
   assert.match(stderr, /does not run on this system/);
   assert.match(stderr, /GLIBC_2\.39' not found/);
-  assert.match(stderr, /glibc 2\.39 or newer/);
+  assert.match(stderr, /glibc 2\.28 or newer/);
+  assert.match(stderr, /MSN_TARGET=x86_64-unknown-linux-musl sh install\.sh/);
   assert.match(stderr, /cargo install --git https:\/\/github\.com\/thehumanworks\/msn msn-cli/);
   assert.doesNotMatch(stderr, /installed msn 2\.0\.0 to/);
 });
+
+// Fake uname, ldd and getconf so detection sees another Linux system.
+function fakeLinux(name, { arch = "x86_64", ldd, glibc }) {
+  const bin = join(work, `fake-${name}`);
+  mkdirSync(bin, { recursive: true });
+  const tool = (file, body) => {
+    writeFileSync(join(bin, file), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(bin, file), 0o755);
+  };
+  tool("uname", `[ "$1" = -m ] && echo ${arch} || echo Linux`);
+  tool("ldd", `echo "${ldd}" >&2`);
+  tool("getconf", glibc ? `echo "glibc ${glibc}"` : "exit 1");
+  return bin;
+}
+
+for (const [name, system, expected] of [
+  ["debian-12", { ldd: "ldd (Debian GLIBC 2.36-9) 2.36", glibc: "2.36" }, "x86_64-unknown-linux-gnu"],
+  ["glibc-floor", { ldd: "ldd (GNU libc) 2.28", glibc: "2.28" }, "x86_64-unknown-linux-gnu"],
+  ["centos-7", { ldd: "ldd (GNU libc) 2.17", glibc: "2.17" }, "x86_64-unknown-linux-musl"],
+  ["alpine", { ldd: "musl libc (x86_64)" }, "x86_64-unknown-linux-musl"],
+  ["arm-alpine", { arch: "aarch64", ldd: "musl libc (aarch64)" }, "aarch64-unknown-linux-musl"],
+]) {
+  test(`detects ${expected} on ${name}`, async () => {
+    const bin = fakeLinux(name, system);
+    const { stderr } = await install(["--dir", join(work, `detect-${name}`)], {
+      MSN_TARGET: "",
+      PATH: `${bin}:${process.env.PATH}`,
+    });
+    assert.match(stderr, new RegExp(`downloading msn v9\\.9\\.9 for ${expected}\n`));
+  });
+}
 
 test("a partially downloaded script runs nothing", async () => {
   const source = readFileSync(script, "utf8");

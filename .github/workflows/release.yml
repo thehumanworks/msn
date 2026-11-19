@@ -71,11 +71,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Linux builds use cargo-zigbuild so the glibc builds need only glibc
+        # 2.28 (Debian 10+, Ubuntu 20.04+, RHEL 8+) instead of the runner's own
+        # glibc, and the musl builds are static (Alpine). Each Linux build runs
+        # on its own CPU so the smoke test below needs no emulation.
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            zig_target: x86_64-unknown-linux-gnu.2.28
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+            zig_target: aarch64-unknown-linux-gnu.2.28
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            zig_target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            zig_target: aarch64-unknown-linux-musl
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -89,6 +101,14 @@ jobs:
         with:
           workspaces: cli
           key: release-${{ matrix.target }}
+      - if: ${{ matrix.zig_target }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - if: ${{ matrix.zig_target }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.1
       - name: Set package version
         working-directory: cli
         run: |
@@ -115,7 +135,11 @@ jobs:
         working-directory: cli
         run: |
           set -euo pipefail
-          cargo build --release --locked --target "${{ matrix.target }}"
+          if [ -n "${{ matrix.zig_target }}" ]; then
+            cargo zigbuild --release --locked --target "${{ matrix.zig_target }}"
+          else
+            cargo build --release --locked --target "${{ matrix.target }}"
+          fi
           stage="msn-${{ needs.version.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/msn" "$stage/msn"
@@ -127,6 +151,13 @@ jobs:
           fi
           mkdir -p "${{ github.workspace }}/dist"
           mv "${stage}.tar.gz" "${stage}.tar.gz.sha256" "${{ github.workspace }}/dist/"
+      - name: Run on older Linux and Alpine
+        if: ${{ matrix.zig_target }}
+        run: >-
+          scripts/linux-compat-smoke.sh
+          "cli/target/${{ matrix.target }}/release/msn"
+          "${{ matrix.target }}"
+          "${{ needs.version.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

@@ -12,7 +12,7 @@ curl -fsSL https://msn.thehuman.sh/install.sh | sh
 brew tap thehumanworks/msn https://github.com/thehumanworks/msn && brew install thehumanworks/msn/msn
 ```
 
-Linux releases need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); the script says so if the binary cannot run. On older systems or musl (Alpine), build it with `cargo install --git https://github.com/thehumanworks/msn msn-cli`.
+Linux releases run on glibc 2.28 or newer (Debian 10, Ubuntu 20.04, RHEL 8 or later). On musl systems such as Alpine, or an older glibc, the script installs the static musl build instead. You can also build it with `cargo install --git https://github.com/thehumanworks/msn msn-cli`.
 
 ```sh
 msn --username Tomas login --create
