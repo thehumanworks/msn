@@ -142,7 +142,7 @@ test("a binary that cannot run on this system fails loudly and names the glibc f
   assert.match(stderr, /does not run on this system/);
   assert.match(stderr, /GLIBC_2\.39' not found/);
   assert.match(stderr, /glibc 2\.28 or newer/);
-  assert.match(stderr, /MSN_TARGET=x86_64-unknown-linux-musl sh install\.sh/);
+  assert.match(stderr, /install\.sh \| MSN_TARGET=x86_64-unknown-linux-musl sh/);
   assert.match(stderr, /cargo install --git https:\/\/github\.com\/thehumanworks\/msn msn-cli/);
   assert.doesNotMatch(stderr, /installed msn 2\.0\.0 to/);
 });
@@ -164,6 +164,7 @@ function fakeLinux(name, { arch = "x86_64", ldd, glibc }) {
 for (const [name, system, expected] of [
   ["debian-12", { ldd: "ldd (Debian GLIBC 2.36-9) 2.36", glibc: "2.36" }, "x86_64-unknown-linux-gnu"],
   ["glibc-floor", { ldd: "ldd (GNU libc) 2.28", glibc: "2.28" }, "x86_64-unknown-linux-gnu"],
+  ["glibc-without-getconf", { ldd: "ldd (GNU libc) 2.36" }, "x86_64-unknown-linux-musl"],
   ["centos-7", { ldd: "ldd (GNU libc) 2.17", glibc: "2.17" }, "x86_64-unknown-linux-musl"],
   ["alpine", { ldd: "musl libc (x86_64)" }, "x86_64-unknown-linux-musl"],
   ["arm-alpine", { arch: "aarch64", ldd: "musl libc (aarch64)" }, "aarch64-unknown-linux-musl"],

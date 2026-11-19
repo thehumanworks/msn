@@ -151,13 +151,15 @@ jobs:
           fi
           mkdir -p "${{ github.workspace }}/dist"
           mv "${stage}.tar.gz" "${stage}.tar.gz.sha256" "${{ github.workspace }}/dist/"
+      # Tests the binary unpacked from the release tarball, exactly what users download.
       - name: Run on older Linux and Alpine
         if: ${{ matrix.zig_target }}
-        run: >-
-          scripts/linux-compat-smoke.sh
-          "cli/target/${{ matrix.target }}/release/msn"
-          "${{ matrix.target }}"
-          "${{ needs.version.outputs.version }}"
+        run: |
+          set -euo pipefail
+          stage="msn-${{ needs.version.outputs.tag }}-${{ matrix.target }}"
+          unpacked="$(mktemp -d)"
+          tar -xzf "dist/${stage}.tar.gz" -C "$unpacked"
+          scripts/linux-compat-smoke.sh "$unpacked/$stage/msn" "${{ matrix.target }}" "${{ needs.version.outputs.version }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

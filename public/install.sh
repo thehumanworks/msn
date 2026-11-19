@@ -233,7 +233,7 @@ else
   case "$target" in
   *-linux-gnu)
     say "The glibc build needs glibc 2.28 or newer (Debian 10, Ubuntu 20.04, RHEL 8 or later)."
-    say "Try the static build instead: MSN_TARGET=${target%-gnu}-musl sh install.sh"
+    say "Try the static build instead: curl -fsSL https://msn.thehuman.sh/install.sh | MSN_TARGET=${target%-gnu}-musl sh"
     say "Or build it: cargo install --git https://github.com/thehumanworks/msn msn-cli"
     ;;
   esac
