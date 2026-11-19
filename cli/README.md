@@ -104,6 +104,8 @@ A selected profile replaces ambient `MSN_URL`, workspace/legacy tenant and token
 ## Commands
 
 ```sh
+msn doctor                               # check the setup; prints the exact fix for each problem
+msn doctor general --json                # same, as one JSON report; exit 1 when a check fails
 msn health
 msn whoami                               # current key name binding, not its secret
 msn channels

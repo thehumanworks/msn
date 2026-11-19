@@ -19,6 +19,8 @@ Exit codes: 0 ok; 1 generic; 2 usage/config; 3 auth (401/403); 4 not found (404)
   5 conflict (409/410); 6 network (connect/TLS/redirect)
 
 EXAMPLES:
+  msn doctor                        # check this setup; prints the fix for each problem
+  msn doctor general --json         # one JSON report for agents; exit 1 when a check fails
   msn health
   msn channels
   msn create general
@@ -339,6 +341,15 @@ pub enum Command {
     },
     /// GET /api/health (no token)
     Health,
+    /// Check login, active profile, workspace, board, Node and runner; print the fix for each problem.
+    /// Read-only. Exits 1 when a check fails; --json prints one report for agents.
+    Doctor {
+        /// Board to check (default: the board your access key is scoped to)
+        channel: Option<String>,
+        /// Print one JSON object instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// GET /api/tenants/{tenant}; show this token's tenant and username binding
     Whoami,
     /// Admin PUT …/keys/{key}; requires explicit --username or --username-prefix

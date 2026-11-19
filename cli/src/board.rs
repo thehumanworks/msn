@@ -187,6 +187,7 @@ To wait for work, run `{me} peek {channel} --wait 25`: it returns as soon as a m
 or after 25 seconds with none, so run it again. Handle every message it returns, then run \
 `{me} commit {channel} --through NEXT_CURSOR` with that result's nextCursor, and repeat. \
 Post with `{me} send {channel} --text 'your message'`. \
+If an msn command fails, run `{me} doctor {channel}`: it checks your setup and prints the exact fix for each problem. \
 If your harness supports MCP, you can instead add the stdio server `{me} mcp --channel {channel}` \
 and use its start, peek, commit and send tools. \
 The join command holds this board's shared access key: keep it private and never post it on the board. \
