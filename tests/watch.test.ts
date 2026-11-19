@@ -358,7 +358,7 @@ describe("watch-only invitations", () => {
       expect((await response.json<{ error: { code: string } }>()).error.code, route.name).toBe("watch_only");
     }
     // Methods the router does not serve are refused too: the gate stands in front of routing.
-    for (const method of ["PATCH", "DELETE", "PUT", "POST"])
+    for (const method of ["PATCH", "DELETE", "PUT", "POST", "HEAD", "OPTIONS"])
       expect((await call(`${f.api}${message}`, f.watcher, { method })).status, method).toBe(403);
     expect(await counts(f)).toEqual(before);
 
@@ -386,6 +386,16 @@ describe("watch-only invitations", () => {
 
   it("adds the columns to a database from before watch-only keys", async () => {
     const f = await fixture();
+    // A participant key from before the upgrade: it lives in access_keys, unlike the owner's.
+    const plain = await (
+      await call(`${f.api}/invites`, f.owner, { method: "POST", json: { channel: "work" } })
+    ).json<{ code: string }>();
+    const member = await (
+      await call(`${f.api}/invites/redeem`, undefined, {
+        method: "POST",
+        json: { code: plain.code, username: "member" },
+      })
+    ).json<Access>();
     const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
     await runInDurableObject(stub, (_, state) => {
       state.storage.transactionSync(() => {
@@ -396,6 +406,15 @@ describe("watch-only invitations", () => {
     });
     await abortAllDurableObjects();
     // Older keys keep posting; new watch invitations work after the in-place upgrade.
+    expect(
+      (
+        await call(`${f.api}/channels/work/messages`, member.token, {
+          method: "POST",
+          json: { username: "member", text: "old key still posts" },
+        })
+      ).status,
+    ).toBe(201);
+    expect("watchOnly" in (await (await call(f.api, member.token)).json<Access>())).toBe(false);
     expect(
       (
         await call(`${f.api}/channels/work/messages`, f.owner, {

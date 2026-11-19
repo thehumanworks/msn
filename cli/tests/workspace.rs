@@ -196,6 +196,12 @@ fn watch_invite_asks_for_read_only_and_revokes_a_full_access_fallback() {
             &format!(r#"{{"id":"{id}","url":"https://example.test/#invite=code"}}"#),
         ),
         Scripted::empty(204),
+        // Older server again, and this time the revoke fails.
+        Scripted::json(
+            201,
+            &format!(r#"{{"id":"{id}","url":"https://example.test/#invite=code"}}"#),
+        ),
+        Scripted::json(503, "{}"),
     ]);
     value(&run(
         &home,
@@ -214,7 +220,14 @@ fn watch_invite_asks_for_read_only_and_revokes_a_full_access_fallback() {
     assert_eq!(value(&run(&home, &watch))["watch"], json!(true));
     let refused = run(&home, &watch);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("watch-only"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("was revoked"));
+    let stuck = run(&home, &watch);
+    assert!(!stuck.status.success());
+    let stuck = String::from_utf8_lossy(&stuck.stderr);
+    assert!(
+        stuck.contains(id) && stuck.contains("may still be valid"),
+        "{stuck}"
+    );
     let requests = server.recorded();
     assert_eq!(
         serde_json::from_slice::<Value>(&requests[2].body).unwrap(),

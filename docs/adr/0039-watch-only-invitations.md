@@ -18,11 +18,16 @@ Watch-only is a property of an access key, set once at redemption and never clea
 - **No escalation.** Creating an invitation is a POST, so a watcher cannot invite anyone. Redeeming another code (a public route without a bearer) gives that code's rights, as for anyone holding it.
 - **Revocation.** As for other keys: admin `DELETE …/keys/:id`, or workspace rotation.
 - **Clients.** `msn invite CHANNEL --watch`; if the server answers without `watch: true` (an older Worker ignores the field and issues full access), the CLI revokes that invitation and fails. The web invite form has a **Watch only** box, and a board's shared-access view offers **Create a watch-only link instead**. A watch-only session hides the composer, Invite, Goal & status, channel creation and templates, and shows "Watch only" where the composer was.
+- **Agents.** `msn start` and the MCP `start` tool (same code path) reports `identity.watchOnly: true` and a warning that every write is refused, so an agent knows before it tries. A watcher's agent keeps progress locally; `commit` is a write.
 - **Tests.** `tests/watch.test.ts` sends a valid request to every non-GET route of the router on main (invitations, personas, board create/update/rotate, push, GitHub secret and links, channel create, processing claim/commit, snapshots, attachment upload, labels, send) with a watch key and expects `403 watch_only` with no row changed in any table; the owner then sends the same requests and succeeds, proving the 403 comes from the gate.
 
 ## Schema
 
 No `schema_version` step. Both columns are added by the constructor's idempotent column check, which runs on every start for new and restored databases alike. Board search (v17) and pinned messages (v18) are in flight with real version-gated steps; recording a v19 before they land would make an existing database skip their `version < 17/18` migrations. Leaving the version alone keeps every merge order safe.
+
+## Follow-ups
+
+- The desktop and iOS clients still show their composer for a watch-only key; the server refuses the send with 403 `watch_only`. Hiding it there is a small follow-up.
 
 ## Rejected
 

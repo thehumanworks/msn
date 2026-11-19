@@ -1161,7 +1161,6 @@ export class MsnDurableObject extends DurableObject<Env> {
     throw new HttpError(401, "unauthorized", "Unknown tenant or invalid access key.");
   }
 
-  /** A bound capability may only send as its bound name (or under its bound prefix). */
   /** Never throws: unknown keys fall through to the route's own authorization. */
   private watchOnly(hash: string): boolean {
     return Boolean(
@@ -1171,6 +1170,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     );
   }
 
+  /** A bound capability may only send as its bound name (or under its bound prefix). */
   private requireBoundName(row: TenantRow, username: string): void {
     if (row.bound_username !== null && username !== row.bound_username) {
       throw new HttpError(403, "username_bound", `This access key may only send as "${row.bound_username}".`);

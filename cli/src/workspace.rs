@@ -269,12 +269,18 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             if *watch && data["watch"] != json!(true) {
                 // A server without watch-only invitations ignores the field and issues full
                 // access. Never hand that link out: revoke it before reporting the error.
-                if let Some(id) = data["id"].as_str() {
-                    let _ = client.delete(&format!("/api/tenants/{tenant}/invites/{id}"), &token);
-                }
-                return Err(CliError::generic(
-                    "This server does not support watch-only invitations; nothing was created.",
-                ));
+                let id = data["id"].as_str().unwrap_or("unknown");
+                let revoked = data["id"].is_string()
+                    && client
+                        .delete(&format!("/api/tenants/{tenant}/invites/{id}"), &token)
+                        .is_ok_and(|result| (200..300).contains(&result.status));
+                return Err(CliError::generic(if revoked {
+                    "This server does not support watch-only invitations; the full-access invitation it made was revoked.".to_string()
+                } else {
+                    format!(
+                        "This server does not support watch-only invitations and made a full-access invitation {id}, which could not be revoked and may still be valid. Run msn invite-revoke {id}."
+                    )
+                }));
             }
             println!("{data}");
             Ok(())

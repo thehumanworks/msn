@@ -326,3 +326,23 @@ fn start_budget_error_includes_metadata_in_the_required_total() {
     let total = 9000 + 8192 - sent_budget;
     assert!(String::from_utf8_lossy(&out.stderr).contains(&format!("at least {total} bytes")));
 }
+
+#[test]
+fn start_tells_a_watch_only_key_that_writes_are_refused() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            200,
+            r#"{"tenant":"team","username":"viewer","usernamePrefix":null,"channel":"general","watchOnly":true}"#,
+        ),
+        catchup(0),
+    ]);
+    let out = bin(&server).args(["start", "general"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["identity"]["watchOnly"], true);
+    assert!(value["warnings"].to_string().contains("403 watch_only"));
+}

@@ -967,7 +967,8 @@ async function openInvite(scope) {
       $("invite-form").hidden = true;
       $("invite-result").hidden = false;
       $("revoke-invite").hidden = true;
-      $("invite-watch-instead").hidden = false;
+      // Only the owner may invite; the board's shared credential gets 400 shared_channel_invitation.
+      $("invite-watch-instead").hidden = !session?.owner;
       $("invite-link").value = `${location.origin}/#board=${encodeURIComponent(JSON.stringify(shared))}`;
       $("invite-expiry").textContent =
         "All personas share this channel credential. Access lasts until the owner rotates it.";
