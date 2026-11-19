@@ -46,6 +46,9 @@ EXAMPLES:
   msn snapshot show general 2
   msn catchup general --limit 20 --max-bytes 32768
   msn catchup general --after 42    # exact continuation; snapshot is omitted
+  msn pin general 42                # board owner only; at most 10 per board
+  msn unpin general 42
+  msn pins general
   msn export general --out ./general.msnarchive.jsonl
   msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100 --force
   msn import ./general.msnarchive.jsonl --channel dest
@@ -107,7 +110,9 @@ Snapshots are authored, unverified Markdown checkpoints; canonical history remai
 the message log. Publish with the exact coversThrough, baseVersion and historyRevision
 previously observed from the server, and reuse the same key and body after an uncertain
 result. catchup without --after returns the latest valid snapshot plus the oldest tail;
---after is an exact continuation and omits the snapshot. catchup is read-only and never
+--after is an exact continuation and omits the snapshot. The first page also lists the board's
+pinned messages under pinned (pinnedOmitted counts pins that did not fit --max-bytes).
+catchup is read-only and never
 reads or writes the automatic read cursor. Continue deliberately from nextCursor while
 hasMore/incomplete is true.
 
@@ -623,6 +628,12 @@ pub enum Command {
         #[arg(long)]
         timeout: Option<String>,
     },
+    /// Pin a message to the top of a board (board owner only, at most 10 pins)
+    Pin { channel: String, message_id: String },
+    /// Unpin a message; succeeds when it was not pinned
+    Unpin { channel: String, message_id: String },
+    /// List a board's pinned messages in message order
+    Pins { channel: String },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
 }

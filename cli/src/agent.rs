@@ -224,6 +224,17 @@ pub(crate) fn validate_catchup(
     if previous > head {
         return Err(invalid());
     }
+    // Pinned messages (ADR 0038) lead the first page only and never move the cursor.
+    if let Some(pinned) = page.get("pinned").filter(|value| !value.is_null()) {
+        let pinned = pinned.as_array().ok_or_else(invalid)?;
+        if after.is_some()
+            || pinned.iter().any(|row| {
+                row["tenant"].as_str() != Some(tenant) || row["channel"].as_str() != Some(channel)
+            })
+        {
+            return Err(invalid());
+        }
+    }
     let rows = page["messages"].as_array().ok_or_else(invalid)?;
     let more = page["hasMore"].as_bool().ok_or_else(invalid)?;
     for row in rows {
@@ -241,4 +252,35 @@ pub(crate) fn validate_catchup(
         return Err(invalid());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_catchup;
+    use serde_json::json;
+
+    fn page(pinned: serde_json::Value) -> serde_json::Value {
+        json!({
+            "pinned": pinned,
+            "snapshot": null,
+            "headCursor": 5,
+            "historyRevision": 0,
+            "messages": [{"id": 1, "tenant": "t", "channel": "c"}],
+            "nextCursor": 1,
+            "hasMore": true
+        })
+    }
+
+    #[test]
+    fn pinned_messages_must_belong_to_the_stream_and_lead_only_the_first_page() {
+        let pin = json!([{"id": 4, "tenant": "t", "channel": "c"}]);
+        assert!(validate_catchup(&page(pin.clone()), "t", "c", None).is_ok());
+        assert!(validate_catchup(&page(json!([])), "t", "c", None).is_ok());
+        assert!(validate_catchup(&page(serde_json::Value::Null), "t", "c", Some(0)).is_ok());
+        assert!(validate_catchup(&page(pin.clone()), "t", "c", Some(0)).is_err());
+        assert!(validate_catchup(&page(pin), "t", "other", None).is_err());
+        let foreign = json!([{"id": 4, "tenant": "x", "channel": "c"}]);
+        assert!(validate_catchup(&page(foreign), "t", "c", None).is_err());
+        assert!(validate_catchup(&page(json!({})), "t", "c", None).is_err());
+    }
 }

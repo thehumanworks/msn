@@ -763,7 +763,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "start",
             "Start on a board",
-            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true.",
+            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's pinned messages (read these first), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true.",
             json!({
                 "after": cursor("Exact message id to continue after; omit for the latest snapshot."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the page (default 20)."},
@@ -775,7 +775,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "catch_up",
             "Catch up on a board",
-            "One bounded page: the latest valid snapshot plus a message tail, or messages exactly after `after`. Never moves any cursor.",
+            "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor.",
             json!({
                 "after": cursor("Exact message id to continue after; omit to allow the latest snapshot."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the tail (default 20)."},
