@@ -32,8 +32,8 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::identity::{resolve_username, validate_username};
-use crate::processing;
 use crate::{Correlation, Payload, send_body};
+use crate::{processing, resumable};
 
 /// Newest first. The client's version is echoed when listed, otherwise the newest is offered.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -371,9 +371,17 @@ impl Server {
         positive(limit, "limit")?;
         let reader = self.processing_reader(&tenant, &token)?;
         let mut out = Vec::new();
-        processing::peek_to(
-            &mut out, &self.url, &tenant, &token, &channel, &reader, None, wait, limit, &self.stop,
-        )?;
+        if resumable::enabled_by_env() {
+            resumable::peek_to(
+                &mut out, &self.url, &tenant, &token, &channel, &reader, None, wait, limit,
+                &self.stop,
+            )?;
+        } else {
+            processing::peek_to(
+                &mut out, &self.url, &tenant, &token, &channel, &reader, None, wait, limit,
+                &self.stop,
+            )?;
+        }
         Ok(parse_printed(&out)?)
     }
 
@@ -385,9 +393,15 @@ impl Server {
         })?;
         let reader = self.processing_reader(&tenant, &token)?;
         let mut out = Vec::new();
-        processing::commit_to(
-            &mut out, &self.url, &tenant, &channel, &reader, None, through,
-        )?;
+        if resumable::enabled_by_env() {
+            resumable::commit_to(
+                &mut out, &self.url, &tenant, &token, &channel, &reader, None, through,
+            )?;
+        } else {
+            processing::commit_to(
+                &mut out, &self.url, &tenant, &channel, &reader, None, through,
+            )?;
+        }
         Ok(parse_printed(&out)?)
     }
 

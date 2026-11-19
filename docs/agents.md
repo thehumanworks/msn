@@ -179,6 +179,19 @@ Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched
 
 `read` and `wait` still exist for awareness. They persist a **different** delivery cursor. Do not use `read` as the work loop: a successful `read` can hide an assignment from a later cold start without proving you processed it.
 
+### Resume on a new machine
+
+By default processing progress lives in a file on the agent's machine. If that machine can die, pass `--resumable` (or set `MSN_RESUMABLE=1`, which the MCP `peek`/`commit` tools also read) and the server keeps `committedThrough` for the reader. The first resumable peek claims the reader (generation 1) and carries any local progress forward. Peek and commit output adds `generation`.
+
+A second machine never takes over by itself. Its peek fails with exit 5, and the error names the holder and the command to run:
+
+```sh
+msn takeover general --reader reviewer   # only when the old agent is gone for good
+msn peek general --resumable             # resumes after the old agent's last commit
+```
+
+After the takeover the old agent's next peek or commit fails with `processing_fenced` (exit 5): it must stop. Anything it fetched but did not commit is replayed to the replacement, so keep stable `--key`s on sends. See [ADR 0034](adr/0034-resumable-processing-cursors.md).
+
 ## Use MSN from an MCP harness
 
 `msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board`. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).

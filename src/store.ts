@@ -80,7 +80,7 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 14;
 /** A runner counts as listening this long after its last event poll ended (ADR 0028). */
 export const LISTENING_GRACE_MS = 60_000;
 /** `persona_presence.lastListeningAt` is written at most this often per persona while it polls. */
@@ -137,6 +137,46 @@ type EventRow = {
 const EVENT_COLUMNS = "id, channel, type, resourceId, historyRevision, createdAt";
 function toEvent(row: EventRow, tenant: string): CoordinationEvent {
   return { ...row, tenant };
+}
+
+/** Resumable processing progress per channel and reader, fenced by generation (ADR 0034). */
+type ProcessingRow = {
+  reader: string;
+  committedThrough: number;
+  generation: number;
+  holder: string | null;
+  claimedAt: string;
+  updatedAt: string;
+};
+const PROCESSING_COLUMNS = "reader, committedThrough, generation, holder, claimedAt, updatedAt";
+type ProcessingFence = { reader: string; generation: number };
+function toProcessing(row: ProcessingRow) {
+  return { ...row };
+}
+function processingReader(value: string | undefined): string {
+  let reader: string;
+  try {
+    reader = decodeURIComponent(value ?? "");
+  } catch {
+    throw new HttpError(400, "invalid_reader", "Reader must be URL-encoded UTF-8.");
+  }
+  return text(reader, "reader", 128, "invalid_reader");
+}
+function processingInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new HttpError(400, "invalid_processing", `${field} must be a non-negative integer.`);
+  return value;
+}
+function processingFence(url: URL): ProcessingFence | null {
+  const reader = url.searchParams.get("processingReader");
+  const generation = url.searchParams.get("generation");
+  if (reader === null && generation === null) return null;
+  if (reader === null || generation === null)
+    throw new HttpError(400, "invalid_query", "processingReader and generation go together.");
+  return {
+    reader: text(reader, "processingReader", 128, "invalid_reader"),
+    generation: integer(generation, 0, Number.MAX_SAFE_INTEGER),
+  };
 }
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
@@ -249,6 +289,11 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS push_subscriptions (
           endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, createdAt TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS processing_cursors (
+          channel TEXT NOT NULL, reader TEXT NOT NULL, committedThrough INTEGER NOT NULL,
+          generation INTEGER NOT NULL, holder TEXT, claimedAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+          PRIMARY KEY(channel, reader)
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -317,6 +362,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         // v11 → v12: owner push subscriptions and the workspace's VAPID key (ADR 0029). Both tables
         // are created above and start empty, so push stays off until an owner device subscribes.
         if (version < 12) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (12)");
+        // v13 is reserved for message labels (ADR 0032), whose table is created idempotently above, so
+        // its marker is safe to record in either merge order; a fresh database records it too.
+        if (version < 13) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (13)");
+        // v13 → v14: resumable processing cursors (ADR 0034). The table is created above and starts
+        // empty; agents that never opt in keep local-only progress.
+        if (version < 14) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (14)");
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -968,9 +1019,16 @@ export class MsnDurableObject extends DurableObject<Env> {
     after: number,
     limit: number,
     wait: number,
+    fence: ProcessingFence | null = null,
   ): Promise<Response> | Response {
+    const respond = (page: ReturnType<typeof this.page>) => {
+      if (!fence) return json(page);
+      // Recheck at reply time: a takeover during a long poll fences this reply, too.
+      this.requireGeneration(channel, fence.reader, fence.generation);
+      return json({ ...page, committedThrough: after, generation: fence.generation });
+    };
     const page = this.page(tenant, channel, after, limit);
-    if (page.messages.length || !wait) return json(page);
+    if (page.messages.length || !wait) return respond(page);
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
     // No await between SELECT and registration: sends cannot fall into a lost-wakeup gap.
@@ -989,7 +1047,9 @@ export class MsnDurableObject extends DurableObject<Env> {
           finished = true;
           cleanup();
           resolve(
-            aborted ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499) : json(next),
+            aborted
+              ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499)
+              : respond(next),
           );
         } catch (error) {
           finished = true;
@@ -1346,6 +1406,132 @@ export class MsnDurableObject extends DurableObject<Env> {
         413,
       );
     return json(result);
+  }
+
+  /** Current processing cursor row, or null when the reader was never claimed (ADR 0034). */
+  private processingRow(channel: string, reader: string): ProcessingRow | null {
+    return (
+      this.ctx.storage.sql
+        .exec<ProcessingRow>(
+          `SELECT ${PROCESSING_COLUMNS} FROM processing_cursors WHERE channel = ? AND reader = ?`,
+          channel,
+          reader,
+        )
+        .toArray()[0] ?? null
+    );
+  }
+
+  /**
+   * The fence (ADR 0034). Synchronous, so callers run it in the same storage turn as the read or
+   * write it guards: once a takeover commits, no request carrying an older generation succeeds.
+   */
+  private requireGeneration(channel: string, reader: string, generation: number): ProcessingRow {
+    const row = this.processingRow(channel, reader);
+    if (!row)
+      throw new HttpError(
+        404,
+        "processing_not_claimed",
+        "This reader has no resumable progress on this channel. Claim it first.",
+      );
+    if (row.generation !== generation)
+      throw new HttpError(
+        409,
+        "processing_fenced",
+        `Generation ${generation} was taken over; generation ${row.generation} now holds this reader. Stop processing.`,
+      );
+    return row;
+  }
+
+  private async processingRoute(request: Request, channel: string, rest: string[]): Promise<Response> {
+    this.requireChannel(channel);
+    const reader = processingReader(rest[0]);
+    if (rest.length === 1 && request.method === "GET") {
+      const row = this.processingRow(channel, reader);
+      return json(row ? toProcessing(row) : { reader, generation: 0, committedThrough: 0, holder: null });
+    }
+    if (rest.length !== 2 || request.method !== "POST")
+      throw new HttpError(404, "route_not_found", "Unknown processing operation.");
+    const input = await body(request);
+    if (rest[1] === "claim") {
+      const expected = processingInteger(input.expectGeneration, "expectGeneration");
+      const holder =
+        input.holder === undefined || input.holder === null ? null : text(input.holder, "holder", 128);
+      const start =
+        input.committedThrough === undefined
+          ? 0
+          : processingInteger(input.committedThrough, "committedThrough");
+      const row = this.ctx.storage.transactionSync(() => {
+        const current = this.processingRow(channel, reader);
+        const generation = current?.generation ?? 0;
+        if (generation !== expected)
+          throw new HttpError(
+            409,
+            generation && !expected ? "processing_held" : "processing_generation_mismatch",
+            generation && !expected
+              ? `Generation ${generation} holds this reader. Take over explicitly only if that agent is gone.`
+              : `expectGeneration is ${expected} but generation ${generation} holds this reader. Read it again.`,
+            { generation, holder: current?.holder ?? null, committedThrough: current?.committedThrough ?? 0 },
+          );
+        // A first claim may carry local progress forward; a takeover always keeps the server's.
+        if (current && input.committedThrough !== undefined)
+          throw new HttpError(
+            400,
+            "invalid_processing",
+            "committedThrough is only accepted on a first claim.",
+          );
+        if (start > this.headCursor(channel))
+          throw new HttpError(400, "invalid_cursor", "committedThrough exceeds this channel's current head.");
+        const now = new Date().toISOString();
+        return this.ctx.storage.sql
+          .exec<ProcessingRow>(
+            `INSERT INTO processing_cursors(channel, reader, committedThrough, generation, holder, claimedAt, updatedAt)
+             VALUES (?, ?, ?, 1, ?, ?, ?)
+             ON CONFLICT(channel, reader) DO UPDATE SET generation = generation + 1, holder = excluded.holder,
+               claimedAt = excluded.claimedAt, updatedAt = excluded.updatedAt
+             RETURNING ${PROCESSING_COLUMNS}`,
+            channel,
+            reader,
+            start,
+            holder,
+            now,
+            now,
+          )
+          .one();
+      });
+      return json({ ...toProcessing(row), previousGeneration: expected }, expected ? 200 : 201);
+    }
+    if (rest[1] === "commit") {
+      const generation = processingInteger(input.generation, "generation");
+      const through = processingInteger(input.through, "through");
+      const row = this.ctx.storage.transactionSync(() => {
+        // Fence check and write share one transaction: a superseded generation cannot commit.
+        const current = this.requireGeneration(channel, reader, generation);
+        if (through < current.committedThrough)
+          throw new HttpError(409, "commit_behind", "through is behind committedThrough.", {
+            committedThrough: current.committedThrough,
+          });
+        if (through > this.headCursor(channel))
+          throw new HttpError(400, "invalid_cursor", "through exceeds this channel's current head.");
+        return this.ctx.storage.sql
+          .exec<ProcessingRow>(
+            `UPDATE processing_cursors SET committedThrough = ?, updatedAt = ? WHERE channel = ? AND reader = ?
+             RETURNING ${PROCESSING_COLUMNS}`,
+            through,
+            new Date().toISOString(),
+            channel,
+            reader,
+          )
+          .one();
+      });
+      return json(toProcessing(row));
+    }
+    throw new HttpError(404, "route_not_found", "Unknown processing operation.");
+  }
+
+  private headCursor(channel: string): number {
+    return this.ctx.storage.sql
+      .exec<{ head: number }>("SELECT COALESCE(MAX(id), 0) AS head FROM messages WHERE channel = ?", channel)
+      .one().head;
   }
 
   private requireScope(capability: TenantRow, channel: string | null): void {
@@ -1811,6 +1997,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
             return this.catchup(tenant, channel, url);
+          if (rest[2] === "processing") return await this.processingRoute(request, channel, rest.slice(3));
           if (rest[2] === "snapshots") {
             this.requireChannel(channel);
             if (rest.length === 3 && request.method === "POST" && snapshotData) {
@@ -1902,10 +2089,27 @@ export class MsnDurableObject extends DurableObject<Env> {
             }
             if (request.method === "GET") {
               this.requireChannel(channel);
-              const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
               const limit = integer(url.searchParams.get("limit"), 100, 100);
               const wait = integer(url.searchParams.get("wait"), 0, 25);
               if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+              const fence = processingFence(url);
+              if (fence) {
+                // Resumable peek (ADR 0034): the server's committedThrough is the start, and a
+                // superseded generation is refused before and after any wait.
+                if (url.searchParams.has("after"))
+                  throw new HttpError(
+                    400,
+                    "invalid_query",
+                    "after cannot be combined with processingReader.",
+                  );
+                const after = this.requireGeneration(
+                  channel,
+                  fence.reader,
+                  fence.generation,
+                ).committedThrough;
+                return await this.poll(request, hash, tenant, channel, after, limit, wait, fence);
+              }
+              const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
               return await this.poll(request, hash, tenant, channel, after, limit, wait);
             }
           }

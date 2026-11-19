@@ -407,7 +407,7 @@ describe("owner push notifications", () => {
     expect((await say(f, "Anyone there?", { to: "human" })).status).toBe(201);
     await runInDurableObject(f.stub, (_, state) => {
       expect(state.storage.sql.exec("SELECT COUNT(*) AS n FROM push_keys").one().n).toBe(0);
-      expect(state.storage.sql.exec("SELECT MAX(version) AS v FROM schema_version").one().v).toBe(12);
+      expect(state.storage.sql.exec("SELECT MAX(version) AS v FROM schema_version").one().v).toBe(14);
     });
     expect(f.sent).toHaveLength(0);
   });

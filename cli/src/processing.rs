@@ -43,10 +43,14 @@ pub struct ProcessingState {
     pub committed_through: u64,
     #[serde(rename = "highestFetched")]
     pub highest_fetched: u64,
+    /// Set once this reader's progress is resumable on the server (ADR 0034); the fence on every
+    /// resumable peek and commit. Absent for local-only progress, so older files stay valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 impl ProcessingState {
-    fn fresh(url: &Url, tenant: &str, channel: &str, reader: &str) -> Self {
+    pub(crate) fn fresh(url: &Url, tenant: &str, channel: &str, reader: &str) -> Self {
         Self {
             server: origin_key(url),
             tenant: tenant.to_string(),
@@ -54,6 +58,7 @@ impl ProcessingState {
             reader: reader.to_string(),
             committed_through: 0,
             highest_fetched: 0,
+            generation: None,
         }
     }
 
@@ -157,6 +162,7 @@ pub(crate) fn peek_to(
         path,
         &ProcessingState::expected(url, tenant, channel, reader),
     )?;
+    refuse_resumable(&state)?;
     if stop.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -211,6 +217,7 @@ pub(crate) fn commit_to(
         path,
         &ProcessingState::expected(url, tenant, channel, reader),
     )?;
+    refuse_resumable(&state)?;
     if through < state.committed_through {
         return Err(CliError::usage(
             "Commit --through is behind committedThrough.",
@@ -237,7 +244,17 @@ pub(crate) fn commit_to(
     Ok(())
 }
 
-fn validate_bounds(wait: u64, limit: u64) -> Result<(), CliError> {
+/// Local-only commands must not move progress that the server now owns (ADR 0034).
+fn refuse_resumable(state: &ProcessingState) -> Result<(), CliError> {
+    if state.generation.is_some() {
+        return Err(CliError::usage(
+            "This reader's progress is resumable (kept on the server). Pass --resumable or set MSN_RESUMABLE=1.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bounds(wait: u64, limit: u64) -> Result<(), CliError> {
     if wait > MAX_WAIT {
         return Err(CliError::usage("wait must be an integer from 0 to 25."));
     }
@@ -247,7 +264,7 @@ fn validate_bounds(wait: u64, limit: u64) -> Result<(), CliError> {
     Ok(())
 }
 
-fn resolve_path(
+pub(crate) fn resolve_path(
     url: &Url,
     tenant: &str,
     reader: &str,
@@ -264,7 +281,10 @@ fn resolve_path(
     Ok(path)
 }
 
-fn load_processing(path: &Path, expected: &ProcessingState) -> Result<ProcessingState, CliError> {
+pub(crate) fn load_processing(
+    path: &Path,
+    expected: &ProcessingState,
+) -> Result<ProcessingState, CliError> {
     let raw = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -293,6 +313,10 @@ fn load_processing(path: &Path, expected: &ProcessingState) -> Result<Processing
     if committed_through > highest_fetched {
         return Err(corrupt_state());
     }
+    let generation = match &saved.generation {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_watermark(value, "generation")?),
+    };
     Ok(ProcessingState {
         server: saved.server,
         tenant: saved.tenant,
@@ -300,10 +324,11 @@ fn load_processing(path: &Path, expected: &ProcessingState) -> Result<Processing
         reader: saved.reader,
         committed_through,
         highest_fetched,
+        generation,
     })
 }
 
-fn write_processing(path: &Path, state: &ProcessingState) -> Result<(), CliError> {
+pub(crate) fn write_processing(path: &Path, state: &ProcessingState) -> Result<(), CliError> {
     if state.committed_through > state.highest_fetched {
         return Err(corrupt_state());
     }
@@ -343,6 +368,8 @@ struct ProcessingFile {
     committed_through: Value,
     #[serde(rename = "highestFetched")]
     highest_fetched: Value,
+    #[serde(default)]
+    generation: Option<Value>,
 }
 
 fn parse_watermark(value: &Value, name: &str) -> Result<u64, CliError> {
@@ -356,7 +383,7 @@ fn parse_watermark(value: &Value, name: &str) -> Result<u64, CliError> {
     }
 }
 
-fn parse_processing_page(
+pub(crate) fn parse_processing_page(
     body: &str,
     tenant: &str,
     channel: &str,
@@ -458,7 +485,7 @@ fn corrupt_state() -> CliError {
     CliError::usage("Processing file is corrupt.")
 }
 
-fn get_interruptible(
+pub(crate) fn get_interruptible(
     client: Arc<MsnClient>,
     path: String,
     token: String,
