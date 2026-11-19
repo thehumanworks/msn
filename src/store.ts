@@ -700,6 +700,13 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (!subscriptions.length) return;
     const attention = needsOwner(message, this.ownerNames());
     if (!attention) return;
+    // At most one push per board and reason per cooldown, so a looping or noisy sender cannot
+    // flood the owner. The board itself still records every message.
+    const throttle = JSON.stringify([message.channel, attention.reason]);
+    const now = Date.now();
+    const last = this.pushSentAt.get(throttle);
+    if (last !== undefined && now - last < this.pushCooldownMs) return;
+    this.pushSentAt.set(throttle, now);
     const payload = {
       schema: "msn.push.v1",
       tenant: message.tenant,
@@ -710,7 +717,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       body: `${message.username}: ${attention.summary}`,
     };
     this.ctx.waitUntil(
-      Promise.all(
+      Promise.allSettled(
         subscriptions.map(async (subscription) => {
           const result = await sendPush(keys, subscription, keys.subject, payload, this.pushFetch);
           // The push service says this device unsubscribed; stop sending to it.
@@ -724,6 +731,10 @@ export class MsnDurableObject extends DurableObject<Env> {
     );
   }
 
+  /** Last push time per [board, reason]; memory only, so it resets when the object restarts. */
+  private pushSentAt = new Map<string, number>();
+  /** Replaced in tests. */
+  pushCooldownMs = 60_000;
   /** Replaced in tests; production calls the push service directly. */
   pushFetch: typeof fetch = (input, init) => fetch(input, init);
 

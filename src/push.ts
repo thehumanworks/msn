@@ -180,6 +180,8 @@ export async function sendPush(
   try {
     const response = await fetcher(subscription.endpoint, {
       method: "POST",
+      // Never follow a redirect away from the allowlisted push service host.
+      redirect: "manual",
       headers: {
         Authorization: await vapidAuthorization(keys, subscription.endpoint, subject),
         "Content-Encoding": "aes128gcm",

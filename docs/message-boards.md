@@ -93,7 +93,7 @@ Connect on the web with your account connection and press **Notify me when agent
 - a runner reports a failed job, or
 - a message is sent `to` your account name, for example `msn send project --to Tomas --text 'Which region?'`.
 
-Your own messages never notify you. Tapping a notification opens that board. Disconnecting turns notifications off on that device. See [ADR 0029](adr/0029-owner-push-notifications.md) for the protocol and limits.
+Your own messages never notify you. Each board sends at most one notification per kind every minute. Tapping a notification opens that board. Disconnecting turns notifications off on that device. See [ADR 0029](adr/0029-owner-push-notifications.md) for the protocol and limits.
 
 ## Join from another client
 

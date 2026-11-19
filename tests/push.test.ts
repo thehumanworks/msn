@@ -215,6 +215,8 @@ async function fixture() {
   let status = 201;
   const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
   await runInDurableObject(stub, (instance: MsnDurableObject) => {
+    // Delivery tests check every trigger; the cooldown has its own test.
+    instance.pushCooldownMs = 0;
     instance.pushFetch = async (input, init) => {
       sent.push({
         url: String(input),
@@ -408,6 +410,84 @@ describe("owner push notifications", () => {
       expect(state.storage.sql.exec("SELECT MAX(version) AS v FROM schema_version").one().v).toBe(12);
     });
     expect(f.sent).toHaveLength(0);
+  });
+
+  it("sends at most one push per board and reason per cooldown", async () => {
+    const f = await fixture();
+    await runInDurableObject(f.stub, (instance: MsnDurableObject) => {
+      instance.pushCooldownMs = 60_000;
+    });
+    const device = await browser();
+    await call(f.tenant, "/push", f.owner);
+    await call(f.tenant, "/push/subscriptions", f.owner, "PUT", device.subscription);
+    for (let i = 0; i < 5; i++) expect((await say(f, `question ${i}`, { to: "human" })).status).toBe(201);
+    await say(f, JSON.stringify({ schema: "msn.task.v1", task: "release", action: "block", reason: "x" }), {
+      contentType: "application/json",
+    });
+    await say(f, JSON.stringify({ schema: "msn.task.v1", task: "other", action: "block", reason: "y" }), {
+      contentType: "application/json",
+    });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+    // Give any extra (wrong) delivery a chance to show up before asserting there is none.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(f.sent).toHaveLength(2);
+    expect(JSON.parse(await decrypt(device, f.sent[0].body))).toMatchObject({ body: "lead: question 0" });
+    expect(JSON.parse(await decrypt(device, f.sent[1].body))).toMatchObject({ reason: "task_blocked" });
+  });
+
+  it("an owner credential never notifies, even when sending under another name", async () => {
+    // A legacy unbound workspace token is an owner credential that may send as any name.
+    const tenant = `push-${crypto.randomUUID()}`;
+    const provisioned = await exports.default.fetch(`https://msn.test/api/admin/tenants/${tenant}`, {
+      method: "PUT",
+      headers: { Authorization: "Bearer test-admin-secret-000000000000000000000" },
+    });
+    const workspace = (await provisioned.json<{ token: string }>()).token;
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
+    const human = (await stub.accountSession(tenant, "human")).token;
+    const sent: string[] = [];
+    await runInDurableObject(stub, (instance: MsnDurableObject) => {
+      instance.pushCooldownMs = 0;
+      instance.pushFetch = async (input) => {
+        sent.push(String(input));
+        return new Response(null, { status: 201 });
+      };
+    });
+    const device = await browser();
+    await call(tenant, "/push", human);
+    await call(tenant, "/push/subscriptions", human, "PUT", device.subscription);
+    expect(
+      (
+        await call(tenant, "/channels/ops/messages", workspace, "POST", {
+          username: "ops",
+          text: "hi",
+          to: "human",
+        })
+      ).status,
+    ).toBe(201);
+    // A participant key (not an owner credential) with the same message does notify.
+    const key = await exports.default.fetch(`https://msn.test/api/admin/tenants/${tenant}/keys/agent`, {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer test-admin-secret-000000000000000000000",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ username: "ops" }),
+    });
+    expect(key.status).toBe(201);
+    const agent = (await key.json<{ token: string }>()).token;
+    expect(
+      (
+        await call(tenant, "/channels/ops/messages", agent, "POST", {
+          username: "ops",
+          text: "hi",
+          to: "human",
+        })
+      ).status,
+    ).toBe(201);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(sent).toHaveLength(1);
   });
 
   it("an admin token rotation removes every registered device", async () => {

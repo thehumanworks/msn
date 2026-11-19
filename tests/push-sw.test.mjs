@@ -87,7 +87,7 @@ test("a click focuses an open app and asks it to open the board, or opens a new 
   assert.deepEqual(plain(messages), [{ type: "msn.open", tenant: "acme", channel: "release" }]);
   const closed = worker();
   await closed.fire("notificationclick", { notification });
-  assert.deepEqual(plain(closed.opened), ["/?channel=release"]);
+  assert.deepEqual(plain(closed.opened), ["/?tenant=acme&channel=release"]);
   const hostile = worker();
   await hostile.fire("notificationclick", { notification: { close: () => {}, data: { channel: "//evil" } } });
   assert.deepEqual(plain(hostile.opened), ["/"]);

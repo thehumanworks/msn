@@ -43,7 +43,12 @@ self.addEventListener("notificationclick", (event) => {
         if (channel) open.postMessage({ type: "msn.open", tenant: target.tenant, channel });
         return;
       }
-      await self.clients.openWindow(channel ? `/?channel=${encodeURIComponent(channel)}` : "/");
+      const tenant = NAME.test(target.tenant ?? "") ? target.tenant : "";
+      await self.clients.openWindow(
+        channel && tenant
+          ? `/?tenant=${encodeURIComponent(tenant)}&channel=${encodeURIComponent(channel)}`
+          : "/",
+      );
     })(),
   );
 });

@@ -105,19 +105,22 @@ function trimCache() {
   }
 }
 
-function endSession(connection, message) {
+// `stopPush` turns off this device's notifications: on Disconnect and on a revoked key, not when
+// an invitation link switches identity.
+function endSession(connection, message, { stopPush = false } = {}) {
   if (session !== connection) return;
   stopPolling();
   forgetSession(connection?.tenant);
   if (connection) {
-    // Leaving this device stops its notifications too. The request is sent before the token is cleared.
+    // The request is sent before the token is cleared.
     const token = connection.token;
-    disablePush(connection.tenant, (path, options) =>
-      fetch(`/api/tenants/${connection.tenant}${path}`, {
-        ...options,
-        headers: { Authorization: `Bearer ${token}`, ...options.headers },
-      }),
-    ).catch(() => {});
+    if (stopPush)
+      disablePush(connection.tenant, (path, options) =>
+        fetch(`/api/tenants/${connection.tenant}${path}`, {
+          ...options,
+          headers: { Authorization: `Bearer ${token}`, ...options.headers },
+        }),
+      ).catch(() => {});
     connection.token = "";
     for (const state of connection.drafts.values()) {
       state.content = "";
@@ -176,7 +179,7 @@ async function api(path, options = {}, connection = session) {
   // Connection identity (not channel/poll generation) protects a newer login from old requests.
   if (response.status === 401) {
     const message = "Session ended: invalid access key. Enter a valid access key to reconnect.";
-    endSession(connection, message);
+    endSession(connection, message, { stopPush: true });
     throw Object.assign(new Error(message), { status: 401 });
   }
   const data = response.status === 204 ? {} : await response.json();
@@ -883,7 +886,7 @@ $("refresh").addEventListener("click", async () => {
   }
 });
 $("disconnect").addEventListener("click", () => {
-  endSession(session, "Disconnected. Access key cleared from this browser.");
+  endSession(session, "Disconnected. Access key cleared from this browser.", { stopPush: true });
   $("status").classList.remove("error");
 });
 // A keyboard opening shortens the log without the reader scrolling. Scroll events it
@@ -952,9 +955,15 @@ const incomingInvite = receiveInvitation();
 entryMode();
 const remembered = incomingInvite ? null : savedSession();
 // A notification opens /?channel=NAME; the address bar goes back to / once it is read.
-const notifiedChannel = new URLSearchParams(location.search).get("channel");
+const notified = new URLSearchParams(location.search);
+const notifiedChannel = notified.get("channel");
 if (notifiedChannel !== null) history.replaceState(null, "", "/");
-if (remembered && notifiedChannel && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(notifiedChannel))
+if (
+  remembered &&
+  notified.get("tenant") === remembered.tenant &&
+  notifiedChannel &&
+  /^[a-z0-9][a-z0-9_-]{0,63}$/.test(notifiedChannel)
+)
   storage.set(CHANNEL_KEY(remembered.tenant), notifiedChannel);
 if (remembered) {
   $("tenant").value = remembered.tenant;
