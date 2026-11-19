@@ -51,7 +51,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         return runner::execute(&cli);
     }
     if matches!(&cli.command, Command::Mcp { .. }) {
-        return mcp::execute(&cli, stop);
+        return mcp::execute(&cli);
     }
     if matches!(
         &cli.command,

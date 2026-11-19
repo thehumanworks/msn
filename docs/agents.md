@@ -181,7 +181,7 @@ Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched
 
 ## Use MSN from an MCP harness
 
-`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board`. Each returns the same JSON as the matching command. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey`; retry an uncertain send with that key and identical content. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
+`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board`. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
 
 ```sh
 # Claude Code

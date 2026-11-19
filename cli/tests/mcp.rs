@@ -236,3 +236,35 @@ fn catch_up_rejects_a_page_from_another_channel() {
     let replies = session(&home, &server, &[call(1, "catch_up", json!({"after":2}))]);
     assert_eq!(replies[1]["result"]["isError"], true);
 }
+
+#[test]
+fn uncertain_send_returns_its_key_and_a_retry_reuses_it() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            503,
+            r#"{"error":{"code":"unavailable","message":"try again"}}"#,
+        ),
+        Scripted::json(
+            201,
+            r#"{"message":{"id":9,"tenant":"team","channel":"general","username":"alice","text":"hi"}}"#,
+        ),
+    ]);
+    let replies = session(&home, &server, &[call(1, "send", json!({"text":"hi"}))]);
+    let failed = &replies[1]["result"];
+    assert_eq!(failed["isError"], true);
+    let key = failed["structuredContent"]["idempotencyKey"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let replies = session(
+        &home,
+        &server,
+        &[call(1, "send", json!({"text":"hi","key":key}))],
+    );
+    assert_eq!(ok(&replies[1])["idempotencyKey"], key.as_str());
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].headers["idempotency-key"], key);
+    assert_eq!(requests[1].headers["idempotency-key"], key);
+}
