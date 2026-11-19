@@ -399,7 +399,11 @@ async function poll(live = false) {
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
       $("more").hidden = !data.hasMore;
-      status(live ? `Live in #${selected}` : `Polled #${selected} · ${data.messages.length} new`);
+      // An uncertain send keeps its "draft is preserved" warning until it is retried or edited;
+      // a poll that happens to return in the meantime must not hide it.
+      const pending = draft(connection, selected);
+      if (!pending.retry || pending.sending)
+        status(live ? `Live in #${selected}` : `Polled #${selected} · ${data.messages.length} new`);
       backoff = 1000;
     } catch (error) {
       if (generation !== epoch || error.name === "AbortError") return;
