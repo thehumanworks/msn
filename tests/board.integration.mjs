@@ -196,10 +196,17 @@ try {
     const p = child(binary, ["invite", "work", "--for-agent", "--name", "helper"]);
     const [code] = await p.done;
     assert.equal(code, 0, `invite --for-agent: ${p.errors}`);
-    return p.output;
+    return p;
   };
-  const paragraph = await handoff();
-  assert.equal(await handoff(), paragraph, "Repeating the invite keeps the same persona");
+  const first = await handoff();
+  const paragraph = first.output;
+  assert.ok(!first.errors.includes("Reusing existing persona"), "The first invite adds the persona");
+  const repeat = await handoff();
+  assert.equal(repeat.output, paragraph, "Repeating the invite keeps the same persona");
+  assert.ok(
+    repeat.errors.includes("Reusing existing persona helper."),
+    "A repeat says it reuses the persona",
+  );
   assert.ok(paragraph.includes("Finish the integration goal"), "The paragraph quotes the board goal");
   assert.ok(paragraph.includes("msn --profile work-helper peek work --wait 25"), "It says how to wait");
   assert.ok(paragraph.includes("msn --profile work-helper mcp --channel work"), "It offers MCP");

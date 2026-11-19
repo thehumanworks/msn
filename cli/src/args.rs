@@ -268,7 +268,7 @@ pub enum Command {
         expires_in: u32,
         /// Print one paragraph to paste into any agent: how to join this board as a persona,
         /// the board goal and how to wait for work. Needs CHANNEL and --name.
-        #[arg(long, requires_all = ["channel", "name"])]
+        #[arg(long, requires_all = ["channel", "name"], conflicts_with_all = ["uses", "expires_in"])]
         for_agent: bool,
         /// The agent's persona name on the board (with --for-agent)
         #[arg(long, requires = "for_agent")]
