@@ -389,6 +389,8 @@ bun run test:transfer          # requires Rust; two independent local Workers, e
 
 The v1 SQLite DO migration/class identity from the starter is preserved. Existing tenants upgrade their SQLite schema in place on first use; their original keys and history remain intact. These checkout changes require a Worker deployment and a rebuilt Rust CLI before they are available remotely.
 
+**Production deploys run from GitHub Actions, not from a personal computer.** The `deploy Worker` job in `.github/workflows/ci.yml` runs after the `rust`, `js` and `agent-workflows` jobs pass. On a pull request it only bundles and validates the Worker (`wrangler deploy --dry-run`, no credentials). On a push to `main` it runs `wrangler deploy`, which keeps the existing `ADMIN_TOKEN` secret. It needs two repository secrets: `CLOUDFLARE_API_TOKEN` (an account API token from the "Edit Cloudflare Workers" template, limited to this account and the `thehuman.sh` zone) and `CLOUDFLARE_ACCOUNT_ID`. If they are missing, the job fails with a clear error instead of skipping silently. The manual commands below are for the first deployment and for rotating the admin secret.
+
 A deploy does **not** transfer a local workspace. History, snapshots, and participant keys stay on the Durable Object they were issued against. After deploying code, provision or reuse a **remote** workspace and issue new keys (or copy a channel across with `msn export` and `msn import`). `scripts/onboarding-check.mjs` confirms a participant can read the advertised channel on that origin.
 
 ```sh
