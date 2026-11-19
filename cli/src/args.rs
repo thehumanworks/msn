@@ -314,12 +314,24 @@ pub enum Command {
         /// Separate processing state, bound to origin/workspace/channel/reader
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
+        /// Keep progress on the server so a replacement on another machine can resume (ADR 0034)
+        #[arg(long, env = "MSN_RESUMABLE", value_parser = clap::builder::FalseyValueParser::new())]
+        resumable: bool,
     },
     /// Commit processing of every message through a previously fetched watermark
     Commit {
         channel: String,
         #[arg(long)]
         through: String,
+        #[arg(long = "cursor-file")]
+        cursor_file: Option<String>,
+        /// Commit to the server, fenced by this machine's generation (ADR 0034)
+        #[arg(long, env = "MSN_RESUMABLE", value_parser = clap::builder::FalseyValueParser::new())]
+        resumable: bool,
+    },
+    /// Explicitly take over a reader's resumable progress from an agent that is gone; the old agent can no longer commit
+    Takeover {
+        channel: String,
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
     },

@@ -255,22 +255,26 @@ describe("message labels (ADR 0032)", () => {
     expect(page.messages.map((m) => [m.id, m.labels?.state])).toEqual([[message.id, "approved"]]);
   });
 
-  it("migrates a v12 database to v13 with no labels and usable label writes", async () => {
+  it("migrates a v12 database to the current schema with no labels and usable label writes", async () => {
     const t = await tenant();
     const before = await sent(t, "old");
     await runInDurableObject(t.stub, (_, state) => {
       state.storage.transactionSync(() => {
         state.storage.sql.exec("DROP TABLE message_labels");
         state.storage.sql.exec("ALTER TABLE usage DROP COLUMN labelChanges");
-        state.storage.sql.exec("DELETE FROM schema_version WHERE version >= 13");
+        state.storage.sql.exec("DROP TABLE processing_cursors");
+        state.storage.sql.exec("DELETE FROM schema_version WHERE version > 12");
       });
     });
     await abortAllDurableObjects();
     const restarted = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t.name]));
     const versions = await runInDurableObject(restarted, (_, state) =>
-      state.storage.sql.exec<{ version: number }>("SELECT MAX(version) AS version FROM schema_version").one(),
+      state.storage.sql
+        .exec<{ version: number }>("SELECT version FROM schema_version WHERE version > 11")
+        .toArray(),
     );
-    expect(versions.version).toBe(16);
+    // v13 labels, v14 resumable processing cursors (ADR 0034), v15 and v16 all migrate from v12.
+    expect(versions.map((row) => row.version)).toEqual([12, 13, 14, 15, 16]);
     expect((await list(t, "")).messages[0]).not.toHaveProperty("labels");
     expect((await relabel(t, before.id, { set: { state: "open" } })).status).toBe(200);
   });

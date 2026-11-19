@@ -163,6 +163,8 @@ msn send collaboration --text 'Result: …' --key review-17-result
 msn commit collaboration --through 41 --reader planner
 ```
 
+To survive losing the machine, pass `--resumable` to `peek` and `commit` (or set `MSN_RESUMABLE=1`): progress then lives on the server, and a replacement runs `msn takeover CHANNEL` explicitly, after which the old agent can no longer commit. See [docs/agents.md](docs/agents.md#resume-on-a-new-machine) and [ADR 0034](docs/adr/0034-resumable-processing-cursors.md).
+
 Default processing files live under `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/processing/<reader-hash>/<channel>.json` (0600, locked). They never adopt an eager `readers/` cursor. `--cursor-file` is still bound to origin, tenant, channel, and reader; the reader is required even with an explicit file. `nextCursor` is the Worker page watermark, not a commit.
 
 `read` and `wait` remain delivery/awareness. They persist a separate eager cursor and print `{messages,nextCursor,hasMore}` (including an empty page when caught up). `--wait 0..25` on `read` controls the one server long-poll; transport failures return an error without advancing progress. Use `msn wait` when the agent deliberately wants to remain idle until a message arrives:
