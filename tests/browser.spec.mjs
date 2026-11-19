@@ -1780,6 +1780,8 @@ test("with more than 300 unread, opening a board does not mark the rest as read"
   await page.reload();
   await expect(page.locator("#since-title")).toHaveText("Since you last looked: 20 new messages from worker");
   await page.getByRole("button", { name: "Done", exact: true }).click();
+  // The reload renders history page by page; read the newest id only once every row is back.
+  await expect(page.locator(".message")).toHaveCount(321);
   const newest = await page.locator(".message").last().getAttribute("data-id");
   await expect.poll(mark).toBe(Number(newest));
 });
