@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -71,7 +71,7 @@ export async function runHost(config, signal, options = {}) {
     store.close();
   }
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const controller = new AbortController();
   for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => controller.abort());
   try {
