@@ -144,6 +144,8 @@ pub enum UiEvent {
         head: u64,
         revision: u64,
         board: Result<Value, String>,
+        /// Pinned messages (ADR 0038); empty when the server has none or does not support pins.
+        pins: Vec<Value>,
     },
     Snapshots {
         generation: u64,
@@ -430,6 +432,10 @@ fn handle_command(
             {
                 Ok(history) => {
                     let board = client_ops::project_board(&history);
+                    // Pins send no message or event, so every sync re-reads them. A failure
+                    // (or an older server) shows none rather than failing the history.
+                    let pins = client_ops::fetch_pins(&cc.client, &cc.tenant, &cc.token, &channel)
+                        .unwrap_or_default();
                     let mut messages = history.messages;
                     let keep = crate::state::MAX_CACHED_MESSAGES;
                     if messages.len() > keep {
@@ -446,6 +452,7 @@ fn handle_command(
                             head: history.head,
                             revision: history.revision,
                             board,
+                            pins,
                         },
                     );
                 }
