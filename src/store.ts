@@ -38,6 +38,7 @@ import {
   labels as parseLabels,
   recipient,
   replyTarget,
+  searchMatch,
   slug,
   snapshotInteger,
   text,
@@ -101,7 +102,16 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
+/** Older messages indexed per backfill step after the v17 migration (ADR 0037). */
+export const SEARCH_BACKFILL_BATCH = 500;
+/** `kind` search filter values and the content type each one matches. */
+const SEARCH_KINDS: Record<string, ContentType | undefined> = Object.assign(Object.create(null), {
+  text: "text/plain",
+  json: "application/json",
+  "text/plain": "text/plain",
+  "application/json": "application/json",
+});
 /** Lifetime label changes per workspace; each one writes a journal event (ADR 0032). */
 const MAX_LABEL_CHANGES = 100000;
 /** A runner counts as listening this long after its last event poll ended (ADR 0028). */
@@ -292,6 +302,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           headSha TEXT, greenSha TEXT, createdAt TEXT NOT NULL, PRIMARY KEY(repo, number, channel)
         );
         CREATE INDEX IF NOT EXISTS github_link_heads ON github_links(repo, headSha);
+        CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(
+          text, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2'
+        );
+        CREATE TABLE IF NOT EXISTS search_backfill (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1), indexedThrough INTEGER NOT NULL,
+          target INTEGER NOT NULL
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -371,6 +388,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (version < 16)
           for (const applied of [14, 15, 16])
             ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
+        // v16 → v17: message search (ADR 0037). The index is created above and empty; every message
+        // that exists now is indexed in batches by alarm(), and new sends are indexed as they land.
+        if (version < 17) {
+          ctx.storage.sql.exec(
+            "INSERT OR IGNORE INTO search_backfill(singleton, indexedThrough, target) SELECT 1, 0, COALESCE(MAX(id), 0) FROM messages",
+          );
+          ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (17)");
+        }
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -385,6 +410,45 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
       }
     });
+    if (!this.searchIndexed()) void ctx.storage.setAlarm(Date.now());
+  }
+
+  /** True once every message that existed at the v17 migration is in the search index. */
+  private searchIndexed(): boolean {
+    const state = this.ctx.storage.sql
+      .exec<{ indexedThrough: number; target: number }>("SELECT indexedThrough, target FROM search_backfill")
+      .toArray()[0];
+    return !state || state.indexedThrough >= state.target;
+  }
+
+  /** Indexes the next batch of pre-v17 messages; returns true when nothing is left (ADR 0037). */
+  backfillSearch(batch = SEARCH_BACKFILL_BATCH): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.ctx.storage.sql
+        .exec<{ indexedThrough: number; target: number }>(
+          "SELECT indexedThrough, target FROM search_backfill",
+        )
+        .toArray()[0];
+      if (!state || state.indexedThrough >= state.target) return true;
+      const rows = this.ctx.storage.sql
+        .exec<{ id: number; text: string }>(
+          "SELECT id, text FROM messages WHERE id > ? AND id <= ? AND deleted = 0 ORDER BY id LIMIT ?",
+          state.indexedThrough,
+          state.target,
+          batch,
+        )
+        .toArray();
+      for (const row of rows)
+        this.ctx.storage.sql.exec("INSERT INTO message_search(rowid, text) VALUES (?, ?)", row.id, row.text);
+      const through = rows.length < batch ? state.target : (rows.at(-1)?.id ?? state.target);
+      this.ctx.storage.sql.exec("UPDATE search_backfill SET indexedThrough = ? WHERE singleton = 1", through);
+      return through >= state.target;
+    });
+  }
+
+  /** The only alarm user today: one backfill batch per run until the search index is complete. */
+  async alarm(): Promise<void> {
+    if (!this.backfillSearch()) await this.ctx.storage.setAlarm(Date.now());
   }
 
   async accountSession(tenant: string, username: string) {
@@ -1577,6 +1641,11 @@ export class MsnDurableObject extends DurableObject<Env> {
         "UPDATE usage SET messages = messages + 1, bytes = bytes + ? WHERE singleton = 1",
         bytes,
       );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO message_search(rowid, text) VALUES (?, ?)",
+        message.id,
+        message.text,
+      );
       for (const [label, value] of Object.entries(labels ?? {}))
         this.ctx.storage.sql.exec(
           "INSERT INTO message_labels(channel, messageId, key, value, updatedAt) VALUES (?, ?, ?, ?, ?)",
@@ -1604,6 +1673,95 @@ export class MsnDurableObject extends DurableObject<Env> {
         .exec<{ revision: number }>("SELECT revision FROM channel_history WHERE channel = ?", channel)
         .toArray()[0]?.revision ?? 0
     );
+  }
+
+  /**
+   * Newest-first search of one channel (ADR 0037). `q` drives the FTS5 index, so its cost follows
+   * how many messages in the workspace match; `from`, `kind` and `label` narrow it. Without `q`
+   * the channel's own index is scanned newest first. `before` pages to older matches.
+   */
+  private search(tenant: string, channel: string, params: URLSearchParams): Response {
+    for (const name of params.keys())
+      if (!["q", "from", "kind", "label", "before", "limit"].includes(name))
+        throw new HttpError(400, "invalid_query", `Unknown search parameter ${name}.`);
+    const q = params.get("q") ?? "";
+    const match = searchMatch(q);
+    if (q.trim() && !match) throw new HttpError(400, "invalid_query", "q has no words to search for.");
+    const from = params.has("from") ? text(params.get("from"), "from", 128) : null;
+    const kindParam = params.get("kind");
+    const kind = kindParam === null ? null : SEARCH_KINDS[kindParam];
+    if (kind === undefined) throw new HttpError(400, "invalid_query", "kind must be text or json.");
+    const filters = labelFilters(params);
+    if (!match && from === null && kind === null && !filters.length)
+      throw new HttpError(400, "invalid_query", "Search needs q, from, kind or label.");
+    const before = params.has("before")
+      ? integer(params.get("before"), 0, Number.MAX_SAFE_INTEGER)
+      : Number.MAX_SAFE_INTEGER;
+    const limit = integer(params.get("limit"), 20, 100);
+    if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+    const columns = MESSAGE_COLUMNS.split(", ")
+      .map((column) => `m.${column}`)
+      .join(", ");
+    const where: string[] = ["m.channel = ?", "m.deleted = 0", "m.id < ?"];
+    const bindings: unknown[] = [channel, before];
+    if (from !== null) {
+      where.push("m.username = ?");
+      bindings.push(from);
+    }
+    if (kind !== null) {
+      where.push("m.contentType = ?");
+      bindings.push(kind);
+    }
+    for (const filter of filters) {
+      where.push(
+        `EXISTS (SELECT 1 FROM message_labels l WHERE l.channel = m.channel AND l.messageId = m.id AND l.key = ?${
+          filter.values ? ` AND l.value IN (${filter.values.map(() => "?").join(", ")})` : ""
+        })`,
+      );
+      bindings.push(filter.key, ...(filter.values ?? []));
+    }
+    const rows = match
+      ? this.ctx.storage.sql
+          .exec<MessageRow>(
+            `SELECT ${columns} FROM message_search s JOIN messages m ON m.id = s.rowid
+             WHERE message_search MATCH ? AND s.rowid < ? AND ${where.join(" AND ")}
+             ORDER BY s.rowid DESC LIMIT ?`,
+            match,
+            before,
+            ...bindings,
+            limit + 1,
+          )
+          .toArray()
+      : this.ctx.storage.sql
+          .exec<MessageRow>(
+            `SELECT ${columns} FROM messages m WHERE ${where.join(" AND ")} ORDER BY m.id DESC LIMIT ?`,
+            ...bindings,
+            limit + 1,
+          )
+          .toArray();
+    const messages = rows.slice(0, limit).map((row) => toMessage(row, tenant));
+    if (messages.length) {
+      // Matches can be far apart, so read labels by id rather than by range as withLabels does.
+      const byId = new Map(messages.map((message) => [message.id, message]));
+      for (const row of this.ctx.storage.sql
+        .exec<{ messageId: number; key: string; value: string }>(
+          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${messages
+            .map(() => "?")
+            .join(", ")}) ORDER BY messageId, key`,
+          channel,
+          ...byId.keys(),
+        )
+        .toArray()) {
+        const message = byId.get(row.messageId);
+        if (message) message.labels = { ...message.labels, [row.key]: row.value };
+      }
+    }
+    return json({
+      messages,
+      hasMore: rows.length > limit,
+      ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
+      complete: this.searchIndexed(),
+    });
   }
 
   /** Same-channel live row only; tombstones and other channels do not leak bodies. */
@@ -2140,6 +2298,8 @@ export class MsnDurableObject extends DurableObject<Env> {
               channel,
               id,
             );
+            // Deleted text must not stay findable (ADR 0037).
+            this.ctx.storage.sql.exec("DELETE FROM message_search WHERE rowid = ?", id);
             const snapshotBytes = this.ctx.storage.sql
               .exec<{ bytes: number }>(
                 "SELECT COALESCE(SUM(bytes), 0) AS bytes FROM snapshots WHERE channel = ?",
@@ -2400,6 +2560,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (change) {
             this.requireChannel(channel);
             return this.relabel(tenant, channel, messageId(rest[3]), change);
+          }
+          if (rest.length === 3 && rest[2] === "search" && request.method === "GET") {
+            this.requireChannel(channel);
+            return this.search(tenant, channel, url.searchParams);
           }
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);

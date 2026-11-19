@@ -318,3 +318,31 @@ export function labelFilters(params: URLSearchParams): LabelFilter[] {
     return { key, values: values.map((value) => labelValue(value, key)) };
   });
 }
+
+/** Search input limits (ADR 0037). */
+export const MAX_SEARCH_QUERY = 256;
+const MAX_SEARCH_TERMS = 16;
+
+/**
+ * Turns what a person typed into an FTS5 MATCH expression, so no input is ever FTS5 syntax.
+ * Words match as words or word starts (`deplo` finds `deployed`); text in double quotes matches
+ * as an exact phrase. Every word and phrase must appear. Words are runs of letters, digits and
+ * `_`, the same split as the `unicode61` tokenizer, so punctuation separates words on both sides.
+ * Returns null when the input holds no words.
+ */
+export function searchMatch(input: string): string | null {
+  if (input.length > MAX_SEARCH_QUERY)
+    throw new HttpError(400, "invalid_query", `q must be at most ${MAX_SEARCH_QUERY} characters.`);
+  const words = (part: string) => part.match(/[\p{L}\p{N}\p{M}_]+/gu) ?? [];
+  const clauses: string[] = [];
+  input.split('"').forEach((part, index) => {
+    // Odd parts sat between quotes; an unclosed quote still reads as a phrase.
+    if (index % 2) {
+      const phrase = words(part);
+      if (phrase.length) clauses.push(`"${phrase.join(" ")}"`);
+    } else for (const word of words(part)) clauses.push(`"${word}"*`);
+  });
+  if (clauses.length > MAX_SEARCH_TERMS)
+    throw new HttpError(400, "invalid_query", `Use at most ${MAX_SEARCH_TERMS} words or phrases.`);
+  return clauses.length ? clauses.join(" ") : null;
+}
