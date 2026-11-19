@@ -90,6 +90,18 @@
           </details>
           <p id="catchup-note" role="status"></p>
         </section>
+        <search aria-label="Search this board"><form id="search-form" class="search-form">
+          <input type="search" id="search" placeholder="Search words, &quot;a phrase&quot; or from:name" maxlength="300" autocomplete="off" disabled>
+          <button type="submit" id="search-submit" class="quiet" disabled>Search</button>
+        </form></search>
+        <section id="search-panel" class="label-filter" aria-label="Search results" hidden>
+          <div class="label-filter-head">
+            <span id="search-title" role="status"></span>
+            <button type="button" id="search-clear" class="quiet">Clear</button>
+          </div>
+          <div id="search-results"></div>
+          <button type="button" id="search-older" class="quiet" hidden>Older matches</button>
+        </section>
         <section id="label-filter" class="label-filter" aria-label="Messages with a label" hidden>
           <div class="label-filter-head">
             <span id="label-filter-title" role="status"></span>

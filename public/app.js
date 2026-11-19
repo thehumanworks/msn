@@ -196,8 +196,19 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   $("jump").hidden = true;
-  for (const id of ["poll", "catchup", "reread", "recipient", "message", "send", "invite-channel"])
+  for (const id of [
+    "poll",
+    "catchup",
+    "reread",
+    "recipient",
+    "message",
+    "send",
+    "invite-channel",
+    "search",
+    "search-submit",
+  ])
     $(id).disabled = true;
+  clearSearch();
   $("notify").hidden = true;
   $("workspace").hidden = true;
   $("welcome").hidden = false;
@@ -333,6 +344,64 @@ function appendMessage(message, target = $("messages")) {
   if (target === $("messages") && session?.channels.get(channel)?.since?.firstId === message.id)
     article.classList.add("since-start");
   target.append(article);
+}
+
+/**
+ * Board search (ADR 0037). `from:name` words become the sender filter; everything else is sent as
+ * q, where each word also matches word starts and "quoted text" is a phrase. Newest matches first.
+ */
+function parseSearch(input) {
+  const from = [];
+  const q = input
+    .replace(/(^|\s)from:(\S+)/g, (_, space, name) => {
+      from.push(name);
+      return space;
+    })
+    .trim();
+  return { q, from: from.at(-1) ?? "" };
+}
+
+let searchQuery = 0;
+let searchState = null;
+async function runSearch(older = false) {
+  if (!session || !channel) return;
+  const query = ++searchQuery;
+  const { q, from } = older && searchState ? searchState : parseSearch($("search").value);
+  if (!q && !from) return clearSearch();
+  if (!older) {
+    searchState = { q, from, count: 0, before: null };
+    $("search-results").replaceChildren();
+  }
+  const describe = [q && `“${q}”`, from && `from ${from}`].filter(Boolean).join(" ");
+  $("search-panel").hidden = false;
+  $("search-older").hidden = true;
+  $("search-title").textContent = `Searching for ${describe}…`;
+  const params = new URLSearchParams({ limit: "20" });
+  if (q) params.set("q", q);
+  if (from) params.set("from", from);
+  if (older && searchState.before) params.set("before", String(searchState.before));
+  try {
+    const data = await api(`/channels/${channel}/search?${params}`);
+    if (query !== searchQuery) return;
+    for (const message of data.messages) appendMessage(message, $("search-results"));
+    searchState.count += data.messages.length;
+    searchState.before = data.nextBefore ?? null;
+    const count = searchState.count;
+    $("search-title").textContent =
+      `${count}${data.hasMore ? "+" : ""} message${count === 1 ? "" : "s"} matching ${describe}, newest first` +
+      (data.complete ? "" : " · older messages are still being indexed");
+    $("search-older").hidden = !data.hasMore;
+  } catch (error) {
+    if (query === searchQuery) $("search-title").textContent = error.message;
+  }
+}
+
+function clearSearch() {
+  searchQuery++;
+  searchState = null;
+  $("search-panel").hidden = true;
+  $("search-older").hidden = true;
+  $("search-results").replaceChildren();
 }
 
 let labelQuery = 0;
@@ -598,6 +667,8 @@ function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
   $("agents").disabled = false;
+  $("search").disabled = false;
+  $("search-submit").disabled = false;
   savePosition();
   stopPolling();
   channel = name;
@@ -625,6 +696,8 @@ function selectChannel(name, { reset = false } = {}) {
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
   clearLabel();
+  clearSearch();
+  $("search").value = "";
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
   showCheckpoint(state);
@@ -1171,6 +1244,15 @@ $("message").addEventListener("keydown", (event) => {
   }
 });
 $("label-filter-clear").addEventListener("click", clearLabel);
+$("search-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  void runSearch();
+});
+$("search-clear").addEventListener("click", () => {
+  $("search").value = "";
+  clearSearch();
+});
+$("search-older").addEventListener("click", () => void runSearch(true));
 $("poll").addEventListener("click", () => {
   $("live").checked = false;
   poll(false);
