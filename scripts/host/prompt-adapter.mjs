@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /** Optional prompt bridge. The runtime itself depends only on the executable JSON protocol. */
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HostError, MAX_OUTPUT, requireValue } from "./protocol.mjs";
 
@@ -151,7 +152,7 @@ export async function adapt(options, envelope) {
     if (directory) await rm(directory, { recursive: true, force: true });
   }
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     let raw = "";
     for await (const chunk of process.stdin) {
