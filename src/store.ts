@@ -113,7 +113,9 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 18;
+/** Pinned messages per board (ADR 0038). */
+export const MAX_PINS = 10;
 /** Lifetime label changes per workspace; each one writes a journal event (ADR 0032). */
 const MAX_LABEL_CHANGES = 100000;
 /** A runner counts as listening this long after its last event poll ended (ADR 0028). */
@@ -360,6 +362,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           headSha TEXT, greenSha TEXT, createdAt TEXT NOT NULL, PRIMARY KEY(repo, number, channel)
         );
         CREATE INDEX IF NOT EXISTS github_link_heads ON github_links(repo, headSha);
+        CREATE TABLE IF NOT EXISTS pins (
+          channel TEXT NOT NULL, messageId INTEGER NOT NULL, pinnedBy TEXT, pinnedAt TEXT NOT NULL,
+          PRIMARY KEY(channel, messageId)
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -443,6 +449,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         // CREATE TABLE IF NOT EXISTS above, so recording them here is safe in any merge order.
         if (version < 16)
           for (const applied of [14, 15, 16])
+            ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
+        // v17 → v18: owner-pinned messages (ADR 0038). The table is created above and starts empty.
+        // v17 belongs to board search (ADR 0037). Whichever lands first records both rows, so any
+        // v17 step that must run on existing data has to check its own tables, not MAX(version).
+        if (version < 18)
+          for (const applied of [17, 18])
             ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
@@ -1869,6 +1881,86 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** Same-channel live row only; tombstones and other channels do not leak bodies. */
+  /** Pinned messages in message order, each with when and by whom it was pinned (ADR 0038). */
+  private pinned(tenant: string, channel: string): Message[] {
+    const columns = MESSAGE_COLUMNS.split(", ")
+      .map((column) => `m.${column}`)
+      .join(", ");
+    const rows = this.ctx.storage.sql
+      .exec<MessageRow & { pinnedAt: string; pinnedBy: string | null }>(
+        `SELECT ${columns}, p.pinnedAt, p.pinnedBy FROM pins p JOIN messages m ON m.id = p.messageId
+         WHERE p.channel = ? AND m.channel = p.channel AND m.deleted = 0 ORDER BY m.id`,
+        channel,
+      )
+      .toArray();
+    const pins = new Map(rows.map((row) => [row.id, { pinnedAt: row.pinnedAt, pinnedBy: row.pinnedBy }]));
+    // withLabels reads one id range; pins can be far apart, so decorate each message on its own.
+    return rows.map(({ pinnedAt: _a, pinnedBy: _b, ...row }) => {
+      const message = this.withLabels(channel, [toMessage(row, tenant)])[0];
+      const pin = pins.get(row.id);
+      return Object.assign(message, {
+        pinnedAt: pin?.pinnedAt,
+        ...(pin?.pinnedBy ? { pinnedBy: pin.pinnedBy } : {}),
+      });
+    });
+  }
+
+  /**
+   * `GET …/pins` lists a board's pinned messages for anyone who can read it. `PUT|DELETE
+   * …/pins/:id` are owner only. Pinning never sends a message, so message ids and cursors stay.
+   */
+  private pinRoute(
+    request: Request,
+    tenant: string,
+    channel: string,
+    rest: string[],
+    capability: TenantRow,
+  ): Response {
+    this.requireChannel(channel);
+    if (!rest.length && request.method === "GET")
+      return json({ pins: this.pinned(tenant, channel), limit: MAX_PINS });
+    if (rest.length !== 1 || !["PUT", "DELETE"].includes(request.method))
+      throw new HttpError(404, "route_not_found", "Unknown pin operation.");
+    this.requireOwner(capability);
+    const id = messageId(rest[0]);
+    if (request.method === "DELETE") {
+      this.ctx.storage.sql.exec("DELETE FROM pins WHERE channel = ? AND messageId = ?", channel, id);
+      return new Response(null, { status: 204 });
+    }
+    const created = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql
+        .exec<{ deleted: number }>("SELECT deleted FROM messages WHERE channel = ? AND id = ?", channel, id)
+        .toArray()[0];
+      if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+      if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+      if (
+        this.ctx.storage.sql
+          .exec("SELECT 1 FROM pins WHERE channel = ? AND messageId = ?", channel, id)
+          .toArray().length
+      )
+        return false;
+      const count = this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM pins WHERE channel = ?", channel)
+        .one().n;
+      if (count >= MAX_PINS)
+        throw new HttpError(
+          409,
+          "pin_limit",
+          `A board can have at most ${MAX_PINS} pinned messages. Unpin one first.`,
+        );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO pins(channel, messageId, pinnedBy, pinnedAt) VALUES (?, ?, ?, ?)",
+        channel,
+        id,
+        capability.bound_username ?? null,
+        new Date().toISOString(),
+      );
+      return true;
+    });
+    const pin = this.pinned(tenant, channel).find((message) => message.id === id);
+    return json({ pin, created }, created ? 201 : 200);
+  }
+
   private showMessage(tenant: string, channel: string, id: number): Response {
     const row = this.ctx.storage.sql
       .exec<MessageRow & { deleted: number }>(
@@ -2041,7 +2133,11 @@ export class MsnDurableObject extends DurableObject<Env> {
         ? ["age_threshold"]
         : []),
     ];
+    // Pinned messages lead the first page only (ADR 0038), like the snapshot; a continuation
+    // already had them. They never move nextCursor.
+    const pinned = url.searchParams.has("after") ? null : this.pinned(tenant, channel);
     const result = {
+      ...(pinned ? { pinned, pinnedOmitted: 0 } : {}),
       snapshot: snapshot ? toSnapshot(snapshot, tenant) : null,
       snapshotVersion: latest?.version ?? 0,
       historyRevision: this.historyRevision(channel),
@@ -2059,8 +2155,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       snapshotPolicy: { messageThreshold: 20, byteThreshold: 16384, maxAgeSeconds: 86400 },
       byteLimitReached: false,
     };
+    // Pins are best effort: the checkpoint and first pending message must fit, pins need not.
     const minimum = {
       ...result,
+      ...(pinned ? { pinned: [], pinnedOmitted: pinned.length } : {}),
       messages: messages.slice(0, 1),
       nextCursor: messages[0]?.id ?? after,
       hasMore: pendingMessages > 1,
@@ -2072,16 +2170,30 @@ export class MsnDurableObject extends DurableObject<Env> {
     const encoder = new TextEncoder();
     const messageSizes = messages.map((message) => encoder.encode(JSON.stringify(message)).length);
     let contentBytes = messageSizes.reduce((sum, bytes) => sum + bytes, 0);
+    const pinSizes = (pinned ?? []).map((message) => encoder.encode(JSON.stringify(message)).length);
+    let pinBytes = pinSizes.reduce((sum, bytes) => sum + bytes, 0);
     const size = () =>
-      encoder.encode(JSON.stringify({ ...result, messages: [] })).length +
+      encoder.encode(JSON.stringify({ ...result, ...(pinned ? { pinned: [] } : {}), messages: [] })).length +
       contentBytes +
-      Math.max(0, result.messages.length - 1);
-    while (size() > maxBytes && result.messages.length) {
+      Math.max(0, result.messages.length - 1) +
+      pinBytes +
+      Math.max(0, (result.pinned?.length ?? 0) - 1);
+    const dropMessage = () => {
       result.messages.pop();
       contentBytes -= messageSizes.pop() ?? 0;
       result.nextCursor = result.messages.at(-1)?.id ?? after;
       result.hasMore = result.incomplete = result.byteLimitReached = true;
+    };
+    // Shed tail messages first (they stay readable with after=nextCursor), down to one; then
+    // the newest pins; then the last message.
+    while (size() > maxBytes && result.messages.length > 1) dropMessage();
+    while (size() > maxBytes && result.pinned?.length) {
+      result.pinned.pop();
+      pinBytes -= pinSizes.pop() ?? 0;
+      result.pinnedOmitted = (result.pinnedOmitted ?? 0) + 1;
+      result.byteLimitReached = true;
     }
+    while (size() > maxBytes && result.messages.length) dropMessage();
     if (size() > maxBytes || (pendingMessages > 0 && result.messages.length === 0))
       return json(
         {
@@ -2539,6 +2651,7 @@ export class MsnDurableObject extends DurableObject<Env> {
               channel,
               id,
             );
+            this.ctx.storage.sql.exec("DELETE FROM pins WHERE channel = ? AND messageId = ?", channel, id);
             const snapshotBytes = this.ctx.storage.sql
               .exec<{ bytes: number }>(
                 "SELECT COALESCE(SUM(bytes), 0) AS bytes FROM snapshots WHERE channel = ?",
@@ -2737,6 +2850,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
             return this.catchup(tenant, channel, url);
+          if (rest[2] === "pins") return this.pinRoute(request, tenant, channel, rest.slice(3), capability);
           if (rest[2] === "processing")
             return await this.processingRoute(request, channel, rest.slice(3), capability);
           if (rest[2] === "snapshots") {
