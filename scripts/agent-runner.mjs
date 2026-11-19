@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 /** Persistent single-agent entry. No transport or model polling is implemented here. */
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { access, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -390,7 +390,7 @@ export async function main(args = process.argv.slice(2), env = process.env, depe
   }
   return { status: "stopped" };
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {

@@ -2,7 +2,7 @@
 /** Harness-neutral, at-least-once dispatch. Only operator-supplied argv is executable. */
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -452,7 +452,7 @@ export async function run(options, signal = new AbortController().signal, env = 
     await checkpoint.close();
   }
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const controller = new AbortController();
   for (const name of ["SIGINT", "SIGTERM"]) process.once(name, () => controller.abort());
   try {
