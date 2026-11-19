@@ -23,6 +23,14 @@ import {
   snapshotInteger,
   text,
 } from "./http";
+import {
+  generateVapidKeys,
+  needsOwner,
+  type PushSubscription,
+  parseSubscription,
+  sendPush,
+  type VapidKeys,
+} from "./push";
 
 export type Message = {
   id: number;
@@ -72,11 +80,13 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 /** A runner counts as listening this long after its last event poll ended (ADR 0028). */
 export const LISTENING_GRACE_MS = 60_000;
 /** `persona_presence.lastListeningAt` is written at most this often per persona while it polls. */
 export const PRESENCE_WRITE_INTERVAL_MS = 5 * 60_000;
+/** Owner devices that receive push notifications (ADR 0029). */
+const MAX_PUSH_SUBSCRIPTIONS = 20;
 type InviteRow = {
   id: string;
   code_hash: string;
@@ -232,6 +242,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           channel TEXT NOT NULL, personaId TEXT NOT NULL, lastListeningAt TEXT NOT NULL,
           PRIMARY KEY(channel, personaId)
         );
+        CREATE TABLE IF NOT EXISTS push_keys (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1), publicKey TEXT NOT NULL,
+          privateJwk TEXT NOT NULL, subject TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, createdAt TEXT NOT NULL
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -297,6 +314,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (version < 10) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (10)");
         // v10 → v11: persona listening presence (ADR 0028); table and index are created above.
         if (version < 11) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (11)");
+        // v11 → v12: owner push subscriptions and the workspace's VAPID key (ADR 0029). Both tables
+        // are created above and start empty, so push stays off until an owner device subscribes.
+        if (version < 12) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (12)");
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -497,6 +517,9 @@ export class MsnDurableObject extends DurableObject<Env> {
             {},
             null,
             `board-${revision + 1}`,
+            null,
+            // Notify the owner only when an agent newly blocks the board, never for their own change.
+            !capability.owner_access && current.status !== "blocked",
           );
         });
         return json({ board: this.board(channel) });
@@ -595,6 +618,114 @@ export class MsnDurableObject extends DurableObject<Env> {
       throw new HttpError(400, "listener_unknown_persona", "Register this persona before listening.");
     return id;
   }
+
+  /** Owner-only device registration for push notifications (ADR 0029). */
+  private async pushRoute(request: Request, url: URL, rest: string[], capability: TenantRow) {
+    this.requireOwner(capability);
+    if (!rest.length && request.method === "GET") {
+      if (!this.vapidKeys()) {
+        const keys = await generateVapidKeys();
+        // A concurrent first request may have won; the first stored key stays.
+        this.ctx.storage.sql.exec(
+          "INSERT OR IGNORE INTO push_keys(singleton,publicKey,privateJwk,subject) VALUES(1,?,?,?)",
+          keys.publicKey,
+          keys.privateJwk,
+          url.protocol === "https:" ? url.origin : "mailto:msn@localhost",
+        );
+      }
+      const devices = this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM push_subscriptions")
+        .one().n;
+      return json({ publicKey: this.vapidKeys()?.publicKey, devices });
+    }
+    if (rest.length === 1 && rest[0] === "subscriptions" && ["PUT", "DELETE"].includes(request.method)) {
+      const input = await body(request);
+      if (request.method === "DELETE") {
+        const endpoint = typeof input?.endpoint === "string" ? input.endpoint : "";
+        this.ctx.storage.sql.exec("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint);
+        return new Response(null, { status: 204 });
+      }
+      const subscription = parseSubscription(input);
+      if (!this.vapidKeys())
+        throw new HttpError(409, "push_not_ready", "Read the push key with GET push first.");
+      this.ctx.storage.transactionSync(() => {
+        const known = this.ctx.storage.sql
+          .exec("SELECT endpoint FROM push_subscriptions WHERE endpoint = ?", subscription.endpoint)
+          .toArray().length;
+        const count = this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM push_subscriptions")
+          .one().n;
+        if (!known && count >= MAX_PUSH_SUBSCRIPTIONS)
+          throw new HttpError(409, "push_quota", "Turn notifications off on another device first.");
+        this.ctx.storage.sql.exec(
+          "INSERT INTO push_subscriptions(endpoint,p256dh,auth,createdAt) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth",
+          subscription.endpoint,
+          subscription.p256dh,
+          subscription.auth,
+          new Date().toISOString(),
+        );
+      });
+      return json({ subscribed: true }, 201);
+    }
+    throw new HttpError(404, "route_not_found", "Unknown push operation.");
+  }
+
+  private vapidKeys(): (VapidKeys & { subject: string }) | undefined {
+    return this.ctx.storage.sql
+      .exec<VapidKeys & { subject: string }>("SELECT publicKey, privateJwk, subject FROM push_keys")
+      .toArray()[0];
+  }
+
+  /** Account names that belong to the owner: the workspace binding and every owner login. */
+  private ownerNames(): Set<string> {
+    const names = new Set<string>();
+    const tenant = this.tenantRow();
+    if (tenant?.bound_username) names.add(tenant.bound_username);
+    for (const row of this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT DISTINCT bound_username AS name FROM access_keys WHERE owner_access = 1 AND bound_username IS NOT NULL",
+      )
+      .toArray())
+      names.add(row.name);
+    return names;
+  }
+
+  /** Fire-and-forget: a sender never waits for, or fails because of, a notification. */
+  private notifyOwner(message: Message): void {
+    const keys = this.vapidKeys();
+    if (!keys) return;
+    const subscriptions = this.ctx.storage.sql
+      .exec<PushSubscription>("SELECT endpoint, p256dh, auth FROM push_subscriptions")
+      .toArray();
+    if (!subscriptions.length) return;
+    const attention = needsOwner(message, this.ownerNames());
+    if (!attention) return;
+    const payload = {
+      schema: "msn.push.v1",
+      tenant: message.tenant,
+      channel: message.channel,
+      messageId: message.id,
+      reason: attention.reason,
+      title: `#${message.channel}`,
+      body: `${message.username}: ${attention.summary}`,
+    };
+    this.ctx.waitUntil(
+      Promise.all(
+        subscriptions.map(async (subscription) => {
+          const result = await sendPush(keys, subscription, keys.subject, payload, this.pushFetch);
+          // The push service says this device unsubscribed; stop sending to it.
+          if (result === "gone")
+            this.ctx.storage.sql.exec(
+              "DELETE FROM push_subscriptions WHERE endpoint = ?",
+              subscription.endpoint,
+            );
+        }),
+      ),
+    );
+  }
+
+  /** Replaced in tests; production calls the push service directly. */
+  pushFetch: typeof fetch = (input, init) => fetch(input, init);
 
   private requireOwner(capability: TenantRow) {
     if (!capability.owner_access)
@@ -886,6 +1017,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     key: string | null,
     hash: string,
     personaId: string | null = null,
+    notify = true,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       if (key) {
@@ -967,6 +1099,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (!result.replayed) {
       for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
       this.wakeEvents(channel);
+      if (notify) this.notifyOwner(result.message);
     }
     return json(result, result.replayed ? 200 : 201);
   }
@@ -1416,6 +1549,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             // Rotation remains a workspace-wide emergency reset, not a partial revocation.
             this.ctx.storage.sql.exec("DELETE FROM access_keys");
             this.ctx.storage.sql.exec("DELETE FROM invites");
+            // Owner devices subscribed under the old credentials stop receiving notifications.
+            this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
           });
           this.wakeAllWaiters();
           return json(this.identity(tenant, this.authorize(hash), token));
@@ -1609,6 +1744,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             );
           return new Response(null, { status: 204 });
         }
+        if (rest[0] === "push") return await this.pushRoute(request, url, rest.slice(1), capability);
         if (rest.length === 1 && rest[0] === "events" && request.method === "GET") {
           const channelParam = url.searchParams.get("channel");
           const channel = channelParam === null ? null : slug(channelParam);
@@ -1749,6 +1885,8 @@ export class MsnDurableObject extends DurableObject<Env> {
                 key,
                 payloadHash,
                 personaId,
+                // The owner's own messages never notify the owner.
+                !capability.owner_access,
               );
             }
             if (request.method === "GET") {

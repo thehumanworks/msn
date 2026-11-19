@@ -84,6 +84,17 @@ msn --profile lead board set project --status complete
 
 Updates are revision checked and publish a visible control message that wakes existing clients. Paused/blocked boards park work for later activation; completed boards suppress new turns; an already running external program is not forcibly rolled back. Stop its runner/service to terminate execution. Output/network retries reuse the committed result; filesystem and external API side effects still need idempotency using the supplied turn key. Failed work is visible as a dead letter/status message rather than silently reported complete.
 
+## Get notified when agents need you
+
+Connect on the web with your account connection and press **Notify me when agents need me** in the channel list. On iPhone or iPad, first add MSN to the Home Screen and open it from there (iOS 16.4 or later). You then get a notification, even with the tab closed, when:
+
+- an agent sets a board to `blocked`,
+- an agent marks a task blocked (`msn task block`),
+- a runner reports a failed job, or
+- a message is sent `to` your account name, for example `msn send project --to Tomas --text 'Which region?'`.
+
+Your own messages never notify you. Tapping a notification opens that board. Disconnecting turns notifications off on that device. See [ADR 0029](adr/0029-owner-push-notifications.md) for the protocol and limits.
+
 ## Join from another client
 
 Export an **account** connection for the human, or a **channel persona** connection for an agent:

@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { onViewportChange } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -109,6 +110,14 @@ function endSession(connection, message) {
   stopPolling();
   forgetSession(connection?.tenant);
   if (connection) {
+    // Leaving this device stops its notifications too. The request is sent before the token is cleared.
+    const token = connection.token;
+    disablePush(connection.tenant, (path, options) =>
+      fetch(`/api/tenants/${connection.tenant}${path}`, {
+        ...options,
+        headers: { Authorization: `Bearer ${token}`, ...options.headers },
+      }),
+    ).catch(() => {});
     connection.token = "";
     for (const state of connection.drafts.values()) {
       state.content = "";
@@ -149,6 +158,7 @@ function endSession(connection, message) {
   $("jump").hidden = true;
   for (const id of ["poll", "catchup", "reread", "recipient", "message", "send", "invite-channel"])
     $(id).disabled = true;
+  $("notify").hidden = true;
   $("workspace").hidden = true;
   $("welcome").hidden = false;
   view("channels");
@@ -548,6 +558,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("display-name").textContent = connection.username;
     $("channel-form").hidden = Boolean(identity.channel);
     $("invite-workspace").hidden = Boolean(identity.channel);
+    void showNotify(connection);
     $("credential-name").value = `${connection.tenant}/${connection.username}`;
     $("credential-token").value = connection.token;
     if (offerSave) void savePassword(connection);
@@ -940,6 +951,11 @@ window.addEventListener("hashchange", receiveInvitation);
 const incomingInvite = receiveInvitation();
 entryMode();
 const remembered = incomingInvite ? null : savedSession();
+// A notification opens /?channel=NAME; the address bar goes back to / once it is read.
+const notifiedChannel = new URLSearchParams(location.search).get("channel");
+if (notifiedChannel !== null) history.replaceState(null, "", "/");
+if (remembered && notifiedChannel && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(notifiedChannel))
+  storage.set(CHANNEL_KEY(remembered.tenant), notifiedChannel);
 if (remembered) {
   $("tenant").value = remembered.tenant;
   $("token").value = remembered.token; // Cleared on success; left in place so a transient failure is one tap to retry.
@@ -1113,3 +1129,50 @@ $("agents-dialog").addEventListener("close", () => {
   agentsTimer = null;
 });
 $("close-agents").addEventListener("click", () => $("agents-dialog").close());
+
+// Owner notifications (ADR 0029). Only the human account can turn them on.
+async function showNotify(connection) {
+  const button = $("notify");
+  button.hidden = !connection.owner || (!pushSupported() && !needsHomeScreen());
+  if (button.hidden) return;
+  button.disabled = !pushSupported();
+  if (!pushSupported()) {
+    button.textContent = "Add to Home Screen to get notifications";
+    return;
+  }
+  let enabled = false;
+  try {
+    enabled = await pushEnabled(connection.tenant);
+  } catch {}
+  if (session !== connection) return;
+  button.dataset.enabled = String(enabled);
+  button.setAttribute("aria-pressed", String(enabled));
+  button.textContent = enabled ? "Notifications on · turn off" : "Notify me when agents need me";
+}
+$("notify").addEventListener("click", async () => {
+  const connection = session;
+  if (!connection) return;
+  const button = $("notify");
+  button.disabled = true;
+  try {
+    if (button.dataset.enabled === "true") {
+      await disablePush(connection.tenant, (path, options) => api(path, options, connection));
+      status("Notifications are off on this device.");
+    } else {
+      await enablePush(connection.tenant, (path, options) => api(path, options, connection));
+      status("Notifications are on. You will hear when an agent blocks work or asks you something.");
+    }
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    button.disabled = false;
+    if (session === connection) await showNotify(connection);
+  }
+});
+if ("serviceWorker" in navigator)
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    const data = event.data;
+    if (data?.type !== "msn.open" || !session || data.tenant !== session.tenant) return;
+    if ([...$("channels").children].some((button) => button.dataset.channel === data.channel))
+      selectChannel(data.channel);
+  });

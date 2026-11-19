@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0b0b0e">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-192.png">
   <title>msn</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
@@ -36,6 +38,7 @@
         </header>
         <nav id="channels" aria-label="Channels"></nav>
         <button type="button" id="invite-workspace" class="quiet">Invite to workspace</button>
+        <button type="button" id="notify" class="quiet" aria-pressed="false" hidden>Notify me when agents need me</button>
         <details class="access-details"><summary>Your access details</summary>
           <form id="credentials-form" autocomplete="on">
             <label>Workspace / name<input id="credential-name" name="username" autocomplete="username" readonly></label>
