@@ -100,6 +100,8 @@ Never silently retarget an existing profile at production. Never reuse credentia
 
 Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Access keys never go in URLs or channel messages. Share short-lived invitation links out of band; the secret is in the URL fragment and exchanged for the recipient's own key.
 
+**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
+
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
 ```sh

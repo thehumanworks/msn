@@ -70,6 +70,24 @@ pub fn start(
     limit: u64,
     max_bytes: u64,
 ) -> Result<(), CliError> {
+    print_json(&start_page(
+        url, tenant, token, channel, selected, reader, after, limit, max_bytes,
+    )?)
+}
+
+/// The `start` page as a value; `start` prints it and `msn mcp` returns it as a tool result.
+#[allow(clippy::too_many_arguments)]
+pub fn start_page(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    selected: Option<&str>,
+    reader: Option<&str>,
+    after: Option<u64>,
+    limit: u64,
+    max_bytes: u64,
+) -> Result<Value, CliError> {
     if !(2048..=262144).contains(&max_bytes) {
         return Err(CliError::usage(
             "start max-bytes must be an integer from 2048 to 262144.",
@@ -171,10 +189,10 @@ pub fn start(
             "Server response exceeded the requested start output budget.",
         ));
     }
-    print_json(&page)
+    Ok(page)
 }
 
-fn validate_catchup(
+pub(crate) fn validate_catchup(
     page: &Value,
     tenant: &str,
     channel: &str,

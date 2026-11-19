@@ -26,6 +26,7 @@
     "host": "node scripts/host-runner.mjs",
     "test:host": "node --test tests/host-*.test.mjs",
     "test:host:integration": "node tests/host.integration.mjs",
+    "test:mcp": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/mcp.integration.mjs",
     "test:board": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/board.integration.mjs"
   },
   "devDependencies": {

@@ -226,6 +226,12 @@ pub enum Command {
         #[arg(long)]
         out: String,
     },
+    /// Serve MSN as MCP tools over stdio (JSON-RPC on stdin/stdout) for any MCP agent harness
+    Mcp {
+        /// Default channel for tools that omit `channel`
+        #[arg(long)]
+        channel: Option<String>,
+    },
     /// Persistently listen using a saved trusted executable (Node 24+; explicit first setup)
     Run {
         channel: String,
