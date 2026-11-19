@@ -972,6 +972,47 @@ test("reply and correlation annotations are plain text, not threads or read rece
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("label chips are plain text and list the channel's messages with that label now", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (text, labels) => {
+    const response = await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username: "agent", text, ...(labels ? { labels } : {}) },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message;
+  };
+  const attack = '<img src=x onerror="window.pwned=true">';
+  const parser = await send("fix the parser", { state: "open", area: attack });
+  await send("ship the docs", { state: "done" });
+  await send("no labels");
+  await connect(page, t);
+  await expect(page.locator("#messages .message")).toHaveCount(3);
+  await expect(page.locator("#messages .label-chip")).toHaveText([
+    `area=${attack}`,
+    "state=open",
+    "state=done",
+  ]);
+  await expect(page.locator(".label-chip img")).toHaveCount(0);
+  // A label changed after the page loaded: the filter asks the server, so it is current.
+  const closed = await request.post(`${t.path}/channels/general/messages/${parser.id}/labels`, {
+    headers: t.headers,
+    data: { set: { state: "done" } },
+  });
+  expect(closed.status()).toBe(200);
+  await page.locator("#messages .label-chip", { hasText: "state=done" }).click();
+  await expect(page.locator("#label-filter-title")).toHaveText("2 messages with state=done");
+  await expect(page.locator("#label-results .message p")).toHaveText(["fix the parser", "ship the docs"]);
+  await page.screenshot({ path: testInfo.outputPath("labels.png") });
+  await page.getByRole("button", { name: "Clear" }).click();
+  await expect(page.locator("#label-filter")).toBeHidden();
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 for (const budget of ["channel count", "total messages"]) {
   test(`memory cache evicts the least-recently-used channel at the ${budget} bound`, async ({
     page,
@@ -1739,6 +1780,8 @@ test("with more than 300 unread, opening a board does not mark the rest as read"
   await page.reload();
   await expect(page.locator("#since-title")).toHaveText("Since you last looked: 20 new messages from worker");
   await page.getByRole("button", { name: "Done", exact: true }).click();
+  // The reload renders history page by page; read the newest id only once every row is back.
+  await expect(page.locator(".message")).toHaveCount(321);
   const newest = await page.locator(".message").last().getAttribute("data-id");
   await expect.poll(mark).toBe(Number(newest));
 });

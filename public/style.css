@@ -513,6 +513,46 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
+.message-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.label-chip {
+  font: 11px var(--mono);
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  padding: 2px 8px;
+  min-height: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+  cursor: pointer;
+}
+.label-chip:hover,
+.label-chip:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.label-filter {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  font-size: 12px;
+  max-height: 40%;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+.label-filter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
 .message {
   padding: 8px 10px;
   border-radius: 8px;

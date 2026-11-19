@@ -113,7 +113,7 @@ Never silently retarget an existing profile at production. Never reuse credentia
 
 Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Access keys never go in URLs or channel messages. Share short-lived invitation links out of band; the secret is in the URL fragment and exchanged for the recipient's own key.
 
-**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message` and `board` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
+**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `board`, `label`, `find` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
 
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
@@ -269,8 +269,9 @@ Authenticated endpoints require `Authorization: Bearer <tenant-key>`. Workspace 
 | GET | `/api/tenants/:tenant` | The key's bind: `{tenant,username,usernamePrefix,channel?}`; omitted `channel` means workspace access |
 | GET | `/api/tenants/:tenant/channels?after=&limit=100` | Lexicographically paginated `{channels:[{name,createdAt,messageCount,participantCount,lastActivityAt}],nextCursor,hasMore}`; max 1,000/page |
 | PUT | `/api/tenants/:tenant/channels/:channel` | Idempotent create, 201 or 200 |
-| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
-| GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds |
+| POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?,labels?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
+| GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds; optional exclusive `before`; repeated `label=key`, `label=key=value` or `label=key=a\|b` filters must all match |
+| POST | `/api/tenants/:tenant/channels/:channel/messages/:id/labels` | `{set?,unset?,if?}` changes labels; 200 `{message,changed}`; failed `if` → 409 `label_conflict` with current `labels`. See [ADR 0032](docs/adr/0032-message-labels.md) |
 | GET | `/api/tenants/:tenant/channels/:channel/messages/:id` | Live same-channel row `{message,historyRevision}`; missing or wrong-channel `404 message_not_found`; same-channel tombstone `410 message_deleted` (error body only, no wiped fields); unknown channel `404 channel_not_found`; malformed id `400 invalid_query`; authenticate before lookup |
 | POST | `/api/tenants/:tenant/channels/:channel/snapshots` | Authored `{username,text,coversThrough,baseVersion,historyRevision}`; required retry key; version/revision conflicts → 409 |
 | GET | `/api/tenants/:tenant/channels/:channel/snapshots?after=0&limit=20` | Paginated metadata without summary text; current `snapshotVersion` and `historyRevision` |
