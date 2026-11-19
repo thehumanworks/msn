@@ -283,9 +283,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS label_values ON message_labels(channel, key, value, messageId);
         CREATE TABLE IF NOT EXISTS attachments (
-          channel TEXT NOT NULL, id TEXT NOT NULL, data BLOB NOT NULL, bytes INTEGER NOT NULL,
-          createdAt TEXT NOT NULL, PRIMARY KEY(channel, id)
+          channel TEXT NOT NULL, id TEXT NOT NULL, bytes INTEGER NOT NULL, createdAt TEXT NOT NULL,
+          data BLOB NOT NULL, PRIMARY KEY(channel, id)
         );
+        CREATE INDEX IF NOT EXISTS attachment_age ON attachments(createdAt);
         CREATE TABLE IF NOT EXISTS message_attachments (
           messageId INTEGER NOT NULL, position INTEGER NOT NULL, channel TEXT NOT NULL,
           attachmentId TEXT NOT NULL, name TEXT NOT NULL, mediaType TEXT NOT NULL,

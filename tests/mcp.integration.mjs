@@ -49,8 +49,9 @@ async function cli(args) {
 
 /** A minimal MCP stdio client: newline-delimited JSON-RPC, responses matched by id. */
 function mcp(profile) {
+  // The scratch directory is the MCP server's working directory, where saveTo may write.
   const p = spawn(binary, ["--profile", profile, "mcp", "--channel", "work"], {
-    cwd,
+    cwd: dir,
     env,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -213,12 +214,18 @@ try {
   assert.equal(log.text, "step 1 ok\nstep 2 FAILED\n");
   const binaryResult = await reviewer.tool("get_attachment", { id: attached.message.id, index: 1 });
   assert.equal(binaryResult.isError, true, "binary files are never returned inline");
-  const saved = await reviewer.ok("get_attachment", {
+  const outside = await reviewer.tool("get_attachment", {
     id: attached.message.id,
     index: 1,
     saveTo: join(dir, "copy.png"),
   });
-  assert.equal(saved.savedTo, join(dir, "copy.png"));
+  assert.equal(outside.isError, true, "saveTo refuses absolute paths");
+  const saved = await reviewer.ok("get_attachment", {
+    id: attached.message.id,
+    index: 1,
+    saveTo: "copy.png",
+  });
+  assert.equal(saved.savedTo, "copy.png");
   assert.deepEqual(await readFile(join(dir, "copy.png")), png);
   const missing = await lead.tool("send", { text: "x", attach: [join(dir, "nope.txt")] });
   assert.equal(missing.isError, true);

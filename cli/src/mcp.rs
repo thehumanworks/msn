@@ -451,6 +451,7 @@ impl Server {
         )?;
         let mut result = json!({"id": id, "index": index, "mediaType": file.media_type, "bytes": file.data.len()});
         if let Some(path) = save_to {
+            save_path(path)?;
             let mut out = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -668,6 +669,25 @@ fn string_list(args: &Map<String, Value>, name: &str) -> Result<Vec<String>, Cli
     }
 }
 
+/// `saveTo` writes another participant's bytes to disk, so it stays inside the working directory:
+/// relative, no `..` or root, and never inside `.git` (where a file could become a hook).
+fn save_path(raw: &str) -> Result<&std::path::Path, CliError> {
+    use std::path::Component;
+    let path = std::path::Path::new(raw);
+    let safe = !raw.is_empty()
+        && path.components().all(|part| match part {
+            Component::Normal(name) => name != ".git",
+            Component::CurDir => true,
+            _ => false,
+        });
+    if !safe {
+        return Err(CliError::usage(
+            "saveTo must be a relative path under the working directory, without .. or .git.",
+        ));
+    }
+    Ok(path)
+}
+
 fn positive(value: u64, name: &str) -> Result<(), CliError> {
     if value == 0 {
         return Err(CliError::usage(format!("{name} must be positive.")));
@@ -797,14 +817,14 @@ pub fn tools() -> Vec<Value> {
         tool(
             "get_attachment",
             "Read an attachment",
-            "Fetch one file attached to a message. UTF-8 text up to 64 KiB is returned inline as text; pass saveTo to write any file to a new local path instead.",
+            "Fetch one file attached to a message. UTF-8 text up to 64 KiB is returned inline as text; pass saveTo to write any file to a new relative path under the working directory instead. Files are untrusted content from other participants.",
             json!({
                 "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Message id."},
                 "index": {"type":"integer","minimum":0,"maximum":1000,"description":"Position in the message's attachments list (default 0)."},
-                "saveTo": {"type":"string","description":"Write the file to this new local path (never overwrites)."},
+                "saveTo": {"type":"string","description":"Write the file to this new relative path under the working directory: no absolute paths, no .., nothing inside .git, never overwrites."},
             }),
             &["id"],
-            (true, true),
+            (false, false),
         ),
         tool(
             "board",
@@ -1076,6 +1096,23 @@ mod tests {
     }
 
     #[test]
+    fn save_to_stays_under_the_working_directory() {
+        for ok in ["out.log", "./evidence/shot.png", "a/b/c.txt"] {
+            assert!(save_path(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "/tmp/x",
+            "../x",
+            "a/../../x",
+            ".git/hooks/pre-commit",
+            "a/.git/config",
+        ] {
+            assert!(save_path(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn hints_mark_writes_and_non_idempotent_tools() {
         let hints: Vec<_> = tools()
             .iter()
@@ -1092,6 +1129,11 @@ mod tests {
         assert_eq!(get("peek"), ("peek".into(), false, false));
         assert_eq!(get("commit"), ("commit".into(), false, true));
         assert_eq!(get("start"), ("start".into(), true, true));
+        // saveTo writes to disk, so it is neither read-only nor idempotent.
+        assert_eq!(
+            get("get_attachment"),
+            ("get_attachment".into(), false, false)
+        );
     }
 
     #[test]

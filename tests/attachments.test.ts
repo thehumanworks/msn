@@ -233,4 +233,83 @@ describe("message attachments (ADR 0035)", () => {
     );
     expect(remaining).toBe(1);
   });
+
+  it("serves markup as a download and hardens file names", async () => {
+    const t = await tenant();
+    const svg = await (
+      await upload(t, '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>')
+    ).json<Upload>();
+    const html = await (await upload(t, "<script>alert(1)</script>")).json<Upload>();
+    const sent = await (
+      await send(t, [
+        { id: svg.attachment.id, name: "x.svg", mediaType: "image/svg+xml" },
+        { id: html.attachment.id, name: "it's (1)*.html", mediaType: "text/html" },
+      ])
+    ).json<{ message: Message }>();
+    const file = (index: number) =>
+      call(`${t.path}/channels/general/messages/${sent.message.id}/attachments/${index}`, t.token);
+    const image = await file(0);
+    expect(image.headers.get("Content-Disposition")?.startsWith("attachment;")).toBe(true);
+    expect(image.headers.get("Content-Security-Policy")).toContain("default-src 'self'");
+    const page = await file(1);
+    expect(page.headers.get("Content-Disposition")).toBe(
+      `attachment; filename="it's (1)*.html"; filename*=UTF-8''it%27s%20%281%29%2A.html`,
+    );
+    // Bidirectional overrides could disguise an extension.
+    const bidi = await send(t, [{ id: html.attachment.id, name: "report\u202Egpj.exe" }]);
+    expect(bidi.status).toBe(400);
+  });
+
+  it("keeps uploads and downloads inside a channel-scoped key's channel", async () => {
+    const tenantName = `scoped-${crypto.randomUUID()}`;
+    const owner = await (
+      await exports.default.fetch(`https://msn.test/api/tenants/${tenantName}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "owner" }),
+      })
+    ).json<{ token: string }>();
+    const t = {
+      name: tenantName,
+      token: owner.token,
+      path: `/api/tenants/${tenantName}`,
+      admin: `/api/admin/tenants/${tenantName}`,
+      stub: env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenantName])),
+    };
+    await call(`${t.path}/channels/secret`, t.token, { method: "PUT" });
+    const secret = await (await upload(t, "private", "secret")).json<Upload>();
+    const posted = await (
+      await call(`${t.path}/channels/secret/messages`, t.token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: "owner",
+          text: "s",
+          attachments: [{ id: secret.attachment.id, name: "s.txt" }],
+        }),
+      })
+    ).json<{ message: Message }>();
+    const invite = await (
+      await call(`${t.path}/invites`, t.token, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel: "general" }),
+      })
+    ).json<{ code: string }>();
+    const guest = await (
+      await call(`${t.path}/invites/redeem`, undefined, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: invite.code, username: "guest" }),
+      })
+    ).json<{ token: string; channel: string }>();
+    expect(guest.channel).toBe("general");
+    const scoped = { ...t, token: guest.token };
+    expect((await upload(scoped, "x", "secret")).status).toBe(403);
+    expect(
+      (await call(`${t.path}/channels/secret/messages/${posted.message.id}/attachments/0`, guest.token))
+        .status,
+    ).toBe(403);
+    expect((await upload(scoped, "allowed", "general")).status).toBe(201);
+  });
 });

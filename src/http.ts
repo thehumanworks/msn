@@ -407,14 +407,17 @@ export function attachmentName(value: unknown): string {
         c === "/" ||
         c === "\\" ||
         c.charCodeAt(0) < 0x20 ||
-        (c.charCodeAt(0) >= 0x7f && c.charCodeAt(0) <= 0x9f),
+        (c.charCodeAt(0) >= 0x7f && c.charCodeAt(0) <= 0x9f) ||
+        // Bidirectional overrides can make "gpj.exe" read as "exe.jpg".
+        (c.charCodeAt(0) >= 0x202a && c.charCodeAt(0) <= 0x202e) ||
+        (c.charCodeAt(0) >= 0x2066 && c.charCodeAt(0) <= 0x2069),
     ) ||
     new TextEncoder().encode(value).length > 255
   )
     throw new HttpError(
       400,
       "invalid_attachment",
-      "Attachment name must be a file name of at most 255 UTF-8 bytes, without slashes or control characters.",
+      "Attachment name must be a file name of at most 255 UTF-8 bytes, without slashes, control or bidirectional override characters.",
     );
   return value;
 }
@@ -460,5 +463,10 @@ export function attachmentRefs(value: unknown): AttachmentRef[] {
 /** RFC 6266 filename for Content-Disposition: an ASCII fallback plus the exact UTF-8 name. */
 export function contentDisposition(inline: boolean, name: string): string {
   const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
-  return `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  // RFC 5987 attr-chars exclude ' ( ) *, which encodeURIComponent leaves as they are.
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }

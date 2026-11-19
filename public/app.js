@@ -326,6 +326,14 @@ function attachmentList(message) {
   return list;
 }
 
+/** The browser's type without parameters, when the server accepts it; else the server guesses from the name. */
+function mediaTypeOf(file) {
+  const type = file.type.split(";")[0].trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/.test(type)
+    ? { mediaType: type }
+    : {};
+}
+
 /** The composer's pending files for the selected channel. */
 function showFiles(state) {
   const list = $("attach-list");
@@ -1226,7 +1234,7 @@ $("send-form").addEventListener("submit", async (event) => {
       attachments.push({
         id: attachment.id,
         name: file.name,
-        ...(file.type ? { mediaType: file.type } : {}),
+        ...mediaTypeOf(file),
       });
     }
     const payload = JSON.stringify({
