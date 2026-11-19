@@ -965,3 +965,60 @@ body > footer {
     animation: none;
   }
 }
+
+/* Pinned messages (ADR 0038): a compact strip above the log. */
+.pins {
+  padding: 6px 14px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  font-size: 12px;
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow-y: auto;
+}
+.pins summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+}
+.pins ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.pins li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pins .pin-text {
+  flex: 1;
+  min-width: 0;
+  min-height: 24px;
+  padding: 3px 0;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.pins li.expanded .pin-text {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+.pins .pin-remove,
+.message-meta .pin-toggle {
+  font: inherit;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.message-meta .pin-toggle {
+  padding: 0 4px;
+  min-height: 0;
+}
