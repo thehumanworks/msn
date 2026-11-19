@@ -60,6 +60,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             | Command::Board { .. }
             | Command::Persona { .. }
             | Command::ConnectionExport { .. }
+            | Command::Invite {
+                for_agent: true,
+                ..
+            }
     ) {
         return board::execute(&cli);
     }
