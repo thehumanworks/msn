@@ -30,7 +30,15 @@ test("utc accepts only ISO instants", () => {
   assert.equal(utc("2026-11-20T17:04:05.123Z"), "2026-11-20 17:04:05 UTC");
   assert.equal(utc("2026-11-20T17:04:05Z"), "2026-11-20 17:04:05 UTC");
   assert.equal(utc("not <a> date"), "not \\<a\\> date");
-  assert.equal(utc("2026-11-20T17:04:05.Z"), "2026-11-20T17:04:05.Z");
+  assert.equal(utc("2026-11-20T17:04:05.Z"), "2026-11-20T17\\:04\\:05.Z");
+});
+
+test("inline text cannot autolink or hide text", () => {
+  assert.equal(inline("https://a.b"), "https\\://a.b");
+  assert.equal(inline("a@b.c"), "a\\@b.c");
+  assert.equal(inline("see www.x.y"), "see www\\.x.y");
+  assert.equal(inline("a\u00adb\u{E0041}c\u2060d"), "a\uFFFDb\uFFFDc\uFFFDd");
+  assert.equal(inline(undefined), "");
 });
 
 test("inline text never holds a line break or bidi control", () => {

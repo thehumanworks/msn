@@ -27,19 +27,32 @@ pub struct TranscriptMeta<'a> {
 }
 
 const MARKUP: &[char] = &[
-    '\\', '`', '*', '_', '[', ']', '(', ')', '<', '>', '&', '!', '~', '|', '#', '$',
+    '\\', '`', '*', '_', '[', ']', '(', ')', '<', '>', '&', '!', '~', '|', '#', '$', ':', '@',
 ];
 
+/// Controls, bidi controls and invisible characters (zero-width, soft hyphen, word joiners, tag
+/// characters) that can hide text from a person reading the transcript while an agent still reads it.
 fn unsafe_char(c: char) -> bool {
     let n = c as u32;
     n < 0x20
         || (0x7f..=0x9f).contains(&n)
+        || n == 0xad
+        || n == 0x61c
+        || n == 0x180e
         || (0x200b..=0x200f).contains(&n)
         || n == 0x2028
         || n == 0x2029
         || (0x202a..=0x202e).contains(&n)
-        || (0x2066..=0x2069).contains(&n)
+        || (0x2060..=0x2064).contains(&n)
+        || (0x2066..=0x206f).contains(&n)
         || n == 0xfeff
+        || (0xe0000..=0xe007f).contains(&n)
+}
+
+fn ends_with_www(out: &str) -> bool {
+    out.len() >= 3
+        && out.is_char_boundary(out.len() - 3)
+        && out[out.len() - 3..].eq_ignore_ascii_case("www")
 }
 
 /// One line of escaped inline text: markup characters get a backslash, controls become U+FFFD.
@@ -49,7 +62,8 @@ pub fn inline(value: &str) -> String {
         if unsafe_char(c) {
             out.push('\u{FFFD}');
         } else {
-            if MARKUP.contains(&c) {
+            // `:` and `@` stop GFM autolinks; a `.` after `www` stops `www.` autolinks.
+            if MARKUP.contains(&c) || (c == '.' && ends_with_www(&out)) {
                 out.push('\\');
             }
             out.push(c);
@@ -153,10 +167,11 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
         let id = id_of(message);
         out.extend(["".into(), "---".into(), "".into()]);
         out.push(format!("<a id=\"msg-{id}\"></a>"));
+        // The time comes before the sender, so a sender name cannot fake it.
         out.push(format!(
             "### #{id} · {} · {}",
-            inline(message["username"].as_str().unwrap_or("")),
-            utc(message["createdAt"].as_str().unwrap_or(""))
+            utc(message["createdAt"].as_str().unwrap_or("")),
+            inline(message["username"].as_str().unwrap_or(""))
         ));
         let mut details = Vec::new();
         if let Some(parent) = message.get("replyTo").and_then(Value::as_u64) {
@@ -285,6 +300,17 @@ mod tests {
         assert_eq!(utc("2026-11-20T17:04:05.123Z"), "2026-11-20 17:04:05 UTC");
         assert_eq!(utc("2026-11-20T17:04:05Z"), "2026-11-20 17:04:05 UTC");
         assert_eq!(utc("not <a> date"), "not \\<a\\> date");
-        assert_eq!(utc("2026-11-20T17:04:05.Z"), "2026-11-20T17:04:05.Z");
+        assert_eq!(utc("2026-11-20T17:04:05.Z"), "2026-11-20T17\\:04\\:05.Z");
+    }
+
+    #[test]
+    fn inline_blocks_autolinks_and_hidden_text() {
+        assert_eq!(inline("https://a.b"), "https\\://a.b");
+        assert_eq!(inline("a@b.c"), "a\\@b.c");
+        assert_eq!(inline("see www.x.y"), "see www\\.x.y");
+        assert_eq!(
+            inline("a\u{ad}b\u{E0041}c\u{2060}d"),
+            "a\u{FFFD}b\u{FFFD}c\u{FFFD}d"
+        );
     }
 }

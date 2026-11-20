@@ -11,30 +11,62 @@
 // the board (names, labels, file names) is written as escaped inline text on a line that starts
 // with fixed text, so it cannot start a block either.
 
-/** ASCII punctuation that can start inline markup (CommonMark, GFM tables, GitHub math). */
-const MARKUP = new Set(["\\", "`", "*", "_", "[", "]", "(", ")", "<", ">", "&", "!", "~", "|", "#", "$"]);
+/**
+ * ASCII punctuation that can start inline markup (CommonMark, GFM tables, GitHub math), plus `:`
+ * and `@`, which GFM autolinks (`https://…`, `a@b.c`). `www.` is handled in inline().
+ */
+const MARKUP = new Set([
+  "\\",
+  "`",
+  "*",
+  "_",
+  "[",
+  "]",
+  "(",
+  ")",
+  "<",
+  ">",
+  "&",
+  "!",
+  "~",
+  "|",
+  "#",
+  "$",
+  ":",
+  "@",
+]);
 
-/** True for characters that must not appear raw in an inline value: controls, bidi and zero-width. */
+/**
+ * True for characters that must not appear raw in an inline value: controls, bidi controls and
+ * invisible characters (zero-width, soft hyphen, word joiners, tag characters) that can hide text
+ * from a person reading the transcript while an agent still reads it.
+ */
 function unsafeCode(n) {
   return (
     n < 0x20 ||
     (n >= 0x7f && n <= 0x9f) ||
+    n === 0xad ||
+    n === 0x61c ||
+    n === 0x180e ||
     (n >= 0x200b && n <= 0x200f) ||
     n === 0x2028 ||
     n === 0x2029 ||
     (n >= 0x202a && n <= 0x202e) ||
-    (n >= 0x2066 && n <= 0x2069) ||
-    n === 0xfeff
+    (n >= 0x2060 && n <= 0x2064) ||
+    (n >= 0x2066 && n <= 0x206f) ||
+    n === 0xfeff ||
+    (n >= 0xe0000 && n <= 0xe007f)
   );
 }
 
 /** One line of escaped inline text: markup characters get a backslash, controls become U+FFFD. */
 export function inline(value) {
   let out = "";
-  for (const char of String(value)) {
+  for (const char of String(value ?? "")) {
     const code = char.codePointAt(0);
-    if (unsafeCode(code)) out += "�";
-    else if (MARKUP.has(char)) out += `\\${char}`;
+    if (unsafeCode(code)) out += "\uFFFD";
+    // A `.` after `www` would let GFM autolink `www.example.com`.
+    else if (MARKUP.has(char) || (char === "." && /www$/i.test(out))) out += `\\${char}`;
     else out += char;
   }
   return out;
@@ -86,7 +118,8 @@ export function renderTranscript(meta, messages) {
   for (const message of messages) {
     out.push("", "---", "");
     out.push(`<a id="msg-${message.id}"></a>`);
-    out.push(`### #${message.id} · ${inline(message.username)} · ${utc(message.createdAt)}`);
+    // The time comes before the sender, so a sender name cannot fake it.
+    out.push(`### #${message.id} · ${utc(message.createdAt)} · ${inline(message.username)}`);
     const details = [];
     if (Number.isSafeInteger(message.replyTo)) {
       const target = shown.has(message.replyTo)
@@ -104,7 +137,7 @@ export function renderTranscript(meta, messages) {
         `- Attachments: ${files.map((file) => `${inline(file.name)} (${size(file.bytes)}, ${inline(file.mediaType)})`).join("; ")}`,
       );
     if (details.length) out.push("", ...details);
-    out.push("", fence(message.text, message.contentType === "application/json" ? "json" : "text"));
+    out.push("", fence(message.text ?? "", message.contentType === "application/json" ? "json" : "text"));
     shown.add(message.id);
   }
   if (!messages.length) out.push("", "_No messages._");

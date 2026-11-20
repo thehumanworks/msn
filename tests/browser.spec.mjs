@@ -2726,8 +2726,10 @@ test("Download saves the board as a Markdown transcript with escaped, fenced mes
   expect(text).toContain("# Transcript of #general");
   expect(text).toContain("- Messages: 2,");
   expect(text).not.toContain("elsewhere");
-  expect(text).toContain(`### #${first} · planner-agent · `);
-  expect(text).toContain(`### #${reply} · bob \\<b\\> · `);
+  expect(text).toMatch(
+    new RegExp(`### #${first} · \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d UTC · planner-agent\\n`),
+  );
+  expect(text).toMatch(new RegExp(`### #${reply} · .* UTC · bob \\\\<b\\\\>\\n`));
   expect(text).toContain(`- Reply to: [#${first}](#msg-${first})`);
   expect(text).toContain("- To: planner-agent");
   expect(text).toContain("- Labels: status=done");

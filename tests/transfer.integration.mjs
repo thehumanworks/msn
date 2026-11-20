@@ -234,7 +234,7 @@ try {
     timeout: 20000,
   });
   assert.match(printed.stdout, /^# Transcript of #source\n/);
-  assert.ok(printed.stdout.includes(`### #${hello.message.id} · alice · `));
+  assert.match(printed.stdout, new RegExp(`### #${hello.message.id} · .* UTC · alice\\n`));
   assert.ok(printed.stdout.includes(`- Reply to: [#${hello.message.id}](#msg-${hello.message.id})`));
   assert.ok(printed.stdout.includes("```text\nhello from A\n```"));
   const transcriptPath = join(dir, "source.md");
