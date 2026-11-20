@@ -1957,8 +1957,8 @@ fn bubble(
         && long
     {
         let label = if fold.open { "Show less" } else { "Show more" };
-        let button =
-            egui::Button::new(egui::RichText::new(label).small().color(theme::ACCENT)).frame(false);
+        let button = egui::Button::new(egui::RichText::new(label).small().color(theme::accent()))
+            .frame(false);
         if ui
             .add(button)
             .on_hover_text(if fold.open {

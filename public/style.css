@@ -1219,11 +1219,12 @@ body > footer {
   font-size: 15px;
   line-height: 1.5;
 }
+/* A mask uses only alpha: any opaque token works, in either theme. */
 .message-body.folded {
   max-height: 15em;
   overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3em), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 3em), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, var(--text) calc(100% - 3em), transparent);
+  mask-image: linear-gradient(to bottom, var(--text) calc(100% - 3em), transparent);
 }
 .fold-toggle {
   display: inline-block;

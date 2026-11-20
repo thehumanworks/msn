@@ -2954,6 +2954,12 @@ test("long messages fold behind Show more; links, jumps and search hits show the
   expect((await pre.textContent()).trim().split("\n")).toHaveLength(30);
   await expect(body(code.id).locator("strong")).toHaveText("ok");
   await page.screenshot({ path: testInfo.outputPath("folded.png") });
+  // Light theme (ADR 0049): the control uses the light accent, and the fold still clips.
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(toggle(long.id)).toHaveCSS("color", "rgb(179, 0, 143)");
+  await expect(body(long.id)).toHaveClass(/folded/);
+  await page.screenshot({ path: testInfo.outputPath("folded-light.png") });
+  await page.emulateMedia({ colorScheme: "dark" });
 
   // Show more opens it, Show less folds it again.
   await toggle(long.id).click();
