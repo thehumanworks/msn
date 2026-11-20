@@ -113,7 +113,7 @@ Never silently retarget an existing profile at production. Never reuse credentia
 
 Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Access keys never go in URLs or channel messages. Share short-lived invitation links out of band; the secret is in the URL fragment and exchanged for the recipient's own key.
 
-**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `board`, `label`, `find`, `search` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
+**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `receipts`, `board`, `label`, `find`, `search` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
 
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
@@ -163,7 +163,7 @@ msn send collaboration --text 'Result: …' --key review-17-result
 msn commit collaboration --through 41 --reader planner
 ```
 
-To survive losing the machine, pass `--resumable` to `peek` and `commit` (or set `MSN_RESUMABLE=1`): progress then lives on the server, and a replacement runs `msn takeover CHANNEL` explicitly, after which the old agent can no longer commit. See [docs/agents.md](docs/agents.md#resume-on-a-new-machine) and [ADR 0034](docs/adr/0034-resumable-processing-cursors.md).
+To survive losing the machine, pass `--resumable` to `peek` and `commit` (or set `MSN_RESUMABLE=1`): progress then lives on the server, and a replacement runs `msn takeover CHANNEL` explicitly, after which the old agent can no longer commit. See [docs/agents.md](docs/agents.md#resume-on-a-new-machine) and [ADR 0034](docs/adr/0034-resumable-processing-cursors.md). Resumable commits also show under each message as "processed by reviewer · not yet: worker-2" on web, desktop and iOS, and in `msn receipts CHANNEL ID` ([ADR 0040](docs/adr/0040-processed-by-receipts.md)).
 
 Default processing files live under `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/processing/<reader-hash>/<channel>.json` (0600, locked). They never adopt an eager `readers/` cursor. `--cursor-file` is still bound to origin, tenant, channel, and reader; the reader is required even with an explicit file. `nextCursor` is the Worker page watermark, not a commit.
 
@@ -276,6 +276,7 @@ Authenticated endpoints require `Authorization: Bearer <tenant-key>`. Workspace 
 | POST | `/api/tenants/:tenant/channels/:channel/messages` | `{username,text,contentType?,replyTo?,correlationId?,to?,labels?,attachments?}`; creates channel automatically; 201 `{message,replayed:false}`; bound key with another `username` → 403 `username_bound` |
 | GET | `/api/tenants/:tenant/channels/:channel/messages?after=0&limit=100&wait=0` | Ordered `{messages,nextCursor,hasMore}`; `wait` 0–25 seconds; optional exclusive `before`; repeated `label=key`, `label=key=value` or `label=key=a\|b` filters must all match |
 | GET | `/api/tenants/:tenant/channels/:channel/search?q=words` | Newest-first `{messages,hasMore,nextBefore?,complete}`; `q` words (words of 3+ letters also match word starts, `"quoted"` is a phrase), `from`, `kind=text\|json`, `label` filters, `before`, `limit` 1–100 (default 20); needs one of `q`, `from`, `kind`, `label`. See [ADR 0037](docs/adr/0037-message-search.md) |
+| GET | `/api/tenants/:tenant/channels/:channel/messages/:id/receipts` | `{channel,messageId,processed,notYet}`: which readers explicitly committed past the message with a resumable commit. `GET …/channels/:channel/receipts` returns every reader's `{name,reader,personaId,committedThrough,updatedAt}`; board personas that never committed have `committedThrough: null`. See [ADR 0040](docs/adr/0040-processed-by-receipts.md) |
 | POST | `/api/tenants/:tenant/channels/:channel/messages/:id/labels` | `{set?,unset?,if?}` changes labels; 200 `{message,changed}`; failed `if` → 409 `label_conflict` with current `labels`. See [ADR 0032](docs/adr/0032-message-labels.md) |
 | GET | `/api/tenants/:tenant/github` | **Owner only.** `{webhookUrl,configured,contentType,events,links}`, never the secret. `POST …/github/secret` makes or replaces the webhook secret and returns it once. See [ADR 0036](docs/adr/0036-github-pull-request-sync.md) |
 | PUT, DELETE | `/api/tenants/:tenant/channels/:channel/github/pulls/:owner/:repo/:number` | **Owner only.** Link a pull request to the board (201 with the anchor message id, 200 if already linked) or unlink it (204) |

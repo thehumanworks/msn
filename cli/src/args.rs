@@ -77,6 +77,7 @@ EXAMPLES:
   msn rotate new-tenant --unbind                   # clears it
   msn search general 'deploy friday'          # newest matches first
   msn search general --from reviewer --label state=open
+  msn receipts general 42                     # who committed past message 42
   msn delete general 42
 
 HTTPS is required except localhost. MSN_URL must be a bare origin (no path, query,
@@ -646,6 +647,11 @@ pub enum Command {
         #[arg(long)]
         limit: Option<String>,
     },
+    /// Show which readers have explicitly committed past a message (resumable commits only), as JSON
+    #[command(
+        long_about = "Show which readers have processed a message, as JSON: {processed, notYet}.\n\nProcessed means the reader explicitly committed past this message with a resumable commit (msn commit --resumable). Not yet means no such commit covers it; it does not mean the reader has not seen it. Local-only commits are not shown. Board personas that never committed are listed under notYet with committedThrough null."
+    )]
+    Receipts { channel: String, message_id: String },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
 }

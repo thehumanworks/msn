@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import type { Message } from "../core/types.ts";
+import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { formatTime } from "./format.ts";
 import { colors, mono, radius, spacing } from "./theme.ts";
@@ -12,6 +13,8 @@ type Props = {
   quoted: Message | undefined;
   selected: boolean;
   onReply: (message: Message) => void;
+  /** Processed-by line from explicit commits only (ADR 0040), or null. */
+  receipts?: string | null;
 };
 
 function preview(text: string): string {
@@ -19,7 +22,7 @@ function preview(text: string): string {
   return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
 }
 
-function MessageRowImpl({ message, own, quoted, selected, onReply }: Props) {
+function MessageRowImpl({ message, own, quoted, selected, onReply, receipts = null }: Props) {
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
   const who = own ? "You" : message.username;
@@ -65,6 +68,14 @@ function MessageRowImpl({ message, own, quoted, selected, onReply }: Props) {
           {message.text}
         </Text>
       )}
+      {receipts ? (
+        <Text
+          style={styles.receipts}
+          accessibilityLabel={`${receipts}. ${RECEIPTS_MEANING}`}
+        >
+          {receipts}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
@@ -89,4 +100,5 @@ const styles = StyleSheet.create({
   quote: { borderLeftWidth: 3, borderLeftColor: colors.border, paddingLeft: spacing.sm },
   quoteText: { color: colors.muted, fontSize: 13 },
   body: { fontSize: 16 },
+  receipts: { color: colors.muted, fontSize: 12 },
 });

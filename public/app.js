@@ -442,9 +442,58 @@ function appendMessage(message, target = $("messages")) {
     }
     article.append(row);
   }
+  if (target === $("messages")) {
+    const receipts = document.createElement("div");
+    receipts.className = "message-receipts";
+    receipts.title = RECEIPTS_MEANING;
+    showReceipt(receipts, message.id, session?.channels.get(channel)?.receipts);
+    article.append(receipts);
+  }
   if (target === $("messages") && session?.channels.get(channel)?.since?.firstId === message.id)
     article.classList.add("since-start");
   target.append(article);
+}
+
+/**
+ * Processed-by receipts (ADR 0040). They come only from explicit resumable commits, so the line
+ * says who committed past a message and who has not, never who has "seen" it.
+ */
+const RECEIPTS_MEANING =
+  "Processed means the reader explicitly committed past this message (msn commit --resumable). Not yet means no such commit covers it; it does not mean the reader has not seen it. Local-only commits are not shown.";
+const RECEIPTS_EVERY_MS = 10000;
+function receiptLine(receipts, id) {
+  if (!Array.isArray(receipts) || !receipts.length) return null;
+  const done = receipts
+    .filter((r) => r.committedThrough !== null && r.committedThrough >= id)
+    .map((r) => r.name);
+  const waiting = receipts
+    .filter((r) => !(r.committedThrough !== null && r.committedThrough >= id))
+    .map((r) => r.name);
+  if (!waiting.length) return `Processed by ${done.join(", ")}`;
+  if (!done.length) return `Not yet processed by ${waiting.join(", ")}`;
+  return `Processed by ${done.join(", ")} · not yet: ${waiting.join(", ")}`;
+}
+function showReceipt(element, id, receipts) {
+  const line = receiptLine(receipts, id);
+  element.textContent = line ?? "";
+  element.hidden = line === null;
+}
+async function loadReceipts(connection, name, state, force = false) {
+  if (!force && state.receiptsAt && Date.now() - state.receiptsAt < RECEIPTS_EVERY_MS) return;
+  state.receiptsAt = Date.now();
+  try {
+    const data = await api(`/channels/${name}/receipts`, {}, connection);
+    if (data.channel !== name || !Array.isArray(data.receipts)) return;
+    state.receipts = data.receipts;
+  } catch {
+    // Receipts are an extra; an older server or a failed request just leaves them as they were.
+    return;
+  }
+  if (session !== connection || channel !== name) return;
+  for (const article of $("messages").children) {
+    const element = article.querySelector(":scope > .message-receipts");
+    if (element) showReceipt(element, Number(article.dataset.id), state.receipts);
+  }
 }
 
 /**
@@ -739,6 +788,7 @@ async function poll(live = false) {
       );
       if (generation !== epoch) return;
       render(data.messages, state);
+      void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
       if (state.context) showCheckpoint(state);
