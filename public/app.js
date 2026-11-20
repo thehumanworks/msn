@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { renderMarkdown } from "./markdown.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { onViewportChange } from "./viewport.js";
@@ -447,12 +448,14 @@ function appendMessage(message, target = $("messages")) {
     );
     meta.append(link);
   }
-  const content = document.createElement(structured ? "pre" : "p");
-  content.textContent = boardUpdate
-    ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
-    : structured
-      ? pretty(message.text)
-      : message.text;
+  // Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043).
+  let content;
+  if (boardUpdate || structured) {
+    content = document.createElement(structured ? "pre" : "p");
+    content.textContent = boardUpdate
+      ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
+      : pretty(message.text);
+  } else content = renderMarkdown(message.text);
   article.append(meta);
   for (const [field, label] of [
     ["to", "To"],
