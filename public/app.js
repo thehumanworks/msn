@@ -80,8 +80,12 @@ function advanceMark() {
     const rect = reply.getClientRects()[0];
     if (rect && rect.top < bottom) seen = Math.max(seen ?? 0, Number(reply.dataset.id));
   }
-  const ceiling = session.channels.get(channel)?.markCeiling;
+  const state = session.channels.get(channel);
+  const ceiling = state?.markCeiling;
   if (seen !== null && ceiling !== undefined && ceiling !== null) seen = Math.min(seen, ceiling);
+  // A reply still folded away has not been read; the mark waits just below it.
+  const unseen = firstUnseenReply(state);
+  if (seen !== null && unseen !== null) seen = Math.min(seen, unseen.id - 1);
   const next = advance(session.marks ?? {}, markId(session.username, channel), seen);
   if (!next) return;
   session.marks = next;
@@ -204,6 +208,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   $("jump").hidden = true;
+  $("thread-jump").hidden = true;
   for (const id of [
     "poll",
     "catchup",
@@ -513,9 +518,10 @@ function threadOf(root) {
     state.expanded ??= new Set();
     if (state.expanded.has(id)) state.expanded.delete(id);
     else state.expanded.add(id);
-    state.threadNew?.delete(id);
+    state.unseen?.delete(id);
     showThread(root);
     savePosition();
+    showJump(state);
   });
   thread = document.createElement("div");
   thread.className = "thread";
@@ -539,7 +545,7 @@ function showThread(root) {
     return;
   }
   const open = Boolean(state?.expanded?.has(id));
-  const fresh = open ? 0 : (state?.threadNew?.get(id) ?? 0);
+  const fresh = open ? 0 : (state?.unseen?.get(id)?.size ?? 0);
   thread.hidden = !open;
   toggle.setAttribute("aria-expanded", String(open));
   toggle.textContent = `${open ? "Hide" : "Show"} ${count} repl${count === 1 ? "y" : "ies"}${fresh ? ` · ${fresh} new` : ""}`;
@@ -554,8 +560,9 @@ function revealInThread(article) {
   if (!root || !state) return;
   state.expanded ??= new Set();
   state.expanded.add(Number(root.dataset.id));
-  state.threadNew?.delete(Number(root.dataset.id));
+  state.unseen?.delete(Number(root.dataset.id));
   showThread(root);
+  showJump(state);
 }
 
 /** Remove one message from the log. Replies folded under it go back to the log on their own. */
@@ -567,9 +574,12 @@ function removeFromLog(id, state) {
     Number(reply.dataset.id),
   );
   node.remove();
-  if (root !== node) return showThread(root);
+  if (root !== node) {
+    state.unseen?.get(Number(root.dataset.id))?.delete(id);
+    return showThread(root);
+  }
   state.expanded?.delete(id);
-  state.threadNew?.delete(id);
+  state.unseen?.delete(id);
   if (!orphans.length) return;
   const byId = new Map(state.messages.map((message) => [message.id, message]));
   for (const reply of orphans) if (byId.has(reply)) appendMessage(byId.get(reply));
@@ -593,7 +603,8 @@ async function showParent(message, article) {
     try {
       parent = (await api(`/channels/${message.channel}/messages/${id}`)).message;
     } catch (error) {
-      if (error.status !== 404) {
+      // 404: no such message; 410: it was deleted. Either way it is gone.
+      if (error.status !== 404 && error.status !== 410) {
         status(error.message, true);
         return;
       }
@@ -780,6 +791,17 @@ async function loadSince(connection, name, state, mark) {
 
 function showJump(state) {
   $("jump").hidden = !state.newMessages;
+  const next = firstUnseenReply(state);
+  $("thread-jump").hidden = next === null;
+  if (next !== null) $("thread-jump").textContent = `New reply in thread #${next.root} · Show`;
+}
+
+/** The oldest reply that arrived in a folded thread and has not been shown yet. */
+function firstUnseenReply(state) {
+  let next = null;
+  for (const [root, ids] of state?.unseen ?? [])
+    for (const id of ids) if (next === null || id < next.id) next = { root, id };
+  return next;
 }
 
 function showCheckpoint(state) {
@@ -864,6 +886,7 @@ function render(messages, state) {
   const visible = chatVisible();
   const follow = state.atBottom;
   let added = false;
+  let addedRow = false;
   for (const message of messages) {
     if (state.seen.has(message.id)) continue;
     added = true;
@@ -871,24 +894,31 @@ function render(messages, state) {
     state.messages.push(message);
     const article = appendMessage(message);
     if (article.classList.contains("reply")) {
-      // A reply you sent opens its thread. One after your read mark counts as new until the
-      // thread is opened; on a board you have never read, nothing is new yet.
+      // Someone else's reply after your read mark, in a folded thread, is unseen until the
+      // thread is opened: the toggle and the thread pointer say so, and the read mark waits
+      // below it. On a board you have never read, nothing is new yet.
       const id = Number(topLevel(article).dataset.id);
       const mark = readMark(channel);
-      if (message.username === session?.username) revealInThread(article);
-      else if (mark !== undefined && message.id > mark && !state.expanded?.has(id)) {
-        state.threadNew ??= new Map();
-        state.threadNew.set(id, (state.threadNew.get(id) ?? 0) + 1);
+      if (
+        message.username !== session?.username &&
+        mark !== undefined &&
+        message.id > mark &&
+        !state.expanded?.has(id)
+      ) {
+        state.unseen ??= new Map();
+        if (!state.unseen.has(id)) state.unseen.set(id, new Set());
+        state.unseen.get(id).add(message.id);
         showThread(topLevel(article));
       }
-    }
+    } else addedRow = true;
     if (state.messages.length > MAX_MESSAGES) {
       const oldest = state.messages.shift().id;
       state.seen.delete(oldest);
       removeFromLog(oldest, state);
     }
   }
-  if (added && !follow) state.newMessages = true;
+  // "Jump to latest" is for rows in the log; a folded reply has its own pointer.
+  if (addedRow && !follow) state.newMessages = true;
   if (visible) restorePosition(state);
   if (added) advanceMark();
   showJump(state);
@@ -1676,6 +1706,10 @@ document.addEventListener("visibilitychange", () => {
 });
 // Closing or navigating away records the last position while the page is still visible.
 addEventListener("pagehide", () => advanceMark());
+$("thread-jump").addEventListener("click", () => {
+  const next = firstUnseenReply(session?.channels.get(channel));
+  if (next) showMessage(next.id);
+});
 $("jump").addEventListener("click", () => {
   $("messages").scrollTop = $("messages").scrollHeight;
   savePosition();
