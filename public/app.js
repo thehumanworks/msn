@@ -2293,6 +2293,12 @@ function toolbarEdges() {
 }
 document.querySelector(".toolbar").addEventListener("scroll", toolbarEdges, { passive: true });
 new ResizeObserver(toolbarEdges).observe(document.querySelector(".toolbar"));
+// A button shown or hidden (Mute, Jump, Load next page) changes what is left to scroll to.
+new MutationObserver(toolbarEdges).observe(document.querySelector(".toolbar"), {
+  subtree: true,
+  attributes: true,
+  attributeFilter: ["hidden"],
+});
 
 $("channel-form").addEventListener("submit", async (event) => {
   event.preventDefault();

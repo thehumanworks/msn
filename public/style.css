@@ -1750,6 +1750,11 @@ nav button.has-unread .channel-name {
   .message-meta .reply-button {
     padding: 0 8px;
   }
+  /* Wrapped rows sit far enough apart that the hit areas above and below never overlap. */
+  .message-reactions,
+  .message-labels {
+    row-gap: 12px;
+  }
   :is(
     .message-meta .pin-toggle,
     .message-meta .copy-link,
