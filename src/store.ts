@@ -119,6 +119,9 @@ const MAX_KEYS = 1000;
 const SCHEMA_VERSION = 18;
 /** Pinned messages per board (ADR 0038). */
 export const MAX_PINS = 10;
+/** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
+export const UNREAD_BOARDS = 100;
+export const UNREAD_CAP = 99;
 /** Older messages indexed per backfill step after the v17 migration (ADR 0037). */
 export const SEARCH_BACKFILL_BATCH = 500;
 /** `kind` search filter values and the content type each one matches. */
@@ -2648,6 +2651,51 @@ export class MsnDurableObject extends DurableObject<Env> {
       .one().head;
   }
 
+  /**
+   * Unread counts (ADR 0045). The reader sends the read marks it already keeps on its device as
+   * repeated `mark=<channel>:<id>`; the server keeps no read state. Each board reads at most
+   * UNREAD_CAP + 1 rows from the channel_messages index, so a request is bounded by
+   * UNREAD_BOARDS × (UNREAD_CAP + 1) index rows whatever the history size.
+   */
+  private unreadCounts(url: URL, capability: TenantRow) {
+    const me = url.searchParams.get("me") ?? "";
+    if (me.length > 128) throw new HttpError(400, "invalid_query", "me must be at most 128 characters.");
+    const marks = url.searchParams.getAll("mark");
+    if (!marks.length || marks.length > UNREAD_BOARDS)
+      throw new HttpError(400, "invalid_query", `Send 1–${UNREAD_BOARDS} mark=<channel>:<id> pairs.`);
+    const seen = new Set<string>();
+    const pairs = marks.map((value) => {
+      const split = value.lastIndexOf(":");
+      const channel = slug(split > 0 ? value.slice(0, split) : "");
+      const after = Number(value.slice(split + 1));
+      if (split < 0 || !/^\d{1,16}$/.test(value.slice(split + 1)) || !Number.isSafeInteger(after))
+        throw new HttpError(400, "invalid_query", "Each mark must be <channel>:<message id>.");
+      if (seen.has(channel)) throw new HttpError(400, "invalid_query", "Each channel may appear once.");
+      seen.add(channel);
+      this.requireScope(capability, channel);
+      return { channel, after };
+    });
+    const self = me.trim().toLowerCase();
+    const unread = pairs.map(({ channel, after }) => {
+      const rows = this.ctx.storage.sql
+        .exec<{ username: string; recipient: string | null }>(
+          "SELECT username, recipient FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?",
+          channel,
+          after,
+          UNREAD_CAP + 1,
+        )
+        .toArray();
+      const capped = rows.length > UNREAD_CAP;
+      // Your own messages are not news, as in "since you last looked" (ADR 0033).
+      const others = rows.slice(0, UNREAD_CAP).filter((row) => row.username !== me);
+      const toYou = self
+        ? others.filter((row) => row.recipient !== null && row.recipient.trim().toLowerCase() === self).length
+        : 0;
+      return { channel, after, count: others.length, toYou, ...(capped ? { capped: true } : {}) };
+    });
+    return { unread, cap: UNREAD_CAP };
+  }
+
   private requireScope(capability: TenantRow, channel: string | null): void {
     if (capability.channel_scope && capability.channel_scope !== channel)
       throw new HttpError(
@@ -3142,6 +3190,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             include === "labels",
           );
         }
+        if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")
+          return json(this.unreadCounts(url, capability));
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
           const after = url.searchParams.get("after") ?? "";
           if (after) slug(after);

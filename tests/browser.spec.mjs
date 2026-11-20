@@ -1803,6 +1803,57 @@ test("only the owner account is offered notifications", async ({ page, request }
   await expect(page.locator("#notify")).toBeHidden();
 });
 
+test("the board list shows unread counts from this device's read marks", async ({ page, request }, testInfo) => {
+  const t = await provision(request);
+  const post = async (channel, username, text, extra = {}) => {
+    const response = await request.post(`${t.path}/channels/${channel}/messages`, {
+      headers: t.headers,
+      data: { username, text, ...extra },
+    });
+    expect(response.status()).toBe(201);
+  };
+  await post("alpha", "lead", "Plan is up");
+  await post("beta", "lead", "Other board");
+  await post("gamma", "lead", "Never opened here");
+  await connect(page, t, "Tomas");
+  await expect(page.locator("#channel-title")).toHaveText("# alpha");
+  await openChannel(page, "beta");
+  await expect(page.locator(".message")).toHaveCount(1);
+  await expect
+    .poll(() => page.evaluate((key) => localStorage.getItem(key), `msn.read.${t.tenant}`))
+    .toContain('"Tomas\\nbeta"');
+
+  // While the reader is on beta, alpha moves on: two messages, one addressed to them.
+  await post("alpha", "worker", "Started the login fix");
+  await post("alpha", "worker", "Which region?", { to: "tomas" });
+  await post("alpha", "Tomas", "My own note from another device");
+  await post("gamma", "lead", "Still never opened");
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Refresh channels" }).click();
+  const alpha = page.locator('#channels button[data-channel="alpha"]');
+  await expect(alpha.locator(".unread-count")).toHaveText("2");
+  await expect(alpha.locator(".unread-mine")).toHaveText("@1");
+  await expect(alpha).toHaveAccessibleName("# alpha");
+  await expect(alpha).toHaveAccessibleDescription("2 unread messages, 1 to you");
+  // A board never read on this device has no mark, so no count; the open board shows none.
+  await expect(page.locator('#channels button[data-channel="gamma"] .unread')).toBeHidden();
+  if (await page.locator("#messages").isVisible())
+    await expect(page.locator('#channels button[data-channel="beta"] .unread')).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath("unread-counts.png") });
+
+  // Reading alpha clears its count.
+  await openChannel(page, "alpha");
+  await expect(page.locator(".message")).toHaveCount(4);
+  await page.locator("#messages").evaluate((box) => {
+    box.scrollTop = box.scrollHeight;
+  });
+  await openChannel(page, "beta");
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Refresh channels" }).click();
+  await expect(alpha.locator(".unread")).toBeHidden();
+  await expect(alpha).not.toHaveAttribute("aria-describedby");
+});
+
 test("a board shows what changed since you last looked, with a marker where you stopped", async ({
   page,
   request,
