@@ -9,6 +9,7 @@ use msn_cli::identity::validate_username;
 
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
+use crate::read_marks;
 use crate::state::{
     AppState, ChannelState, PendingSend, PendingTaskEvent, Screen, SearchState, ThreadRow,
 };
@@ -37,6 +38,10 @@ pub struct MsnDesktopApp {
     receipts_at: Option<std::time::Instant>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
+    /// This connection's read-mark file (ADR 0045), once the connection's name is known.
+    read_marks_path: Option<(u64, Option<std::path::PathBuf>)>,
+    /// When unread counts were last asked for; at most one request per `UNREAD_EVERY`.
+    unread_at: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
@@ -115,6 +120,8 @@ impl MsnDesktopApp {
             link_origin: None,
             copied_link: None,
             receipts_at: None,
+            read_marks_path: None,
+            unread_at: None,
             profile_store,
         }
     }
@@ -158,6 +165,13 @@ impl MsnDesktopApp {
         }
         let deferred = self.state.take_deferred();
         self.dispatch_all(deferred);
+        self.load_read_marks();
+        if self.unread_at.is_none_or(|at| at.elapsed() >= UNREAD_EVERY)
+            && let Some(command) = self.state.unread_command()
+        {
+            self.unread_at = Some(std::time::Instant::now());
+            self.dispatch(command);
+        }
         if self.state.channel.is_some()
             && self
                 .receipts_at
@@ -517,7 +531,13 @@ impl MsnDesktopApp {
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                 for name in &self.state.channels {
                     let selected = self.state.selected_channel.as_deref() == Some(name.as_str());
-                    if ui.selectable_label(selected, name).clicked() && !selected {
+                    let unread = self.state.unread_for(name);
+                    let response = ui.selectable_label(selected, channel_label(name, unread));
+                    let response = match unread {
+                        Some(entry) => response.on_hover_text(entry.label()),
+                        None => response,
+                    };
+                    if response.clicked() && !selected {
                         actions.push(Action::Select(name.clone()));
                     }
                 }
@@ -654,6 +674,8 @@ impl MsnDesktopApp {
                     }
                 });
         }
+        // The newest message whose top reached the visible conversation (ADR 0045).
+        let mut seen = 0u64;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 bottom: 8,
@@ -705,6 +727,9 @@ impl MsnDesktopApp {
                                                 );
                                             });
                                         }
+                                        if ui.cursor().top() < ui.clip_rect().bottom() {
+                                            seen = seen.max(id);
+                                        }
                                         render_message(ui, message, &me, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
@@ -724,6 +749,9 @@ impl MsnDesktopApp {
                                         }
                                     }
                                     ThreadRow::Reply { id } => {
+                                        if ui.cursor().top() < ui.clip_rect().bottom() {
+                                            seen = seen.max(id);
+                                        }
                                         let shown = ui.indent(("thread-reply", id), |ui| {
                                             let reply = &state.messages[&id];
                                             render_message(ui, reply, &me, actions);
@@ -742,6 +770,10 @@ impl MsnDesktopApp {
                         }
                     });
             });
+        // A window in the background is not being read.
+        if ui.input(|input| input.focused) && self.state.mark_read(seen) {
+            self.save_read_marks();
+        }
     }
 
     fn composer_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -1121,6 +1153,41 @@ impl MsnDesktopApp {
         });
     }
 
+    /// Reads this connection's marks from disk once, after the server confirmed the name.
+    fn load_read_marks(&mut self) {
+        let Some(connection) = self.state.connection.as_ref() else {
+            return;
+        };
+        if self
+            .read_marks_path
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation == connection.generation)
+        {
+            return;
+        }
+        let path = self.link_origin.as_ref().and_then(|origin| {
+            read_marks::default_path(origin, &connection.tenant, &connection.username)
+        });
+        self.state.read_marks = path
+            .as_deref()
+            .map(|path| read_marks::load(path, &connection.username))
+            .unwrap_or_default();
+        self.state.unread_stale = true;
+        self.read_marks_path = Some((connection.generation, path));
+    }
+
+    /// Writes the marks after one moved. A failed write only costs counts after a restart.
+    fn save_read_marks(&mut self) {
+        let Some(connection) = self.state.connection.as_ref() else {
+            return;
+        };
+        if let Some((generation, Some(path))) = &self.read_marks_path
+            && *generation == connection.generation
+        {
+            let _ = read_marks::save(path, &connection.username, &self.state.read_marks);
+        }
+    }
+
     /// The web link to message `id` of the open channel (ADR 0042). It carries no credential.
     fn message_link(&self, id: u64) -> Option<String> {
         let origin = self.link_origin.as_ref()?;
@@ -1237,6 +1304,30 @@ fn render_pins(ui: &mut egui::Ui, pins: &[Value]) {
     });
 }
 
+/// A board in the list: its name, then the unread count and how many are to you (ADR 0045).
+fn channel_label(name: &str, unread: Option<&read_marks::Unread>) -> egui::WidgetText {
+    let Some((count, mine)) = unread.and_then(read_marks::Unread::badge) else {
+        return name.into();
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::TextStyle::Body.resolve(&egui::Style::default());
+    let small = egui::TextStyle::Small.resolve(&egui::Style::default());
+    job.append(
+        name,
+        0.0,
+        egui::TextFormat::simple(font, egui::Color32::PLACEHOLDER),
+    );
+    job.append(
+        &count,
+        10.0,
+        egui::TextFormat::simple(small.clone(), theme::MUTED),
+    );
+    if let Some(mine) = mine {
+        job.append(&mine, 6.0, egui::TextFormat::simple(small, theme::ACCENT));
+    }
+    job.into()
+}
+
 /// `#id name: first line`, at most 160 characters.
 fn pin_line(pin: &Value) -> String {
     let id = pin["id"].as_u64().unwrap_or(0);
@@ -1270,6 +1361,9 @@ fn search_summary(search: &SearchState) -> String {
     }
     summary
 }
+
+/// The shortest gap between two unread-count requests; events in between are coalesced.
+const UNREAD_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How often the open channel's processed-by receipts are reloaded.
 const RECEIPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
@@ -1708,6 +1802,8 @@ mod layout_tests {
             link_origin: None,
             copied_link: None,
             receipts_at: None,
+            read_marks_path: None,
+            unread_at: None,
             profile_store: None,
         }
     }
