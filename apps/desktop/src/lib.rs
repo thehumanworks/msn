@@ -2,6 +2,7 @@
 //! smoke check; everything else lives here so integration tests can drive it over real HTTP.
 
 pub mod app;
+pub mod drafts;
 pub mod markdown;
 mod mention;
 pub mod net;

@@ -802,6 +802,12 @@ nav .empty {
   font: 12px var(--mono);
   overflow-wrap: anywhere;
 }
+/* A draft kept across a reload lost its files (ADR 0057): a note, not a chip. */
+.attach-missing {
+  font: 12px var(--mono);
+  color: var(--muted);
+  align-self: center;
+}
 .compose .icon {
   width: 44px;
   height: 44px;

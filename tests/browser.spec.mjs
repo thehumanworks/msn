@@ -622,6 +622,177 @@ test("network-uncertain sends preserve drafts and reuse idempotency keys", async
   expect((await result.json()).messages).toMatchObject([{ to: "review-agent" }]);
 });
 
+test("drafts survive a reload per board and clear on send and Disconnect (ADR 0057)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/ops`, { headers: t.headers });
+  const posted = await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "lead", text: "Who takes the release notes?" },
+  });
+  const { message } = await posted.json();
+  await connect(page, t);
+  await openChannel(page, "general");
+  await page.getByRole("button", { name: `Reply to message #${message.id}` }).click();
+  await page.getByLabel("To", { exact: true }).fill("lead");
+  await page.getByLabel("Message", { exact: true }).fill("I can, after the deploy");
+  await openChannel(page, "ops");
+  await page.getByLabel("Message", { exact: true }).fill("ops note\nsecond line");
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# ops");
+  await expect(page.locator("#message")).toHaveValue("ops note\nsecond line");
+  await openChannel(page, "general");
+  await expect(page.locator("#message")).toHaveValue("I can, after the deploy");
+  await expect(page.locator("#recipient")).toHaveValue("lead");
+  await expect(page.locator("#reply-note-text")).toHaveText(`Replying to #${message.id} · lead`);
+  await page.screenshot({ path: testInfo.outputPath("drafts-restored.png") });
+  // Only the drafts are stored for them: never the access key.
+  const kept = await page.evaluate((tenant) => localStorage.getItem(`msn.drafts.${tenant}`), t.tenant);
+  expect(kept).toContain("I can, after the deploy");
+  expect(kept).not.toContain(t.token);
+  // Sending removes the draft; the other board's draft stays.
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# general");
+  await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator("#recipient")).toHaveValue("");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await openChannel(page, "ops");
+  await expect(page.locator("#message")).toHaveValue("ops note\nsecond line");
+  // Clearing the field removes the draft too.
+  await page.getByLabel("Message", { exact: true }).fill("");
+  await expect
+    .poll(() => page.evaluate((tenant) => localStorage.getItem(`msn.drafts.${tenant}`), t.tenant))
+    .toBeNull();
+  await page.getByLabel("Message", { exact: true }).fill("left behind");
+  await disconnect(page);
+  expect(await stored(page)).toEqual([0, 0]);
+});
+
+test("drafts stay in memory only without Stay signed in (ADR 0057)", async ({ page, request }) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t, "Tomas", { remember: false });
+  await page.getByLabel("Message", { exact: true }).fill("not on disk");
+  await page.getByLabel("To", { exact: true }).fill("lead");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  expect(await stored(page)).toEqual([0, 0]);
+});
+
+test("a draft's files are not kept; the draft says so after a reload (ADR 0057)", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  await page.locator("#attach-input").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("secret file body"),
+  });
+  await page.getByLabel("Message", { exact: true }).fill("see attached");
+  await page.reload();
+  await expect(page.locator("#message")).toHaveValue("see attached");
+  await expect(page.locator(".attach-missing")).toHaveText(
+    "1 file was not kept after the reload · attach again",
+  );
+  const kept = await page.evaluate((tenant) => localStorage.getItem(`msn.drafts.${tenant}`), t.tenant);
+  expect(kept).not.toContain("notes.txt");
+  expect(kept).not.toContain("secret file body");
+  await page.locator("#attach-input").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("secret file body"),
+  });
+  await expect(page.locator(".attach-missing")).toHaveCount(0);
+  await expect(page.locator("#attach-list button")).toContainText("notes.txt");
+});
+
+test("an uncertain send retried after a reload reuses its key and posts once (ADR 0057)", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  let first = true;
+  const keys = [];
+  await page.route("**/channels/general/messages", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    keys.push(route.request().headers()["idempotency-key"]);
+    if (first) {
+      first = false;
+      // The server stores the message; the browser never learns it did.
+      await route.fetch();
+      await route.abort("failed");
+    } else await route.continue();
+  });
+  await page.getByLabel("To", { exact: true }).fill("review-agent");
+  await page.getByLabel("Message", { exact: true }).fill("uncertain then reload");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#status")).toContainText("draft is preserved");
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# general");
+  await expect(page.locator("#message")).toHaveValue("uncertain then reload");
+  await expect(page.locator("#recipient")).toHaveValue("review-agent");
+  await expect(page.locator("#status")).toContainText("may not have gone through");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#message")).toHaveValue("");
+  expect(keys).toHaveLength(2);
+  expect(keys[1]).toBe(keys[0]);
+  const result = await request.get(`${t.path}/channels/general/messages`, { headers: t.headers });
+  expect((await result.json()).messages.map((m) => m.text)).toEqual(["uncertain then reload"]);
+  // Nothing is left to retry once the send is confirmed.
+  expect(await page.evaluate((tenant) => localStorage.getItem(`msn.drafts.${tenant}`), t.tenant)).toBeNull();
+});
+
+test("an uncertain send with a file, retried after a reload, posts once with the file (ADR 0057)", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  let first = true;
+  const keys = [];
+  await page.route("**/channels/general/messages", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    keys.push(route.request().headers()["idempotency-key"]);
+    if (first) {
+      first = false;
+      await route.fetch();
+      await route.abort("failed");
+    } else await route.continue();
+  });
+  await page.locator("#attach-input").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("file body"),
+  });
+  await page.getByLabel("Message", { exact: true }).fill("with a file");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#status")).toContainText("draft is preserved");
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# general");
+  await expect(page.locator("#message")).toHaveValue("with a file");
+  await expect(page.locator(".attach-missing")).toContainText("Send retries this message with its 1 file");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator(".attach-missing")).toHaveCount(0);
+  expect(keys).toHaveLength(2);
+  expect(keys[1]).toBe(keys[0]);
+  const result = await request.get(`${t.path}/channels/general/messages`, { headers: t.headers });
+  const messages = (await result.json()).messages;
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toMatchObject({ text: "with a file", attachments: [{ name: "notes.txt" }] });
+});
+
 test("editing an uncertain recipient creates a new logical send and retry key", async ({ page, request }) => {
   const t = await provision(request);
   await request.put(`${t.path}/channels/general`, { headers: t.headers });
