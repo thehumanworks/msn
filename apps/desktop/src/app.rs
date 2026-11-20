@@ -794,6 +794,7 @@ impl MsnDesktopApp {
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
         let scroll_to = self.scroll_to.take();
+        let channel_name = self.state.selected_channel.clone().unwrap_or_default();
         // A reply that landed in a folded thread: point at it, since the log does not show it.
         if let Some((root, id)) = self.state.channel.as_ref().and_then(|s| s.first_unseen()) {
             egui::Panel::bottom("thread-pointer")
@@ -865,7 +866,7 @@ impl MsnDesktopApp {
                                         if ui.cursor().top() < ui.clip_rect().bottom() {
                                             seen = seen.max(id);
                                         }
-                                        let fold = Fold::new(id, &state.unfolded);
+                                        let fold = Fold::new(&channel_name, id, &state.unfolded);
                                         render_message(ui, message, &me, Some(fold), actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
@@ -890,7 +891,8 @@ impl MsnDesktopApp {
                                         }
                                         let shown = ui.indent(("thread-reply", id), |ui| {
                                             let reply = &state.messages[&id];
-                                            let fold = Fold::new(id, &state.unfolded);
+                                            let fold =
+                                                Fold::new(&channel_name, id, &state.unfolded);
                                             render_message(ui, reply, &me, Some(fold), actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
@@ -1634,15 +1636,16 @@ const FOLDED_LINES: f32 = 10.0;
 /// One message's fold: whether the person opened it, and whether its toggle was pressed.
 #[derive(Clone, Copy)]
 struct Fold {
-    id: u64,
+    /// Where the measured height is kept: the board and the message.
+    key: egui::Id,
     open: bool,
     toggled: bool,
 }
 
 impl Fold {
-    fn new(id: u64, unfolded: &std::collections::BTreeSet<u64>) -> Self {
+    fn new(channel: &str, id: u64, unfolded: &std::collections::BTreeSet<u64>) -> Self {
         Fold {
-            id,
+            key: egui::Id::new(("message-fold", channel, id)),
             open: unfolded.contains(&id),
             toggled: false,
         }
@@ -1658,7 +1661,7 @@ fn fold_clip(ui: &mut egui::Ui, fold: Option<&Fold>, add: impl FnOnce(&mut egui:
         return false;
     };
     let line = ui.text_style_height(&egui::TextStyle::Body);
-    let key = egui::Id::new(("message-fold", fold.id));
+    let key = fold.key;
     let measured: Option<f32> = ui.data(|data| data.get_temp(key));
     let long = |height: f32| height > FOLD_LINES * line;
     let height = if measured.is_some_and(long) && !fold.open {
