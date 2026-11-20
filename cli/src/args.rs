@@ -269,13 +269,16 @@ pub enum Command {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
-    /// Invite people or agents (omit CHANNEL for workspace access; --for-agent prints a paste-ready board handoff)
+    /// Invite people or agents (omit CHANNEL for workspace access; --watch for read-only; --for-agent prints a paste-ready board handoff)
     Invite {
         channel: Option<String>,
         #[arg(long, default_value_t = 25)]
         uses: u32,
         #[arg(long, default_value_t = 86400)]
         expires_in: u32,
+        /// Watch only: whoever joins can read the channel live but cannot post or change anything
+        #[arg(long, conflicts_with = "for_agent")]
+        watch: bool,
         /// Print one paragraph to paste into any agent: how to join this board as a persona,
         /// the board goal and how to wait for work. Needs CHANNEL and --name.
         #[arg(long, requires_all = ["channel", "name"], conflicts_with_all = ["uses", "expires_in"])]

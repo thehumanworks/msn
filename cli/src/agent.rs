@@ -129,6 +129,13 @@ pub fn start_page(
             "start does not move read or processing cursors. peek begins at committed processing progress, initially zero."
         ]
     });
+    if identity["watchOnly"] == true {
+        // ADR 0039: tell the agent up front instead of letting every write fail with 403.
+        extra["identity"]["watchOnly"] = json!(true);
+        extra["warnings"].as_array_mut().unwrap().push(json!(
+            "This key is watch-only: read with start, peek, wait and show. Every write (send, label, commit, snapshot, attachment upload, invite, persona) is refused with 403 watch_only."
+        ));
+    }
     if identity["sharedChannel"] == true {
         extra["identity"]["sharedChannel"] = json!(true);
         extra["identity"]["personaId"] = json!(reader);

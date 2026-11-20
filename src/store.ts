@@ -103,6 +103,8 @@ type TenantRow = {
   channel_scope?: string | null;
   owner_access?: number;
   shared_channel?: number;
+  /** Watch-only key (ADR 0039): every request but a read is refused. Never cleared. */
+  read_only?: number;
 };
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
@@ -139,6 +141,8 @@ type InviteRow = {
   channel: string | null;
   expiresAt: number;
   remaining: number;
+  /** Redeeming issues a watch-only key (ADR 0039). */
+  watch: number;
 };
 const MAX_SNAPSHOTS = 1000;
 // Exact upper bound: every message can be created and later deleted, every channel and every
@@ -400,6 +404,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       for (const [table, column, definition] of [
         ["access_keys", "owner_access", "INTEGER NOT NULL DEFAULT 0"],
         ["access_keys", "shared_channel", "INTEGER NOT NULL DEFAULT 0"],
+        // Watch-only invitations and keys (ADR 0039). Additive with a safe default, so this needs
+        // no schema_version step: older keys and invitations stay full participants.
+        ["access_keys", "read_only", "INTEGER NOT NULL DEFAULT 0"],
+        ["invites", "watch", "INTEGER NOT NULL DEFAULT 0"],
         ["messages", "personaId", "TEXT"],
         ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
@@ -1253,6 +1261,15 @@ export class MsnDurableObject extends DurableObject<Env> {
     throw new HttpError(401, "unauthorized", "Unknown tenant or invalid access key.");
   }
 
+  /** Never throws: unknown keys fall through to the route's own authorization. */
+  private watchOnly(hash: string): boolean {
+    return Boolean(
+      this.ctx.storage.sql
+        .exec<{ read_only: number }>("SELECT read_only FROM access_keys WHERE token_hash = ?", hash)
+        .toArray()[0]?.read_only,
+    );
+  }
+
   /** A bound capability may only send as its bound name (or under its bound prefix). */
   private requireBoundName(row: TenantRow, username: string): void {
     if (row.bound_username !== null && username !== row.bound_username) {
@@ -1276,6 +1293,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       ...(row.channel_scope ? { channel: row.channel_scope } : {}),
       ...(row.owner_access ? { owner: true } : {}),
       ...(row.shared_channel ? { sharedChannel: true } : {}),
+      ...(row.read_only ? { watchOnly: true } : {}),
     };
   }
 
@@ -2572,6 +2590,9 @@ export class MsnDurableObject extends DurableObject<Env> {
       );
     const maxUses = input.maxUses === undefined ? 25 : snapshotInteger(input.maxUses, "maxUses");
     const expiresIn = input.expiresIn === undefined ? 86400 : snapshotInteger(input.expiresIn, "expiresIn");
+    if (input.watch !== undefined && typeof input.watch !== "boolean")
+      throw new HttpError(400, "invalid_invite", "watch must be true or false.");
+    const watch = input.watch === true;
     if (maxUses < 1 || maxUses > 100 || expiresIn < 60 || expiresIn > 604800)
       throw new HttpError(400, "invalid_invite", "Use 1–100 recipients and an expiry of 60–604800 seconds.");
     const code = newToken();
@@ -2589,13 +2610,14 @@ export class MsnDurableObject extends DurableObject<Env> {
     const id = crypto.randomUUID();
     const expiresAt = now + expiresIn * 1000;
     this.ctx.storage.sql.exec(
-      "INSERT INTO invites VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO invites (id, code_hash, creator_hash, channel, expiresAt, remaining, watch) VALUES (?, ?, ?, ?, ?, ?, ?)",
       id,
       codeHash,
       hash,
       channel,
       expiresAt,
       maxUses,
+      watch ? 1 : 0,
     );
     const accessCode = `${tenant}.${code}`;
     return json(
@@ -2607,6 +2629,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         url: `${new URL(request.url).origin}/#invite=${accessCode}`,
         expiresAt: new Date(expiresAt).toISOString(),
         maxUses,
+        ...(watch ? { watch: true } : {}),
       },
       201,
     );
@@ -2643,19 +2666,25 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.requireKeyCapacity();
       const id = crypto.randomUUID();
       this.ctx.storage.sql.exec(
-        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope) VALUES (?, ?, ?, NULL, ?, ?)",
+        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope, read_only) VALUES (?, ?, ?, NULL, ?, ?, ?)",
         id,
         hash,
         username,
         new Date().toISOString(),
         invite.channel,
+        invite.watch ? 1 : 0,
       );
       this.ctx.storage.sql.exec("UPDATE invites SET remaining = remaining - 1 WHERE id = ?", invite.id);
       return json(
         {
           ...this.identity(
             tenant,
-            { bound_username: username, bound_prefix: null, channel_scope: invite.channel },
+            {
+              bound_username: username,
+              bound_prefix: null,
+              channel_scope: invite.channel,
+              read_only: invite.watch,
+            },
             token,
           ),
           keyId: id,
@@ -2729,11 +2758,12 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 1 && request.method === "GET") {
             return json({
               keys: this.ctx.storage.sql
-                .exec(`SELECT ${KEY_METADATA}, channel_scope FROM access_keys ORDER BY id`)
+                .exec(`SELECT ${KEY_METADATA}, channel_scope, read_only FROM access_keys ORDER BY id`)
                 .toArray()
-                .map(({ channel_scope, ...key }) => ({
+                .map(({ channel_scope, read_only, ...key }) => ({
                   ...key,
                   ...(channel_scope ? { channel: channel_scope } : {}),
+                  ...(read_only ? { watchOnly: true } : {}),
                 })),
             });
           }
@@ -2837,6 +2867,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
       } else {
         const hash = await digest(bearer(request));
+        // Watch-only keys (ADR 0039) read and never write. One gate in front of every route, so a
+        // write route added later is refused by default. GET routes never change board content.
+        if (request.method !== "GET" && this.watchOnly(hash))
+          throw new HttpError(
+            403,
+            "watch_only",
+            "This access key can watch the board but not post or change anything.",
+          );
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
