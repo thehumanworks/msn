@@ -9,7 +9,7 @@
       "after": 0
     },
     "messages": [],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: none\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n_No messages._\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: none\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n_No messages._\n"
   },
   {
     "name": "one plain message",
@@ -31,7 +31,7 @@
         "createdAt": "2026-11-20T17:04:05.123Z"
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #1 to #1\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-20 17:04:05 UTC · alice\n\n```text\nhello\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #1 to #1\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-20 17:04:05 UTC · alice\n\n```text\nhello\n```\n"
   },
   {
     "name": "reply inside the transcript links to its anchor; outside links to the board",
@@ -74,7 +74,7 @@
         "replyTo": 2
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Starts after message #4\n- Messages: 3, #5 to #9\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-5\"></a>\n### #5 · 2026-11-20 17:04:05 UTC · planner-agent\n\n```text\nPlan:\n1. build\n2. ship\n```\n\n---\n\n<a id=\"msg-7\"></a>\n### #7 · 2026-11-20 17:04:05 UTC · bob\n\n- Reply to: [#5](#msg-5)\n- To: planner-agent\n\n```text\nApproved.\n```\n\n---\n\n<a id=\"msg-9\"></a>\n### #9 · 2026-11-20 17:04:05 UTC · alice\n\n- Reply to: [#2](https://msn.example/#board=acme/release&msg=2)\n\n```text\nFollowing up on the old thread.\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Starts after message #4\n- Messages: 3, #5 to #9\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-5\"></a>\n### #5 · 2026-11-20 17:04:05 UTC · planner-agent\n\n```text\nPlan:\n1. build\n2. ship\n```\n\n---\n\n<a id=\"msg-7\"></a>\n### #7 · 2026-11-20 17:04:05 UTC · bob\n\n- Reply to: [#5](#msg-5)\n- To: planner-agent\n\n```text\nApproved.\n```\n\n---\n\n<a id=\"msg-9\"></a>\n### #9 · 2026-11-20 17:04:05 UTC · alice\n\n- Reply to: [#2](https://msn.example/#board=acme/release&msg=2)\n\n```text\nFollowing up on the old thread.\n```\n"
   },
   {
     "name": "labels sorted by key and attachments by index",
@@ -124,7 +124,7 @@
         ]
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #3 to #3\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-3\"></a>\n### #3 · 2026-11-20 17:04:05 UTC · alice\n\n- Labels: github.pr=thehumanworks/msn\\#12, kind=decision, status=done\n- Attachments: report.pdf (512 B, application/pdf); log \\[final\\].txt (1.3 KiB, text/plain); big.bin (3.1 MiB, application/octet-stream)\n\n```text\nhello\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #3 to #3\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-3\"></a>\n### #3 · 2026-11-20 17:04:05 UTC · alice\n\n- Labels: github.pr=thehumanworks/msn\\#12, kind=decision, status=done\n- Attachments: report.pdf (512 B, application/pdf); log \\[final\\].txt (1.3 KiB, text/plain); big.bin (3.1 MiB, application/octet-stream)\n\n```text\nhello\n```\n"
   },
   {
     "name": "message text cannot close its block or inject markup",
@@ -155,7 +155,7 @@
         "createdAt": "2026-11-20T17:04:05.123Z"
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #10 to #11\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-10\"></a>\n### #10 · 2026-11-20 17:04:05 UTC · alice\n\n`````text\n```\n# not a heading\n</a><script>alert(1)</script>\n<!-- hide the rest\n````\n``x``\n`````\n\n---\n\n<a id=\"msg-11\"></a>\n### #11 · 2026-11-20 17:04:05 UTC · alice\n\n```text\nafter\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #10 to #11\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-10\"></a>\n### #10 · 2026-11-20 17:04:05 UTC · alice\n\n`````text\n```\n# not a heading\n</a><script>alert(1)</script>\n<!-- hide the rest\n````\n``x``\n`````\n\n---\n\n<a id=\"msg-11\"></a>\n### #11 · 2026-11-20 17:04:05 UTC · alice\n\n```text\nafter\n```\n"
   },
   {
     "name": "names and labels are escaped and kept on one line",
@@ -190,7 +190,7 @@
         ]
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #12 to #12\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-12\"></a>\n### #12 · 2026-11-20 17:04:05 UTC · evil�\\# Heading \\*x\\* \\<b\\>�\n\n- To: a\\|b\\`c\n- Labels: note=\\[x\\]\\(javascript\\:alert\\(1\\)\\) \\& \\$y\\$ \\~z\\~ \\!\n- Attachments: a��---�\\_b\\_.md (0 B, text/markdown)\n\n```text\nhello\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #12 to #12\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-12\"></a>\n### #12 · 2026-11-20 17:04:05 UTC · evil�\\# Heading \\*x\\* \\<b\\>�\n\n- To: a\\|b\\`c\n- Labels: note=\\[x\\]\\(javascript\\:alert\\(1\\)\\) \\& \\$y\\$ \\~z\\~ \\!\n- Attachments: a��---�\\_b\\_.md (0 B, text/markdown)\n\n```text\nhello\n```\n"
   },
   {
     "name": "json messages, line endings and empty text",
@@ -230,7 +230,7 @@
         "createdAt": "2026-11-20T17:04:05.123Z"
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 3, #20 to #22\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-20\"></a>\n### #20 · 2026-11-20 17:04:05 UTC · alice\n\n```json\n{\"op\":\"ping\"}\n```\n\n---\n\n<a id=\"msg-21\"></a>\n### #21 · 2026-11-20 17:04:05 UTC · alice\n\n```text\none\ntwo\nthree\n```\n\n---\n\n<a id=\"msg-22\"></a>\n### #22 · 2026-11-20 17:04:05 UTC · alice\n\n```text\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 3, #20 to #22\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-20\"></a>\n### #20 · 2026-11-20 17:04:05 UTC · alice\n\n```json\n{\"op\":\"ping\"}\n```\n\n---\n\n<a id=\"msg-21\"></a>\n### #21 · 2026-11-20 17:04:05 UTC · alice\n\n```text\none\ntwo\nthree\n```\n\n---\n\n<a id=\"msg-22\"></a>\n### #22 · 2026-11-20 17:04:05 UTC · alice\n\n```text\n```\n"
   },
   {
     "name": "URLs, emails and www names cannot become autolinks",
@@ -266,7 +266,7 @@
         ]
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #40 to #40\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-40\"></a>\n### #40 · 2026-11-20 17:04:05 UTC · https\\://evil.example/x\n\n- To: ops\\@example.com\n- Labels: see=www\\.example.com and WWW\\.Example.org, url=mailto\\:a\\@b.c\n- Attachments: http\\://x.y/z.txt (1 B, text/plain)\n\n```text\nhello\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #40 to #40\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-40\"></a>\n### #40 · 2026-11-20 17:04:05 UTC · https\\://evil.example/x\n\n- To: ops\\@example.com\n- Labels: see=www\\.example.com and WWW\\.Example.org, url=mailto\\:a\\@b.c\n- Attachments: http\\://x.y/z.txt (1 B, text/plain)\n\n```text\nhello\n```\n"
   },
   {
     "name": "invisible and hostile characters in names; tilde and long backtick text",
@@ -292,7 +292,7 @@
         }
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #41 to #41\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-41\"></a>\n### #41 · 2026-11-20 17:04:05 UTC · a�b�c�d�e�f�g�h�i�j�😀k\n\n- To: x�y\n- Labels: k=v��\n\n`````````````text\n~~~\n# still code\n~~~\n````````````\n\u0000 😀\n`````````````\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #41 to #41\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-41\"></a>\n### #41 · 2026-11-20 17:04:05 UTC · a�b�c�d�e�f�g�h�i�j�😀k\n\n- To: x�y\n- Labels: k=v��\n\n`````````````text\n~~~\n# still code\n~~~\n````````````\n\u0000 😀\n`````````````\n"
   },
   {
     "name": "a sender name cannot fake the time, and missing fields render empty",
@@ -317,7 +317,7 @@
         "createdAt": "2026-11-20T17:04:06Z"
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #50 to #51\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-50\"></a>\n### #50 · 2026-11-20 17:04:05 UTC · mallory · 2020-01-01 00\\:00\\:00 UTC\n\n```text\nhi\n```\n\n---\n\n<a id=\"msg-51\"></a>\n### #51 · 2026-11-20 17:04:06 UTC · \n\n```text\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #50 to #51\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-50\"></a>\n### #50 · 2026-11-20 17:04:05 UTC · mallory · 2020-01-01 00\\:00\\:00 UTC\n\n```text\nhi\n```\n\n---\n\n<a id=\"msg-51\"></a>\n### #51 · 2026-11-20 17:04:06 UTC · \n\n```text\n```\n"
   },
   {
     "name": "odd createdAt is shown escaped",
@@ -339,6 +339,38 @@
         "createdAt": "yesterday <noon>"
       }
     ],
-    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #30 to #30\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as it was sent, inside a code block.\n\n---\n\n<a id=\"msg-30\"></a>\n### #30 · yesterday \\<noon\\> · alice\n\n```text\nhello\n```\n"
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 1, #30 to #30\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-30\"></a>\n### #30 · yesterday \\<noon\\> · alice\n\n```text\nhello\n```\n"
+  },
+  {
+    "name": "an edited message says when its text last changed",
+    "meta": {
+      "origin": "https://msn.example",
+      "tenant": "acme",
+      "channel": "release",
+      "exportedAt": "2026-11-20T17:30:00.000Z",
+      "after": 0
+    },
+    "messages": [
+      {
+        "id": 1,
+        "tenant": "acme",
+        "channel": "release",
+        "username": "alice",
+        "text": "deploy on monday",
+        "contentType": "text/plain",
+        "createdAt": "2026-11-20T17:04:05.123Z",
+        "editedAt": "2026-11-20T17:10:00.456Z"
+      },
+      {
+        "id": 2,
+        "tenant": "acme",
+        "channel": "release",
+        "username": "bob",
+        "text": "ok",
+        "contentType": "text/plain",
+        "createdAt": "2026-11-20T17:11:00.000Z"
+      }
+    ],
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #1 to #2\n- Exported: 2026-11-20 17:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-20 17:04:05 UTC (edited 2026-11-20 17:10:00 UTC) · alice\n\n```text\ndeploy on monday\n```\n\n---\n\n<a id=\"msg-2\"></a>\n### #2 · 2026-11-20 17:11:00 UTC · bob\n\n```text\nok\n```\n"
   }
 ]

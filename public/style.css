@@ -865,6 +865,13 @@ nav .empty {
 .keyboard-open .pane-chat:has(.compose :focus) :is(.toolbar, search, .pins, .checkpoint, .since) {
   display: none;
 }
+/* With the keyboard up, the home indicator is covered: its safe-area padding is empty space. */
+.keyboard-open :is(.compose, .identity) {
+  padding-bottom: 8px;
+}
+.keyboard-open #status {
+  padding-bottom: 4px;
+}
 /* In landscape the keyboard leaves room for little more than the composer: the board header
    and the status line step aside too, so the message field and a few lines of log fit. */
 .keyboard-short .pane-chat:has(.compose :focus) > .bar,
@@ -1601,6 +1608,16 @@ nav button.has-unread .channel-name {
 #messages article:focus:not(:focus-visible) {
   outline: none;
 }
+
+/* Edit a message you sent (ADR 0052). */
+.message-meta .message-edited {
+  margin-left: 0;
+  font-family: inherit;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+.message-meta .message-edit,
 .message-meta .reply-button {
   font: inherit;
   font-size: 11px;
@@ -1608,11 +1625,33 @@ nav button.has-unread .channel-name {
   padding: 0 4px;
   min-height: 0;
 }
+.watching .message-edit,
+.archived .message-edit,
 .watching .reply-button,
 .archived .reply-button {
   display: none;
 }
+.fold-toggle.editing {
+  display: none;
+}
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.edit-form textarea {
+  width: 100%;
+  min-height: 3em;
+  resize: vertical;
+}
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 @media (pointer: coarse) {
+  .message-meta .message-edit,
   .message-meta .reply-button {
     min-height: 32px;
     padding: 0 8px;
@@ -1725,13 +1764,6 @@ nav button.has-unread .channel-name {
     inset: -6px 0;
   }
 }
-/* With the keyboard up, the home indicator is covered: its safe-area padding is empty space. */
-.keyboard-open :is(.compose, .identity) {
-  padding-bottom: 8px;
-}
-.keyboard-open #status {
-  padding-bottom: 4px;
-}
 /* The toolbar strip scrolls sideways with no scrollbar: fade the edge that has more. */
 .toolbar.more-right {
   -webkit-mask-image: linear-gradient(to right, var(--text) calc(100% - 32px), transparent);
@@ -1756,4 +1788,70 @@ nav button.has-unread .channel-name {
     var(--text) calc(100% - 32px),
     transparent
   );
+}
+/* Mention someone with @ (ADR 0055): the To field says who a message goes to before it is sent,
+   and the suggestions open above the message field so an on-screen keyboard never covers them. */
+.to-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.to-field label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.to-field input {
+  flex: 1;
+  min-width: 0;
+}
+.to-field:has(#recipient:not(:placeholder-shown)) label {
+  color: var(--accent);
+  font-weight: 600;
+}
+.message-field {
+  position: relative;
+  display: grid;
+}
+.mention-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 5;
+  margin: 0;
+  padding: 4px;
+  max-height: min(240px, calc(var(--app-height) * 0.4));
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.mention-list[hidden] {
+  display: none;
+}
+.mention-list [role="option"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.mention-list [role="option"][aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.mention-list small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+@media (pointer: coarse) {
+  .mention-list [role="option"] {
+    min-height: 44px;
+  }
 }

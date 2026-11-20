@@ -165,6 +165,14 @@ impl MsnClient {
                     req.send_empty()
                 }
             }
+            "PATCH" => {
+                let req = apply_headers(self.agent.patch(&url), token, extra);
+                if let Some(payload) = body {
+                    req.send_json(payload)
+                } else {
+                    req.send_empty()
+                }
+            }
             other => return Err(CliError::generic(format!("Unsupported method {other}"))),
         };
         match result {

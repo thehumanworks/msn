@@ -2668,6 +2668,114 @@ test("people react to a message with a fixed set; reactions toggle and never add
   for (const add of await page.locator("#messages .reaction-add").all()) await expect(add).toBeHidden();
 });
 
+test("people edit their own messages in place; others see the edit and nothing moves", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: shared,
+    data: { displayName: "lead" },
+  });
+  await request.put(`${t.path}/channels/other`, { headers: t.headers });
+  const send = async (headers, username, text) =>
+    (
+      await (
+        await request.post(`${t.path}/channels/work/messages`, { headers, data: { username, text } })
+      ).json()
+    ).message.id;
+  const mine = await send(t.headers, "human", "Ship it on **mondya**");
+  const theirs = await send(shared, "lead", "I will take the <b>deploy</b>");
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const article = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  // Only your own messages offer Edit.
+  await expect(article(theirs).locator(".message-edit")).toHaveCount(0);
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  const box = article(mine).getByRole("textbox", { name: `New text for message #${mine}` });
+  await expect(box).toHaveValue("Ship it on **mondya**");
+  // Escape cancels without a change.
+  await box.press("Escape");
+  await expect(box).toHaveCount(0);
+  await expect(article(mine).locator(".message-body strong")).toHaveText("mondya");
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  await box.fill("Ship it on **monday**");
+  await page.screenshot({ path: testInfo.outputPath("edit-form.png") });
+  await box.press("Control+Enter");
+  await expect(article(mine).locator(".message-body strong")).toHaveText("monday");
+  await expect(article(mine).locator(".message-edited")).toHaveText("edited");
+  await expect(page.locator("#messages > article")).toHaveCount(2);
+
+  // Another participant's edit shows when the board is read again; text stays plain.
+  expect(
+    (
+      await request.patch(`${t.path}/channels/work/messages/${theirs}`, {
+        headers: shared,
+        data: { username: "lead", text: "I will take the <i>deploy</i> and the rollback" },
+      })
+    ).status(),
+  ).toBe(200);
+  await openChannel(page, "other");
+  await openChannel(page, "work");
+  await expect(article(theirs).locator(".message-body")).toHaveText(
+    "I will take the <i>deploy</i> and the rollback",
+  );
+  await expect(article(theirs).locator(".message-edited")).toBeVisible();
+  await expect(article(theirs).locator("i")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("edited.png") });
+
+  // Nothing moved: same ids, same order, no new message.
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.map((m) => [m.id, m.text])).toEqual([
+    [mine, "Ship it on **monday**"],
+    [theirs, "I will take the <i>deploy</i> and the rollback"],
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Two editors: a save that started before another device's edit is refused, the editor stays
+  // open with the user's text, and a second Save replaces the newer version on purpose.
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  expect(
+    (
+      await request.patch(`${t.path}/channels/work/messages/${mine}`, {
+        headers: t.headers,
+        data: { username: "human", text: "Ship it on monday, from my phone" },
+      })
+    ).status(),
+  ).toBe(200);
+  await box.fill("Ship it on **tuesday**");
+  await box.press("Control+Enter");
+  await expect(page.locator("#status")).toContainText("changed while you were editing");
+  await expect(box).toHaveValue("Ship it on **tuesday**");
+  await box.press("Control+Enter");
+  await expect(box).toHaveCount(0);
+  await expect(article(mine).locator(".message-body strong")).toHaveText("tuesday");
+
+  // An archived board offers no Edit.
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await expect(article(mine).locator(".message-edit")).toBeHidden();
+});
+
 test("a watch-only invitation lets someone read a board live without posting", async ({
   page,
   request,
@@ -3617,4 +3725,167 @@ test("on an archived board j and k still move but r never starts a reply", async
   await page.keyboard.press("r");
   await expect(page.locator("#reply-note")).toBeHidden();
   await expect(page.locator("#message")).not.toBeFocused();
+});
+
+test("typing @ suggests the board's people; a pick writes @name and fills an empty To (ADR 0055)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = "e".repeat(64);
+  const board = { Authorization: `Bearer ${credential}` };
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  for (const [id, displayName] of [
+    ["p1", "lead"],
+    ["p2", "reviewer"],
+    ["p3", "builder"],
+  ])
+    await request.put(`${t.path}/channels/work/personas/${id}`, { headers: board, data: { displayName } });
+  // Reviewer has not posted yet: it comes after the people who have.
+  for (const [personaId, username] of [
+    ["p3", "builder"],
+    ["p1", "lead"],
+  ])
+    expect(
+      (
+        await request.post(`${t.path}/channels/work/messages`, {
+          headers: board,
+          data: { username, personaId, text: `${username} checking in` },
+        })
+      ).status(),
+    ).toBe(201);
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await expect(page.locator("#messages .message")).toHaveCount(2);
+  const box = page.locator("#message");
+  const list = page.getByRole("listbox", { name: "People to mention" });
+  const to = page.getByLabel("To", { exact: true });
+
+  // A reply in progress, so Escape on the list can be shown to leave it alone.
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("k");
+  await page.keyboard.press("r");
+  await expect(page.locator("#reply-note")).toBeVisible();
+
+  // A bare @ lists everyone but me: recent senders newest first, then the other personas.
+  await box.pressSequentially("Please @");
+  await expect(list).toBeVisible();
+  await expect(list.getByRole("option")).toHaveText(["@lead", "@builder", "@reviewer"]);
+  await expect(box).toHaveAttribute("aria-expanded", "true");
+  await page.screenshot({ path: testInfo.outputPath("mention-list.png") });
+
+  // Typing narrows the list; arrows move; Enter picks instead of sending.
+  await box.pressSequentially("r");
+  await expect(list.getByRole("option")).toHaveText(["@reviewer", "@builder"]);
+  await page.keyboard.press("ArrowDown");
+  await expect(list.getByRole("option", { name: "@builder" })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("Please @reviewer ");
+  await expect(to).toHaveValue("reviewer");
+  await expect(list).toBeHidden();
+  await expect(page.locator("#status")).toContainText("the message goes to reviewer");
+
+  // A second mention only adds @name: the first pick stays the recipient.
+  await box.pressSequentially("and @bu");
+  await list.getByRole("option", { name: "@builder" }).click();
+  await expect(box).toHaveValue("Please @reviewer and @builder ");
+  await expect(box).toBeFocused();
+  await expect(to).toHaveValue("reviewer");
+
+  // Escape closes only the list (the reply stays), and typing on does not reopen it.
+  await box.pressSequentially("@l");
+  await expect(list).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(list).toBeHidden();
+  await expect(page.locator("#reply-note")).toBeVisible();
+  await box.pressSequentially("e");
+  await expect(list).toBeHidden();
+  // A space closes it too; shortcuts never fire while typing.
+  await box.pressSequentially(" @re");
+  await expect(list).toBeVisible();
+  await box.pressSequentially(" jk");
+  await expect(list).toBeHidden();
+  await expect(box).toBeFocused();
+  await expect(box).toHaveValue("Please @reviewer and @builder @le @re jk");
+  await page.screenshot({ path: testInfo.outputPath("mention-picked.png") });
+
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("");
+  await expect(to).toHaveValue("");
+  const result = await request.get(`${t.path}/channels/work/messages`, { headers: t.headers });
+  const sent = (await result.json()).messages.at(-1);
+  expect(sent).toMatchObject({
+    username: "human",
+    to: "reviewer",
+    text: "Please @reviewer and @builder @le @re jk",
+  });
+  expect(sent.replyTo).toBeGreaterThan(0);
+
+  // Deleting the picked @name clears the To it filled; a To typed by hand is never cleared.
+  await box.pressSequentially("@lea");
+  await page.keyboard.press("Tab");
+  await expect(to).toHaveValue("lead");
+  await box.fill("");
+  await box.dispatchEvent("input");
+  await expect(to).toHaveValue("");
+  await to.fill("ops");
+  await box.pressSequentially("@lead");
+  await page.keyboard.press("Enter");
+  await expect(to).toHaveValue("ops");
+  await box.fill("");
+  await box.dispatchEvent("input");
+  await expect(to).toHaveValue("ops");
+  await to.fill("");
+
+  // A list closed with Escape and then sent does not stay closed for the next message's @.
+  await box.pressSequentially("@b");
+  await expect(list).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(list).toBeHidden();
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("");
+  await box.pressSequentially("@b");
+  await expect(list).toBeVisible();
+
+  // An input method still composing owns Enter: it neither picks nor sends.
+  await box.evaluate((node) =>
+    node.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true }),
+    ),
+  );
+  await expect(box).toHaveValue("@b");
+  await expect(list).toBeVisible();
+});
+
+test("a failed persona load is not retried on every key after @ (ADR 0055)", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential: "f".repeat(64), goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  let asked = 0;
+  await page.route("**/channels/work/personas", (route) => {
+    asked += 1;
+    return route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"down"}' });
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#message").pressSequentially("@abc");
+  await expect.poll(() => asked).toBe(1);
+  await page.locator("#message").pressSequentially("def");
+  await page.waitForTimeout(300);
+  expect(asked).toBe(1);
+  await expect(page.locator("#status")).not.toHaveClass(/error/);
 });

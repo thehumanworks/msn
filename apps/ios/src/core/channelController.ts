@@ -80,6 +80,9 @@ export class ChannelController {
   private syncCursor = 0;
   private pinsAt = 0;
   private reactionsAt = 0;
+  private editsAt = 0;
+  /** Edit cursor (ADR 0052); 0 reads every edit once, so none made while loading is missed. */
+  private editCursor = 0;
   private needReload = true;
   private needSync = false;
   private pendingSnapshot: number | null = null;
@@ -284,6 +287,7 @@ export class ChannelController {
       this.publishMessages();
       if (!next.hasMore) {
         await this.refreshReactions();
+        await this.refreshEdits();
         return this.refreshPins();
       }
     }
@@ -312,6 +316,60 @@ export class ChannelController {
       if (changed) this.publishMessages();
     } catch (error) {
       if (isAbortError(error)) throw error;
+    }
+  }
+
+  /**
+   * Edits send no new message (ADR 0052), so a sync re-reads them after the edit cursor as often
+   * as reactions. Best effort: a failed read keeps what is shown.
+   */
+  private async refreshEdits(): Promise<void> {
+    if (!this.byId.size || Date.now() - this.editsAt < this.pinRefreshMs) return;
+    this.editsAt = Date.now();
+    try {
+      const { edits, editCursor } = await this.ctl.api.listEdits(this.channel, this.editCursor, this.ctl.signal);
+      if (this.disposed) return;
+      this.editCursor = Math.max(this.editCursor, editCursor);
+      let changed = false;
+      for (const edited of edits) changed = this.applyEdit(edited) || changed;
+      if (changed) this.publishMessages();
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
+  }
+
+  /** Takes an edit's text and editedAt into the loaded copy; reactions and the rest stay. */
+  private applyEdit(edited: Message): boolean {
+    const current = this.byId.get(edited.id);
+    if (!current || (current.text === edited.text && current.editedAt === edited.editedAt)) return false;
+    this.byId.set(edited.id, {
+      ...current,
+      text: edited.text,
+      ...(edited.editedAt ? { editedAt: edited.editedAt } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * Replaces the text of one of your loaded messages (ADR 0052). Resolves to an error message, or
+   * null once the board shows the new text.
+   */
+  async editMessage(id: number, text: string): Promise<string | null> {
+    const message = this.byId.get(id);
+    if (!message) return "That message is no longer loaded.";
+    const username = this.ctl.session.username;
+    if (message.username !== username || username === "github") return "Only the sender can edit a message.";
+    if (!text.trim()) return "A message cannot be empty.";
+    if (text === message.text) return null;
+    try {
+      const updated = await this.ctl.api.editMessage(this.channel, id, { username, text }, this.ctl.signal);
+      if (this.disposed) return null;
+      if (this.applyEdit(updated)) this.publishMessages();
+      return null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+      return error instanceof Error ? error.message : "Could not edit the message.";
     }
   }
 

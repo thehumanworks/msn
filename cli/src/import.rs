@@ -829,17 +829,22 @@ fn import_envelope(
     if let Some(to) = message.get("to").and_then(Value::as_str) {
         provenance.insert("to".to_string(), json!(to));
     }
+    let mut origin = json!({
+        "instanceId": source.instance_id,
+        "origin": source.origin,
+        "tenant": source.tenant,
+        "channel": source.channel,
+        "messageId": source_id,
+        "username": message.get("username").and_then(Value::as_str).unwrap_or(""),
+        "createdAt": message.get("createdAt").and_then(Value::as_str).unwrap_or(""),
+    });
+    // An edited source message (ADR 0052) keeps when its sender last changed it.
+    if let Some(edited) = message.get("editedAt").and_then(Value::as_str) {
+        origin["editedAt"] = json!(edited);
+    }
     json!({
         "schema": IMPORT_SCHEMA,
-        "source": {
-            "instanceId": source.instance_id,
-            "origin": source.origin,
-            "tenant": source.tenant,
-            "channel": source.channel,
-            "messageId": source_id,
-            "username": message.get("username").and_then(Value::as_str).unwrap_or(""),
-            "createdAt": message.get("createdAt").and_then(Value::as_str).unwrap_or(""),
-        },
+        "source": origin,
         "payload": {
             "contentType": content_type,
             "text": text,

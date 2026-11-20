@@ -89,12 +89,36 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// The open board's personas, for @ suggestions (ADR 0055).
+    LoadPersonas {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
     /// Current reactions (ADR 0047) for the open channel's messages after `after`.
     LoadReactions {
         generation: u64,
         channel_generation: u64,
         channel: String,
         after: u64,
+    },
+    /// Messages edited after `after` on the open channel (ADR 0052); `None` learns the cursor.
+    LoadEdits {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        after: Option<u64>,
+    },
+    /// Replaces the text of one of `username`'s messages (ADR 0052).
+    EditMessage {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        id: u64,
+        text: String,
+        /// The `editedAt` the editor started from; None for a never-edited message.
+        base: Option<String>,
     },
     /// Adds (`remove: false`) or removes one reaction as `username` (ADR 0047).
     React {
@@ -172,8 +196,11 @@ impl Command {
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
             | Command::LoadReceipts { generation, .. }
+            | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
+            | Command::LoadEdits { generation, .. }
+            | Command::EditMessage { generation, .. }
             | Command::SendMessage { generation, .. }
             | Command::SendTaskEvent { generation, .. }
             | Command::Search { generation, .. }
@@ -269,6 +296,13 @@ pub enum UiEvent {
         channel: String,
         receipts: Vec<msn_cli::receipts::Receipt>,
     },
+    /// The open board's personas as (name, listening) (ADR 0055); empty on a plain channel.
+    Personas {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        personas: Vec<(String, bool)>,
+    },
     /// Reactions for every message after `after` that has any (ADR 0047); others have none.
     Reactions {
         generation: u64,
@@ -276,6 +310,21 @@ pub enum UiEvent {
         channel: String,
         after: u64,
         reactions: Vec<(u64, Value)>,
+    },
+    /// Messages edited since the last edit cursor, and the cursor to ask from next (ADR 0052).
+    Edits {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        messages: Vec<Value>,
+        edit_cursor: u64,
+    },
+    /// The user's own message after their edit (ADR 0052).
+    Edited {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        message: Value,
     },
     /// One message's reactions after the user's own change (`Null` when none are left).
     Reacted {
@@ -678,6 +727,34 @@ fn handle_command(
                 None,
             ),
         },
+        Command::LoadPersonas {
+            channel_generation,
+            channel,
+            ..
+        } => match client_ops::fetch_personas(&cc.client, &cc.tenant, &cc.token, &channel) {
+            Err(err @ CliError::Auth(_)) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "personas",
+                err,
+                false,
+                None,
+            ),
+            // A plain channel has no personas (404), and a failed load only leaves @ with the
+            // senders it already knows: neither is worth an error line.
+            result => emit(
+                tx,
+                wake,
+                UiEvent::Personas {
+                    generation,
+                    channel_generation,
+                    channel,
+                    personas: result.unwrap_or_default(),
+                },
+            ),
+        },
         Command::LoadReactions {
             channel_generation,
             channel,
@@ -708,6 +785,73 @@ fn handle_command(
                 ),
             }
         }
+        Command::LoadEdits {
+            channel_generation,
+            channel,
+            after,
+            ..
+        } => match client_ops::fetch_edits(&cc.client, &cc.tenant, &cc.token, &channel, after) {
+            Ok((messages, edit_cursor)) => emit(
+                tx,
+                wake,
+                UiEvent::Edits {
+                    generation,
+                    channel_generation,
+                    channel,
+                    messages,
+                    edit_cursor,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "edits",
+                err,
+                false,
+                None,
+            ),
+        },
+        Command::EditMessage {
+            channel_generation,
+            channel,
+            username,
+            id,
+            text,
+            base,
+            ..
+        } => match client_ops::edit_message(
+            &cc.client,
+            &cc.tenant,
+            &cc.token,
+            &channel,
+            &username,
+            id,
+            &text,
+            base.as_deref(),
+        ) {
+            Ok(message) => emit(
+                tx,
+                wake,
+                UiEvent::Edited {
+                    generation,
+                    channel_generation,
+                    channel,
+                    message,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "edit",
+                err,
+                true,
+                None,
+            ),
+        },
         Command::React {
             channel_generation,
             channel,

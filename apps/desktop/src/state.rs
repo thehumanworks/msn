@@ -144,8 +144,15 @@ pub struct ChannelState {
     /// Explicit commit positions (ADR 0040); empty until loaded or on a server without them.
     pub receipts: Vec<msn_cli::receipts::Receipt>,
     pub receipts_flight: Flight,
+    /// The board's personas for @ suggestions (ADR 0055): `None` until asked for once.
+    pub personas: Option<Vec<(String, bool)>>,
+    pub personas_requested: bool,
     /// Reactions (ADR 0047) send no event, so they are re-read on the receipts timer.
     pub reactions_flight: Flight,
+    /// Edits (ADR 0052) send no message either; re-read on the same timer from `edit_cursor`.
+    pub edits_flight: Flight,
+    /// The board's edit cursor from the last edits page; 0 reads every edit once.
+    pub edit_cursor: u64,
     /// Thread roots the person opened (ADR 0041). Display only; kept across syncs.
     pub expanded: BTreeSet<u64>,
     /// Long messages the person opened with Show more, or jumped to (ADR 0050). Display only.
@@ -404,6 +411,66 @@ impl AppState {
             })
     }
 
+    /// Re-reads edits (ADR 0052) after the open channel's edit cursor; the app calls this on the
+    /// receipts timer, because an edit adds no message.
+    pub fn edits_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        if !state.loaded {
+            return None;
+        }
+        let after = state.edit_cursor;
+        state.edits_flight.request().then_some(Command::LoadEdits {
+            generation,
+            channel_generation,
+            channel,
+            after: Some(after),
+        })
+    }
+
+    /// Replaces the text of one of the connected name's messages (ADR 0052). Nothing is sent for
+    /// an archived board, someone else's message, a GitHub notice or an unchanged text.
+    /// `base` is the message's `editedAt` when the editor opened, so a save after another
+    /// device's edit is refused instead of overwriting it.
+    pub fn edit_message(&mut self, id: u64, text: String, base: Option<String>) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if self.is_archived(&channel) {
+            self.status = Some(format!("{channel} is archived and read only."));
+            return Vec::new();
+        }
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Vec::new();
+        };
+        let Some(message) = self.channel.as_ref().and_then(|s| s.messages.get(&id)) else {
+            return Vec::new();
+        };
+        if message["username"].as_str() != Some(username.as_str()) || username == "github" {
+            self.status = Some("Only the sender can edit a message.".into());
+            return Vec::new();
+        }
+        if text.trim().is_empty() {
+            self.status = Some("A message cannot be empty.".into());
+            return Vec::new();
+        }
+        if message["text"].as_str() == Some(text.as_str()) {
+            return Vec::new();
+        }
+        vec![Command::EditMessage {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            id,
+            text,
+            base,
+        }]
+    }
+
     /// Adds or removes the connected name's reaction on one message (ADR 0047). An archived
     /// board takes no changes, so nothing is sent.
     pub fn react(&mut self, id: u64, kind: &str, remove: bool) -> Vec<Command> {
@@ -444,6 +511,23 @@ impl AppState {
                 channel_generation,
                 channel,
             })
+    }
+
+    /// Asks for the open board's personas once per visit, the first time @ is typed (ADR 0055).
+    pub fn personas_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        if state.personas_requested {
+            return None;
+        }
+        state.personas_requested = true;
+        Some(Command::LoadPersonas {
+            generation,
+            channel_generation,
+            channel,
+        })
     }
 
     fn snapshots_command(&mut self) -> Option<Command> {
@@ -818,7 +902,12 @@ impl AppState {
                 }
                 self.status = Some(BUSY.into());
             }
-            Command::React { .. } => self.status = Some(BUSY.into()),
+            Command::React { .. } | Command::EditMessage { .. } => self.status = Some(BUSY.into()),
+            Command::LoadEdits { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.edits_flight.fail();
+                }
+            }
             Command::LoadReactions { .. } => {
                 if let Some(state) = self.channel.as_mut() {
                     state.reactions_flight.fail();
@@ -995,6 +1084,19 @@ impl AppState {
                     Vec::new()
                 }
             }
+            UiEvent::Personas {
+                generation,
+                channel_generation,
+                channel,
+                personas,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.personas = Some(personas);
+                }
+                Vec::new()
+            }
             UiEvent::Reactions {
                 generation,
                 channel_generation,
@@ -1023,6 +1125,51 @@ impl AppState {
                 } else {
                     Vec::new()
                 }
+            }
+            UiEvent::Edits {
+                generation,
+                channel_generation,
+                channel,
+                messages,
+                edit_cursor,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                for edited in &messages {
+                    apply_edit(state, edited);
+                }
+                state.edit_cursor = state.edit_cursor.max(edit_cursor);
+                if state.edits_flight.finish() {
+                    vec![Command::LoadEdits {
+                        generation,
+                        channel_generation,
+                        channel,
+                        after: Some(state.edit_cursor),
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::Edited {
+                generation,
+                channel_generation,
+                channel,
+                message,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    apply_edit(state, &message);
+                    self.status = Some(format!(
+                        "Message #{} edited.",
+                        message["id"].as_u64().unwrap_or(0)
+                    ));
+                }
+                Vec::new()
             }
             UiEvent::Reacted {
                 generation,
@@ -1414,6 +1561,16 @@ impl AppState {
                 }
             }
             "react" => self.status = Some(format!("Reaction not changed: {message}")),
+            // Edits (ADR 0052): a failed refresh keeps what is shown.
+            "edits" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.edits_flight.fail();
+                }
+            }
+            // A 409 edit_conflict says someone saved first; the next edits refresh shows their text.
+            "edit" => self.status = Some(format!("Message not edited: {message}")),
             "sync-channel" | "load-snapshots" => {
                 if channel_generation != Some(self.channel_generation) {
                     return;
@@ -1431,6 +1588,23 @@ impl AppState {
             }
             _ => self.status = Some(message),
         }
+    }
+}
+
+/// Takes an edited message's text and editedAt (ADR 0052) into the cached copy, if it is loaded.
+/// Everything else on the cached message (reactions, labels, attachments) stays.
+fn apply_edit(state: &mut ChannelState, edited: &Value) {
+    let Some(id) = edited["id"].as_u64() else {
+        return;
+    };
+    let Some(message) = state.messages.get_mut(&id).and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(text) = edited["text"].as_str() {
+        message.insert("text".into(), Value::String(text.into()));
+    }
+    if let Some(at) = edited["editedAt"].as_str() {
+        message.insert("editedAt".into(), Value::String(at.into()));
     }
 }
 
@@ -1889,6 +2063,73 @@ mod tests {
         });
         assert_eq!(state.selected_channel.as_deref(), Some("random"));
         assert!(state.channel.as_ref().unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn edits_refresh_cached_messages_and_only_own_messages_can_be_edited() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(&mut state, vec![msg(4, "a"), msg(5, "b")], 5, 0);
+        let Some(Command::LoadEdits { after, .. }) = state.edits_command() else {
+            panic!("expected an edits request");
+        };
+        assert_eq!(after, Some(0));
+        assert!(state.edits_command().is_none());
+        let cg = state.channel_generation;
+        // The second request above was queued: it reruns from the new cursor.
+        let rerun = state.apply(UiEvent::Edits {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            messages: vec![
+                json!({"id": 5, "channel": "general", "text": "b2", "editedAt": "2026-11-20T00:00:00Z"}),
+                json!({"id": 99, "channel": "general", "text": "not loaded"}),
+            ],
+            edit_cursor: 7,
+        });
+        let channel = state.channel.as_ref().unwrap();
+        assert_eq!(channel.messages[&5]["text"], "b2");
+        assert_eq!(channel.messages[&5]["editedAt"], "2026-11-20T00:00:00Z");
+        assert!(!channel.messages.contains_key(&99));
+        assert_eq!(channel.edit_cursor, 7);
+        assert!(matches!(
+            rerun.as_slice(),
+            [Command::LoadEdits { after: Some(7), .. }]
+        ));
+
+        // Message 4 is alice's, the connected name: it can be edited.
+        state
+            .channel
+            .as_mut()
+            .unwrap()
+            .messages
+            .get_mut(&4)
+            .unwrap()["username"] = json!("alice");
+        let commands = state.edit_message(4, "a2".into(), None);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::EditMessage { id: 4, text, username, base: None, .. }] if text == "a2" && username == "alice"
+        ));
+        assert!(
+            state.edit_message(4, "a".into(), None).is_empty(),
+            "unchanged text sends nothing"
+        );
+        assert!(state.edit_message(4, "  ".into(), None).is_empty());
+        state
+            .channel
+            .as_mut()
+            .unwrap()
+            .messages
+            .get_mut(&4)
+            .unwrap()["username"] = json!("bob");
+        assert!(state.edit_message(4, "mine now".into(), None).is_empty());
+        state.apply(UiEvent::Edited {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            message: json!({"id": 4, "channel": "general", "text": "a2", "editedAt": "2026-11-20T00:00:01Z"}),
+        });
+        assert_eq!(state.channel.as_ref().unwrap().messages[&4]["text"], "a2");
     }
 
     #[test]

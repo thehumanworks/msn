@@ -29,6 +29,8 @@ export type Message = {
   correlationId?: string;
   to?: string;
   reactions?: Reactions;
+  /** When the sender last edited the text (ADR 0052); absent when never edited. */
+  editedAt?: string;
 };
 
 /** One page of message search (ADR 0037), newest first. */

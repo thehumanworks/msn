@@ -225,6 +225,36 @@ test("inbox reference and cursor are atomic, replay deduplicates, queue overflow
   assert.equal(f.store.agent("alice").cursor, 2);
   assert.equal(f.store.db.prepare("SELECT event FROM jobs WHERE id=1").get().event.includes('"text"'), false);
 });
+test("several edits to one message queue one turn; a running edit turn still gets a follow-up (ADR 0052)", (t) => {
+  const f = fixture(t, { maxPending: 3 });
+  const edited = (id, resourceId) => ({ ...event(id), type: "message.edited", resourceId });
+  const queued = () =>
+    f.store.db.prepare("SELECT event_id FROM jobs WHERE agent='alice' AND status='queued' ORDER BY id").all();
+  assert.equal(f.store.ingest("alice", edited(5, 1)), true);
+  assert.equal(f.store.ingest("alice", edited(6, 1)), true);
+  assert.equal(f.store.ingest("alice", edited(7, 1)), true);
+  assert.deepEqual(
+    queued().map((row) => row.event_id),
+    [5],
+  );
+  assert.equal(f.store.agent("alice").cursor, 7);
+  // An edit to another message is its own turn.
+  assert.equal(f.store.ingest("alice", edited(8, 2)), true);
+  assert.deepEqual(
+    queued().map((row) => row.event_id),
+    [5, 8],
+  );
+  // Once the first edit turn runs, a newer edit to that message queues again: the running turn
+  // may already have read the older text. Edits after that merge into the new queued job.
+  f.store.claim("alice", 100, 10);
+  assert.equal(f.store.ingest("alice", edited(9, 1)), true);
+  assert.deepEqual(
+    queued().map((row) => row.event_id),
+    [8, 9],
+  );
+  assert.equal(f.store.ingest("alice", edited(10, 1)), true);
+  assert.equal(queued().length, 2);
+});
 test("restart persists cursors, committed state/outbox and defers unfinished process lease", (t) => {
   const f = fixture(t);
   const done = turn(f, "alice", 1);

@@ -157,6 +157,28 @@ test("an agent added on restart never executes pre-addition events, even when pe
   );
   assert.equal(f.status().agents.find((a) => a.id === "carol").cursor, f.events.length);
 });
+test("an agent that already handled a message is told when its sender edits it (ADR 0052)", async (t) => {
+  const f = await hostFixture(t);
+  const original = f.post({ to: "bob", text: "first draft" });
+  await f.message((m) => m.to === "human" && m.text === "done:first draft");
+  const handled = f.status();
+  f.edit(original.id, "second draft");
+  await f.message((m) => m.to === "human" && m.text === `edited:${original.id}:second draft`);
+  const records = (await f.records()).filter((r) => r.who === "bob");
+  assert.equal(records.length, 2);
+  const notice = records[1].input;
+  assert.equal(notice.trigger.type, "message.edited");
+  assert.equal(notice.trigger.messageId, original.id);
+  assert.equal(notice.trigger.editedAt, notice.message.editedAt);
+  assert.match(notice.trigger.notice, new RegExp(`^Message ${original.id} from human was edited at `));
+  assert.equal(notice.message.id, original.id);
+  assert.equal(notice.message.text, "second draft");
+  assert.notEqual(notice.idempotencyKey, records[0].input.idempotencyKey);
+  // Alice was not addressed, so the edit does not wake her either.
+  assert.equal((await f.records()).filter((r) => r.who === "alice").length, 0);
+  assert.ok(f.requests.filter((r) => r.path.endsWith("/events")).every((r) => r.include === "edits"));
+  assert.equal(f.status().failures.length, handled.failures.length);
+});
 test("revoking one agent stops only that agent; remaining peer continues", async (t) => {
   const f = await hostFixture(t);
   f.revoke("alice");

@@ -13,6 +13,7 @@ Design and trade-offs: [ADR 0018](../../docs/adr/0018-native-desktop-client.md).
 - **Channels**: list, create, select. Names come from the server's `name` field and are validated as slugs before they reach a URL.
 - **Chat**: canonical history, live refresh, directed recipient (`to`) and reply (`replyTo`), Enter to send. Every send has a stable `Idempotency-Key`; a failed or uncertain send keeps its key and payload and is retried with the same bytes. Editing the text creates a new send with a new key.
 - **Keyboard**: `/` search, `j`/`k` next and previous message, `r` reply to it, `g` then `b` the board list, `Esc` close or cancel, `?` the list of shortcuts. None fire while you type in a field ([ADR 0054](../../docs/adr/0054-keyboard-shortcuts.md)).
+- **Mentions**: type `@` in the message to pick someone on the board (arrows and Enter, or click). The first person you pick fills an empty To field; the `@name` stays in the text ([ADR 0055](../../docs/adr/0055-mention-with-at.md)).
 - **Snapshots**: the snapshot list and the latest valid snapshot text.
 - **Tasks**: a board projected from canonical history by the CLI's own reducer, showing effective state, asserted state, owner, reviewer, dependencies, evidence, conflicts and warnings. Delivery of a message never implies task completion. The only task action in the GUI is **Claim**; other actions stay in `msn task`.
 - **Live updates** come from `GET /api/tenants/:tenant/events` (server long-poll, no periodic scans). Events are metadata only; every relevant event triggers a canonical re-read.

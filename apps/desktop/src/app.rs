@@ -8,6 +8,7 @@ use msn_cli::config::{MAX_SAFE_INTEGER, is_slug, parse_int, parse_origin, slug};
 use msn_cli::identity::validate_username;
 
 use crate::markdown;
+use crate::mention;
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
 use crate::read_marks;
@@ -34,6 +35,10 @@ pub struct MsnDesktopApp {
     /// When processed-by receipts were last asked for; commits are not channel events, so the
     /// open channel's receipts are reloaded on a timer (ADR 0040).
     receipts_at: Option<std::time::Instant>,
+    /// The message being edited and its draft text (ADR 0052); one at a time.
+    editing: Option<(u64, String)>,
+    /// The `editedAt` of the message when its editor opened (ADR 0052).
+    edit_base: Option<String>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
     /// This connection's read-mark file (ADR 0045), once the connection's name is known.
@@ -56,6 +61,17 @@ pub struct MsnDesktopApp {
     show_keys: bool,
     /// A field or list that takes keyboard focus on the next frame.
     focus: Option<FocusTarget>,
+    /// The open @ suggestions (ADR 0055), and the @ that Escape closed so typing on after it
+    /// does not reopen the list.
+    mention: Option<MentionList>,
+    mention_dismissed: Option<usize>,
+}
+
+/// @ suggestions under the message field (ADR 0055): where the @ is, who, and which is chosen.
+struct MentionList {
+    start: usize,
+    options: Vec<mention::Person>,
+    active: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -150,6 +166,8 @@ struct Composer {
     text: String,
     to: String,
     reply_to: String,
+    /// The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
+    mention_to: Option<String>,
     error: Option<String>,
 }
 
@@ -172,6 +190,10 @@ enum Action {
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
+    /// Open the editor on one of your messages, save it, or close it (ADR 0052).
+    StartEdit(u64),
+    SaveEdit,
+    CancelEdit,
     /// Address the next message as a reply to this one (ADR 0054).
     Reply(u64),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
@@ -222,6 +244,8 @@ impl MsnDesktopApp {
             link_origin: None,
             copied_link: None,
             receipts_at: None,
+            editing: None,
+            edit_base: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,
@@ -235,6 +259,8 @@ impl MsnDesktopApp {
             chord_at: None,
             show_keys: false,
             focus: None,
+            mention: None,
+            mention_dismissed: None,
         }
     }
 
@@ -306,6 +332,9 @@ impl MsnDesktopApp {
             self.dispatch_all(command.into_iter().collect());
             // Reactions send no event either (ADR 0047), so they share the receipts timer.
             let command = self.state.reactions_command();
+            self.dispatch_all(command.into_iter().collect());
+            // Edits send no new message either (ADR 0052).
+            let command = self.state.edits_command();
             self.dispatch_all(command.into_iter().collect());
         }
     }
@@ -994,6 +1023,7 @@ impl MsnDesktopApp {
                                             actions,
                                         );
                                         mark_selected(ui, &shown, selected == Some(id), reveal);
+                                        render_editor(ui, id, &mut self.editing, actions);
                                         render_reactions(ui, message, &me, can_react, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
@@ -1029,6 +1059,7 @@ impl MsnDesktopApp {
                                                 actions,
                                             );
                                             mark_selected(ui, &shown, selected == Some(id), reveal);
+                                            render_editor(ui, id, &mut self.editing, actions);
                                             render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
@@ -1070,16 +1101,50 @@ impl MsnDesktopApp {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             let input_id = egui::Id::new("message-input");
             let focused = ui.memory(|memory| memory.has_focus(input_id));
+            // Keys for an open @ list are taken before the field sees them (ADR 0055): Enter
+            // picks instead of sending, and the arrows move instead of jumping the cursor.
+            let mut pick = None;
+            if focused && let Some(list) = self.mention.as_mut() {
+                let count = list.options.len();
+                ui.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        list.active = (list.active + 1) % count;
+                    }
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        list.active = (list.active + count - 1) % count;
+                    }
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                        pick = Some(list.active);
+                    }
+                });
+            }
+            if let Some(index) = pick {
+                self.pick_mention(ui.ctx(), input_id, index);
+            }
             theme::message_pill(focused).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.composer.text)
-                            .id(input_id)
-                            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
-                            .hint_text("Type a message…")
-                            .desired_width((ui.available_width() - 38.0).max(60.0)),
-                    );
+                    let output = egui::TextEdit::singleline(&mut self.composer.text)
+                        .id(input_id)
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
+                        .hint_text("Type a message… (@ to mention)")
+                        .desired_width((ui.available_width() - 38.0).max(60.0))
+                        .show(ui);
+                    let response = output.response.response.clone();
+                    if response.changed() {
+                        let (to, by) = mention::address_after_edit(
+                            &self.composer.to,
+                            self.composer.mention_to.take(),
+                            &self.composer.text,
+                        );
+                        self.composer.to = to;
+                        self.composer.mention_to = by;
+                    }
+                    let caret = output
+                        .cursor_range
+                        .filter(|range| range.primary == range.secondary)
+                        .map(|range| range.primary.index.0);
+                    self.update_mention(response.has_focus().then_some(caret).flatten());
                     if self.focus == Some(FocusTarget::Composer) {
                         response.request_focus();
                         self.focus = None;
@@ -1093,12 +1158,47 @@ impl MsnDesktopApp {
                     }
                 });
             });
+            // Above the field (the layout runs upwards), so it reads as part of the message.
+            let mut clicked = None;
+            if let Some(list) = &self.mention {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width().min(360.0));
+                    for (index, person) in list.options.iter().enumerate().rev() {
+                        let note = if person.listening {
+                            "  · listening"
+                        } else {
+                            ""
+                        };
+                        let label = format!("@{}{note}", person.name);
+                        let row = ui.add(
+                            egui::Button::selectable(index == list.active, label)
+                                .min_size(egui::vec2(ui.available_width(), 28.0)),
+                        );
+                        if row.clicked() {
+                            clicked = Some(index);
+                        }
+                    }
+                });
+            }
+            if let Some(index) = clicked {
+                self.pick_mention(ui.ctx(), input_id, index);
+            }
             // Addressing: compact fields whose widths adapt instead of wrapping.
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let label = |text: &str| egui::RichText::new(text).small().color(theme::muted());
                 ui.add_space(6.0);
-                ui.label(label("To"));
+                // Who the message goes to, said before it is sent (ADR 0055).
+                if self.composer.to.trim().is_empty() {
+                    ui.label(label("To"));
+                } else {
+                    ui.label(
+                        egui::RichText::new("To")
+                            .small()
+                            .strong()
+                            .color(theme::accent()),
+                    );
+                }
                 let to_width = (ui.available_width() - 130.0).clamp(56.0, 150.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.composer.to)
@@ -1298,6 +1398,23 @@ impl MsnDesktopApp {
                 {
                     return true;
                 }
+                // Escape on an open @ list closes only the list, and the field keeps focus
+                // (ADR 0055); a pending reply waits for the next press.
+                if let (
+                    Some(list),
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    },
+                ) = (&self.mention, event)
+                {
+                    self.mention_dismissed = Some(list.start);
+                    self.mention = None;
+                    // egui lets go of a focused field on Escape before this runs; take it back.
+                    self.focus = Some(FocusTarget::Composer);
+                    return false;
+                }
                 let chord = self.chord_at.is_some_and(|at| at.elapsed() <= CHORD);
                 let Some(shortcut) = key_shortcut(event, typing, chord) else {
                     // Any other key typed ends a pending g.
@@ -1374,6 +1491,105 @@ impl MsnDesktopApp {
         }
     }
 
+    /// Opens, narrows or closes the @ list for the caret in the message field (ADR 0055).
+    /// `caret` is `None` when the field does not have focus or text is selected.
+    fn update_mention(&mut self, caret: Option<usize>) {
+        let can_post = self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| !self.state.is_archived(channel));
+        let at = caret
+            .filter(|_| can_post)
+            .and_then(|caret| mention::mention_at(&self.composer.text, caret));
+        let Some((start, query)) = at else {
+            if caret.is_some() {
+                self.mention_dismissed = None;
+            }
+            self.mention = None;
+            return;
+        };
+        if self.mention_dismissed == Some(start) {
+            self.mention = None;
+            return;
+        }
+        if let Some(command) = self.state.personas_command() {
+            self.dispatch(command);
+        }
+        let me = self
+            .state
+            .connection
+            .as_ref()
+            .map(|connection| connection.username.clone())
+            .unwrap_or_default();
+        let Some(state) = self.state.channel.as_ref() else {
+            self.mention = None;
+            return;
+        };
+        let personas = state.personas.clone().unwrap_or_default();
+        let everyone = mention::people(&personas, state.messages.values(), &me);
+        let options = mention::suggest(&everyone, &query, mention::MAX_SUGGESTIONS);
+        if options.is_empty() {
+            self.mention = None;
+            return;
+        }
+        let previous = self
+            .mention
+            .as_ref()
+            .and_then(|list| list.options.get(list.active))
+            .map(|person| person.name.clone());
+        let active = options
+            .iter()
+            .position(|person| Some(&person.name) == previous.as_ref())
+            .unwrap_or(0);
+        self.mention = Some(MentionList {
+            start,
+            options,
+            active,
+        });
+    }
+
+    /// Writes `@name ` over the typed @query, fills an empty To with the name, and keeps the
+    /// cursor in the field after the mention (ADR 0055).
+    fn pick_mention(&mut self, ctx: &egui::Context, input_id: egui::Id, index: usize) {
+        let Some(list) = self.mention.take() else {
+            return;
+        };
+        let Some(person) = list.options.get(index) else {
+            return;
+        };
+        let mut edit = egui::TextEdit::load_state(ctx, input_id).unwrap_or_default();
+        let caret = edit
+            .cursor
+            .char_range()
+            .map(|range| range.primary.index.0)
+            .unwrap_or(self.composer.text.chars().count());
+        let (text, caret) =
+            mention::insert_mention(&self.composer.text, list.start, caret, &person.name);
+        self.composer.text = text;
+        let (to, by) = mention::address_after_pick(
+            &self.composer.to,
+            self.composer.mention_to.take(),
+            &person.name,
+        );
+        self.state.status = Some(if to == person.name {
+            format!(
+                "Mentioned {} · the message goes to {}",
+                person.name, person.name
+            )
+        } else {
+            format!("Mentioned {} · the message still goes to {to}", person.name)
+        });
+        self.composer.to = to;
+        self.composer.mention_to = by;
+        edit.cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
+        edit.store(ctx, input_id);
+        self.focus = Some(FocusTarget::Composer);
+    }
+
     /// Addresses the next message to `id` and puts the cursor in the message field. Archived
     /// boards take no posts (ADR 0046), so nothing changes there.
     fn reply_to(&mut self, id: u64) {
@@ -1426,6 +1642,13 @@ impl MsnDesktopApp {
             }
             Action::Select(name) => {
                 self.selected = None;
+                // The composer is shared by every board: a To filled by an @ pick named someone
+                // on the board being left, so it goes; a To typed by hand stays (ADR 0055).
+                if self.composer.mention_to.take().as_deref() == Some(self.composer.to.as_str()) {
+                    self.composer.to.clear();
+                }
+                self.mention = None;
+                self.mention_dismissed = None;
                 let commands = self.state.select_channel(name);
                 self.dispatch_all(commands);
             }
@@ -1460,6 +1683,30 @@ impl MsnDesktopApp {
                     self.state.status = Some(format!("Link to message #{id} copied."));
                 }
             }
+            Action::StartEdit(id) => {
+                let message = self
+                    .state
+                    .channel
+                    .as_ref()
+                    .and_then(|state| state.messages.get(&id));
+                let text = message
+                    .and_then(|message| message["text"].as_str())
+                    .map(str::to_string);
+                let base = message
+                    .and_then(|message| message["editedAt"].as_str())
+                    .map(str::to_string);
+                if let Some(text) = text {
+                    self.editing = Some((id, text));
+                    self.edit_base = base;
+                }
+            }
+            Action::SaveEdit => {
+                if let Some((id, text)) = self.editing.take() {
+                    let commands = self.state.edit_message(id, text, self.edit_base.take());
+                    self.dispatch_all(commands);
+                }
+            }
+            Action::CancelEdit => self.editing = None,
             Action::Reply(id) => self.reply_to(id),
             Action::React(id, kind, remove) => {
                 let commands = self.state.react(id, kind, remove);
@@ -1524,6 +1771,12 @@ impl MsnDesktopApp {
         };
         self.composer.error = None;
         self.composer.text.clear();
+        // To filled by an @ pick belongs to that message (ADR 0055); a typed To stays.
+        if self.composer.mention_to.take().as_deref() == Some(self.composer.to.as_str()) {
+            self.composer.to.clear();
+        }
+        self.mention = None;
+        self.mention_dismissed = None;
         // A reply target is for one message (ADR 0054); the next message starts unaddressed.
         self.composer.reply_to.clear();
         // Your reply folds into its thread; open it so the reply does not seem to vanish.
@@ -2085,6 +2338,9 @@ fn render_message(
     let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
+    // Only the sender edits (ADR 0052); GitHub notices never; the server checks it too.
+    // Search hits (no fold) show no editor, so they offer no Edit.
+    let editable = own && can_post && fold.is_some() && username != "github";
     let text = message["text"].as_str().unwrap_or("");
     let body = if message["contentType"].as_str() == Some("application/json") {
         Body::Rich(
@@ -2104,7 +2360,10 @@ fn render_message(
     let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             bubble(ui, header, body, true, fold.as_mut(), |ui| {
-                link_controls(ui, id, can_post, actions)
+                link_controls(ui, id, can_post, actions);
+                if editable {
+                    edit_control(ui, id, actions);
+                }
             })
         })
         .inner
@@ -2138,8 +2397,69 @@ fn render_message(
             actions.push(Action::CopyLink(id));
             ui.close();
         }
+        if editable && ui.button("Edit this message").clicked() {
+            actions.push(Action::StartEdit(id));
+            ui.close();
+        }
     });
     shown
+}
+
+/// "Edit" beside "Link" on your own messages (ADR 0052).
+fn edit_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+    if ui
+        .link(egui::RichText::new("Edit").small().color(theme::muted()))
+        .on_hover_text(format!("Edit message #{id}"))
+        .clicked()
+    {
+        actions.push(Action::StartEdit(id));
+    }
+}
+
+/// The editor under a message being edited (ADR 0052): the draft, Save and Cancel. Ctrl+Enter
+/// saves and Escape cancels, as in the web app.
+fn render_editor(
+    ui: &mut egui::Ui,
+    id: u64,
+    editing: &mut Option<(u64, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let Some((editing_id, draft)) = editing.as_mut() else {
+        return;
+    };
+    if *editing_id != id {
+        return;
+    }
+    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+        let response = ui.add(
+            egui::TextEdit::multiline(draft)
+                .id(egui::Id::new(("edit-message", id)))
+                .desired_rows(3)
+                .desired_width(ui.available_width() * 0.8),
+        );
+        if !response.has_focus() && !response.lost_focus() {
+            response.request_focus();
+        }
+        let (save, cancel) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::Enter) && input.modifiers.command,
+                input.key_pressed(egui::Key::Escape),
+            )
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() || cancel {
+                actions.push(Action::CancelEdit);
+            }
+            let by_key = save && (response.has_focus() || response.lost_focus());
+            if by_key && draft.ends_with('\n') {
+                // The editor may already have taken the Enter as a new line.
+                draft.pop();
+            }
+            if ui.button("Save").clicked() || by_key {
+                actions.push(Action::SaveEdit);
+            }
+        });
+    });
 }
 
 /// The message j and k selected (ADR 0054): an accent ring around it, scrolled into view when
@@ -2290,6 +2610,9 @@ fn message_header(
     meta.push_str(&format!("#{}", message["id"].as_u64().unwrap_or(0)));
     if let Some(reply_to) = message["replyTo"].as_u64() {
         meta.push_str(&format!(" · re #{reply_to}"));
+    }
+    if message["editedAt"].is_string() {
+        meta.push_str(" · edited");
     }
     // Full muted, not dimmed: the time and id must meet AA in both themes (ADR 0049).
     job.append(&meta, 10.0, format(theme::muted()));
@@ -2578,6 +2901,8 @@ mod layout_tests {
             link_origin: None,
             copied_link: None,
             receipts_at: None,
+            editing: None,
+            edit_base: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,
@@ -2591,6 +2916,8 @@ mod layout_tests {
             chord_at: None,
             show_keys: false,
             focus: None,
+            mention: None,
+            mention_dismissed: None,
         }
     }
 
@@ -2864,6 +3191,105 @@ mod layout_tests {
         press(&ctx, &mut app, text("r"));
         assert_eq!(app.composer.reply_to, "");
         assert!(app.state.status.as_deref().unwrap().contains("j or k"));
+    }
+
+    fn key(key: egui::Key) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    fn names(app: &MsnDesktopApp) -> Vec<String> {
+        app.mention
+            .as_ref()
+            .map(|list| list.options.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn typing_at_suggests_people_and_the_first_pick_addresses_the_message() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(2);
+        let channel = app.state.channel.as_mut().unwrap();
+        channel.personas = Some(vec![
+            ("reviewer".into(), false),
+            ("lead".into(), true),
+            ("Alex".into(), true),
+        ]);
+        channel.personas_requested = true;
+        app.composer.reply_to = "1".into();
+        app.focus = Some(FocusTarget::Composer);
+        press(&ctx, &mut app, vec![]);
+        assert_eq!(focused(&ctx), Some(egui::Id::new("message-input")));
+
+        // A bare @ lists listening personas, recent senders, then the rest; never me (Alex).
+        press(&ctx, &mut app, text("Please @"));
+        assert_eq!(names(&app), ["lead", "Jamie", "reviewer"]);
+        // Typing narrows; arrows move; Enter picks instead of sending.
+        press(&ctx, &mut app, text("e"));
+        assert_eq!(names(&app), ["lead", "Jamie", "reviewer"], "contains e");
+        press(&ctx, &mut app, key(egui::Key::ArrowDown));
+        press(&ctx, &mut app, key(egui::Key::Enter));
+        press(&ctx, &mut app, vec![]);
+        assert_eq!(app.composer.text, "Please @Jamie ");
+        assert_eq!(app.composer.to, "Jamie");
+        assert!(app.mention.is_none());
+        assert!(app.state.pending_sends.is_empty(), "Enter picked, not sent");
+        assert_eq!(focused(&ctx), Some(egui::Id::new("message-input")));
+
+        // A second pick only adds @name; To stays the first.
+        press(&ctx, &mut app, text("and @re"));
+        assert_eq!(names(&app), ["reviewer"]);
+        press(&ctx, &mut app, key(egui::Key::Enter));
+        press(&ctx, &mut app, vec![]);
+        assert_eq!(app.composer.text, "Please @Jamie and @reviewer ");
+        assert_eq!(app.composer.to, "Jamie");
+
+        // Escape closes only the list: the reply stays, the field keeps focus, and typing on
+        // after that @ does not reopen it. A space closes it too.
+        press(&ctx, &mut app, text("@l"));
+        assert!(app.mention.is_some());
+        press(&ctx, &mut app, escape());
+        press(&ctx, &mut app, vec![]);
+        assert!(app.mention.is_none());
+        assert_eq!(app.composer.reply_to, "1");
+        assert_eq!(focused(&ctx), Some(egui::Id::new("message-input")));
+        press(&ctx, &mut app, text("e"));
+        assert!(app.mention.is_none());
+        press(&ctx, &mut app, text(" @j"));
+        assert_eq!(names(&app), ["Jamie"]);
+        press(&ctx, &mut app, text(" jk"));
+        assert!(app.mention.is_none());
+        assert_eq!(app.selected, None, "no shortcut fired while typing");
+
+        // Sending uses the picked To, then clears it: it belonged to that message.
+        press(&ctx, &mut app, key(egui::Key::Enter));
+        press(&ctx, &mut app, vec![]);
+        let pending: Vec<_> = app.state.pending_sends.values().collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].to.as_deref(), Some("Jamie"));
+        assert_eq!(pending[0].text, "Please @Jamie and @reviewer @le @j jk");
+        assert_eq!(app.composer.to, "");
+
+        // The composer is shared by every board: switching boards drops a To an @ pick filled
+        // and forgets a closed @, but keeps a To typed by hand.
+        press(&ctx, &mut app, text("@l"));
+        press(&ctx, &mut app, key(egui::Key::Enter));
+        press(&ctx, &mut app, text("@j"));
+        press(&ctx, &mut app, escape());
+        assert_eq!(app.composer.to, "lead");
+        assert!(app.mention_dismissed.is_some());
+        app.perform(Action::Select("design".into()));
+        assert_eq!(app.composer.to, "");
+        assert!(app.mention.is_none() && app.mention_dismissed.is_none());
+        app.composer.to = "ops".into();
+        app.perform(Action::Select("general".into()));
+        assert_eq!(app.composer.to, "ops");
     }
 
     #[test]

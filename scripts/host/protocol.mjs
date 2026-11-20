@@ -178,7 +178,9 @@ export function validateMessage(message, event, connection) {
       Buffer.byteLength(message.text) <= 16384 &&
       ["text/plain", "application/json"].includes(message.contentType) &&
       (message.to === undefined || name(message.to)) &&
-      (message.correlationId === undefined || name(message.correlationId)),
+      (message.correlationId === undefined || name(message.correlationId)) &&
+      (event.type !== "message.edited" ||
+        (typeof message.editedAt === "string" && Number.isFinite(Date.parse(message.editedAt)))),
     "invalid_canonical_message",
   );
   if (message.contentType === "application/json") {

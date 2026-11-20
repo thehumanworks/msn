@@ -67,15 +67,27 @@ pub fn start(
     selected: Option<&str>,
     reader: Option<&str>,
     after: Option<u64>,
+    edits_after: Option<u64>,
     limit: u64,
     max_bytes: u64,
 ) -> Result<(), CliError> {
     print_json(&start_page(
-        url, tenant, token, channel, selected, reader, after, limit, max_bytes,
+        url,
+        tenant,
+        token,
+        channel,
+        selected,
+        reader,
+        after,
+        edits_after,
+        limit,
+        max_bytes,
     )?)
 }
 
 /// The `start` page as a value; `start` prints it and `msn mcp` returns it as a tool result.
+/// It always asks for edits (ADR 0052): after `edits_after`, or from the board's current edit
+/// position when it is None, so a continuation reports earlier messages changed since.
 #[allow(clippy::too_many_arguments)]
 pub fn start_page(
     url: &Url,
@@ -85,6 +97,7 @@ pub fn start_page(
     selected: Option<&str>,
     reader: Option<&str>,
     after: Option<u64>,
+    edits_after: Option<u64>,
     limit: u64,
     max_bytes: u64,
 ) -> Result<Value, CliError> {
@@ -121,7 +134,8 @@ pub fn start_page(
             "work": "peek CHANNEL; process messages INCLUDING required send/task results with stable --key; then commit CHANNEL --through THIS peek's processed nextCursor (not highestFetched)",
             "tasks": "task list CHANNEL; task events describe work, not exclusive ownership",
             "evidence": "show CHANNEL ID",
-            "continuation": "start CHANNEL --after nextCursor while hasMore is true; never use a saved read cursor for initial start",
+            "continuation": "start CHANNEL --after nextCursor --edits-after editCursor while hasMore is true; never use a saved read cursor for initial start",
+            "edits": "edited lists earlier messages whose senders changed them since editCursor; the new text replaces what you read",
             "send": "send CHANNEL --text TEXT --key STABLE_KEY; reuse identical bytes and key after uncertain results"
         },
         "warnings": [
@@ -171,7 +185,7 @@ pub fn start_page(
         .ok_or_else(|| {
             CliError::usage("Increase start max-bytes to fit identity and workflow metadata.")
         })?;
-    let continuation = after.map(|n| format!("&after={n}")).unwrap_or_default();
+    let continuation = catchup_query(after, Some(edits_after));
     let response = MsnClient::new(url)?.get(
         &format!(
             "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={server_budget}{continuation}"
@@ -204,6 +218,19 @@ pub fn start_page(
         ));
     }
     Ok(page)
+}
+
+/// The `&after=…&editsAfter=…` tail of a catch-up query. `edits`: None asks for no edits,
+/// `Some(None)` starts at the board's current edit position (`latest`, so a new reader gets no
+/// old edits) and `Some(Some(n))` continues after edit cursor `n` (ADR 0052).
+pub(crate) fn catchup_query(after: Option<u64>, edits: Option<Option<u64>>) -> String {
+    let mut query = after.map(|n| format!("&after={n}")).unwrap_or_default();
+    match edits {
+        None => {}
+        Some(None) => query.push_str("&editsAfter=latest"),
+        Some(Some(cursor)) => query.push_str(&format!("&editsAfter={cursor}")),
+    }
+    query
 }
 
 pub(crate) fn validate_catchup(
@@ -247,6 +274,19 @@ pub(crate) fn validate_catchup(
             })
         {
             return Err(invalid());
+        }
+    }
+    // Edited earlier messages (ADR 0052) are at or before the page's start and in this stream.
+    if let Some(edited) = page.get("edited").filter(|value| !value.is_null()) {
+        let edited = edited.as_array().ok_or_else(invalid)?;
+        number(page, "editCursor")?;
+        for row in edited {
+            if number(row, "id")? > previous
+                || row["tenant"].as_str() != Some(tenant)
+                || row["channel"].as_str() != Some(channel)
+            {
+                return Err(invalid());
+            }
         }
     }
     let rows = page["messages"].as_array().ok_or_else(invalid)?;

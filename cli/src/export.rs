@@ -621,6 +621,10 @@ fn message_record(row: &Value) -> Result<MessageRecord, CliError> {
             .as_str()
             .ok_or_else(|| CliError::generic("Message is missing createdAt."))?
             .to_string(),
+        edited_at: row
+            .get("editedAt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         reply_to: row.get("replyTo").and_then(Value::as_u64),
         correlation_id: row
             .get("correlationId")

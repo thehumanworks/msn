@@ -181,14 +181,29 @@ export class HostStore {
     return this.tx(() => {
       const current = this.agent(agent);
       if (event.id <= current.cursor) return true;
-      if (event.type === "message.created" && current.channels.includes(event.channel)) {
+      // An edit (ADR 0052) queues a turn like a new message: the agent may have acted on the old text.
+      if (
+        (event.type === "message.created" || event.type === "message.edited") &&
+        current.channels.includes(event.channel)
+      ) {
         const pending = this.db
           .prepare("SELECT COUNT(*) AS n FROM jobs WHERE agent=? AND status IN ('queued','running')")
           .get(agent).n;
-        if (pending >= this.config.maxPending) return false;
-        this.db
-          .prepare("INSERT OR IGNORE INTO jobs(agent,event_id,channel,event) VALUES (?,?,?,?)")
-          .run(agent, event.id, event.channel, JSON.stringify(event));
+        // Several edits to one message make one turn: a queued edit job already reads the
+        // message's current text when it runs, so a newer edit needs no job of its own.
+        const merged =
+          event.type === "message.edited" &&
+          this.db
+            .prepare(
+              "SELECT 1 FROM jobs WHERE agent=? AND channel=? AND status='queued' AND json_extract(event,'$.type')='message.edited' AND json_extract(event,'$.resourceId')=?",
+            )
+            .get(agent, event.channel, event.resourceId);
+        if (!merged) {
+          if (pending >= this.config.maxPending) return false;
+          this.db
+            .prepare("INSERT OR IGNORE INTO jobs(agent,event_id,channel,event) VALUES (?,?,?,?)")
+            .run(agent, event.id, event.channel, JSON.stringify(event));
+        }
       }
       this.db.prepare("UPDATE agents SET cursor=? WHERE id=?").run(event.id, agent);
       return true;

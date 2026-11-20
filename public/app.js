@@ -1,6 +1,7 @@
 import { acquire, invitation, savePassword } from "./access.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
+import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { renderTranscript } from "./transcript.js";
@@ -16,6 +17,11 @@ let session = null;
 let channel = "";
 let generation = 0;
 let polling = null;
+/**
+ * The open @ suggestions (ADR 0055): where the @ is, the names shown and the highlighted one.
+ * `dismissed` is the @ that Escape closed, so typing on after it does not reopen the list.
+ */
+const mention = { start: -1, options: [], active: 0, dismissed: -1 };
 /** Boards the server reports archived (ADR 0046): read only, hidden unless Show archived. */
 const archivedBoards = new Set();
 // A bounded, memory-only delivery cache, not a durable read receipt or unread counter.
@@ -106,6 +112,8 @@ function draft(connection = session, name = channel) {
     connection.drafts.set(name, {
       content: "",
       recipient: "",
+      // The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
+      mentionTo: null,
       replyTo: null,
       files: [],
       retry: null,
@@ -188,6 +196,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
     for (const state of connection.drafts.values()) {
       state.content = "";
       state.recipient = "";
+      state.mentionTo = null;
       state.replyTo = null;
       state.files = [];
       state.retry = null;
@@ -212,6 +221,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("invite-dialog").close();
   $("message").value = "";
   $("recipient").value = "";
+  closeMentions();
   $("new-channel").value = "";
   autosize();
   $("attach-list").replaceChildren();
@@ -426,6 +436,7 @@ function appendMessage(message, target = $("messages")) {
   label.textContent = `#${message.id}`;
   label.title = `#${message.channel} · message ${message.id}`;
   meta.append(name, time);
+  if (message.editedAt) meta.append(editedMark(message));
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
   let boardUpdate = null;
   if (message.contentType === "application/json") {
@@ -457,6 +468,17 @@ function appendMessage(message, target = $("messages")) {
     toggle.addEventListener("click", () => setPin(message.id, !isPinned(message.id)));
     meta.append(toggle);
   }
+  // Only the sender edits (ADR 0052); the server checks it too.
+  if (target === $("messages") && canEdit(message)) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "quiet message-edit";
+    edit.textContent = "Edit";
+    edit.title = `Edit message #${message.id}`;
+    edit.setAttribute("aria-label", `Edit message #${message.id}`);
+    edit.addEventListener("click", () => startEdit(article, message.id));
+    meta.append(edit);
+  }
   // A link to this one message (ADR 0042). It carries no credential: the reader needs their own access.
   if (session) {
     const link = document.createElement("button");
@@ -485,14 +507,7 @@ function appendMessage(message, target = $("messages")) {
     reply.addEventListener("click", () => replyTo(message));
     meta.append(reply);
   }
-  // Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043).
-  let content;
-  if (boardUpdate || structured) {
-    content = document.createElement(structured ? "pre" : "p");
-    content.textContent = boardUpdate
-      ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
-      : pretty(message.text);
-  } else content = renderMarkdown(message.text);
+  const content = messageContent(message, boardUpdate, structured);
   article.append(meta);
   for (const [field, label] of [
     ["to", "To"],
@@ -762,6 +777,183 @@ async function loadReceipts(connection, name, state, force = false) {
     const message = byId.get(Number(article.dataset.id));
     if (element && message) showReceipt(element, message, state.receipts);
   }
+}
+
+/** Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043). */
+function messageContent(message, boardUpdate, structured) {
+  if (!boardUpdate && !structured) return renderMarkdown(message.text);
+  const content = document.createElement(structured ? "pre" : "p");
+  content.textContent = boardUpdate
+    ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
+    : pretty(message.text);
+  return content;
+}
+
+/*
+ * Edit a message you sent (ADR 0052). The id, place, replies and read marks stay; only the text
+ * changes. Other people's edits arrive from GET …/edits, re-read like reactions.
+ */
+const EDIT_REFRESH_MS = 15_000;
+
+function canEdit(message) {
+  return (
+    Boolean(session) &&
+    !session.watchOnly &&
+    message.username === session.username &&
+    message.username !== "github" &&
+    !archivedBoards.has(message.channel)
+  );
+}
+
+function editedMark(message) {
+  const mark = document.createElement("span");
+  mark.className = "message-edited";
+  mark.textContent = "edited";
+  mark.title = `Edited ${message.editedAt}`;
+  return mark;
+}
+
+function startEdit(article, id) {
+  const state = session?.channels.get(channel);
+  const message = state?.messages.find((item) => item.id === id);
+  if (!message || article.querySelector(":scope > .edit-form")) return;
+  const body = article.querySelector(":scope > .message-body");
+  const toggle = article.querySelector(":scope > .fold-toggle");
+  const form = document.createElement("form");
+  form.className = "edit-form";
+  // The version this editor started from: a save after someone else's edit is refused (409).
+  let base = message.editedAt ?? null;
+  const input = document.createElement("textarea");
+  input.value = message.text;
+  input.rows = Math.min(12, Math.max(2, message.text.split("\n").length));
+  input.setAttribute("aria-label", `New text for message #${id}`);
+  const actions = document.createElement("div");
+  actions.className = "edit-actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "quiet";
+  cancel.textContent = "Cancel";
+  actions.append(save, cancel);
+  form.append(input, actions);
+  const close = () => {
+    form.remove();
+    if (body) body.hidden = false;
+    if (toggle) toggle.classList.remove("editing");
+  };
+  cancel.addEventListener("click", close);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = input.value;
+    if (!text.trim()) return status("A message cannot be empty.", true);
+    if (text === message.text) return close();
+    save.disabled = true;
+    const ok = await saveEdit(message, text, base);
+    save.disabled = false;
+    // After a conflict the user has seen the warning; a second Save replaces the newer version.
+    if (ok === "conflict") base = message.editedAt ?? null;
+    else if (ok) close();
+  });
+  if (body) body.hidden = true;
+  if (toggle) toggle.classList.add("editing");
+  (body ?? article.querySelector(":scope > .message-meta")).after(form);
+  input.focus();
+}
+
+async function saveEdit(message, text, base) {
+  if (!session || !channel) return false;
+  const connection = session;
+  const name = channel;
+  try {
+    const data = await api(
+      `/channels/${name}/messages/${message.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: connection.username, text, ifEditedAt: base }),
+      },
+      connection,
+    );
+    const state = connection.channels.get(name);
+    if (state && session === connection && channel === name) showEdit(state, data.message);
+    status(`Message #${message.id} edited.`);
+    return true;
+  } catch (error) {
+    if (error.name === "AbortError") return false;
+    if (error.code === "edit_conflict") {
+      // Someone saved first (another tab or device): fetch their version, keep this editor open.
+      const state = connection.channels.get(name);
+      if (state) await loadEdits(connection, name, state);
+      status(
+        `Message #${message.id} changed while you were editing. Save again to replace it, or Cancel to keep the new version.`,
+        true,
+      );
+      return "conflict";
+    }
+    status(error.message, true);
+    return false;
+  }
+}
+
+/** Applies an edited message's text to the cached copy and every row that shows it. */
+function showEdit(state, edited) {
+  const message = state.messages.find((item) => item.id === edited.id);
+  if (!message || (message.text === edited.text && message.editedAt === edited.editedAt)) return;
+  message.text = edited.text;
+  message.editedAt = edited.editedAt;
+  let boardUpdate = null;
+  if (message.contentType === "application/json")
+    try {
+      const data = JSON.parse(message.text);
+      if (
+        data.schema === "msn.board.v1" &&
+        typeof data.goal === "string" &&
+        ["active", "paused", "complete", "blocked"].includes(data.status)
+      )
+        boardUpdate = data;
+    } catch {}
+  const structured = message.contentType === "application/json" && !boardUpdate;
+  for (const article of $("messages").querySelectorAll(`article[data-id="${edited.id}"]`)) {
+    const body = article.querySelector(":scope > .message-body");
+    if (body) {
+      for (const old of body.children) foldObserver?.unobserve(old);
+      const content = messageContent(message, boardUpdate, structured);
+      body.replaceChildren(content);
+      foldObserver?.observe(content);
+    }
+    const meta = article.querySelector(":scope > .message-meta");
+    const mark = meta?.querySelector(".message-edited");
+    if (mark) mark.title = `Edited ${message.editedAt}`;
+    else meta?.querySelector("time")?.after(editedMark(message));
+  }
+}
+
+/**
+ * Re-reads edits since the board's edit cursor. The first read starts at 0, so an edit made
+ * while the log was loading is not missed; applying an edit twice changes nothing.
+ */
+async function loadEdits(connection, name, state) {
+  state.editsAt = Date.now();
+  try {
+    for (let page = 0; page < 5; page++) {
+      const data = await api(`/channels/${name}/edits?after=${state.editCursor ?? 0}`, {}, connection);
+      if (session !== connection || channel !== name) return;
+      for (const message of data.edits) showEdit(state, message);
+      state.editCursor = data.editCursor;
+      if (!data.hasMore) break;
+    }
+  } catch {}
 }
 
 /*
@@ -1569,6 +1761,8 @@ async function poll(live = false) {
       // Reactions send no message either (ADR 0047).
       if (Date.now() - (state.reactionsAt ?? 0) > REACTION_REFRESH_MS)
         void loadReactions(connection, selected, state);
+      // Edits send no new message either (ADR 0052).
+      if (Date.now() - (state.editsAt ?? 0) > EDIT_REFRESH_MS) void loadEdits(connection, selected, state);
       if (Date.now() - (connection.unreadAt ?? 0) > UNREAD_REFRESH_MS) void loadUnread(connection);
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
@@ -1660,6 +1854,8 @@ function selectChannel(name, { reset = false } = {}) {
   const selectedDraft = draft();
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
+  closeMentions();
+  mention.dismissed = -1;
   showFiles(selectedDraft);
   clearLabel();
   clearSearch();
@@ -1672,6 +1868,7 @@ function selectChannel(name, { reset = false } = {}) {
   showPins(state);
   void loadPins(session, name);
   void loadReactions(session, name, state);
+  void loadEdits(session, name, state);
   // Capture where the reader stopped before this visit's own reading moves the mark.
   const mark = state.since?.mark ?? readMark(name);
   showSince(state);
@@ -2381,7 +2578,10 @@ $("send-form").addEventListener("submit", async (event) => {
     if (state.content === content && state.recipient === recipient) {
       state.content = "";
       state.recipient = "";
+      state.mentionTo = null;
       if (state.replyTo === replyId) state.replyTo = null;
+      // A closed @ belonged to the sent text; the next message's @ opens the list again.
+      mention.dismissed = -1;
     }
     state.files = state.files.filter((file) => !files.includes(file));
     if (state.retry === attempt) state.retry = null;
@@ -2426,13 +2626,29 @@ $("attach-input").addEventListener("change", () => {
 });
 
 $("message").addEventListener("input", () => {
-  if (session && channel) draft().content = $("message").value;
+  if (session && channel) {
+    const state = draft();
+    state.content = $("message").value;
+    const address = addressAfterEdit($("recipient").value, state.mentionTo, state.content);
+    state.mentionTo = address.mentionTo;
+    if (address.to !== $("recipient").value) {
+      $("recipient").value = state.recipient = address.to;
+    }
+  }
   autosize();
+  showMentions();
 });
 $("recipient").addEventListener("input", () => {
-  if (session && channel) draft().recipient = $("recipient").value;
+  if (session && channel) {
+    const state = draft();
+    state.recipient = $("recipient").value;
+    if (state.recipient !== state.mentionTo) state.mentionTo = null;
+  }
 });
 $("message").addEventListener("keydown", (event) => {
+  // An input method still composing owns Enter and the arrows: it is choosing a word, not sending.
+  if (event.isComposing || event.keyCode === 229) return;
+  if (mentionKey(event)) return;
   // Enter sends; Shift+Enter inserts a newline. Ctrl/⌘+Enter always sends.
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey || !event.shiftKey)) {
     event.preventDefault();
@@ -2860,6 +3076,8 @@ async function showAgents() {
   const target = agentsChannel;
   try {
     const { personas } = await api(`/channels/${target}/personas`, {}, connection);
+    const cached = connection.channels.get(target);
+    if (cached) cached.personas = personas;
     if (session !== connection || agentsChannel !== target) return;
     const list = $("agents-list");
     list.replaceChildren();
@@ -3232,3 +3450,144 @@ document.addEventListener("keydown", (event) => {
     replyTo(message);
   }
 });
+
+/*
+ * Mention someone with @ (ADR 0055). Typing @ in the message suggests the board's personas and
+ * recent senders; Up and Down move, Enter or Tab (or a tap) picks, Escape or a space closes.
+ * A pick writes @name into the text and, when To is empty, puts the name in To: the first
+ * mention picked addresses the message. The list is a listbox the message field controls, so
+ * focus never leaves the field and screen readers hear the highlighted name.
+ */
+function closeMentions() {
+  mention.start = -1;
+  mention.options = [];
+  $("mention-list").hidden = true;
+  $("mention-list").replaceChildren();
+  $("message").setAttribute("aria-expanded", "false");
+  $("message").removeAttribute("aria-activedescendant");
+}
+
+/** Loads the board's personas once per visit; a plain channel has none (404). */
+async function loadPersonas(connection, name, state) {
+  if (state.personas || state.personasLoading) return;
+  state.personasLoading = true;
+  try {
+    const { personas } = await api(`/channels/${name}/personas`, {}, connection);
+    state.personas = personas;
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    // A plain channel (404) has no personas; any other failure is not retried on every key
+    // either. Senders still work, and the next visit to the board asks again.
+    state.personas = [];
+  } finally {
+    state.personasLoading = false;
+  }
+  if (session === connection && channel === name && mention.start >= 0) showMentions();
+}
+
+function showMentions() {
+  const box = $("message");
+  if (!session || !channel || !canPost() || document.activeElement !== box) return closeMentions();
+  const at = box.selectionStart === box.selectionEnd ? mentionAt(box.value, box.selectionStart) : null;
+  if (!at || at.start === mention.dismissed) {
+    if (!at) mention.dismissed = -1;
+    return closeMentions();
+  }
+  const state = session.channels.get(channel);
+  if (!state) return closeMentions();
+  void loadPersonas(session, channel, state);
+  const options = suggest(
+    people({ personas: state.personas ?? [], messages: state.messages, me: session.username }),
+    at.query,
+  );
+  if (!options.length) return closeMentions();
+  const previous = mention.options[mention.active]?.name;
+  mention.start = at.start;
+  mention.options = options;
+  mention.active = Math.max(
+    0,
+    options.findIndex((person) => person.name === previous),
+  );
+  const list = $("mention-list");
+  list.replaceChildren(
+    ...options.map((person, index) => {
+      const item = document.createElement("div");
+      item.id = `mention-${index}`;
+      item.setAttribute("role", "option");
+      item.dataset.index = String(index);
+      const name = document.createElement("span");
+      name.textContent = `@${person.name}`;
+      item.append(name);
+      if (person.listening) {
+        const note = document.createElement("small");
+        note.textContent = "listening";
+        item.append(note);
+      }
+      return item;
+    }),
+  );
+  list.hidden = false;
+  box.setAttribute("aria-expanded", "true");
+  highlightMention(mention.active);
+}
+
+function highlightMention(index) {
+  mention.active = index;
+  for (const item of $("mention-list").children)
+    item.setAttribute("aria-selected", String(Number(item.dataset.index) === index));
+  const item = $(`mention-${index}`);
+  $("message").setAttribute("aria-activedescendant", item?.id ?? "");
+  item?.scrollIntoView({ block: "nearest" });
+}
+
+function pickMention(index) {
+  const person = mention.options[index];
+  const box = $("message");
+  if (!person || mention.start < 0 || !session || !channel) return;
+  const next = insertMention(box.value, mention.start, box.selectionStart, person.name);
+  box.value = next.text;
+  box.setSelectionRange(next.caret, next.caret);
+  const state = draft();
+  state.content = next.text;
+  const address = addressAfterPick($("recipient").value, state.mentionTo, person.name);
+  state.mentionTo = address.mentionTo;
+  $("recipient").value = state.recipient = address.to;
+  closeMentions();
+  autosize();
+  status(
+    address.to === person.name
+      ? `Mentioned ${person.name} · the message goes to ${person.name}`
+      : `Mentioned ${person.name} · the message still goes to ${address.to}`,
+  );
+}
+
+/** Keys for the open list. Returns true when the key was used, so it neither sends nor types. */
+function mentionKey(event) {
+  if (mention.start < 0 || event.isComposing) return false;
+  const count = mention.options.length;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const move = event.key === "ArrowDown" ? 1 : -1;
+    highlightMention((mention.active + move + count) % count);
+  } else if (
+    (event.key === "Enter" || event.key === "Tab") &&
+    !event.shiftKey &&
+    !event.ctrlKey &&
+    !event.metaKey
+  ) {
+    pickMention(mention.active);
+  } else if (event.key === "Escape") {
+    // Closes only the list: a pending reply stays for the next press.
+    mention.dismissed = mention.start;
+    closeMentions();
+  } else return false;
+  event.preventDefault();
+  return true;
+}
+
+$("mention-list").addEventListener("mousedown", (event) => event.preventDefault());
+$("mention-list").addEventListener("click", (event) => {
+  const item = event.target.closest?.("[data-index]");
+  if (item) pickMention(Number(item.dataset.index));
+});
+$("message").addEventListener("click", showMentions);
+$("message").addEventListener("blur", closeMentions);
