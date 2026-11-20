@@ -7,11 +7,14 @@ import { Store } from "./store.ts";
  * sends them and the server keeps nothing.
  *
  * Storage: the keychain is the app's only persistent store, so the marks live there as one small
- * item per identity, `msn.read.v1.<hash>`, holding `[[channel, id], …]` oldest-moved first. At
- * most MAX_MARKS boards are kept so the item stays well under keychain size guidance. Forgetting
- * the saved profile removes it.
+ * item per identity, `msn.read.v1.<hash>`, holding `[[channel, id], …]` oldest-moved first. Only
+ * the most recently read boards that fit in STORED_BYTES are written, below expo-secure-store's
+ * documented 2048-byte value limit; memory keeps up to MAX_MARKS for this session. The item is
+ * written only once the profile is saved, and forgetting the profile removes it.
  */
 export const MAX_MARKS = 100;
+/** The keychain item's size bound in bytes (expo-secure-store documents 2048 per value). */
+export const STORED_BYTES = 1800;
 /** Boards per counts request, matching the server's limit. */
 export const UNREAD_BOARDS = 100;
 /** Writes are coalesced: at most one keychain write per this interval. */
@@ -84,6 +87,18 @@ export function seenMark(visible: Iterable<number>, unseen: Iterable<number>): n
   return seen > 0 ? seen : null;
 }
 
+/** The JSON for the keychain: the newest marks whose encoding fits in `limit` bytes. */
+export function storedMarks(marks: MarkList, limit = STORED_BYTES): string {
+  let kept = [...marks];
+  let text = JSON.stringify(kept);
+  while (kept.length && new TextEncoder().encode(text).length > limit) {
+    // Drop the oldest quarter at a time; a 64-character board name is about 90 bytes.
+    kept = kept.slice(Math.max(1, Math.floor(kept.length / 4)));
+    text = JSON.stringify(kept);
+  }
+  return text;
+}
+
 export type Unread = { channel: string; after: number; count: number; toYou: number; capped: boolean };
 
 /**
@@ -153,11 +168,11 @@ export class ReadMarks {
   private loaded = false;
   private disposed = false;
 
-  private readonly persist: boolean;
+  private persist: boolean;
 
   /**
-   * `persist: false` keeps the marks in memory for this session only: a session that is not saved
-   * on the device leaves no board names behind either.
+   * `persist: false` keeps the marks in memory only, until `startPersisting` (called once the
+   * profile is saved): a session that is not saved on the device leaves no board names behind.
    */
   constructor(
     store: SecretStore,
@@ -168,8 +183,29 @@ export class ReadMarks {
     this.key = readMarksKey(identity);
     this.saveDelayMs = saveDelayMs;
     this.persist = persist;
-    const stored = persist ? store.get(this.key) : Promise.resolve(null);
-    this.ready = stored
+    this.ready = persist ? this.mergeStored() : Promise.resolve();
+    if (!persist) this.loaded = true;
+  }
+
+  /** The profile is now saved: read any older marks for it and keep these on the device too. */
+  async startPersisting(): Promise<void> {
+    if (this.persist || this.disposed) return;
+    this.persist = true;
+    await this.mergeStored();
+    this.scheduleSave();
+  }
+
+  /** The profile is being forgotten: drop any pending write and never write again. */
+  discard(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.persist = false;
+    this.disposed = true;
+  }
+
+  private mergeStored(): Promise<void> {
+    return this.store
+      .get(this.key)
       .then((raw) => {
         // Marks advanced before the load finished are newer than what was stored.
         let merged = parseMarks(raw);
@@ -205,6 +241,7 @@ export class ReadMarks {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     void this.flush();
     this.disposed = true;
   }
@@ -219,6 +256,7 @@ export class ReadMarks {
 
   private async save(): Promise<void> {
     if (!this.loaded) await this.ready;
-    await this.store.set(this.key, JSON.stringify(this.state.get())).catch(() => undefined);
+    if (!this.persist) return;
+    await this.store.set(this.key, storedMarks(this.state.get())).catch(() => undefined);
   }
 }

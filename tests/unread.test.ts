@@ -73,6 +73,7 @@ describe("GET /unread", () => {
       "mark=Work:1",
       "mark=:1",
       "mark=work:1&mark=work:2",
+      "mark=work:12345678901234567",
       `me=${"x".repeat(129)}&mark=work:1`,
       Array.from({ length: UNREAD_BOARDS + 1 }, (_, i) => `mark=b${i}:0`).join("&"),
     ]) {
@@ -98,6 +99,8 @@ describe("GET /unread", () => {
       { channel: "work", after: first, count: 1, toYou: 1 },
     ]);
     expect((await w.unread("me=watcher&mark=other:0", watcher)).status).toBe(403);
+    // One board outside the key's scope refuses the whole request.
+    expect((await w.unread("me=watcher&mark=work:0&mark=other:0", watcher)).status).toBe(403);
   });
 
   it("leaves deleted messages out", async () => {

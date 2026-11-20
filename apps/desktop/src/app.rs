@@ -43,6 +43,9 @@ pub struct MsnDesktopApp {
     read_marks_path: Option<(u64, Option<std::path::PathBuf>)>,
     /// When unread counts were last asked for; at most one request per `UNREAD_EVERY`.
     unread_at: Option<std::time::Instant>,
+    /// Marks waiting to be written: (file, reader, marks).
+    pending_marks: Option<(std::path::PathBuf, String, read_marks::Marks)>,
+    marks_saved_at: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
@@ -123,6 +126,8 @@ impl MsnDesktopApp {
             receipts_at: None,
             read_marks_path: None,
             unread_at: None,
+            pending_marks: None,
+            marks_saved_at: None,
             profile_store,
         }
     }
@@ -137,6 +142,7 @@ impl MsnDesktopApp {
         match command {
             Command::Disconnect => {
                 self.worker.next_generation();
+                self.save_read_marks(true);
             }
             command => {
                 if let Err(rejected) = self.worker.send(command) {
@@ -152,7 +158,7 @@ impl MsnDesktopApp {
         }
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.events_rx.try_recv() {
             let saved = matches!(event, UiEvent::ProfileSaved { .. });
             let commands = self.state.apply(event);
@@ -167,11 +173,22 @@ impl MsnDesktopApp {
         let deferred = self.state.take_deferred();
         self.dispatch_all(deferred);
         self.load_read_marks();
-        if self.unread_at.is_none_or(|at| at.elapsed() >= UNREAD_EVERY)
-            && let Some(command) = self.state.unread_command()
-        {
-            self.unread_at = Some(std::time::Instant::now());
-            self.dispatch(command);
+        self.save_read_marks(false);
+        // Counts are asked only while the window has focus, at most once per UNREAD_EVERY and
+        // only for boards that changed; a background window asks nothing until focus returns.
+        if self.state.unread_pending() && ctx.input(|input| input.focused) {
+            let wait = self.unread_at.map_or(std::time::Duration::ZERO, |at| {
+                UNREAD_EVERY.saturating_sub(at.elapsed())
+            });
+            if wait.is_zero() {
+                if let Some(command) = self.state.unread_command() {
+                    self.unread_at = Some(std::time::Instant::now());
+                    self.dispatch(command);
+                }
+            } else {
+                // The last change inside the window is asked for when it ends.
+                ctx.request_repaint_after(wait);
+            }
         }
         if self.state.channel.is_some()
             && self
@@ -773,7 +790,7 @@ impl MsnDesktopApp {
             });
         // A window in the background is not being read.
         if ui.input(|input| input.focused) && self.state.mark_read(seen) {
-            self.save_read_marks();
+            self.queue_read_marks();
         }
     }
 
@@ -1154,7 +1171,8 @@ impl MsnDesktopApp {
         });
     }
 
-    /// Reads this connection's marks from disk once, after the server confirmed the name.
+    /// Reads this connection's marks from disk once, after the server confirmed the name. A new
+    /// connection first writes what the previous one still had pending.
     fn load_read_marks(&mut self) {
         let Some(connection) = self.state.connection.as_ref() else {
             return;
@@ -1166,6 +1184,8 @@ impl MsnDesktopApp {
         {
             return;
         }
+        self.save_read_marks(true);
+        let connection = self.state.connection.as_ref().expect("checked above");
         let path = self.link_origin.as_ref().and_then(|origin| {
             read_marks::default_path(origin, &connection.tenant, &connection.username)
         });
@@ -1177,15 +1197,36 @@ impl MsnDesktopApp {
         self.read_marks_path = Some((connection.generation, path));
     }
 
-    /// Writes the marks after one moved. A failed write only costs counts after a restart.
-    fn save_read_marks(&mut self) {
+    /// A mark moved: keep a copy to write, so a disconnect cannot lose it.
+    fn queue_read_marks(&mut self) {
         let Some(connection) = self.state.connection.as_ref() else {
             return;
         };
         if let Some((generation, Some(path))) = &self.read_marks_path
             && *generation == connection.generation
         {
-            let _ = read_marks::save(path, &connection.username, &self.state.read_marks);
+            self.pending_marks = Some((
+                path.clone(),
+                connection.username.clone(),
+                self.state.read_marks.clone(),
+            ));
+        }
+    }
+
+    /// Writes queued marks off the hot path: at most once per SAVE_MARKS_EVERY, or now when
+    /// `force` (connection change, exit). A failed write only costs counts after a restart.
+    fn save_read_marks(&mut self, force: bool) {
+        if self.pending_marks.is_none()
+            || (!force
+                && self
+                    .marks_saved_at
+                    .is_some_and(|at| at.elapsed() < SAVE_MARKS_EVERY))
+        {
+            return;
+        }
+        if let Some((path, reader, marks)) = self.pending_marks.take() {
+            let _ = read_marks::save(&path, &reader, &marks);
+            self.marks_saved_at = Some(std::time::Instant::now());
         }
     }
 
@@ -1219,7 +1260,7 @@ impl MsnDesktopApp {
 
 impl MsnDesktopApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
-        self.drain_events();
+        self.drain_events(ui.ctx());
         if let Some(link) = self.copied_link.take() {
             ui.ctx().copy_text(link);
         }
@@ -1266,6 +1307,14 @@ impl eframe::App for MsnDesktopApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+        if self.pending_marks.is_some() {
+            // Wakes an idle window so a throttled write still happens.
+            ui.ctx().request_repaint_after(SAVE_MARKS_EVERY);
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_read_marks(true);
     }
 }
 
@@ -1365,6 +1414,8 @@ fn search_summary(search: &SearchState) -> String {
 
 /// The shortest gap between two unread-count requests; events in between are coalesced.
 const UNREAD_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+/// The shortest gap between two writes of the read-mark file.
+const SAVE_MARKS_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How often the open channel's processed-by receipts are reloaded.
 const RECEIPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
@@ -1842,6 +1893,8 @@ mod layout_tests {
             receipts_at: None,
             read_marks_path: None,
             unread_at: None,
+            pending_marks: None,
+            marks_saved_at: None,
             profile_store: None,
         }
     }

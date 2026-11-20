@@ -317,9 +317,13 @@ pub struct AppState {
     pub read_marks: Marks,
     /// The last counts the server gave, each for the mark it was asked about.
     pub unread: BTreeMap<String, Unread>,
-    /// Something changed on another board, or the list reloaded: the counts need asking again.
+    /// The list reloaded or the marks were loaded: every board's count needs asking again.
     pub unread_stale: bool,
+    /// Boards whose count changed since it was asked (an event there, or the person left it).
+    pub unread_stale_boards: BTreeSet<String>,
     pub unread_inflight: bool,
+    /// The boards the request in flight asks about; `None` while it asks about every board.
+    unread_asked: Option<Vec<String>>,
 }
 
 impl AppState {
@@ -406,22 +410,36 @@ impl AppState {
     /// The counts request when they are stale and none is in flight. The app calls this on a
     /// throttle; it is only ever made stale by the list loading or by events, never by a timer.
     pub fn unread_command(&mut self) -> Option<Command> {
-        if !self.unread_stale || self.unread_inflight || !self.events_ready {
+        if !self.unread_pending() || self.unread_inflight || !self.events_ready {
             return None;
         }
         let connection = self.connection.as_ref()?;
-        let marks = self.read_marks.for_listed(&self.channels);
+        let all = self.unread_stale;
+        let mut marks = self.read_marks.for_listed(&self.channels);
+        if !all {
+            // Only the boards that changed: the others' counts still hold.
+            marks.retain(|(name, _)| self.unread_stale_boards.contains(name));
+        }
         self.unread_stale = false;
+        self.unread_stale_boards.clear();
         if marks.is_empty() {
-            self.unread.clear();
+            if all {
+                self.unread.clear();
+            }
             return None;
         }
         self.unread_inflight = true;
+        self.unread_asked = (!all).then(|| marks.iter().map(|(name, _)| name.clone()).collect());
         Some(Command::LoadUnread {
             generation: connection.generation,
             me: connection.username.clone(),
             marks,
         })
+    }
+
+    /// Whether some count is waiting to be asked for.
+    pub fn unread_pending(&self) -> bool {
+        self.unread_stale || !self.unread_stale_boards.is_empty()
     }
 
     /// The count to show beside a board: none for the open board (it is being read), and none
@@ -464,6 +482,10 @@ impl AppState {
             return Vec::new();
         }
         self.channel_generation += 1;
+        // The board being left was read up to now; its count is asked again from the new mark.
+        if let Some(previous) = self.selected_channel.take() {
+            self.unread_stale_boards.insert(previous);
+        }
         self.selected_channel = Some(channel);
         self.channel = Some(ChannelState::default());
         [self.sync_command(), self.snapshots_command()]
@@ -619,9 +641,14 @@ impl AppState {
                 }
             }
             Command::CreateChannel { .. } => self.channels_error = Some(BUSY.into()),
-            Command::LoadUnread { .. } => {
+            Command::LoadUnread { marks, .. } => {
                 self.unread_inflight = false;
-                self.unread_stale = true;
+                match self.unread_asked.take() {
+                    None => self.unread_stale = true,
+                    Some(_) => self
+                        .unread_stale_boards
+                        .extend(marks.into_iter().map(|(name, _)| name)),
+                }
             }
             Command::Search { query, .. } => {
                 if let Some(search) = self
@@ -839,11 +866,21 @@ impl AppState {
                     return Vec::new();
                 }
                 self.unread_inflight = false;
+                let asked = self.unread_asked.take();
                 if let Some(counts) = counts {
-                    self.unread = counts
-                        .into_iter()
-                        .map(|entry| (entry.channel.clone(), entry))
-                        .collect();
+                    match asked {
+                        None => self.unread.clear(),
+                        Some(asked) => {
+                            for name in asked {
+                                self.unread.remove(&name);
+                            }
+                        }
+                    }
+                    self.unread.extend(
+                        counts
+                            .into_iter()
+                            .map(|entry| (entry.channel.clone(), entry)),
+                    );
                 }
                 Vec::new()
             }
@@ -1021,7 +1058,7 @@ impl AppState {
                 EventKind::MessageCreated | EventKind::MessageDeleted
             ) && self.selected_channel.as_deref() != Some(event.channel.as_str())
             {
-                self.unread_stale = true;
+                self.unread_stale_boards.insert(event.channel.clone());
             }
             match event.kind {
                 EventKind::ChannelCreated => list = true,
@@ -1309,17 +1346,21 @@ mod tests {
             generation: 1,
             events: vec![event(EventKind::MessageCreated, "general", Some(4), 0)],
         });
-        assert!(!state.unread_stale);
+        assert!(!state.unread_pending());
         state.apply(UiEvent::CoordinationEvents {
             generation: 1,
             events: vec![event(EventKind::MessageCreated, "ops", Some(11), 0)],
         });
-        assert!(state.unread_stale);
+        assert!(state.unread_pending());
         let Some(Command::LoadUnread { me, marks, .. }) = state.unread_command() else {
             panic!("expected a counts request");
         };
         assert_eq!(me, "alice");
-        assert_eq!(marks, vec![("general".into(), 2), ("ops".into(), 10)]);
+        assert_eq!(
+            marks,
+            vec![("ops".into(), 10)],
+            "only the board that changed"
+        );
         assert!(state.unread_command().is_none(), "one request at a time");
 
         let count = |channel: &str, after, count, to_you| Unread {
@@ -1331,7 +1372,7 @@ mod tests {
         };
         state.apply(UiEvent::Unread {
             generation: 1,
-            counts: Some(vec![count("general", 2, 1, 0), count("ops", 10, 3, 1)]),
+            counts: Some(vec![count("ops", 10, 3, 1)]),
         });
         assert!(!state.unread_inflight);
         assert_eq!(state.unread_for("ops").map(|u| u.count), Some(3));
@@ -1355,7 +1396,21 @@ mod tests {
             counts: None,
         });
         assert!(!state.unread_inflight);
-        assert_eq!(state.unread.len(), 2, "the last counts stay");
+        assert_eq!(state.unread.len(), 1, "the last counts stay");
+        // Leaving a board makes its count due again, from where the reader stopped.
+        state.unread_inflight = false;
+        state.select_channel("ops".into());
+        let Some(Command::LoadUnread { marks, .. }) = state.unread_command() else {
+            panic!("expected a counts request for the board left");
+        };
+        assert_eq!(marks, vec![("general".into(), 2)]);
+        // A partial answer replaces only the boards it asked about.
+        state.apply(UiEvent::Unread {
+            generation: 1,
+            counts: Some(vec![count("general", 2, 4, 0)]),
+        });
+        assert_eq!(state.unread.len(), 2);
+        assert_eq!(state.unread_for("general").map(|u| u.count), Some(4));
         // An answer for an old connection is ignored.
         state.unread_inflight = true;
         state.apply(UiEvent::Unread {

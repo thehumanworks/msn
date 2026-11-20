@@ -109,13 +109,26 @@ pub fn load(path: &Path, reader: &str) -> Marks {
 
 /// Writes the marks atomically (a temporary file renamed over the old one), readable only by
 /// this user.
+/// Another window of the same reader may have written meanwhile: its marks are merged in, keeping
+/// the higher id per board, so neither window moves a mark back.
 pub fn save(path: &Path, reader: &str, marks: &Marks) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(parent)?;
+    }
+    let mut merged = load(path, reader);
+    for (channel, id) in &marks.entries {
+        merged.advance(channel, *id);
     }
     let payload = serde_json::to_string(&Stored {
         reader: reader.to_string(),
-        marks: marks.entries.clone(),
+        marks: merged.entries,
     })
     .map_err(std::io::Error::other)?;
     let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
@@ -214,6 +227,30 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+        // Another window wrote a newer mark for one board: saving keeps the higher id of each.
+        let mut other = Marks::default();
+        other.advance("work", 20);
+        other.advance("new", 1);
+        save(&path, "Tomas", &other).unwrap();
+        let mut stale = Marks::default();
+        stale.advance("work", 7);
+        stale.advance("ops", 11);
+        save(&path, "Tomas", &stale).unwrap();
+        let both = load(&path, "Tomas");
+        assert_eq!(
+            (both.get("work"), both.get("ops"), both.get("new")),
+            (Some(20), Some(11), Some(1))
+        );
         fs::write(&path, "not json").unwrap();
         assert_eq!(load(&path, "Tomas"), Marks::default());
         fs::write(

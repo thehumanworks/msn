@@ -12,6 +12,8 @@ import {
   ReadMarks,
   readMarksKey,
   seenMark,
+  STORED_BYTES,
+  storedMarks,
   UNREAD_BOARDS,
   unreadBadge,
   type MarkList,
@@ -124,7 +126,7 @@ test("the channel list shows counts above this device's marks, others' messages 
       ),
     );
     await ctl.start();
-    const list = track(new ChannelListController(ctl, 5));
+    const list = track(new ChannelListController(ctl, 5, {}, 0));
     await list.load();
     await waitFor(() => list.state.get().unread.has("ops"), "first counts");
     assert.equal(list.state.get().unread.get("ops")?.count, 0);
@@ -163,15 +165,87 @@ test("forgetting a saved profile removes its read marks too", async () => {
     const current = app.state.get();
     assert.equal(current.kind, "connected");
     if (current.kind !== "connected") return;
-    current.controller.marks!.advance("general", 4);
-    await current.controller.marks!.flush();
-    assert.equal(store.data.has(readMarksKey(session)), true);
+    const marks = current.controller.marks!;
+    // Written only once the profile is saved.
+    await waitFor(() => store.data.has(readMarksKey(session)), "persisting after the profile save");
+    marks.advance("general", 4);
+    // A write still pending at the forget must not recreate the item afterwards.
     await app.signOut(null, { forget: true });
     await app.settled();
+    await new Promise((resolve) => setTimeout(resolve, 2100));
     assert.equal(store.data.has(readMarksKey(session)), false);
   } finally {
     const s = app.state.get();
     if (s.kind === "connected") s.controller.dispose();
+    await server.close();
+  }
+});
+
+test("the keychain item stays under the value limit, keeping the newest boards", () => {
+  let marks: MarkList = [];
+  for (let i = 0; i < 100; i += 1) marks = advanceMarks(marks, `${"b".repeat(60)}${String(i).padStart(3, "0")}`, 1e12 + i)!;
+  const text = storedMarks(marks);
+  assert.ok(new TextEncoder().encode(text).length <= STORED_BYTES);
+  const kept = parseMarks(text);
+  assert.ok(kept.length > 5);
+  assert.deepEqual(kept.at(-1), marks.at(-1), "the most recently read board is kept");
+  assert.equal(storedMarks([["work", 3]]), '[["work",3]]');
+});
+
+test("a sign-in whose profile save fails leaves no read marks in the keychain", async () => {
+  const server = await startMockServer();
+  const store = memoryStore();
+  const app = new AppModel(store, { fetchImpl: nodeFetch, controller: fast });
+  try {
+    store.failSet = true;
+    const session = { origin: server.url, tenant: "acme", username: "tomas" };
+    assert.equal(await app.signInWithKey({ ...session, token: TEST_TOKEN, remember: true }), null);
+    await app.settled();
+    const current = app.state.get();
+    assert.equal(current.kind, "connected");
+    if (current.kind !== "connected") return;
+    store.failSet = false;
+    current.controller.marks!.advance("general", 4);
+    await current.controller.marks!.flush();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(store.data.has(readMarksKey(session)), false);
+    assert.equal(current.controller.marks!.get("general"), 4, "still kept for this session");
+  } finally {
+    const s = app.state.get();
+    if (s.kind === "connected") s.controller.dispose();
+    await server.close();
+  }
+});
+
+test("counts are asked at most once per interval, with one trailing request", async () => {
+  const server = await startMockServer();
+  try {
+    server.createChannel("ops");
+    const seen = server.post("ops", "asha", "read");
+    const marks = new ReadMarks(memoryStore(), { origin: server.url, tenant: "acme", username: "tomas" });
+    marks.advance("ops", seen.id);
+    const ctl = track(
+      new SessionController(
+        { origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", usernamePrefix: null },
+        { ...fast, fetchImpl: nodeFetch, readMarks: marks },
+      ),
+    );
+    await ctl.start();
+    const list = track(new ChannelListController(ctl, 5, {}, 300));
+    await list.load();
+    const asks = () => server.requests.filter((r) => r.path === "/api/tenants/acme/unread").length;
+    await waitFor(() => asks() === 1, "first count on opening the list");
+    for (let i = 0; i < 5; i += 1) {
+      server.post("ops", "asha", `burst ${i}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(asks(), 1, "a burst inside the interval waits");
+    await waitFor(() => list.state.get().unread.get("ops")?.count === 5, "the trailing request sees the burst");
+    assert.equal(asks(), 2);
+    list.dispose();
+    ctl.dispose();
+  } finally {
     await server.close();
   }
 });

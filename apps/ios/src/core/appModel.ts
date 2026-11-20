@@ -160,6 +160,8 @@ export class AppModel {
     const current = this.state.get();
     if (options.forget && current.kind === "connected") {
       this.intents.set(identityKey(current.controller.session), null);
+      // No pending write may land after the forget removes the item.
+      current.controller.marks?.discard();
     }
     this.disposeCurrent();
     this.wantedActive = null;
@@ -215,7 +217,7 @@ export class AppModel {
       // profiles are never touched.
       this.intents.set(identityKey(session), input.remember ? session : null);
       this.wantedActive = input.remember ? identityKey(session) : null;
-      this.adopt(session, input.remember);
+      this.adopt(session, false);
       void this.sync().then((result) => this.reportSync(result, generation, input.remember));
       return null;
     } catch (error) {
@@ -224,11 +226,12 @@ export class AppModel {
     }
   }
 
-  /** `remember`: the session is saved on this device, so its read marks may be too. */
-  private adopt(session: Session, remember = true): void {
+  /** `persisted`: the session's profile is already saved, so its read marks may be too. */
+  private adopt(session: Session, persisted = true): void {
     const controller: SessionController = new SessionController(session, {
       ...this.controllerOptions,
-      readMarks: new ReadMarks(this.store, session, remember ? undefined : { persist: false }),
+      // A new sign-in keeps marks in memory until its profile is saved (see reportSync).
+      readMarks: new ReadMarks(this.store, session, { persist: persisted }),
       fetchImpl: this.fetchImpl,
       onAuthExpired: () => this.expire(controller),
     });
@@ -238,7 +241,10 @@ export class AppModel {
 
   private reportSync(result: { ok: boolean; full: boolean }, generation: number, remember: boolean): void {
     const current = this.state.get();
-    if (result.ok || generation !== this.generation || current.kind !== "connected") return;
+    if (generation !== this.generation || current.kind !== "connected") return;
+    // Read marks go to the keychain only for a profile that was actually saved (ADR 0045).
+    if (result.ok && remember) void current.controller.marks?.startPersisting();
+    if (result.ok) return;
     this.state.set({
       ...current,
       warning: result.full
