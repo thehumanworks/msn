@@ -20,9 +20,46 @@ fn parse(body: &str) -> Result<Value, CliError> {
     serde_json::from_str(body).map_err(|_| CliError::generic("Response was not JSON."))
 }
 
+/// One active mute as the Worker reports it. `until` is an ISO time; `None` lasts until unmuted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mute {
+    pub channel: String,
+    pub until: Option<String>,
+    pub everything: bool,
+}
+
+impl Mute {
+    pub fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            channel: value["channel"].as_str()?.to_string(),
+            until: value["until"].as_str().map(str::to_string),
+            everything: value["everything"].as_bool().unwrap_or(false),
+        })
+    }
+}
+
 /// Mutes `channel`; returns `{channel, until, everything}`.
 pub fn mute(
     url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    duration: Option<&str>,
+    everything: bool,
+) -> Result<Value, CliError> {
+    mute_with(
+        &MsnClient::new(url)?,
+        tenant,
+        token,
+        channel,
+        duration,
+        everything,
+    )
+}
+
+/// [`mute`] over an existing client (the desktop app keeps one per connection).
+pub fn mute_with(
+    client: &MsnClient,
     tenant: &str,
     token: &str,
     channel: &str,
@@ -40,26 +77,33 @@ pub fn mute(
     if let Some(value) = duration {
         body["for"] = json!(value);
     }
-    let response = MsnClient::new(url)?.send_optional_json(
-        "PUT",
-        &path(tenant, channel),
-        token,
-        Some(&body),
-    )?;
+    let response = client.send_optional_json("PUT", &path(tenant, channel), token, Some(&body))?;
     classify(response.status, &response.body)?;
     parse(&response.body)
 }
 
 /// Removes the mute on `channel`; succeeds when there was none.
 pub fn unmute(url: &Url, tenant: &str, token: &str, channel: &str) -> Result<(), CliError> {
-    let response = MsnClient::new(url)?.delete(&path(tenant, channel), token)?;
+    unmute_with(&MsnClient::new(url)?, tenant, token, channel)
+}
+
+pub fn unmute_with(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<(), CliError> {
+    let response = client.delete(&path(tenant, channel), token)?;
     classify(response.status, &response.body)
 }
 
 /// This person's active mutes: `{mutes: [{channel, until, everything}]}`.
 pub fn list(url: &Url, tenant: &str, token: &str) -> Result<Value, CliError> {
-    let response =
-        MsnClient::new(url)?.get(&format!("/api/tenants/{tenant}/push/mutes"), Some(token))?;
+    list_with(&MsnClient::new(url)?, tenant, token)
+}
+
+pub fn list_with(client: &MsnClient, tenant: &str, token: &str) -> Result<Value, CliError> {
+    let response = client.get(&format!("/api/tenants/{tenant}/push/mutes"), Some(token))?;
     classify(response.status, &response.body)?;
     parse(&response.body)
 }
