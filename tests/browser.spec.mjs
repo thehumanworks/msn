@@ -2691,3 +2691,50 @@ test("the owner archives a finished board: it leaves the list, reads but takes n
   await channelsPane(page);
   await expect(page.getByRole("button", { name: "# work", exact: true })).toBeVisible();
 });
+
+test("Download saves the board as a Markdown transcript with escaped, fenced message text", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await request.put(`${t.path}/channels/other`, { headers: t.headers });
+  const post = async (data, channel = "general") => {
+    const response = await request.post(`${t.path}/channels/${channel}/messages`, {
+      headers: t.headers,
+      data,
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message.id;
+  };
+  const first = await post({ username: "planner-agent", text: "Plan:\n1. build\n2. ship" });
+  await post({ username: "noise", text: "elsewhere" }, "other");
+  const hostile = "```\n# not a heading\n<script>window.pwned=true</script>";
+  const reply = await post({ username: "bob <b>", text: hostile, replyTo: first, to: "planner-agent" });
+  await request.post(`${t.path}/channels/general/messages/${reply}/labels`, {
+    headers: t.headers,
+    data: { set: { status: "done" } },
+  });
+  await connect(page, t);
+  await openChannel(page, "general");
+  await expect(page.locator("#download")).toBeEnabled();
+  const download = page.waitForEvent("download");
+  await page.locator("#download").click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe(`${t.tenant}-general-transcript.md`);
+  const text = await (await import("node:fs/promises")).readFile(await file.path(), "utf8");
+  expect(text).toContain("# Transcript of #general");
+  expect(text).toContain("- Messages: 2,");
+  expect(text).not.toContain("elsewhere");
+  expect(text).toContain(`### #${first} · planner-agent · `);
+  expect(text).toContain(`### #${reply} · bob \\<b\\> · `);
+  expect(text).toContain(`- Reply to: [#${first}](#msg-${first})`);
+  expect(text).toContain("- To: planner-agent");
+  expect(text).toContain("- Labels: status=done");
+  // The hostile text sits inside a fence longer than its own backtick run.
+  expect(text).toContain(`\`\`\`\`text\n${hostile}\n\`\`\`\``);
+  await expect(page.locator("#status")).toContainText("Downloaded #general as a transcript · 2 messages");
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("transcript.png") });
+});
