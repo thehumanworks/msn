@@ -367,10 +367,10 @@ impl AppState {
 
     /// Opens or folds the thread under `root` in the selected channel.
     pub fn toggle_thread(&mut self, root: u64) {
-        if let Some(state) = self.channel.as_mut() {
-            if !state.expanded.remove(&root) {
-                state.expanded.insert(root);
-            }
+        if let Some(state) = self.channel.as_mut()
+            && !state.expanded.remove(&root)
+        {
+            state.expanded.insert(root);
         }
     }
 

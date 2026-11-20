@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { FlatList, KeyboardAvoidingView, Platform, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Draft } from "../core/channelController.ts";
 import type { SessionController } from "../core/sessionController.ts";
+import { ParentLoader, threadRows, type ThreadRow } from "../core/threads.ts";
 import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
@@ -87,7 +88,21 @@ function ChannelBody({
   const me = session.session.username;
 
   const byId = useMemo(() => new Map(state.messages.map((m) => [m.id, m])), [state.messages]);
-  const newestFirst = useMemo(() => [...state.messages].reverse(), [state.messages]);
+  // Reply threads (ADR 0041): folded by default; the list is inverted, so newest row first.
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
+  const rows = useMemo(() => threadRows(state.messages, expanded).reverse(), [state.messages, expanded]);
+  const toggle = useCallback(
+    (root: number) =>
+      setExpanded((current) => {
+        const next = new Set(current);
+        if (!next.delete(root)) next.add(root);
+        return next;
+      }),
+    [],
+  );
+  const loader = useMemo(() => new ParentLoader(session.api, controller.channel), [session, controller]);
+  useEffect(() => () => loader.cancel(), [loader]);
+  const parents = useStore(loader.state);
   const onEdit = useCallback(
     (draft: Draft) => {
       setReplyTo(draft.replyTo !== undefined ? (byId.get(draft.replyTo) ?? null) : null);
@@ -139,10 +154,10 @@ function ChannelBody({
       {empty ? (
         <EmptyState title="No messages yet" body="Say something to start the conversation." />
       ) : (
-        <FlatList<Message>
+        <FlatList<ThreadRow>
           inverted
-          data={newestFirst}
-          keyExtractor={(m) => String(m.id)}
+          data={rows}
+          keyExtractor={(row) => String(row.message.id)}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
           contentContainerStyle={{ padding: spacing.md, gap: spacing.sm }}
@@ -160,15 +175,29 @@ function ChannelBody({
               <Text style={styles.older}>Older messages are not loaded in this app.</Text>
             ) : null
           }
-          renderItem={({ item }) => (
-            <MessageRow
-              message={item}
-              own={item.username === me}
-              quoted={item.replyTo !== undefined ? byId.get(item.replyTo) : undefined}
-              selected={replyTo?.id === item.id}
-              onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
-            />
-          )}
+          renderItem={({ item: row }) => {
+            const item = row.message;
+            const parent = item.replyTo !== undefined && !byId.has(item.replyTo) ? parents.get(item.replyTo) : undefined;
+            return (
+              <MessageRow
+                message={item}
+                own={item.username === me}
+                quoted={
+                  item.replyTo === undefined
+                    ? undefined
+                    : (byId.get(item.replyTo) ??
+                      (parent?.status === "loaded" ? (parent.message ?? undefined) : undefined))
+                }
+                parent={parent}
+                onLoadParent={item.replyTo !== undefined && !byId.has(item.replyTo) ? (id) => void loader.load(id) : undefined}
+                nested={row.kind === "reply"}
+                thread={row.kind === "message" && row.replies > 0 ? { replies: row.replies, open: row.open } : undefined}
+                onToggleThread={toggle}
+                selected={replyTo?.id === item.id}
+                onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
+              />
+            );
+          }}
         />
       )}
       <Composer
