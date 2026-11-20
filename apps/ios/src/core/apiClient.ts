@@ -25,6 +25,7 @@ import type {
   Snapshot,
 } from "./types.ts";
 import { ProtocolError } from "./errors.ts";
+import { decodeUnread, type MarkList, type Unread } from "./readMarks.ts";
 import { decodeMute, decodeMutes, type Mute } from "./mutes.ts";
 
 export type SendMessageInput = {
@@ -64,6 +65,13 @@ export class ApiClient {
     return decodeChannelList(
       await this.http.request<unknown>("/channels", { query: { after, limit }, signal }),
     );
+  }
+
+  /** Counts above this device's read marks (ADR 0045); the server keeps no read state. */
+  async unreadCounts(me: string, marks: MarkList, signal?: AbortSignal): Promise<Map<string, Unread>> {
+    const params = new URLSearchParams({ me });
+    for (const [channel, id] of marks) params.append("mark", `${channel}:${id}`);
+    return decodeUnread(await this.http.request<unknown>(`/unread?${params}`, { signal }), marks);
   }
 
   async createChannel(channel: string, signal?: AbortSignal): Promise<{ channel: string; created: boolean }> {

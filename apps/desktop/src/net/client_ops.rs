@@ -306,6 +306,66 @@ pub fn fetch_receipts(
     msn_cli::receipts::parse_channel(&value, channel)
 }
 
+/// Unread counts above this computer's read marks (ADR 0045). The server keeps no read state;
+/// `me` is the reader's display name, used to leave out their own messages and count the ones
+/// addressed to them.
+pub fn fetch_unread(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    me: &str,
+    marks: &[(String, u64)],
+) -> Result<Vec<crate::read_marks::Unread>, CliError> {
+    slug(tenant)?;
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("me", me);
+    for (channel, id) in marks {
+        slug(channel)?;
+        query.append_pair("mark", &format!("{channel}:{id}"));
+    }
+    let value = get_json(
+        client,
+        &format!("/api/tenants/{tenant}/unread?{}", query.finish()),
+        token,
+    )?;
+    parse_unread(&value, marks)
+}
+
+/// Keeps only answers for boards that were asked about, at the mark that was sent.
+pub fn parse_unread(
+    value: &Value,
+    marks: &[(String, u64)],
+) -> Result<Vec<crate::read_marks::Unread>, CliError> {
+    let rows = value["unread"]
+        .as_array()
+        .ok_or_else(|| CliError::generic("Invalid unread counts."))?;
+    let mut counts = Vec::new();
+    for row in rows {
+        let (Some(channel), Some(after), Some(count), Some(to_you)) = (
+            row["channel"].as_str(),
+            row["after"].as_u64(),
+            row["count"].as_u64(),
+            row["toYou"].as_u64(),
+        ) else {
+            return Err(CliError::generic("Invalid unread counts."));
+        };
+        if !marks
+            .iter()
+            .any(|(name, id)| name == channel && *id == after)
+        {
+            continue;
+        }
+        counts.push(crate::read_marks::Unread {
+            channel: channel.to_string(),
+            after,
+            count,
+            to_you: to_you.min(count),
+            capped: row["capped"].as_bool() == Some(true),
+        });
+    }
+    Ok(counts)
+}
+
 /// The owner's active board mutes (ADR 0044).
 pub fn list_mutes(
     client: &MsnClient,
@@ -753,6 +813,28 @@ mod tests {
 
     fn never() -> bool {
         false
+    }
+
+    #[test]
+    fn unread_answers_must_match_what_was_asked() {
+        let marks = vec![("work".to_string(), 7), ("ops".to_string(), 3)];
+        let counts = parse_unread(
+            &json!({"unread": [
+                {"channel": "work", "after": 7, "count": 4, "toYou": 9, "capped": true},
+                {"channel": "ops", "after": 2, "count": 1, "toYou": 0},
+                {"channel": "other", "after": 1, "count": 1, "toYou": 0}
+            ], "cap": 99}),
+            &marks,
+        )
+        .unwrap();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].channel, "work");
+        assert_eq!(
+            (counts[0].count, counts[0].to_you, counts[0].capped),
+            (4, 4, true)
+        );
+        assert!(parse_unread(&json!({"unread": [{"channel": "work"}]}), &marks).is_err());
+        assert!(parse_unread(&json!({}), &marks).is_err());
     }
 
     #[test]

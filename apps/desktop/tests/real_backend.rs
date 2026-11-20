@@ -119,4 +119,59 @@ fn real_worker_live_flow_including_admin_deletion() {
         "board rebuilt from canonical history after deletion"
     );
     assert!(pump.state.events_notice.is_none() && !pump.state.events_stopped);
+
+    // Unread counts (ADR 0045): another board moves on while this one is open.
+    let other = format!("{channel}-b");
+    client_ops::create_channel(&client, &tenant, &token, &other).expect("create other");
+    let post = |text: &str, key: &str, to: Option<&str>| {
+        client_ops::send_message(
+            &client,
+            &tenant,
+            &token,
+            &other,
+            &username,
+            text,
+            key,
+            Correlation {
+                to: to.map(str::to_string),
+                ..Correlation::default()
+            },
+            &never,
+        )
+        .ok()
+        .expect("send to other")
+        .id
+    };
+    let mark = post("read already", "real-u1", None);
+    pump.state.read_marks.advance(&other, mark);
+    assert!(pump.until(20, |s| s.channels.contains(&other)));
+    // The workspace key posts as this reader; the server leaves the reader's own messages out.
+    post("mine", "real-u2", None);
+    let counts = client_ops::fetch_unread(
+        &client,
+        &tenant,
+        &token,
+        "someone-else",
+        &[(other.clone(), mark)],
+    )
+    .expect("unread counts");
+    assert_eq!(counts.len(), 1);
+    assert_eq!((counts[0].count, counts[0].to_you), (1, 0));
+    post("for you", "real-u3", Some("Someone-Else"));
+    pump.state.unread_stale = true;
+    let command = pump.state.unread_command().expect("a counts request");
+    pump.dispatch(vec![command]);
+    assert!(pump.until(20, |s| !s.unread_inflight && s.unread.contains_key(&other)));
+    // Both new messages were posted under this reader's own name: not news to them.
+    assert_eq!(pump.state.unread[&other].count, 0);
+    assert!(pump.state.unread_for(&other).is_none());
+    let counts = client_ops::fetch_unread(
+        &client,
+        &tenant,
+        &token,
+        "someone-else",
+        &[(other.clone(), mark)],
+    )
+    .expect("unread counts");
+    assert_eq!((counts[0].count, counts[0].to_you), (2, 1));
 }

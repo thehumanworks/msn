@@ -1251,6 +1251,48 @@ body > footer {
   }
 }
 
+/* Unread counts on the board list (ADR 0045). */
+nav button[data-channel] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+nav button .channel-name {
+  flex: 1;
+  min-width: 0;
+}
+nav button.has-unread .channel-name {
+  font-weight: 600;
+}
+.unread {
+  display: inline-flex;
+  gap: 4px;
+  flex: none;
+}
+.unread[hidden] {
+  display: none;
+}
+.unread-count,
+.unread-mine {
+  min-width: 22px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.unread-count {
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+.unread-mine {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
 /* Board mutes (ADR 0044). */
 .mute-span {
   display: grid;
