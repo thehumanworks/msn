@@ -412,8 +412,12 @@ pub enum Command {
     Keys,
     /// Admin DELETE …/keys/{key}; revoke one participant key
     KeyRevoke { key: String },
-    /// GET /api/tenants/{tenant}/channels
-    Channels,
+    /// GET /api/tenants/{tenant}/channels (archived boards only with --archived)
+    Channels {
+        /// Also list archived boards; they carry archivedAt
+        #[arg(long)]
+        archived: bool,
+    },
     /// PUT /api/tenants/{tenant}/channels/{channel}
     Create {
         /// Channel slug (1–64 [a-z0-9_-])
@@ -902,6 +906,15 @@ pub enum BoardCommand {
         channel: String,
         #[arg(long)]
         out: String,
+    },
+    /// Archive a finished board (owner only): it leaves the board list and refuses every write
+    /// with 409 board_archived, but stays readable, searchable and exportable. Nothing is deleted.
+    Archive {
+        channel: String,
+    },
+    /// Make an archived board writable again and return it to the board list (owner only).
+    Unarchive {
+        channel: String,
     },
 }
 #[derive(Debug, Subcommand)]

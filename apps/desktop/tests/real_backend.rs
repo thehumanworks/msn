@@ -120,3 +120,61 @@ fn real_worker_live_flow_including_admin_deletion() {
     );
     assert!(pump.state.events_notice.is_none() && !pump.state.events_stopped);
 }
+
+/// Archived boards (ADR 0046) through the desktop path: archive, the list marks it, the server
+/// refuses a send, and unarchive restores it. Needs the owner token as MSN_WORKSPACE_TOKEN.
+#[test]
+#[ignore = "needs a real Worker; see the file header"]
+fn real_worker_archive_and_unarchive_a_board() {
+    let (url, tenant, token) = (
+        env("MSN_URL"),
+        env("MSN_WORKSPACE_TENANT"),
+        env("MSN_WORKSPACE_TOKEN"),
+    );
+    let origin = msn_cli::config::parse_origin(&url).unwrap();
+    let client = MsnClient::new(&origin).unwrap();
+    let channel = format!("arch-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let never = || false;
+    let rig = rig();
+    let mut pump = Pump {
+        rig: &rig,
+        state: AppState::default(),
+    };
+    let generation = rig.connect(&url, &tenant, &token);
+    pump.state.begin_connect(generation, tenant.clone());
+    assert!(pump.until(20, |s| s.events_ready && s.connection.is_some()));
+    let username = pump.state.connection.as_ref().unwrap().username.clone();
+    pump.dispatch(vec![Command::CreateChannel {
+        generation,
+        name: channel.clone(),
+    }]);
+    assert!(pump.until(20, |s| s.selected_channel.as_deref()
+        == Some(channel.as_str())));
+
+    let commands = pump.state.set_archived(true);
+    pump.dispatch(commands);
+    assert!(pump.until(20, |s| s.is_archived(&channel)
+        && s.channels.contains(&channel)
+        && s.visible_channels().all(|name| name != &channel)));
+    let refused = client_ops::send_message(
+        &client,
+        &tenant,
+        &token,
+        &channel,
+        &username,
+        "after archive",
+        "arch-k1",
+        Correlation::default(),
+        &never,
+    );
+    let error = refused
+        .err()
+        .expect("archived boards refuse sends")
+        .cli_error;
+    assert!(error.to_string().contains("archived"), "{error}");
+
+    let commands = pump.state.set_archived(false);
+    pump.dispatch(commands);
+    assert!(pump.until(20, |s| !s.is_archived(&channel)
+        && s.visible_channels().any(|name| name == &channel)));
+}

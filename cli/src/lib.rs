@@ -327,10 +327,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                     .delete(&format!("/api/admin/tenants/{tenant}/keys/{key}"), &token)?,
             )
         }
-        Command::Channels => {
+        Command::Channels { archived } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
-            channels(&url, &tenant, &token)
+            channels(&url, &tenant, &token, archived)
         }
         Command::Create { channel } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
@@ -1061,9 +1061,10 @@ fn health(url: &Url) -> Result<(), CliError> {
     finish(&client.get("/api/health", None)?)
 }
 
-fn channels(url: &Url, tenant: &str, token: &str) -> Result<(), CliError> {
+fn channels(url: &Url, tenant: &str, token: &str, archived: bool) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
-    let path = format!("/api/tenants/{tenant}/channels?limit={CHANNELS_PAGE_LIMIT}");
+    let include = if archived { "&include=archived" } else { "" };
+    let path = format!("/api/tenants/{tenant}/channels?limit={CHANNELS_PAGE_LIMIT}{include}");
     finish(&client.get(&path, Some(token))?)
 }
 
@@ -1638,6 +1639,10 @@ fn poll_loop(
         match response {
             Ok(response) if (200..300).contains(&response.status) => {
                 let parsed = parse_page(&response.body)?;
+                // An archived board (ADR 0046) gets no new messages: stop instead of polling forever.
+                if parsed.0.is_empty() && page_archived(&response.body) {
+                    return Err(archived_error(channel));
+                }
                 let page = Page {
                     raw: response.body.trim(),
                     messages: &parsed.0,
@@ -1683,6 +1688,19 @@ fn poll_loop(
         }
     }
     Ok(())
+}
+
+/// True when a page says its board is archived (ADR 0046); absent on active boards.
+pub fn page_archived(body: &str) -> bool {
+    serde_json::from_str::<Value>(body.trim())
+        .is_ok_and(|page| page.get("archived").and_then(Value::as_bool) == Some(true))
+}
+
+/// Exit 5 (conflict): a waiting reader stops; the board cannot get new messages until unarchived.
+pub fn archived_error(channel: &str) -> CliError {
+    CliError::conflict(format!(
+        "board_archived: Board {channel} is archived and read-only, so no new messages will arrive. Stop waiting; the board owner can run msn board unarchive {channel}."
+    ))
 }
 
 /// Validates a messages page and returns its rows plus `nextCursor` (absent → `None`).

@@ -70,14 +70,33 @@ pub fn list_channels(
     tenant: &str,
     token: &str,
 ) -> Result<Vec<String>, CliError> {
+    Ok(list_all_channels(client, tenant, token, false)?.0)
+}
+
+/// Every channel including archived boards (ADR 0046), plus the names that are archived. The
+/// sidebar hides the archived ones unless "Show archived" is on.
+pub fn list_all_channels(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    include_archived: bool,
+) -> Result<(Vec<String>, Vec<String>), CliError> {
     slug(tenant)?;
+    let include = if include_archived {
+        "&include=archived"
+    } else {
+        ""
+    };
     let mut after = String::new();
     let mut names = Vec::new();
+    let mut archived = Vec::new();
     for _ in 0..MAX_CHANNEL_PAGES {
         let path = if after.is_empty() {
-            format!("/api/tenants/{tenant}/channels?limit={CHANNELS_PAGE_LIMIT}")
+            format!("/api/tenants/{tenant}/channels?limit={CHANNELS_PAGE_LIMIT}{include}")
         } else {
-            format!("/api/tenants/{tenant}/channels?limit={CHANNELS_PAGE_LIMIT}&after={after}")
+            format!(
+                "/api/tenants/{tenant}/channels?limit={CHANNELS_PAGE_LIMIT}&after={after}{include}"
+            )
         };
         let page = get_json(client, &path, token)?;
         let rows = page["channels"]
@@ -89,12 +108,15 @@ pub fn list_channels(
                 .filter(|name| is_slug(name))
                 .ok_or_else(|| CliError::generic("Invalid channel name in channel list."))?;
             names.push(name.to_string());
+            if row["archivedAt"].is_string() {
+                archived.push(name.to_string());
+            }
         }
         let has_more = page["hasMore"]
             .as_bool()
             .ok_or_else(|| CliError::generic("Invalid channel list."))?;
         if !has_more {
-            return Ok(names);
+            return Ok((names, archived));
         }
         after = names
             .last()
@@ -102,6 +124,41 @@ pub fn list_channels(
             .ok_or_else(|| CliError::generic("Invalid channel list continuation."))?;
     }
     Err(CliError::generic("Too many channels to list."))
+}
+
+/// Archives (`true`) or unarchives a board (ADR 0046). Owner only: a refusal is reported as a
+/// plain error, never as a failed sign-in, so a participant who tries stays connected.
+pub fn set_archived(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    archived: bool,
+) -> Result<bool, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let path = format!("/api/tenants/{tenant}/channels/{channel}/archive");
+    let response = if archived {
+        client.put(&path, token)?
+    } else {
+        client.delete(&path, token)?
+    };
+    if response.status == 403 {
+        return Err(CliError::generic(
+            "Only the board owner can archive or unarchive a board.",
+        ));
+    }
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    if value["channel"].as_str() != Some(channel) {
+        return Err(CliError::generic(
+            "Archive response named a different channel.",
+        ));
+    }
+    value["archived"]
+        .as_bool()
+        .ok_or_else(|| CliError::generic("Invalid archive response."))
 }
 
 pub fn create_channel(

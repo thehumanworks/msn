@@ -2521,3 +2521,54 @@ test("a link for another workspace waits through Disconnect and opens after conn
   await page.goto("/#invite=abc&msg=1");
   await expect(page.locator("#status")).toHaveText("Invalid message link.");
 });
+
+test("the owner archives a finished board: it leaves the list, reads but takes no posts, and comes back", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const shared = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential: shared, goal: "Ship the release" },
+      })
+    ).status(),
+  ).toBe(201);
+  const agent = { Authorization: `Bearer ${shared}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: agent,
+    data: { displayName: "lead" },
+  });
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: agent,
+    data: { username: "lead", text: "Release shipped" },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await expect(page.locator("#archived-note")).toBeHidden();
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  for (const control of ["#send-form", "#invite-channel", "#board-settings"])
+    await expect(page.locator(control), control).toBeHidden();
+  await expect(page.locator("#messages")).toContainText("Release shipped");
+  await page.screenshot({ path: testInfo.outputPath("archived-board.png") });
+  const refused = await request.post(`${t.path}/channels/work/messages`, {
+    headers: agent,
+    data: { username: "lead", text: "One more" },
+  });
+  expect(refused.status()).toBe(409);
+
+  await channelsPane(page);
+  await expect(page.getByRole("button", { name: "# work", exact: true })).toHaveCount(0);
+  await page.getByLabel("Show archived").check();
+  await page.getByRole("button", { name: "# work · archived" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await page.getByRole("button", { name: "Unarchive" }).click();
+  await expect(page.locator("#archived-note")).toBeHidden();
+  await expect(page.locator("#send-form")).toBeVisible();
+  await channelsPane(page);
+  await expect(page.getByRole("button", { name: "# work", exact: true })).toBeVisible();
+});

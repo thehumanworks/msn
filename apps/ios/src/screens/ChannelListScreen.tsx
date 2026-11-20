@@ -21,6 +21,10 @@ export function ChannelListScreen({
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // Archived boards (ADR 0046) stay out of the list unless the person asks to see them.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedCount = state.channels.filter((c) => c.archivedAt !== null).length;
+  const shown = showArchived ? state.channels : state.channels.filter((c) => c.archivedAt === null);
 
   async function create() {
     const channel = name.trim();
@@ -65,6 +69,13 @@ export function ChannelListScreen({
       ) : (
         <Button label="New channel" onPress={() => setCreating(true)} />
       )}
+      {archivedCount ? (
+        <Button
+          label={showArchived ? "Hide archived" : `Show archived (${archivedCount})`}
+          variant="ghost"
+          onPress={() => setShowArchived((value) => !value)}
+        />
+      ) : null}
     </View>
   );
 
@@ -76,7 +87,7 @@ export function ChannelListScreen({
 
   return (
     <FlatList<ChannelSummary>
-      data={state.channels}
+      data={shown}
       keyExtractor={(item) => item.name}
       keyboardShouldPersistTaps="handled"
       contentContainerStyle={{ padding: spacing.lg, flexGrow: 1 }}
@@ -98,11 +109,14 @@ export function ChannelListScreen({
       renderItem={({ item }) => (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Channel ${item.name}, ${formatCount(item.messageCount, "message")}`}
+          accessibilityLabel={`Channel ${item.name}${item.archivedAt ? ", archived" : ""}, ${formatCount(item.messageCount, "message")}`}
           onPress={() => onSelect(item.name)}
           style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
         >
-          <Text style={{ fontWeight: "700" }}>#{item.name}</Text>
+          <Text style={{ fontWeight: "700" }}>
+            #{item.name}
+            {item.archivedAt ? <Text style={styles.meta}> · archived</Text> : null}
+          </Text>
           <Text style={styles.meta}>
             {formatCount(item.messageCount, "message")} · {formatCount(item.participantCount, "participant")}
             {item.lastActivityAt ? ` · ${formatTime(item.lastActivityAt)}` : ""}

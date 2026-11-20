@@ -145,6 +145,13 @@ pub fn start_page(
             token,
         )?["board"]
             .clone();
+        if extra["board"]["archivedAt"].is_string() {
+            // ADR 0046: an archived board reads but refuses every write with 409 board_archived.
+            extra["identity"]["archived"] = json!(true);
+            extra["warnings"].as_array_mut().expect("warnings").push(json!(
+                "This board is archived: read with start, peek and show. Every write (send, label, commit, snapshot, attachment upload, persona) is refused with 409 board_archived; do not retry and do not wait for new messages."
+            ));
+        }
         extra["workflow"]["personas"] = json!(
             "persona add CHANNEL NAME --save-as PROFILE; all personas share this channel credential"
         );

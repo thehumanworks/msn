@@ -1076,6 +1076,48 @@ body > footer {
   display: block;
 }
 
+/* Archived boards (ADR 0046) stay readable; the server refuses every write with 409. */
+.archived #send-form,
+.archived #invite-channel,
+.archived #board-settings {
+  display: none;
+}
+.archived-note {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+.archived .archived-note {
+  display: flex;
+}
+.watching .archived-note {
+  display: none;
+}
+.show-archived {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+#channels button.archived-board {
+  color: var(--muted);
+}
+.archive-board {
+  display: grid;
+  gap: 4px;
+  margin: 16px 0 0;
+}
+.archive-board small {
+  color: var(--muted);
+}
+
 /* Reply threads (ADR 0041): replies fold under the message they answer, one level deep. */
 .thread-toggle {
   display: inline-block;

@@ -41,6 +41,8 @@ export function ChannelScreen({
   onBack,
   trailing,
   banner,
+  archived = false,
+  onSetArchived,
 }: {
   session: SessionController;
   channel: string;
@@ -48,10 +50,22 @@ export function ChannelScreen({
   /** Extra header control, used to keep Sign out reachable for a channel-scoped key. */
   trailing?: ReactNode;
   banner?: ReactNode;
+  /** An archived board (ADR 0046) reads but takes no posts. */
+  archived?: boolean;
+  /** Archive or unarchive this board; resolves to an error to show, or null. Owner only. */
+  onSetArchived?: (archived: boolean) => Promise<string | null>;
 }) {
   const controller = useChannel(session, channel);
   const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>("chat");
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiving, setArchiving] = useState(false);
+  const toggleArchived = async () => {
+    if (!onSetArchived) return;
+    setArchiving(true);
+    setArchiveError(await onSetArchived(!archived));
+    setArchiving(false);
+  };
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -60,9 +74,18 @@ export function ChannelScreen({
         <Text style={styles.title} numberOfLines={1} accessibilityRole="header">
           #{channel}
         </Text>
+        {onSetArchived ? (
+          <Button
+            label={archived ? "Unarchive" : "Archive"}
+            variant="ghost"
+            busy={archiving}
+            onPress={() => void toggleArchived()}
+          />
+        ) : null}
         {trailing}
       </View>
       {banner}
+      {archiveError ? <Banner tone="danger">{archiveError}</Banner> : null}
       <View style={styles.tabs}>
         <Segmented options={TABS} value={tab} onChange={setTab} />
       </View>
@@ -73,6 +96,7 @@ export function ChannelScreen({
           controller={controller}
           tab={tab}
           bottomInset={insets.bottom}
+          archived={archived}
         />
       ) : (
         <EmptyState title="Opening channel…" />
@@ -86,11 +110,13 @@ function ChannelBody({
   controller,
   tab,
   bottomInset,
+  archived,
 }: {
   session: SessionController;
   controller: NonNullable<ReturnType<typeof useChannel>>;
   tab: Tab;
   bottomInset: number;
+  archived: boolean;
 }) {
   const state = useStore(controller.state);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -286,14 +312,20 @@ function ChannelBody({
           <Text style={styles.pointerText}>New reply in thread #{pointer.root} · Show</Text>
         </Pressable>
       ) : null}
-      <Composer
-        channel={controller}
-        onSent={onSent}
-        replyTo={replyTo}
-        onClearReply={() => setReplyTo(null)}
-        bottomInset={bottomInset}
-        restored={restored}
-      />
+      {archived ? (
+        <View style={[styles.archived, { paddingBottom: bottomInset + spacing.md }]}>
+          <Text style={styles.archivedText}>Archived · this board is read only. Unarchive it to post again.</Text>
+        </View>
+      ) : (
+        <Composer
+          channel={controller}
+          onSent={onSent}
+          replyTo={replyTo}
+          onClearReply={() => setReplyTo(null)}
+          bottomInset={bottomInset}
+          restored={restored}
+        />
+      )}
     </View>
   );
 }
@@ -341,4 +373,11 @@ const styles = StyleSheet.create({
     borderTopColor: colors.border,
   },
   pointerText: { color: colors.accent, fontWeight: "600", fontSize: 14 },
+  archived: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  archivedText: { color: colors.muted, fontSize: 14 },
 });

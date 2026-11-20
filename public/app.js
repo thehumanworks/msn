@@ -13,6 +13,8 @@ let session = null;
 let channel = "";
 let generation = 0;
 let polling = null;
+/** Boards the server reports archived (ADR 0046): read only, hidden unless Show archived. */
+const archivedBoards = new Set();
 // A bounded, memory-only delivery cache, not a durable read receipt or unread counter.
 const MAX_MESSAGES = 1000;
 const MAX_CACHED_CHANNELS = 5;
@@ -257,6 +259,9 @@ async function api(path, options = {}, connection = session) {
     const error = new Error(data.error?.message ?? `Request failed (${response.status})`);
     error.status = response.status;
     error.code = data.error?.code;
+    // Archived from another device (ADR 0046): show the board as read only right away.
+    const board = /^\/channels\/([a-z0-9][a-z0-9_-]{0,63})(\/|$)/.exec(path)?.[1];
+    if (session === connection && error.code === "board_archived" && board) markArchived(board, true);
     if (session === connection && error.code === "origin_forbidden") {
       stopPolling();
       $("live").checked = false;
@@ -1300,6 +1305,7 @@ async function poll(live = false) {
       if (generation !== epoch) return;
       render(data.messages, state);
       void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
+      markArchived(selected, data.archived === true);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
@@ -1324,7 +1330,36 @@ async function poll(live = false) {
       await new Promise((resolve) => setTimeout(resolve, backoff));
       backoff = Math.min(backoff * 2, 15000);
     }
-  } while (live && $("live").checked && generation === epoch);
+    // An archived board gets nothing new: stop the live poll once it is caught up.
+  } while (
+    live &&
+    $("live").checked &&
+    generation === epoch &&
+    !(archivedBoards.has(selected) && !state.hasMore)
+  );
+}
+
+/** Shows or hides the read-only state for the open board when the server reports it. */
+function markArchived(name, archived) {
+  if (archived) archivedBoards.add(name);
+  else archivedBoards.delete(name);
+  if (name !== channel) return;
+  $("workspace").classList.toggle("archived", archived);
+  $("unarchive").hidden = !archived || !session?.owner;
+}
+
+async function setArchived(name, archived) {
+  const connection = session;
+  try {
+    await api(`/channels/${name}/archive`, { method: archived ? "PUT" : "DELETE" }, connection);
+    if (session !== connection) return;
+    markArchived(name, archived);
+    status(archived ? `#${name} archived · it is read only and hidden from the list` : `#${name} unarchived`);
+    await refreshChannels(connection);
+    if (!archived && name === channel) poll($("live").checked);
+  } catch (error) {
+    status(error.message, true);
+  }
 }
 
 function selectChannel(name, { reset = false } = {}) {
@@ -1337,6 +1372,7 @@ function selectChannel(name, { reset = false } = {}) {
   savePosition();
   stopPolling();
   channel = name;
+  markArchived(name, archivedBoards.has(name));
   const cache = session.channels;
   let state = reset ? null : cache.get(name);
   // Only a board loaded fresh in this connection gets a new summary. Returning to a cached
@@ -1396,7 +1432,8 @@ async function refreshChannels(connection = session) {
   let after = "";
   const channels = [];
   for (;;) {
-    const data = await api(`/channels?limit=1000&after=${after}`, {}, connection);
+    const include = $("show-archived").checked ? "&include=archived" : "";
+    const data = await api(`/channels?limit=1000&after=${after}${include}`, {}, connection);
     if (session !== connection) return;
     channels.push(...data.channels);
     if (!data.hasMore) break;
@@ -1407,7 +1444,10 @@ async function refreshChannels(connection = session) {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.channel = item.name;
-    button.textContent = `# ${item.name}`;
+    button.textContent = item.archivedAt ? `# ${item.name} · archived` : `# ${item.name}`;
+    button.classList.toggle("archived-board", Boolean(item.archivedAt));
+    if (item.archivedAt) archivedBoards.add(item.name);
+    else archivedBoards.delete(item.name);
     button.title = `${item.messageCount ?? 0} messages · ${item.participantCount ?? 0} authors${item.lastActivityAt ? ` · Last activity ${formatTime(item.lastActivityAt)}` : ""}`;
     button.setAttribute("aria-current", String(channel === item.name));
     button.addEventListener("click", () => selectChannel(item.name));
@@ -2218,6 +2258,8 @@ $("board-settings").addEventListener("click", async () => {
   try {
     const { board } = await api(`/channels/${channel}/board`);
     editingBoard = board;
+    // Only the account owner archives a board (ADR 0046).
+    $("archive-board-row").hidden = !session?.owner;
     $("board-goal").value = board.goal;
     $("board-status").value = board.status;
     $("board-dialog").showModal();
@@ -2226,6 +2268,15 @@ $("board-settings").addEventListener("click", async () => {
   }
 });
 $("close-board").addEventListener("click", () => $("board-dialog").close());
+$("archive-board").addEventListener("click", async () => {
+  if (!editingBoard) return;
+  $("board-dialog").close();
+  await setArchived(editingBoard.channel, true);
+});
+$("unarchive").addEventListener("click", () => setArchived(channel, false));
+$("show-archived").addEventListener("change", () =>
+  refreshChannels().catch((error) => status(error.message, true)),
+);
 $("board-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!editingBoard) return;

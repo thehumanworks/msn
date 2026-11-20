@@ -297,6 +297,10 @@ pub struct AppState {
     pub events_stopped: bool,
 
     pub channels: Vec<String>,
+    /// Channels the server lists as archived boards (ADR 0046): read only.
+    pub archived: std::collections::BTreeSet<String>,
+    /// Sidebar toggle: archived boards are hidden from the list unless this is on.
+    pub show_archived: bool,
     pub channels_flight: Flight,
     pub channels_error: Option<String>,
 
@@ -392,6 +396,30 @@ impl AppState {
 
     pub fn request_channels(&mut self) -> Vec<Command> {
         self.list_command().into_iter().collect()
+    }
+
+    /// The sidebar's channels: archived boards only while "Show archived" is on.
+    pub fn visible_channels(&self) -> impl Iterator<Item = &String> {
+        self.channels
+            .iter()
+            .filter(|name| self.show_archived || !self.archived.contains(*name))
+    }
+
+    pub fn is_archived(&self, channel: &str) -> bool {
+        self.archived.contains(channel)
+    }
+
+    /// Archive or unarchive the open board (ADR 0046); the server allows only the owner.
+    pub fn set_archived(&mut self, archived: bool) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        vec![Command::SetArchived {
+            generation,
+            channel,
+            archived,
+        }]
     }
 
     /// Starts (or restarts) a channel: bumps `channel_generation` so any in-flight response for
@@ -641,17 +669,39 @@ impl AppState {
             UiEvent::Channels {
                 generation,
                 channels,
+                archived,
             } => {
                 if self.generation() != Some(generation) {
                     return Vec::new();
                 }
                 self.channels = channels;
+                self.archived = archived.into_iter().collect();
                 self.channels_error = None;
                 self.channels_flight
                     .finish()
                     .then_some(Command::ListChannels { generation })
                     .into_iter()
                     .collect()
+            }
+            UiEvent::ArchiveChanged {
+                generation,
+                channel,
+                archived,
+            } => {
+                if self.generation() != Some(generation) {
+                    return Vec::new();
+                }
+                if archived {
+                    self.archived.insert(channel.clone());
+                } else {
+                    self.archived.remove(&channel);
+                }
+                self.status = Some(if archived {
+                    format!("{channel} archived: it is read only and hidden from the list.")
+                } else {
+                    format!("{channel} unarchived.")
+                });
+                self.request_channels()
             }
             UiEvent::ChannelCreated {
                 generation,
@@ -1192,6 +1242,50 @@ mod tests {
     }
 
     #[test]
+    fn archived_boards_hide_until_shown_and_archive_changes_refresh_the_list() {
+        let mut state = AppState::default();
+        state.begin_connect(1, "acme".into());
+        state.apply(UiEvent::Connected {
+            generation: 1,
+            username: "alice".into(),
+        });
+        state.apply(UiEvent::EventsReady { generation: 1 });
+        state.apply(UiEvent::Channels {
+            generation: 1,
+            channels: vec!["done".into(), "work".into()],
+            archived: vec!["done".into()],
+        });
+        let visible = |s: &AppState| s.visible_channels().cloned().collect::<Vec<_>>();
+        assert_eq!(visible(&state), ["work"]);
+        state.show_archived = true;
+        assert_eq!(visible(&state), ["done", "work"]);
+        assert!(state.is_archived("done"));
+
+        state.select_channel("work".into());
+        assert!(matches!(
+            state.set_archived(true).as_slice(),
+            [Command::SetArchived { channel, archived: true, .. }] if channel == "work"
+        ));
+        let commands = state.apply(UiEvent::ArchiveChanged {
+            generation: 1,
+            channel: "work".into(),
+            archived: true,
+        });
+        assert!(state.is_archived("work"));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::ListChannels { .. }]
+        ));
+        // A late answer for an older connection changes nothing.
+        state.apply(UiEvent::ArchiveChanged {
+            generation: 0,
+            channel: "work".into(),
+            archived: false,
+        });
+        assert!(state.is_archived("work"));
+    }
+
+    #[test]
     fn reads_wait_for_the_event_cursor_so_history_cannot_race_the_subscription() {
         let mut state = AppState::default();
         state.begin_connect(1, "acme".into());
@@ -1600,7 +1694,8 @@ mod tests {
             state
                 .apply(UiEvent::Channels {
                     generation: 1,
-                    channels: vec!["x".into()]
+                    channels: vec!["x".into()],
+                    archived: Vec::new(),
                 })
                 .is_empty()
         );

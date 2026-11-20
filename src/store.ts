@@ -108,9 +108,10 @@ type TenantRow = {
 };
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
-type Waiter = { channel: string; wake: () => void };
+/** `end` answers the poll now with its current page (archiving a board, ADR 0046). */
+type Waiter = { channel: string; wake: () => void; end: () => void };
 /** `channel: null` matches every channel (unscoped tokens polling the whole tenant). */
-type EventWaiter = { channel: string | null; wake: () => void };
+type EventWaiter = { channel: string | null; wake: () => void; end: () => void };
 const MAX_MESSAGES = 100000;
 const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
@@ -422,6 +423,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         // no schema_version step: older keys and invitations stay full participants.
         ["access_keys", "read_only", "INTEGER NOT NULL DEFAULT 0"],
         ["invites", "watch", "INTEGER NOT NULL DEFAULT 0"],
+        // Archived boards (ADR 0046): NULL is active. Additive, so no schema_version step.
+        ["channels", "archivedAt", "TEXT"],
         ["messages", "personaId", "TEXT"],
         ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
@@ -1141,6 +1144,11 @@ export class MsnDurableObject extends DurableObject<Env> {
     const failed: { channel: string; code: string }[] = [];
     for (const target of targets) {
       const pull = { repo: target.repo, number: target.number };
+      // Archived boards take no new messages, GitHub's included (ADR 0046).
+      if (this.archivedAt(target.channel)) {
+        skipped++;
+        continue;
+      }
       // Workflow runs: every failure, but only the first success per head commit and board, so a
       // busy CI cannot fill the board (ADR 0036).
       if (item.event === "workflow" && item.state !== "success" && QUIET_CONCLUSIONS.has(item.state)) {
@@ -1258,7 +1266,54 @@ export class MsnDurableObject extends DurableObject<Env> {
       )
       .toArray()[0];
     if (!row) throw new HttpError(404, "board_not_found", "Create this message board first.");
-    return row;
+    const archivedAt = this.archivedAt(channel);
+    return archivedAt ? { ...row, archivedAt } : row;
+  }
+
+  /** When the board was archived (ADR 0046), or null while it is active or does not exist. */
+  private archivedAt(channel: string): string | null {
+    return (
+      this.ctx.storage.sql
+        .exec<{ archivedAt: string | null }>("SELECT archivedAt FROM channels WHERE name = ?", channel)
+        .toArray()[0]?.archivedAt ?? null
+    );
+  }
+
+  /** Archived boards refuse every write (ADR 0046). Reads, search and export keep working. */
+  private requireActive(channel: string): void {
+    if (this.archivedAt(channel))
+      throw new HttpError(
+        409,
+        "board_archived",
+        `Board ${channel} is archived and read-only: nothing new can be posted or changed. Do not retry; the board owner can run msn board unarchive ${channel}.`,
+        { channel },
+      );
+  }
+
+  /** PUT archives, DELETE unarchives. Owner only; idempotent; nothing is deleted (ADR 0046). */
+  private archiveRoute(request: Request, channel: string, capability: TenantRow): Response {
+    this.requireOwner(capability);
+    this.requireChannel(channel);
+    if (request.method !== "PUT" && request.method !== "DELETE")
+      throw new HttpError(404, "route_not_found", "Use PUT to archive a board and DELETE to unarchive it.");
+    const archive = request.method === "PUT";
+    const before = this.archivedAt(channel);
+    if (archive && !before)
+      this.ctx.storage.sql.exec(
+        "UPDATE channels SET archivedAt = ? WHERE name = ?",
+        new Date().toISOString(),
+        channel,
+      );
+    if (!archive && before)
+      this.ctx.storage.sql.exec("UPDATE channels SET archivedAt = NULL WHERE name = ?", channel);
+    // Pending long polls on this board answer now, carrying archived: true, so listeners end
+    // cleanly instead of waiting out their timeout.
+    if (archive && !before) {
+      for (const waiter of this.waiters) if (waiter.channel === channel) waiter.end();
+      for (const waiter of this.eventWaiters) if (waiter.channel === channel) waiter.end();
+    }
+    const archivedAt = this.archivedAt(channel);
+    return json({ channel, archived: Boolean(archivedAt), ...(archivedAt ? { archivedAt } : {}) });
   }
 
   private tenantRow(): TenantRow | undefined {
@@ -1335,7 +1390,11 @@ export class MsnDurableObject extends DurableObject<Env> {
       .exec<{ count: number }>("SELECT COUNT(*) AS count FROM channels")
       .one().count;
     if (count >= MAX_CHANNELS) throw new HttpError(409, "channel_quota", "Tenant channel limit reached.");
-    this.ctx.storage.sql.exec("INSERT INTO channels VALUES (?, ?)", channel, new Date().toISOString());
+    this.ctx.storage.sql.exec(
+      "INSERT INTO channels (name, createdAt) VALUES (?, ?)",
+      channel,
+      new Date().toISOString(),
+    );
     this.insertEvent(channel, "channel.created", null);
     return true;
   }
@@ -1397,7 +1456,12 @@ export class MsnDurableObject extends DurableObject<Env> {
           )
     ).toArray();
     const events: CoordinationEvent[] = rows.slice(0, limit).map((row) => toEvent(row, tenant));
-    return { events, nextCursor: events.at(-1)?.id ?? after, hasMore: rows.length > limit };
+    return {
+      events,
+      nextCursor: events.at(-1)?.id ?? after,
+      hasMore: rows.length > limit,
+      ...(channel !== null && this.archivedAt(channel) ? { archived: true } : {}),
+    };
   }
 
   /** Same shape as `poll`, but over the event journal; a distinct id space from message ids. */
@@ -1450,6 +1514,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       };
       const waiter: EventWaiter = {
         channel,
+        end: () => finish(),
         wake: () => {
           // Future cursors must not get woken by earlier events.
           try {
@@ -1656,10 +1721,13 @@ export class MsnDurableObject extends DurableObject<Env> {
     fence: ProcessingFence | null = null,
   ): Promise<Response> | Response {
     const respond = (page: ReturnType<typeof this.page>) => {
-      if (!fence) return json(page);
+      // Archived boards say so on every page, so a waiting client can stop instead of polling
+      // forever for messages that cannot arrive (ADR 0046). Absent on active boards.
+      const archived = this.archivedAt(channel) ? { archived: true } : {};
+      if (!fence) return json({ ...page, ...archived });
       // Recheck at reply time: a takeover during a long poll fences this reply, too.
       this.requireGeneration(channel, fence.reader, fence.generation);
-      return json({ ...page, committedThrough: after, generation: fence.generation });
+      return json({ ...page, ...archived, committedThrough: after, generation: fence.generation });
     };
     const page = this.page(tenant, channel, after, limit, filters, before);
     if (page.messages.length || !wait) return respond(page);
@@ -1693,6 +1761,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       };
       const waiter: Waiter = {
         channel,
+        end: () => finish(),
         wake: () => {
           // Future cursors must not get woken by earlier messages.
           try {
@@ -1727,6 +1796,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     attachments: AttachmentRef[] = [],
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
+      // Rechecked inside the write: an archive that lands while a send awaits its body still wins.
+      this.requireActive(channel);
       if (key) {
         const old = this.ctx.storage.sql
           .exec<MessageRow & { digest: string; deleted: number }>(
@@ -2728,6 +2799,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     const capability = this.authorize(hash); // Final check after every await.
     this.requireScope(capability, channel);
     if (channel) this.requireChannel(channel);
+    if (channel) this.requireActive(channel);
     const now = Date.now();
     this.ctx.storage.sql.exec("DELETE FROM invites WHERE expiresAt <= ? OR remaining = 0", now);
     if (
@@ -2791,6 +2863,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           "The inviter no longer has access. Ask for a new invitation.",
         );
       }
+      // An invitation to an archived board waits: unarchiving makes the same code work again.
+      if (invite.channel) this.requireActive(invite.channel);
       this.requireKeyCapacity();
       const id = crypto.randomUUID();
       this.ctx.storage.sql.exec(
@@ -3004,6 +3078,21 @@ export class MsnDurableObject extends DurableObject<Env> {
             "watch_only",
             "This access key can watch the board but not post or change anything.",
           );
+        // Archived boards (ADR 0046) refuse every write under their path, archive itself aside. One
+        // gate in front of the board routes, like watch-only above, so a later write route is refused
+        // by default. Authorization runs first, so a stranger cannot learn that a board is archived.
+        if (request.method !== "GET" && rest[0] === "channels" && rest[1]) {
+          const channel = slug(rest[1]);
+          if (rest.length === 3 && rest[2] === "archive") {
+            const capability = this.authorize(hash);
+            this.requireScope(capability, channel);
+            return this.archiveRoute(request, channel, capability);
+          }
+          if (this.archivedAt(channel)) {
+            this.requireScope(this.authorize(hash), channel);
+            this.requireActive(channel);
+          }
+        }
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
@@ -3147,18 +3236,25 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (after) slug(after);
           const limit = integer(url.searchParams.get("limit"), 100, 1000);
           if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+          // Archived boards (ADR 0046) leave the default list; include=archived lists them too.
+          const include = url.searchParams.get("include");
+          if (include !== null && include !== "archived")
+            throw new HttpError(400, "invalid_query", "include accepts only archived.");
           const channels = this.ctx.storage.sql
-            .exec<{ name: string; createdAt: string }>(
-              `SELECT c.name, c.createdAt, COUNT(m.id) AS messageCount, MAX(m.createdAt) AS lastActivityAt,
-               COUNT(DISTINCT m.username) AS participantCount
+            .exec<{ name: string; createdAt: string; archivedAt: string | null }>(
+              `SELECT c.name, c.createdAt, c.archivedAt, COUNT(m.id) AS messageCount,
+               MAX(m.createdAt) AS lastActivityAt, COUNT(DISTINCT m.username) AS participantCount
                FROM channels c LEFT JOIN messages m ON m.channel = c.name AND m.deleted = 0
-               WHERE c.name > ? AND (? IS NULL OR c.name = ?) GROUP BY c.name ORDER BY c.name LIMIT ?`,
+               WHERE c.name > ? AND (? IS NULL OR c.name = ?) AND (? OR c.archivedAt IS NULL)
+               GROUP BY c.name ORDER BY c.name LIMIT ?`,
               after,
               capability.channel_scope ?? null,
               capability.channel_scope ?? null,
+              include === "archived" ? 1 : 0,
               limit + 1,
             )
-            .toArray();
+            .toArray()
+            .map(({ archivedAt, ...row }) => (archivedAt ? { ...row, archivedAt } : row));
           return json({
             channels: channels.slice(0, limit),
             nextCursor: channels.slice(0, limit).at(-1)?.name ?? after,
