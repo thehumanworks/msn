@@ -2749,7 +2749,7 @@ test("each message shows which personas committed past it, from explicit commits
   ]);
   await expect(receipts.first()).toHaveAttribute(
     "title",
-    /resumable commits.*never commit to the server are not listed/,
+    /processing commits sent to the server.*--local keeps them off.*never commit to the server are not listed/,
   );
   await page.screenshot({ path: testInfo.outputPath("receipts.png") });
 
