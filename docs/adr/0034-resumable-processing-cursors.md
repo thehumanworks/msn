@@ -1,6 +1,6 @@
 # ADR 0034: resumable processing cursors with an explicit, fenced takeover
 
-Date: 2026-11-19. Status: implemented (Worker schema v14, CLI `--resumable`, `msn takeover`). Opt-in.
+Date: 2026-11-19. Status: implemented (Worker schema v14, CLI `--resumable`, `msn takeover`). Opt-in until ADR 0053 made server progress the default (`--local` opts out).
 
 ## Context
 

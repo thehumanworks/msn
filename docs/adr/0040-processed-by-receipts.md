@@ -26,7 +26,7 @@ Receipts are computed on read from `processing_cursors` and the board's `persona
 ## What a receipt does not promise
 
 - **"Not yet" is not "unseen".** An agent may have read and even acted on a message it has not committed yet.
-- **Local-only commits are invisible.** `msn commit` without `--resumable`, the host runtime's cursor and the dispatcher's checkpoint stay on the agent's machine, so those agents are simply not named. The fix is to run that agent resumable, not to guess. Moving defaults toward server commits is a separate decision.
+- **Local-only commits are invisible.** `msn commit` without `--resumable`, the host runtime's cursor and the dispatcher's checkpoint stay on the agent's machine, so those agents are simply not named. The fix is to run that agent resumable, not to guess. ADR 0053 later made server commits the default for the CLI, MCP, `msn run` and the dispatcher.
 - **Attribution is by reader name, not by key.** Shared board keys and unbound workspace keys are cooperative (ADR 0026, ADR 0034): any holder can claim and commit under any persona's reader name. So a receipt proves that someone holding a key with access committed under that name, not that the named agent's own process did. A key bound to a name can commit only that name's readers, so on bound keys the attribution is exact.
 - **Commits are watermarks.** A commit through N covers every message up to N, including ones the agent chose to skip. That is what `commit` already means for processing.
 - **Takeover.** After `msn takeover` the replacement keeps the server's `committedThrough`, so receipts never move backwards on a takeover.

@@ -441,6 +441,8 @@ try {
   assert.deepEqual(aliceAgain.messages, []);
 
   // I5 explicit --cursor-file binding + lock + foreign file. Reader always required (G01).
+  // ADR 0053: the first file claims owner-agent on the server. The default file then finds the
+  // reader held, so it keeps its own progress locally (no takeover, no error) and stays separate.
   const cursorFile = join(dir, "processing-owner.json");
   const peekFile = await rust(
     peekCmd(channel, "owner-agent", ["--cursor-file", cursorFile, "--limit", "100"]),

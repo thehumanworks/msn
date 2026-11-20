@@ -21,10 +21,15 @@ use common::{MockServer, Scripted};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct Home(PathBuf);
+/// A private HOME, plus an optional MSN_RESUMABLE for the processing mode (ADR 0053).
+struct Home(PathBuf, Option<&'static str>);
 
 impl Home {
     fn new() -> Self {
+        Self(Self::fresh(), None)
+    }
+
+    fn fresh() -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -35,7 +40,12 @@ impl Home {
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
-        Self(path)
+        path
+    }
+
+    /// Progress kept on this machine only (`MSN_RESUMABLE=0`).
+    fn local() -> Self {
+        Self(Self::fresh(), Some("0"))
     }
 
     fn msn(&self, server: &MockServer) -> Command {
@@ -55,6 +65,9 @@ impl Home {
                 "--username",
                 "alice",
             ]);
+        if let Some(mode) = self.1 {
+            command.env("MSN_RESUMABLE", mode);
+        }
         command
     }
 }
@@ -153,7 +166,7 @@ fn send_returns_key_and_posts_once() {
 
 #[test]
 fn peek_then_commit_moves_processing_progress() {
-    let home = Home::new();
+    let home = Home::local();
     let page = r#"{"messages":[{"id":5,"tenant":"team","channel":"general"},{"id":7,"tenant":"team","channel":"general"}],"nextCursor":7,"hasMore":false}"#;
     // Progress is bound to the origin, so the CLI check below uses the same server.
     let server = MockServer::spawn(vec![
@@ -202,6 +215,41 @@ fn peek_then_commit_moves_processing_progress() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(server.recorded()[1].path.contains("after=7&"));
+}
+
+#[test]
+fn peek_and_commit_go_to_the_server_by_default() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            201,
+            r#"{"reader":"alice","generation":1,"committedThrough":0,"holder":"h"}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"messages":[{"id":5,"tenant":"team","channel":"general"}],"nextCursor":5,"hasMore":false,"committedThrough":0,"generation":1}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"reader":"alice","generation":1,"committedThrough":5,"holder":"h"}"#,
+        ),
+    ]);
+    let replies = session(
+        &home,
+        &server,
+        &[
+            call(1, "peek", json!({"wait":0})),
+            call(2, "commit", json!({"through":5})),
+        ],
+    );
+    assert_eq!(ok(&replies[1])["generation"], 1);
+    assert_eq!(
+        ok(&replies[2]),
+        &json!({"committedThrough":5,"highestFetched":5,"generation":1})
+    );
+    let recorded = server.recorded();
+    assert!(recorded[0].path.ends_with("/processing/alice/claim"));
+    assert!(recorded[2].path.ends_with("/processing/alice/commit"));
 }
 
 #[test]

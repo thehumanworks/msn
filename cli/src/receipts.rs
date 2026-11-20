@@ -1,8 +1,9 @@
 //! Processed-by receipts (ADR 0040): which readers have explicitly committed past a message.
 //!
-//! The server reads them only from resumable processing cursors (ADR 0034), so a receipt proves
+//! The server reads them only from server processing cursors (ADR 0034), so a receipt proves
 //! exactly one thing: someone holding the key committed under that reader name through this
-//! message or later (`msn commit --resumable`, or the MCP `commit` tool with MSN_RESUMABLE=1).
+//! message or later. Since ADR 0053, `msn commit`, the MCP `commit` tool, `msn run` and the event
+//! dispatcher send that commit by default; `--local` or MSN_RESUMABLE=0 keeps it off the board.
 //! Only readers with a server cursor are named. "Not yet" means that reader has committed, but
 //! not this far. A persona that never committed to the server is never named: its progress is
 //! unknown, and local-only commits are not visible.
@@ -13,7 +14,7 @@ use serde_json::Value;
 use crate::error::CliError;
 
 /// What a receipt proves, for help text, tooltips and empty states in every client.
-pub const MEANING: &str = "From explicit resumable commits (msn commit --resumable) only. Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
+pub const MEANING: &str = "From explicit processing commits sent to the server only (the default for msn commit, MCP and msn run; --local keeps them off). Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
 
 /// Names listed per side before the rest are folded into "+N more".
 pub const MAX_NAMES: usize = 10;

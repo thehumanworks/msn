@@ -162,6 +162,10 @@ const RUNTIME: &[(&str, &[u8])] = &[
         include_bytes!("../../scripts/host/runtime.mjs"),
     ),
     (
+        "host/server-commits.mjs",
+        include_bytes!("../../scripts/host/server-commits.mjs"),
+    ),
+    (
         "host/store.mjs",
         include_bytes!("../../scripts/host/store.mjs"),
     ),
@@ -264,6 +268,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
         install_service,
         harness,
         prompt,
+        local,
         command,
     } = &cli.command
     else {
@@ -287,6 +292,9 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
     }
     if *prompt {
         child.arg("--prompt");
+    }
+    if *local {
+        child.arg("--local");
     }
     if !command.is_empty() {
         child.arg("--").args(command);

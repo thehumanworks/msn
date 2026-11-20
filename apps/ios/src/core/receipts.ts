@@ -2,8 +2,8 @@ import type { ApiClient } from "./apiClient.ts";
 import { ProtocolError } from "./errors.ts";
 
 /**
- * Processed-by receipts (ADR 0040). The server reads them only from explicit resumable commits
- * (ADR 0034), so a receipt proves that the reader committed past a message, and nothing else.
+ * Processed-by receipts (ADR 0040). The server reads them only from explicit processing commits
+ * (ADR 0034, sent to the server by default since ADR 0053), so a receipt proves that the reader committed past a message, and nothing else.
  */
 export type Receipt = {
   name: string;
@@ -15,7 +15,7 @@ export type Receipt = {
 };
 
 export const RECEIPTS_MEANING =
-  "From explicit resumable commits (msn commit --resumable) only. Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
+  "From explicit processing commits sent to the server only (the default for msn commit, MCP and msn run; --local keeps them off). Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
 
 /** Names listed per side before the rest fold into "+N more". */
 export const RECEIPTS_MAX_NAMES = 10;
