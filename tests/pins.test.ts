@@ -215,7 +215,7 @@ describe("pinned messages (ADR 0038)", () => {
     expect(page.byteLimitReached).toBe(true);
   });
 
-  it("records schema version 18 and creates the pins table", async () => {
+  it("records schema version 18 (now the latest, 20) and creates the pins table", async () => {
     const f = await fixture();
     const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
     await runInDurableObject(stub, (_instance, state) => {
@@ -223,7 +223,7 @@ describe("pinned messages (ADR 0038)", () => {
         .exec<{ version: number }>("SELECT version FROM schema_version ORDER BY version")
         .toArray()
         .map((row) => row.version);
-      expect(versions.at(-1)).toBe(18);
+      expect(versions.at(-1)).toBe(20);
       const tables = state.storage.sql
         .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pins'")
         .toArray();
