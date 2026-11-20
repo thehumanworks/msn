@@ -522,6 +522,36 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let channel = slug(&channel)?;
             label(&url, &tenant, &token, channel, id, &body)
         }
+        Command::Pin {
+            channel,
+            message_id,
+        } => {
+            let id = parse_message_id(&message_id)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            set_pin(&url, &tenant, &token, channel, id, true)
+        }
+        Command::Unpin {
+            channel,
+            message_id,
+        } => {
+            let pin = false;
+            let id = parse_message_id(&message_id)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            set_pin(&url, &tenant, &token, channel, id, pin)
+        }
+        Command::Pins { channel } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            finish(&MsnClient::new(&url)?.get(
+                &format!("/api/tenants/{tenant}/channels/{channel}/pins"),
+                Some(&token),
+            )?)
+        }
         Command::WaitLabel {
             channel,
             filters,
@@ -1158,6 +1188,26 @@ fn label(
         return Err(CliError::conflict(message));
     }
     finish(&response)
+}
+
+/// Pins or unpins one message (ADR 0038). Unpin prints a small JSON result instead of 204's
+/// generic `deleted`, so scripts can tell the two apart.
+fn set_pin(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    id: u64,
+    pin: bool,
+) -> Result<(), CliError> {
+    let client = MsnClient::new(url)?;
+    let path = format!("/api/tenants/{tenant}/channels/{channel}/pins/{id}");
+    if pin {
+        return finish(&client.put(&path, token)?);
+    }
+    let response = client.delete(&path, token)?;
+    classify(response.status, &response.body)?;
+    agent::print_json(&json!({ "unpinned": true, "channel": channel, "id": id }))
 }
 
 /// Long-polls a label filter until a message matches, `timeout` passes or a signal stops it.

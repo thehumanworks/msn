@@ -17,6 +17,7 @@ import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
 import { OutboxRow } from "../components/OutboxRow.tsx";
+import { PinnedStrip } from "../components/PinnedStrip.tsx";
 import { SearchView } from "../components/SearchView.tsx";
 import { SnapshotView } from "../components/SnapshotView.tsx";
 import { TaskActivityView } from "../components/TaskActivityView.tsx";
@@ -212,6 +213,7 @@ function ChannelBody({
   return (
     <View style={{ flex: 1 }}>
       {banner}
+      <PinnedStrip pinned={state.pinned} />
       {empty ? (
         <EmptyState title="No messages yet" body="Say something to start the conversation." />
       ) : (

@@ -183,6 +183,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
       state.seen.clear();
       state.cursor = 0;
       state.anchor = null;
+      state.pins = [];
     }
     connection.channels.clear();
   }
@@ -203,6 +204,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("messages").replaceChildren();
   showCheckpoint(null);
   showSince(null);
+  showPins(null);
   showLinkNote(null);
   // A link waiting for another workspace survives Disconnect: its note says to connect there next.
   $("channels").replaceChildren();
@@ -421,6 +423,15 @@ function appendMessage(message, target = $("messages")) {
   }
   // The id stays last so every row ends the same way, typed or not.
   meta.append(label);
+  // Only the owner pins (ADR 0038); the strip at the top shows pins to everyone.
+  if (session?.owner && target === $("messages")) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "quiet pin-toggle";
+    setPinToggle(toggle, isPinned(message.id));
+    toggle.addEventListener("click", () => setPin(message.id, !isPinned(message.id)));
+    meta.append(toggle);
+  }
   // A link to this one message (ADR 0042). It carries no credential: the reader needs their own access.
   if (session) {
     const link = document.createElement("button");
@@ -706,6 +717,82 @@ async function loadReceipts(connection, name, state, force = false) {
     const message = byId.get(Number(article.dataset.id));
     if (element && message) showReceipt(element, message, state.receipts);
   }
+}
+
+/** Pinned messages (ADR 0038): owner-chosen rules, decisions or plans shown above the log. */
+const PIN_REFRESH_MS = 30_000;
+
+function isPinned(id) {
+  return Boolean(session?.channels.get(channel)?.pins?.some((pin) => pin.id === id));
+}
+
+function setPinToggle(button, pinned) {
+  button.textContent = pinned ? "Unpin" : "Pin";
+  button.title = pinned ? "Remove from the top of this board" : "Pin to the top of this board";
+  button.setAttribute("aria-pressed", String(pinned));
+}
+
+function showPins(state) {
+  const pins = state?.pins ?? [];
+  $("pins").hidden = !pins.length;
+  $("pins-title").textContent = `Pinned · ${pins.length}`;
+  $("pins-list").replaceChildren();
+  for (const pin of pins) {
+    const row = document.createElement("li");
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "quiet pin-text";
+    // Untrusted content: textContent only.
+    open.textContent = `${pin.username}: ${pin.text}`;
+    open.title = `Message #${pin.id}. Click to show it, or to expand it when it is not loaded.`;
+    open.addEventListener("click", () => {
+      if ($("messages").querySelector(`[data-id="${pin.id}"]`)) showMessage(pin.id);
+      else row.classList.toggle("expanded");
+    });
+    row.append(open);
+    if (session?.owner) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "quiet pin-remove";
+      remove.textContent = "Unpin";
+      remove.title = `Unpin message #${pin.id}`;
+      remove.addEventListener("click", () => setPin(pin.id, false));
+      row.append(remove);
+    }
+    $("pins-list").append(row);
+  }
+  for (const toggle of $("messages").querySelectorAll(".pin-toggle"))
+    setPinToggle(
+      toggle,
+      pins.some((pin) => pin.id === Number(toggle.closest(".message")?.dataset.id)),
+    );
+}
+
+/** Reads the board's pins. Failure keeps what is shown: pins are a convenience, not the log. */
+async function loadPins(connection = session, name = channel) {
+  const state = connection?.channels.get(name);
+  if (!state) return;
+  state.pinsAt = Date.now();
+  try {
+    const data = await api(`/channels/${name}/pins`, {}, connection);
+    state.pins = data.pins;
+  } catch {
+    return;
+  }
+  if (session === connection && channel === name) showPins(state);
+}
+
+async function setPin(id, pinned) {
+  if (!session || !channel) return;
+  const connection = session;
+  const name = channel;
+  try {
+    await api(`/channels/${name}/pins/${id}`, { method: pinned ? "PUT" : "DELETE" }, connection);
+    status(pinned ? `Pinned #${id} to the top of #${name}` : `Unpinned #${id}`);
+  } catch (error) {
+    if (error.name !== "AbortError") status(error.message, true);
+  }
+  await loadPins(connection, name);
 }
 
 /**
@@ -1125,7 +1212,12 @@ async function catchup(continuation = false) {
     };
     state.cursor = data.nextCursor;
     state.hasMore = data.hasMore;
+    if (Array.isArray(data.pinned) && !data.pinnedOmitted) {
+      state.pins = data.pinned;
+      state.pinsAt = Date.now();
+    }
     render(data.messages, state);
+    showPins(state);
     if (!continuation) {
       $("messages").scrollTop = 0;
       savePosition();
@@ -1210,6 +1302,8 @@ async function poll(live = false) {
       void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
+      // Another device may pin or unpin; pins send no message, so refresh them now and then.
+      if (Date.now() - (state.pinsAt ?? 0) > PIN_REFRESH_MS) void loadPins(connection, selected);
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
       $("more").hidden = !data.hasMore;
@@ -1273,6 +1367,8 @@ function selectChannel(name, { reset = false } = {}) {
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
   showCheckpoint(state);
+  showPins(state);
+  void loadPins(session, name);
   // Capture where the reader stopped before this visit's own reading moves the mark.
   const mark = state.since?.mark ?? readMark(name);
   showSince(state);
