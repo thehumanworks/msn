@@ -17,6 +17,7 @@
 //! D2 default_held_reader_stays_local_and_names_takeover -> tests/processing.rs::default_held_reader_stays_local_and_names_takeover
 //! D3 default_keeps_local_when_server_cannot_hold_progress (held, watch-only, bound to another name, old server), remembered -> tests/processing.rs::default_falls_back_to_local_for_watch_only_and_old_servers
 //! D5 resumable_claims_and_clears_a_kept_local_reader -> tests/processing.rs::resumable_claims_and_clears_a_kept_local_reader
+//! D6 kept_local_other_than_held_is_retried_after_a_day -> tests/processing.rs::kept_local_other_than_held_is_retried_after_a_day
 //! D4 local_flag_and_env_keep_progress_local -> tests/processing.rs::local_flag_and_env_keep_progress_local
 
 use std::io::{self, Write};
@@ -105,10 +106,34 @@ fn keep_local(response: &RawResponse, channel: &str, reader: &str) -> Option<(St
         (404, "route_not_found") => "This server does not keep processing progress, so it stays on this machine and no receipt names this reader.".into(),
         _ => return None,
     };
-    Some((
-        code,
-        format!("{why} Later peeks for this reader stay local without asking again."),
-    ))
+    let later = if code == "processing_held" {
+        "Later peeks for this reader stay local without asking again."
+    } else {
+        "Later peeks stay local and ask the server again after a day."
+    };
+    Some((code, format!("{why} {later}")))
+}
+
+/// How long a remembered fallback lasts before default mode asks the server again (ADR 0053).
+const RETRY_KEPT_LOCAL_SECS: u64 = 24 * 60 * 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// A held reader stays local until someone acts (`msn takeover` or `--resumable`): retrying could
+/// only find it held again. The other reasons can go away on their own (a server upgrade, a new
+/// key), so they are retried once a day; a missing time counts as due.
+fn kept_local_still_applies(state: &ProcessingState) -> bool {
+    match (state.kept_local.as_deref(), state.kept_local_at) {
+        (None, _) => false,
+        (Some("processing_held"), _) => true,
+        (Some(_), Some(at)) => now_secs().saturating_sub(at) < RETRY_KEPT_LOCAL_SECS,
+        (Some(_), None) => false,
+    }
 }
 
 fn note(reason: &str) {
@@ -383,7 +408,9 @@ fn peek_inner(
     let generation = match state.generation {
         Some(generation) => generation,
         // Default mode already chose local for this reader: no claim request on every peek.
-        None if fallback && state.kept_local.is_some() => return Ok(Outcome::KeepLocal(None)),
+        None if fallback && kept_local_still_applies(&state) => {
+            return Ok(Outcome::KeepLocal(None));
+        }
         None => {
             // First resumable use: claim only an unheld reader, carrying local progress forward.
             let carry = (state.committed_through > 0).then_some(state.committed_through);
@@ -392,6 +419,7 @@ fn peek_inner(
                 Err(response) => {
                     if fallback && let Some((code, why)) = keep_local(&response, channel, reader) {
                         state.kept_local = Some(code);
+                        state.kept_local_at = Some(now_secs());
                         write_processing(path, &state)?;
                         return Ok(Outcome::KeepLocal(Some(why)));
                     }
@@ -402,6 +430,7 @@ fn peek_inner(
             let committed = generation_of(&claimed, "committedThrough")?;
             state.generation = Some(generation);
             state.kept_local = None;
+            state.kept_local_at = None;
             state.committed_through = committed;
             state.highest_fetched = state.highest_fetched.max(committed);
             // Persist before reading: a crash here must not leave this machine locked out by itself.

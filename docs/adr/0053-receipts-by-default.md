@@ -31,7 +31,7 @@ Default mode must not break a setup that works today, so it falls back to local 
 - **A key bound to another name** reading under `--reader` gets `403 username_bound`. Reading under another name is allowed; committing under it is not (ADR 0034).
 - **Servers older than ADR 0034** answer `404 route_not_found`.
 
-The peek then continues locally and prints one line on stderr. For a held reader, that line names the holder, `msn takeover CHANNEL --reader R` and `--resumable`. The progress file remembers the choice (`keptLocal`, the refusal code), so later default-mode peeks make no claim request and print nothing. `--resumable` (or `MSN_RESUMABLE=1`) claims again, fails with exit 5 on a held reader as before, and clears `keptLocal` when the claim succeeds. Any other refusal is an error, as in Server mode.
+The peek then continues locally and prints one line on stderr. For a held reader, that line names the holder, `msn takeover CHANNEL --reader R` and `--resumable`. The progress file remembers the choice (`keptLocal`, the refusal code, and `keptLocalAt`), so later default-mode peeks make no claim request and print nothing. A held reader stays local until someone acts (`msn takeover`, or `--resumable`). The other reasons can go away on their own (a server upgrade, a new key), so default mode asks the server again once a day. `--resumable` (or `MSN_RESUMABLE=1`) claims again, fails with exit 5 on a held reader as before, and clears `keptLocal` when the claim succeeds. Any other refusal is an error, as in Server mode.
 
 This still rests only on explicit commits. A fallback just means no receipt for that agent, never a guessed one.
 

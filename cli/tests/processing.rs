@@ -914,6 +914,7 @@ fn default_fallbacks() {
         let state = state_json(&cursor);
         assert!(state.get("generation").is_none());
         assert!(state["keptLocal"].is_string());
+        assert!(state["keptLocalAt"].is_u64());
         assert_eq!(state["committedThrough"], 7);
     }
 }
@@ -991,4 +992,55 @@ fn resumable_flag_never_falls_back() {
     assert!(!output.status.success());
     assert_eq!(server.recorded().len(), 1);
     assert!(!cursor.exists());
+}
+
+#[test]
+fn kept_local_other_than_held_is_retried_after_a_day() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // (reason, recorded at, whether a default peek asks the server again)
+    for (reason, at, retries) in [
+        ("route_not_found", Some(now), false),
+        ("watch_only", Some(now - 25 * 3600), true),
+        ("username_bound", None, true),
+        ("processing_held", Some(0), false),
+    ] {
+        let mut responses = Vec::new();
+        if retries {
+            responses.push(Scripted::json(201, CLAIMED));
+            responses.push(Scripted::json(200, RESUMED));
+        } else {
+            responses.push(Scripted::json(200, PAGE));
+        }
+        let server = MockServer::spawn(responses);
+        let home = TestHome::new("kept-retry");
+        let cursor = home.file("proc.json");
+        let at = at
+            .map(|at| format!(r#","keptLocalAt":{at}"#))
+            .unwrap_or_default();
+        fs::write(
+            &cursor,
+            format!(
+                r#"{{"server":"{}","tenant":"team","channel":"general","reader":"alice","committedThrough":0,"highestFetched":0,"keptLocal":"{reason}"{at}}}"#,
+                server.url()
+            ),
+        )
+        .unwrap();
+        let output = output_capped(
+            home.command().args(base_peek_args(&server.url(), &cursor)),
+            Duration::from_secs(8),
+        );
+        assert!(
+            output.status.success(),
+            "{reason}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recorded = server.recorded();
+        assert_eq!(recorded[0].path.ends_with("/claim"), retries, "{reason}");
+        let state = state_json(&cursor);
+        assert_eq!(state.get("generation").is_some(), retries, "{reason}");
+        assert_eq!(state.get("keptLocal").is_none(), retries, "{reason}");
+    }
 }

@@ -52,6 +52,14 @@ pub struct ProcessingState {
     /// Remembered so later default-mode peeks do not ask again; `--resumable` claims and clears it.
     #[serde(default, rename = "keptLocal", skip_serializing_if = "Option::is_none")]
     pub kept_local: Option<String>,
+    /// When `kept_local` was recorded, in Unix seconds. Every reason except `processing_held` is
+    /// retried a day later, so an upgraded server or a changed key starts sending receipts again.
+    #[serde(
+        default,
+        rename = "keptLocalAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kept_local_at: Option<u64>,
 }
 
 impl ProcessingState {
@@ -65,6 +73,7 @@ impl ProcessingState {
             highest_fetched: 0,
             generation: None,
             kept_local: None,
+            kept_local_at: None,
         }
     }
 
@@ -329,6 +338,10 @@ pub(crate) fn load_processing(
         None | Some(Value::Null) => None,
         Some(_) => return Err(corrupt_state()),
     };
+    let kept_local_at = match &saved.kept_local_at {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_watermark(value, "keptLocalAt")?),
+    };
     Ok(ProcessingState {
         server: saved.server,
         tenant: saved.tenant,
@@ -338,6 +351,7 @@ pub(crate) fn load_processing(
         highest_fetched,
         generation,
         kept_local,
+        kept_local_at,
     })
 }
 
@@ -385,6 +399,8 @@ struct ProcessingFile {
     generation: Option<Value>,
     #[serde(default, rename = "keptLocal")]
     kept_local: Option<Value>,
+    #[serde(default, rename = "keptLocalAt")]
+    kept_local_at: Option<Value>,
 }
 
 fn parse_watermark(value: &Value, name: &str) -> Result<u64, CliError> {
