@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "react-native";
+import { FlatList, KeyboardAvoidingView, Platform, Pressable, Share, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Draft } from "../core/channelController.ts";
 import type { SessionController } from "../core/sessionController.ts";
@@ -11,6 +11,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
+import { messageLink } from "../core/links.ts";
 import { loadReceipts, type Receipt, RECEIPTS_EVERY_MS, receiptLine } from "../core/receipts.ts";
 import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
@@ -153,6 +154,16 @@ function ChannelBody({
   const loader = useMemo(() => new ParentLoader(session.api, controller.channel), [session, controller]);
   useEffect(() => () => loader.cancel(), [loader]);
   const parents = useStore(loader.state);
+  // Message links (ADR 0042): the share sheet offers Copy, Messages, Mail and the rest.
+  const onShareLink = useCallback(
+    (message: Message) => {
+      const { origin, tenant } = session.session;
+      const url = messageLink(origin, tenant, controller.channel, message.id);
+      // iOS shares the URL itself; other platforms take it as text.
+      void Share.share(Platform.OS === "ios" ? { url } : { message: url }).catch(() => {});
+    },
+    [session, controller],
+  );
   const onEdit = useCallback(
     (draft: Draft) => {
       setReplyTo(draft.replyTo !== undefined ? (byId.get(draft.replyTo) ?? null) : null);
@@ -178,7 +189,7 @@ function ChannelBody({
     ) : null;
 
   if (tab === "search") {
-    return <SearchView api={session.api} channel={controller.channel} me={me} />;
+    return <SearchView api={session.api} channel={controller.channel} me={me} onShareLink={onShareLink} />;
   }
   if (tab === "snapshot") {
     return (
@@ -254,6 +265,7 @@ function ChannelBody({
                 selected={replyTo?.id === item.id}
                 onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
                 receipts={receiptLine(receipts, item)}
+                onShareLink={onShareLink}
               />
             );
           }}

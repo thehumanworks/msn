@@ -83,6 +83,9 @@ function advanceMark() {
   const state = session.channels.get(channel);
   const ceiling = state?.markCeiling;
   if (seen !== null && ceiling !== undefined && ceiling !== null) seen = Math.min(seen, ceiling);
+  // A followed link that loaded messages holds the mark where it was (ADR 0042).
+  const hold = state?.linkHold;
+  if (seen !== null && hold !== undefined && hold !== null) seen = Math.min(seen, hold);
   // A reply still folded away has not been read; the mark waits just below it.
   const unseen = firstUnseenReply(state);
   if (seen !== null && unseen !== null) seen = Math.min(seen, unseen.id - 1);
@@ -199,6 +202,8 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("messages").replaceChildren();
   showCheckpoint(null);
   showSince(null);
+  showLinkNote(null);
+  // A link waiting for another workspace survives Disconnect: its note says to connect there next.
   $("channels").replaceChildren();
   for (const id of ["workspace-name", "display-name", "identity-note", "channel-note"])
     $(id).textContent = "";
@@ -415,6 +420,22 @@ function appendMessage(message, target = $("messages")) {
   }
   // The id stays last so every row ends the same way, typed or not.
   meta.append(label);
+  // A link to this one message (ADR 0042). It carries no credential: the reader needs their own access.
+  if (session) {
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "quiet copy-link";
+    link.textContent = "Link";
+    link.title = `Copy a link to message #${message.id}`;
+    link.setAttribute("aria-label", `Copy link to message #${message.id}`);
+    link.addEventListener("click", () =>
+      copy(
+        messageLink(session.tenant, message.channel, message.id),
+        `Link to message #${message.id} copied.`,
+      ),
+    );
+    meta.append(link);
+  }
   const content = document.createElement(structured ? "pre" : "p");
   content.textContent = boardUpdate
     ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
@@ -816,6 +837,178 @@ function showMessage(id, block = "center") {
   if (state) showJump(state);
 }
 
+/*
+ * Message links (ADR 0042). /#board=TENANT/CHANNEL&msg=ID opens that board scrolled to the message
+ * and highlights it. A link names a message, never a credential: whoever opens it reads with their
+ * own access. Only the existing point read and message pages are used; nothing new on the server.
+ */
+const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+// Pages read forward from the loaded log, like "Load next page", before jumping to the message.
+const LINK_PAGES = 3;
+let pendingLink = null;
+
+function messageLink(tenant, name, id) {
+  return `${location.origin}/#board=${tenant}/${name}&msg=${id}`;
+}
+
+/** { tenant, channel, id } from #board=TENANT/CHANNEL&msg=ID, or null when it is not a valid link. */
+function parseMessageLink(params) {
+  const [tenant = "", name = "", ...rest] = (params.get("board") ?? "").split("/");
+  const raw = params.get("msg") ?? "";
+  const id = Number(raw);
+  if (rest.length || !SLUG.test(tenant) || !SLUG.test(name)) return null;
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(id)) return null;
+  return { tenant, channel: name, id };
+}
+
+function showLinkNote(text, { fromStart = false } = {}) {
+  $("link-note").hidden = !text;
+  $("link-note-text").textContent = text ?? "";
+  $("link-note-start").hidden = !fromStart;
+}
+
+function otherWorkspace(link) {
+  return `This link is for workspace “${link.tenant}”. Disconnect, then connect to it to open message #${link.id}.`;
+}
+
+/** Open a link now when this connection can; otherwise keep it until a connection to its workspace. */
+function followLink(link) {
+  const connected = Boolean(session) && !$("workspace").hidden;
+  if (connected && session.tenant === link.tenant) return void openLink(link);
+  pendingLink = link;
+  if (connected) return status(otherWorkspace(link), true);
+  if (!session) {
+    // A remembered connection to the same workspace replaces this right away and opens the link.
+    $("entry-mode").value = "connect";
+    entryMode();
+    $("tenant").value = link.tenant;
+    status(`Connect to workspace “${link.tenant}” to open message #${link.id}.`);
+  }
+}
+
+/** The connection just finished: open its link, or say why the link waits. True when it opened. */
+function takePendingLink(connection, channels) {
+  const link = pendingLink;
+  if (!link) return false;
+  if (link.tenant !== connection.tenant) {
+    status(otherWorkspace(link), true);
+    return false;
+  }
+  pendingLink = null;
+  if (!channels.some((item) => item.name === link.channel)) {
+    status(`Board #${link.channel} is not in this workspace, or your access key cannot read it.`, true);
+    return false;
+  }
+  void openLink(link);
+  return true;
+}
+
+/**
+ * Show message `id` of board `name`: select the board, load the message if it is not loaded, open
+ * its thread if it is a folded reply, scroll to it and highlight it. 404 and 410 leave a note.
+ */
+async function openLink({ channel: name, id }) {
+  if (!session) return;
+  if (![...$("channels").children].some((node) => node.dataset.channel === name)) {
+    status(`Board #${name} is not in this workspace, or your access key cannot read it.`, true);
+    return;
+  }
+  if (name !== channel) selectChannel(name);
+  else view("chat");
+  clearSearch();
+  clearLabel();
+  showLinkNote(null);
+  // The link drives loading until the message shows.
+  stopPolling();
+  const epoch = generation;
+  const connection = session;
+  const state = connection.channels.get(name);
+  const current = () => generation === epoch && session === connection && channel === name;
+  try {
+    if (!logArticle(id)) {
+      status(`Opening message #${id}…`);
+      try {
+        await api(`/channels/${name}/messages/${id}`, {}, connection);
+      } catch (error) {
+        if (!current()) return;
+        if (error.status !== 404 && error.status !== 410) throw error;
+        const note =
+          error.status === 410
+            ? `Message #${id} was deleted from #${name}.`
+            : `Message #${id} is not on #${name}. Check the link.`;
+        showLinkNote(note);
+        status(note, true);
+        return;
+      }
+      if (!current()) return;
+      // Following a link is not reading what it skips: the read mark stays where it was for the
+      // rest of this visit, so "since you last looked" still lists those messages. A fresh read
+      // (Reread or Load from the start) starts a new board state without the hold.
+      const mark = readMark(name, connection);
+      if (mark !== undefined) state.linkHold = Math.min(state.linkHold ?? mark, mark);
+      for (let page = 0; page < LINK_PAGES && !logArticle(id) && id > state.cursor; page++) {
+        const data = await api(`/channels/${name}/messages?after=${state.cursor}&limit=100`, {}, connection);
+        if (!current()) return;
+        render(data.messages, state);
+        state.cursor = data.nextCursor;
+        state.hasMore = data.hasMore;
+        if (!data.hasMore) break;
+      }
+      if (!logArticle(id)) {
+        // Older than the loaded log, or far ahead of it: show the board from the message onward.
+        Object.assign(state, {
+          context: null,
+          anchor: null,
+          atBottom: false,
+          scrollTop: 0,
+          newMessages: false,
+        });
+        state.messages = [];
+        state.seen.clear();
+        // A summary still loading would draw on the replaced log; the held mark keeps it for later.
+        state.sinceLoad = null;
+        state.since = null;
+        showSince(state);
+        $("messages").replaceChildren();
+        showCheckpoint(state);
+        const data = await api(`/channels/${name}/messages?after=${id - 1}&limit=100`, {}, connection);
+        if (!current()) return;
+        render(data.messages, state);
+        state.cursor = data.nextCursor;
+        state.hasMore = data.hasMore;
+        // Unseen replies stay unseen; only those no longer in the log lose their pointer.
+        for (const [root, ids] of state.unseen ?? []) {
+          for (const reply of ids) if (!logArticle(reply)) ids.delete(reply);
+          if (!ids.size) state.unseen.delete(root);
+        }
+        showJump(state);
+        showLinkNote(`Showing #${name} from message #${id}. Earlier messages are not loaded.`, {
+          fromStart: true,
+        });
+      }
+      $("cursor").textContent = `Cursor ${state.cursor}`;
+      $("more").hidden = !state.hasMore;
+    }
+    const article = logArticle(id);
+    if (!article) {
+      status(`Message #${id} could not be shown. Reread the board and try the link again.`, true);
+      return;
+    }
+    // A reply whose parent is not loaded quotes the parent, so the message reads in context.
+    const message = state.messages.find((item) => item.id === id);
+    if (message?.replyTo != null && !logArticle(message.replyTo)) void showParent(message, article);
+    for (const node of $("messages").querySelectorAll(".linked")) node.classList.remove("linked");
+    article.classList.add("linked");
+    showMessage(id);
+    status(`Showing message #${id} in #${name}.`);
+  } catch (error) {
+    if (current() && error.name !== "AbortError") status(error.message, true);
+  } finally {
+    // Live resumes. Without Live, only an empty log (a link that failed) gets its first page.
+    if (current() && ($("live").checked || !state.messages.length)) poll($("live").checked);
+  }
+}
+
 /**
  * Read up to SINCE_PAGES pages after `mark` and summarise them. Plain message reads with the
  * reader's own key: no new endpoint, no server state, no model calls.
@@ -1038,6 +1231,7 @@ async function poll(live = false) {
 }
 
 function selectChannel(name, { reset = false } = {}) {
+  showLinkNote(null);
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
   $("agents").disabled = false;
@@ -1201,6 +1395,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
       );
     } else forgetSession(connection.tenant);
     status("Connected.");
+    if (takePendingLink(connection, channels)) return;
     const preferred = channels.find((item) => item.name === initial) ?? channels[0];
     if (preferred) selectChannel(preferred.name);
     else {
@@ -1700,6 +1895,11 @@ $("more").addEventListener("click", () => {
   else poll($("live").checked);
 });
 $("reread").addEventListener("click", () => selectChannel(channel, { reset: true }));
+$("link-note-start").addEventListener("click", () => selectChannel(channel, { reset: true }));
+$("link-note-clear").addEventListener("click", () => {
+  showLinkNote(null);
+  for (const node of $("messages").querySelectorAll(".linked")) node.classList.remove("linked");
+});
 $("live").addEventListener("change", () => {
   if ($("live").checked) poll(true);
   else {
@@ -1782,7 +1982,18 @@ $("jump").addEventListener("click", () => {
 
 // Reconnect with remembered credentials; an invalid key is forgotten and the form shown instead.
 function receiveInvitation() {
-  const board = new URLSearchParams(location.hash.slice(1)).get("board");
+  const params = new URLSearchParams(location.hash.slice(1));
+  // A message link (ADR 0042) names a board and a message, never a credential.
+  if (params.has("msg")) {
+    history.replaceState(null, "", location.pathname);
+    // A message link never also carries an invitation or a connection.
+    const mixed = params.has("invite") || params.has("account");
+    const link = mixed ? null : parseMessageLink(params);
+    if (link) followLink(link);
+    else status("Invalid message link.", true);
+    return false;
+  }
+  const board = params.get("board");
   if (board) {
     history.replaceState(null, "", location.pathname);
     try {
