@@ -83,6 +83,9 @@ function advanceMark() {
   const state = session.channels.get(channel);
   const ceiling = state?.markCeiling;
   if (seen !== null && ceiling !== undefined && ceiling !== null) seen = Math.min(seen, ceiling);
+  // A followed link that loaded messages holds the mark where it was (ADR 0042).
+  const hold = state?.linkHold;
+  if (seen !== null && hold !== undefined && hold !== null) seen = Math.min(seen, hold);
   // A reply still folded away has not been read; the mark waits just below it.
   const unseen = firstUnseenReply(state);
   if (seen !== null && unseen !== null) seen = Math.min(seen, unseen.id - 1);
@@ -200,6 +203,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   showCheckpoint(null);
   showSince(null);
   showLinkNote(null);
+  // A link waiting for another workspace survives Disconnect: its note says to connect there next.
   $("channels").replaceChildren();
   for (const id of ["workspace-name", "display-name", "identity-note", "channel-note"])
     $(id).textContent = "";
@@ -937,6 +941,11 @@ async function openLink({ channel: name, id }) {
         return;
       }
       if (!current()) return;
+      // Following a link is not reading what it skips: the read mark stays where it was for the
+      // rest of this visit, so "since you last looked" still lists those messages. A fresh read
+      // (Reread or Load from the start) starts a new board state without the hold.
+      const mark = readMark(name, connection);
+      if (mark !== undefined) state.linkHold = Math.min(state.linkHold ?? mark, mark);
       for (let page = 0; page < LINK_PAGES && !logArticle(id) && id > state.cursor; page++) {
         const data = await api(`/channels/${name}/messages?after=${state.cursor}&limit=100`, {}, connection);
         if (!current()) return;
@@ -956,8 +965,10 @@ async function openLink({ channel: name, id }) {
         });
         state.messages = [];
         state.seen.clear();
-        state.expanded?.clear();
-        state.unseen?.clear();
+        // A summary still loading would draw on the replaced log; the held mark keeps it for later.
+        state.sinceLoad = null;
+        state.since = null;
+        showSince(state);
         $("messages").replaceChildren();
         showCheckpoint(state);
         const data = await api(`/channels/${name}/messages?after=${id - 1}&limit=100`, {}, connection);
@@ -965,6 +976,12 @@ async function openLink({ channel: name, id }) {
         render(data.messages, state);
         state.cursor = data.nextCursor;
         state.hasMore = data.hasMore;
+        // Unseen replies stay unseen; only those no longer in the log lose their pointer.
+        for (const [root, ids] of state.unseen ?? []) {
+          for (const reply of ids) if (!logArticle(reply)) ids.delete(reply);
+          if (!ids.size) state.unseen.delete(root);
+        }
+        showJump(state);
         showLinkNote(`Showing #${name} from message #${id}. Earlier messages are not loaded.`, {
           fromStart: true,
         });
@@ -1969,7 +1986,9 @@ function receiveInvitation() {
   // A message link (ADR 0042) names a board and a message, never a credential.
   if (params.has("msg")) {
     history.replaceState(null, "", location.pathname);
-    const link = parseMessageLink(params);
+    // A message link never also carries an invitation or a connection.
+    const mixed = params.has("invite") || params.has("account");
+    const link = mixed ? null : parseMessageLink(params);
     if (link) followLink(link);
     else status("Invalid message link.", true);
     return false;

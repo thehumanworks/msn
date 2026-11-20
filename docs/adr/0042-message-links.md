@@ -20,11 +20,12 @@ The web app already reads `#board=…`, `#account=…` and `#invite=…` from th
 - Message not loaded: one point read (`GET …/messages/:id`) first. 404 says "Message #N is not on #board. Check the link."; 410 says "Message #N was deleted from #board." Otherwise, when the message is just ahead of the loaded log, up to three pages are read forward exactly as "Load next page" does. When it is older than the log, or further ahead, the log is shown from the message onward (`after=ID-1`), with a note "Earlier messages are not loaded" and a **Load from the start** button (the same as Reread). Message ids are per workspace, not per board, so there is no cheap "a few rows before"; reading forward from the message is what the API offers.
 - Reply threads (ADR 0041): a reply folded in a thread opens the thread. A reply whose parent is not loaded quotes the parent, as its "Reply to" link would.
 - Live resumes from the new cursor afterwards. With Live off, the link loads only what it needs.
+- **Following a link is not reading.** When a link has to load messages, the board's read mark (ADR 0033) is held where it was for the rest of the visit: rows read forward past, or skipped by showing the board from the message, stay in "since you last looked". Reread or **Load from the start** begins a fresh board state without the hold. When the log is replaced, a summary still loading is dropped (it would draw on the old log) and unseen folded replies keep their pointer while they are still in the log.
 
 **Copying a link.**
 - Web: a **Link** button on every message (log, search and label results) copies the link.
 - Desktop: **Link** beside each message header, and "Copy link to this message" in the bubble's right-click menu. The link uses the origin the person connected to.
-- iOS: touch and hold a message (or the VoiceOver action "Copy or share link") opens the share sheet with the link; the sheet offers Copy. React Native's built-in `Share` needs no new native module.
+- iOS: a **Link** control in each message header (and the VoiceOver action "Copy or share link") opens the share sheet with the link; the sheet offers Copy. Touch and hold stays free for selecting text. React Native's built-in `Share` needs no new native module.
 - CLI: `msn link CHANNEL ID` prints the link. It reads the message first, so a missing message exits 4 and a deleted one exits 5, like `msn show`; `--json` prints `{link, channel, id}`.
 - MCP: `message_link {id}` returns the same object; not found and deleted are errors.
 
@@ -34,6 +35,7 @@ The CLI, MCP and desktop build the link with `msn_cli::links::message_link`; the
 
 - Desktop and iOS copy links but do not open them: a link opens the web app. Opening links inside the native apps needs a registered URL scheme or universal links, which is app signing and distribution work (gated); left for later.
 - A link to a message in a long board may show the board from that message onward; earlier rows are one button away.
+- While the read mark is held, messages read on that board during the same visit are listed again next time. That errs toward showing too much rather than hiding skipped messages.
 - Nothing is stored and nothing changes on the server, so there is nothing to migrate.
 
 ## Rejected

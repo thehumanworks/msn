@@ -69,7 +69,7 @@ export function SearchView({
             ) : null
           }
           renderItem={({ item }) => (
-            <MessageRow message={item} own={item.username === me} quoted={undefined} selected={false} onReply={noop} onShareLink={onShareLink} />
+            <MessageRow message={item} own={item.username === me} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} />
           )}
         />
       )}

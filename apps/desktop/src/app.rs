@@ -1298,6 +1298,12 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Ve
         })
         .inner
     };
+    // The bubble's frame only senses hover; give it a stable id that senses the right click.
+    let shown = ui.interact(
+        shown.rect,
+        egui::Id::new(("message-bubble", id)),
+        egui::Sense::click(),
+    );
     shown.context_menu(|ui| {
         if ui.button("Copy link to this message").clicked() {
             actions.push(Action::CopyLink(id));
@@ -1754,6 +1760,47 @@ mod layout_tests {
             ["https://msn.test/#board=design-studio/general&msg=2"]
         );
         assert_eq!(app.copied_link, None);
+    }
+
+    #[test]
+    fn right_click_on_a_message_opens_the_copy_link_menu() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(3);
+        let screen = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(980.0, 640.0),
+        ));
+        let mut frame = |events: Vec<egui::Event>, app: &mut MsnDesktopApp| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        };
+        frame(vec![], &mut app);
+        frame(vec![], &mut app);
+        let bubble = ctx
+            .read_response(egui::Id::new(("message-bubble", 2_u64)))
+            .expect("message 2 is drawn");
+        assert!(bubble.sense.senses_click());
+        assert!(!ctx.any_popup_open());
+        let pos = bubble.rect.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(pos)], &mut app);
+        frame(vec![button(true)], &mut app);
+        frame(vec![button(false)], &mut app);
+        frame(vec![], &mut app);
+        assert!(ctx.any_popup_open(), "the right-click menu opens");
     }
 
     #[test]
