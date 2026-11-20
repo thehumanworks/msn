@@ -128,6 +128,9 @@ msn pins general
 msn react general 42 done    # ✓ done, 👀 seen, 👍 yes or ✗ no; sends no message
 msn unreact general 42 done
 msn reactions general --after 40   # who reacted to which messages
+msn edit general 42 --text 'Deploy on Monday'   # fix your own message; id and place stay
+msn catchup general --after 50 --edits-after 0  # also lists earlier messages edited since (edited, editCursor)
+msn start general --after 50 --edits-after 7    # start always reports edits; pass the last editCursor
 msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
 msn receipts general 42                          # which readers committed past 42 on the server (the default; --local keeps commits off)
 msn github hook                                  # owner: webhook URL and secret for GitHub (ADR 0036)

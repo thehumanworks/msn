@@ -13,7 +13,8 @@ await appendFile(process.env.HOST_TEST_RECORDS, JSON.stringify({who:i.identity.u
 if (i.message?.text==='hang') {process.on('SIGTERM',()=>{}); await new Promise(r=>setTimeout(r,60000));}
 if (i.message?.text==='slow') await new Promise(r=>setTimeout(r,1800));
 let actions=[],wait,progress;
-if(i.message?.text==='continue-work') {progress={status:'working',reason:'second useful step',delayMs:300};}
+if(i.trigger.type==='message.edited') actions=[{type:'send',channel:i.channel,to:'human',text:'edited:'+i.trigger.messageId+':'+i.message.text}];
+else if(i.message?.text==='continue-work') {progress={status:'working',reason:'second useful step',delayMs:300};}
 else if(i.trigger.type==='goal.continue') {actions=[{type:'send',channel:i.channel,to:'human',text:'continued'}];progress={status:'complete',reason:'finished'};}
 else
 if(i.message?.text==='cycle-start') {actions=[{type:'send',channel:i.channel,to:'bob',text:'cycle-request'}]; wait={for:['bob'],timeoutMs:3000,reason:'bob'};}
@@ -71,6 +72,7 @@ export async function hostFixture(t, options = {}) {
       who,
       wait: Number(url.searchParams.get("wait")),
       listener: url.searchParams.get("listener"),
+      include: url.searchParams.get("include"),
     });
     changes.emit("request");
     const respond = (value, status = 200) => {
@@ -224,6 +226,23 @@ export async function hostFixture(t, options = {}) {
     changes.emit("message");
     return message;
   }
+  // The sender edits a message (ADR 0052): the text changes in place and one message.edited event follows.
+  function edit(id, text) {
+    const message = messages.find((item) => item.id === id);
+    message.text = text;
+    message.editedAt = new Date().toISOString();
+    events.push({
+      id: events.length + 1,
+      tenant: "team",
+      channel: message.channel,
+      type: "message.edited",
+      resourceId: id,
+      historyRevision: 0,
+      createdAt: message.editedAt,
+    });
+    changes.emit("event");
+    return message;
+  }
   const configFor = (ids) =>
     validateConfig(
       {
@@ -347,6 +366,7 @@ export async function hostFixture(t, options = {}) {
     env,
     board,
     post,
+    edit,
     stop,
     start,
     messages,

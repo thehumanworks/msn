@@ -427,6 +427,93 @@ pub fn react(
     Ok(message["reactions"].clone())
 }
 
+/// Replaces the text of a message `username` sent (ADR 0052). Returns the edited message.
+/// `base` is the `editedAt` the editor started from (None for a never-edited message); the server
+/// refuses the save with 409 edit_conflict when the message changed since.
+#[allow(clippy::too_many_arguments)]
+pub fn edit_message(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+    text: &str,
+    base: Option<&str>,
+) -> Result<Value, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let response = client.send_optional_json(
+        "PATCH",
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}"),
+        token,
+        Some(&json!({ "username": username, "text": text, "ifEditedAt": base })),
+    )?;
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let message = value["message"].clone();
+    if message["id"].as_u64() != Some(id)
+        || message["channel"].as_str() != Some(channel)
+        || !message["text"].is_string()
+    {
+        return Err(CliError::generic(
+            "Edit response named a different message.",
+        ));
+    }
+    Ok(message)
+}
+
+/// Messages edited after edit cursor `after` (ADR 0052), oldest edit first, and the cursor to
+/// ask from next. `None` only learns the board's current cursor. At most a few pages.
+pub fn fetch_edits(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    after: Option<u64>,
+) -> Result<(Vec<Value>, u64), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let mut found = Vec::new();
+    let mut after = after;
+    for _ in 0..5 {
+        let query = after.map(|n| format!("?after={n}")).unwrap_or_default();
+        let value = get_json(
+            client,
+            &format!("/api/tenants/{tenant}/channels/{channel}/edits{query}"),
+            token,
+        )?;
+        let (page, cursor, more) = parse_edits(&value, channel)?;
+        found.extend(page);
+        after = Some(cursor);
+        if !more {
+            break;
+        }
+    }
+    Ok((found, after.unwrap_or(0)))
+}
+
+/// One edits page: edited messages of this channel, the next edit cursor, and whether more wait.
+pub fn parse_edits(value: &Value, channel: &str) -> Result<(Vec<Value>, u64, bool), CliError> {
+    let bad = || CliError::generic("Invalid edits response.");
+    let rows = value["edits"].as_array().ok_or_else(bad)?;
+    for row in rows {
+        if row["id"].as_u64().is_none()
+            || row["channel"].as_str() != Some(channel)
+            || !row["text"].is_string()
+        {
+            return Err(bad());
+        }
+    }
+    let cursor = value["editCursor"]
+        .as_u64()
+        .filter(|n| *n <= MAX_SAFE_INTEGER)
+        .ok_or_else(bad)?;
+    let more = value["hasMore"].as_bool().ok_or_else(bad)?;
+    Ok((rows.clone(), cursor, more))
+}
+
 /// Current reactions (ADR 0047) for messages after `after`, by message id; at most a few pages.
 pub fn fetch_reactions(
     client: &MsnClient,
@@ -1162,6 +1249,26 @@ mod tests {
         );
         assert!(parse_send_outcome(&ok, "acme", "other").is_err());
         assert!(parse_send_outcome(&json!({"message": message(7)}), "acme", "general").is_err());
+    }
+
+    #[test]
+    fn edit_pages_keep_this_channels_messages_and_the_cursor() {
+        let row = json!({"id": 4, "channel": "general", "text": "fixed", "editedAt": "2026-11-20T00:00:00Z"});
+        let (page, cursor, more) = parse_edits(
+            &json!({"edits": [row.clone()], "editCursor": 9, "hasMore": false}),
+            "general",
+        )
+        .unwrap();
+        assert_eq!((page, cursor, more), (vec![row.clone()], 9, false));
+        assert!(
+            parse_edits(
+                &json!({"edits": [row], "editCursor": 9, "hasMore": false}),
+                "other"
+            )
+            .is_err()
+        );
+        assert!(parse_edits(&json!({"edits": [], "hasMore": false}), "general").is_err());
+        assert!(parse_edits(&json!({"edits": [{"id": 1, "channel": "general"}], "editCursor": 1, "hasMore": false}), "general").is_err());
     }
 
     #[test]

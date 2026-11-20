@@ -42,6 +42,8 @@ type Props = {
   me?: string;
   /** Toggles your reaction; absent where reactions are read only (archived boards, search). */
   onReact?: (message: Message, kind: ReactionKind) => void;
+  /** Opens the editor on this message (ADR 0052); only passed for your own, writable messages. */
+  onEditMessage?: (message: Message) => void;
 };
 
 // The body's font size is 16; React Native's default line is about 1.2 times that.
@@ -96,6 +98,7 @@ function MessageRowImpl({
   unfolded = false,
   me,
   onReact,
+  onEditMessage,
 }: Props) {
   const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
   const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
@@ -121,7 +124,7 @@ function MessageRowImpl({
       accessibilityRole="button"
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
-      }${summary ? `. Reactions: ${summary}` : ""}`}
+      }${message.editedAt ? ", edited" : ""}${summary ? `. Reactions: ${summary}` : ""}`}
       accessibilityHint={`${replyable ? "Double tap to reply. " : ""}Swipe up or down for more actions.`}
       // VoiceOver reads the row as one element, so its inner controls are offered as actions.
       accessibilityActions={[
@@ -132,6 +135,7 @@ function MessageRowImpl({
         ...(fold.long ? [{ name: "toggleFold", label: foldLabel }] : []),
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
+        ...(onEditMessage ? [{ name: "editMessage", label: "Edit" }] : []),
         ...(onReact
           ? REACTION_KINDS.map((kind) => ({
               name: `react_${kind}`,
@@ -147,6 +151,7 @@ function MessageRowImpl({
         else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
           onLoadParent?.(message.replyTo);
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
+        else if (nativeEvent.actionName === "editMessage") onEditMessage?.(message);
         else if (nativeEvent.actionName.startsWith("react_"))
           onReact?.(message, nativeEvent.actionName.slice("react_".length) as ReactionKind);
         else if (nativeEvent.actionName.startsWith("openLink")) {
@@ -167,6 +172,21 @@ function MessageRowImpl({
           </Text>
         ) : null}
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
+        {message.editedAt ? (
+          <Text style={styles.edited} accessibilityLabel={`edited ${formatTime(message.editedAt)}`}>
+            edited
+          </Text>
+        ) : null}
+        {onEditMessage ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Edit message ${message.id}`}
+            onPress={() => onEditMessage(message)}
+            hitSlop={12}
+          >
+            <Text style={styles.linkAction}>Edit</Text>
+          </Pressable>
+        ) : null}
         {onShareLink ? (
           // An explicit control: touch and hold stays free for selecting the text.
           <Pressable
@@ -327,4 +347,5 @@ const styles = StyleSheet.create({
   chipEmpty: { opacity: 0.45, borderStyle: "dashed" },
   chipText: { color: colors.muted, fontSize: 13 },
   linkAction: { color: colors.accent, fontSize: 12, fontWeight: "600" },
+  edited: { color: colors.muted, fontSize: 12, fontStyle: "italic" },
 });

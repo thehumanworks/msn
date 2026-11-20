@@ -34,6 +34,9 @@ type StoredMessage = {
   deleted: boolean;
   to?: string;
   replyTo?: number;
+  /** Edits (ADR 0052): when, and the edit's place in the workspace's edit order. */
+  editedAt?: string;
+  editSeq?: number;
 };
 
 type StoredSnapshot = { channel: string; version: number; text: string; coversThrough: number; invalidated: boolean };
@@ -50,6 +53,8 @@ export type MockServerHandle = {
   remove: (id: number) => void;
   publishSnapshot: (channel: string, text: string) => StoredSnapshot;
   createChannel: (channel: string) => void;
+  /** Edit a stored message as its sender would (ADR 0052); sends no message or event. */
+  editText: (id: number, text: string) => void;
   /** Reactions by message id (ADR 0047). Like the Worker, reacting sends no message or event. */
   reactions: Map<number, Record<string, string[]>>;
   /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
@@ -91,6 +96,14 @@ export async function startMockServer(): Promise<MockServerHandle> {
   const snapshots: StoredSnapshot[] = [];
   const pins = new Set<number>();
   const reactions = new Map<number, Record<string, string[]>>();
+  let edits = 0;
+  const editText = (id: number, text: string) => {
+    const message = messages.find((m) => m.id === id);
+    if (!message) return;
+    message.text = text;
+    message.editedAt = new Date().toISOString();
+    message.editSeq = ++edits;
+  };
   const pinnedRows = (channel: string) =>
     messages
       .filter((m) => m.channel === channel && !m.deleted && pins.has(m.id))
@@ -141,6 +154,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
       ...(m.replyTo ? { replyTo: m.replyTo } : {}),
       ...(m.to ? { to: m.to } : {}),
       ...(reactions.has(m.id) ? { reactions: reactions.get(m.id) } : {}),
+      ...(m.editedAt ? { editedAt: m.editedAt } : {}),
     };
   }
 
@@ -305,6 +319,23 @@ export async function startMockServer(): Promise<MockServerHandle> {
           });
         }
       }
+      if (rest[2] === "edits" && rest.length === 3 && method === "GET") {
+        const after = Number(url.searchParams.get("after") ?? 0);
+        const rows = messages
+          .filter((m) => m.channel === channel && !m.deleted && (m.editSeq ?? 0) > after)
+          .sort((a, b) => (a.editSeq ?? 0) - (b.editSeq ?? 0));
+        const cursor = Math.max(after, ...rows.map((m) => m.editSeq ?? 0));
+        return json(res, 200, { edits: rows.map(toMessage), editCursor: cursor, hasMore: false });
+      }
+      if (rest[2] === "messages" && rest.length === 4 && method === "PATCH") {
+        const body = await readBody(req);
+        const message = messages.find((m) => m.id === Number(rest[3]) && m.channel === channel && !m.deleted);
+        if (!message) return json(res, 404, { error: { code: "message_not_found", message: "Message not found." } });
+        if (message.username !== body.username)
+          return json(res, 403, { error: { code: "not_sender", message: "Only the sender can edit a message." } });
+        editText(message.id, String(body.text));
+        return json(res, 200, { message: toMessage(message), changed: true });
+      }
       if (rest[2] === "reactions" && rest.length === 3 && method === "GET") {
         const after = Number(url.searchParams.get("after") ?? 0);
         const rows = [...reactions]
@@ -459,6 +490,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
     events,
     requests,
     reactions,
+    editText: (id, text) => editText(id, text),
     setPin: (id, pinned) => {
       if (pinned) pins.add(id);
       else pins.delete(id);

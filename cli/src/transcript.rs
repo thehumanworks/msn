@@ -159,7 +159,7 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
     out.push(format!("- Exported: {}", utc(meta.exported_at)));
     out.push(String::new());
     out.push(
-        "Times are UTC. Each message's text is shown exactly as it was sent, inside a code block."
+        "Times are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block."
             .to_string(),
     );
     let mut shown = HashSet::new();
@@ -167,9 +167,14 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
         let id = id_of(message);
         out.extend(["".into(), "---".into(), "".into()]);
         out.push(format!("<a id=\"msg-{id}\"></a>"));
-        // The time comes before the sender, so a sender name cannot fake it.
+        // The times come before the sender, so a sender name cannot fake them. An edited message
+        // (ADR 0052) says when its text last changed.
+        let edited = message["editedAt"]
+            .as_str()
+            .map(|at| format!(" (edited {})", utc(at)))
+            .unwrap_or_default();
         out.push(format!(
-            "### #{id} · {} · {}",
+            "### #{id} · {}{edited} · {}",
             utc(message["createdAt"].as_str().unwrap_or("")),
             inline(message["username"].as_str().unwrap_or(""))
         ));

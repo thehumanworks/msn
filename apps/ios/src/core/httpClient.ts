@@ -36,7 +36,7 @@ export const DEFAULT_TIMEOUT_MS = 20_000;
 export type RequestLimits = { timeoutMs?: number; maxBytes?: number };
 
 export type RequestOptions = RequestLimits & {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   idempotencyKey?: string;

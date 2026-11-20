@@ -1542,6 +1542,16 @@ nav button.has-unread .channel-name {
 #messages article:focus:not(:focus-visible) {
   outline: none;
 }
+
+/* Edit a message you sent (ADR 0052). */
+.message-meta .message-edited {
+  margin-left: 0;
+  font-family: inherit;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+.message-meta .message-edit,
 .message-meta .reply-button {
   font: inherit;
   font-size: 11px;
@@ -1549,11 +1559,33 @@ nav button.has-unread .channel-name {
   padding: 0 4px;
   min-height: 0;
 }
+.watching .message-edit,
+.archived .message-edit,
 .watching .reply-button,
 .archived .reply-button {
   display: none;
 }
+.fold-toggle.editing {
+  display: none;
+}
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.edit-form textarea {
+  width: 100%;
+  min-height: 3em;
+  resize: vertical;
+}
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 @media (pointer: coarse) {
+  .message-meta .message-edit,
   .message-meta .reply-button {
     min-height: 32px;
     padding: 0 8px;

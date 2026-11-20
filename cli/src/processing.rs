@@ -47,6 +47,19 @@ pub struct ProcessingState {
     /// resumable peek and commit. Absent for local-only progress, so older files stay valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// Edit cursor this reader has acted on (ADR 0052): the next peek reports edits after it to
+    /// messages at or before `committedThrough`. Commit, or a peek with no messages, moves it to
+    /// `editsFetched`. Absent until the first peek sets it to the board's current edit position,
+    /// so a new reader gets no old edits; older CLIs ignore it.
+    #[serde(
+        rename = "editsCommitted",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub edits_committed: Option<u64>,
+    /// The edit cursor of the last printed peek.
+    #[serde(rename = "editsFetched", default, skip_serializing_if = "is_zero")]
+    pub edits_fetched: u64,
     /// Why default mode keeps this reader's progress local (ADR 0053): the server refused the
     /// claim with this code (`processing_held`, `watch_only`, `username_bound`, `route_not_found`).
     /// Remembered so later default-mode peeks do not ask again; `--resumable` claims and clears it.
@@ -62,6 +75,10 @@ pub struct ProcessingState {
     pub kept_local_at: Option<u64>,
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl ProcessingState {
     pub(crate) fn fresh(url: &Url, tenant: &str, channel: &str, reader: &str) -> Self {
         Self {
@@ -72,6 +89,8 @@ impl ProcessingState {
             committed_through: 0,
             highest_fetched: 0,
             generation: None,
+            edits_committed: None,
+            edits_fetched: 0,
             kept_local: None,
             kept_local_at: None,
         }
@@ -183,8 +202,9 @@ pub(crate) fn peek_to(
     }
     let client = Arc::new(MsnClient::new(url)?);
     let request = format!(
-        "/api/tenants/{tenant}/channels/{channel}/messages?after={}&wait={wait}&limit={limit}",
-        state.committed_through
+        "/api/tenants/{tenant}/channels/{channel}/messages?after={}&wait={wait}&limit={limit}{}",
+        state.committed_through,
+        edits_query(&state)
     );
     let Some(response) = get_interruptible(client, request, token.to_string(), stop)? else {
         return Ok(());
@@ -197,6 +217,15 @@ pub(crate) fn peek_to(
         Some(id) => state.highest_fetched.max(id),
         None => state.highest_fetched,
     };
+    let mut next = state.clone();
+    let edits_changed = note_edits(
+        &page,
+        &mut next,
+        tenant,
+        channel,
+        state.committed_through,
+        last_id.is_none(),
+    )?;
     page["committedThrough"] = json!(state.committed_through);
     page["highestFetched"] = json!(highest_fetched);
     let printed =
@@ -204,8 +233,7 @@ pub(crate) fn peek_to(
     writeln!(out, "{printed}")?;
     out.flush()
         .map_err(|error| CliError::generic(error.to_string()))?;
-    if last_id.is_some() {
-        let mut next = state;
+    if last_id.is_some() || edits_changed {
         next.highest_fetched = highest_fetched;
         write_processing(path, &next)?;
     }
@@ -244,6 +272,10 @@ pub(crate) fn commit_to(
         ));
     }
     state.committed_through = through;
+    // The edits that peek reported are handled with the messages it printed (ADR 0052).
+    if state.edits_committed.is_some() {
+        state.edits_committed = Some(state.edits_fetched);
+    }
     write_processing(path, &state)?;
     writeln!(
         out,
@@ -332,6 +364,12 @@ pub(crate) fn load_processing(
         None | Some(Value::Null) => None,
         Some(value) => Some(parse_watermark(value, "generation")?),
     };
+    let edits = |value: &Option<Value>, name: &str| match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => parse_watermark(value, name).map(Some),
+    };
+    let edits_committed = edits(&saved.edits_committed, "editsCommitted")?;
+    let edits_fetched = edits(&saved.edits_fetched, "editsFetched")?.unwrap_or(0);
     // A reason this CLI does not know is kept as is; only its presence matters.
     let kept_local = match &saved.kept_local {
         Some(Value::String(code)) if !code.is_empty() && code.len() <= 64 => Some(code.clone()),
@@ -350,6 +388,8 @@ pub(crate) fn load_processing(
         committed_through,
         highest_fetched,
         generation,
+        edits_committed,
+        edits_fetched: edits_fetched.max(edits_committed.unwrap_or(0)),
         kept_local,
         kept_local_at,
     })
@@ -397,10 +437,65 @@ struct ProcessingFile {
     highest_fetched: Value,
     #[serde(default)]
     generation: Option<Value>,
+    #[serde(rename = "editsCommitted", default)]
+    edits_committed: Option<Value>,
+    #[serde(rename = "editsFetched", default)]
+    edits_fetched: Option<Value>,
     #[serde(default, rename = "keptLocal")]
     kept_local: Option<Value>,
     #[serde(default, rename = "keptLocalAt")]
     kept_local_at: Option<Value>,
+}
+
+/// The `&editsAfter=` tail of a peek request (ADR 0052): `latest` until the reader has an edit
+/// cursor, so a new reader starts at the board's current edit position.
+pub(crate) fn edits_query(state: &ProcessingState) -> String {
+    match state.edits_committed {
+        Some(cursor) => format!("&editsAfter={cursor}"),
+        None => "&editsAfter=latest".to_string(),
+    }
+}
+
+/// Checks the page's `edited` rows (earlier messages edited since `editsCommitted`) and records
+/// its `editCursor` as `editsFetched`. The first page sets `editsCommitted` too, and so does a page
+/// with no messages: there is nothing to commit, so its edits count as handled once printed and
+/// the next peek waits instead of returning them again. A server without edits omits both fields
+/// and changes nothing. Returns whether the state changed.
+pub(crate) fn note_edits(
+    page: &Value,
+    state: &mut ProcessingState,
+    tenant: &str,
+    channel: &str,
+    committed: u64,
+    no_messages: bool,
+) -> Result<bool, CliError> {
+    let Some(cursor) = page.get("editCursor") else {
+        if page.get("edited").is_some() {
+            return Err(invalid_page());
+        }
+        return Ok(false);
+    };
+    let cursor = parse_page_cursor(cursor)?;
+    let Some(Value::Array(rows)) = page.get("edited") else {
+        return Err(invalid_page());
+    };
+    if cursor < state.edits_committed.unwrap_or(0)
+        || rows.iter().any(|row| {
+            row["tenant"].as_str() != Some(tenant)
+                || row["channel"].as_str() != Some(channel)
+                || row["id"]
+                    .as_u64()
+                    .is_none_or(|id| id == 0 || id > committed)
+        })
+    {
+        return Err(invalid_page());
+    }
+    let before = (state.edits_committed, state.edits_fetched);
+    state.edits_fetched = cursor;
+    if state.edits_committed.is_none() || no_messages {
+        state.edits_committed = Some(cursor);
+    }
+    Ok(before != (state.edits_committed, state.edits_fetched))
 }
 
 fn parse_watermark(value: &Value, name: &str) -> Result<u64, CliError> {
@@ -976,6 +1071,103 @@ mod tests {
         assert_eq!(read_state(&file)["committedThrough"], 0);
         assert_eq!(read_state(&file)["highestFetched"], 7);
         assert!(recorded.lock().unwrap()[1].contains("after=0"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn peek_reports_edits_to_committed_messages_and_commit_moves_the_edit_cursor() {
+        // ADR 0052: the reader processed through message 5; its sender then edited message 5.
+        const EDITED: &str = r#"{"messages":[{"id":6,"tenant":"team","channel":"general"}],"nextCursor":6,"hasMore":false,"edited":[{"id":5,"tenant":"team","channel":"general","text":"new","editedAt":"2026-11-20T10:00:00.000Z"}],"editCursor":3,"editsHasMore":false}"#;
+        const ONLY_EDITS: &str = r#"{"messages":[],"nextCursor":6,"hasMore":false,"edited":[{"id":6,"tenant":"team","channel":"general","text":"newer"}],"editCursor":4,"editsHasMore":false}"#;
+        const FOREIGN: &str = r#"{"messages":[],"nextCursor":6,"hasMore":false,"edited":[{"id":9,"tenant":"team","channel":"general"}],"editCursor":5,"editsHasMore":false}"#;
+        let (url, recorded) = spawn_scripted(vec![
+            (200, EDITED),
+            (200, EDITED),
+            (200, ONLY_EDITS),
+            (200, FOREIGN),
+        ]);
+        let dir = tmp_dir();
+        let file = dir.join("proc.json");
+        write_state(
+            &file,
+            &ProcessingState {
+                committed_through: 5,
+                highest_fetched: 5,
+                edits_committed: Some(0),
+                ..ProcessingState::fresh(&url, "team", "general", "alice")
+            },
+        );
+        let peek = |out: &mut Vec<u8>| {
+            peek_to(
+                out,
+                &url,
+                "team",
+                "tenant-secret",
+                "general",
+                "alice",
+                Some(&file),
+                0,
+                100,
+                &AtomicBool::new(false),
+            )
+        };
+        let mut printed = Vec::new();
+        peek(&mut printed).unwrap();
+        let page: Value = serde_json::from_slice(&printed).unwrap();
+        assert_eq!(page["edited"][0]["text"], "new");
+        assert_eq!(page["editCursor"], 3);
+        assert!(recorded.lock().unwrap()[0].ends_with("&editsAfter=0"));
+        assert_eq!(read_state(&file)["editsFetched"], 3);
+        assert_eq!(read_state(&file)["editsCommitted"], 0);
+        // Peeking again without a commit replays the edit along with message 6.
+        peek(&mut Vec::new()).unwrap();
+        assert!(recorded.lock().unwrap()[1].ends_with("&editsAfter=0"));
+        commit_to(
+            &mut Vec::new(),
+            &url,
+            "team",
+            "general",
+            "alice",
+            Some(&file),
+            6,
+        )
+        .unwrap();
+        assert_eq!(read_state(&file)["editsCommitted"], 3);
+        assert_eq!(read_state(&file)["committedThrough"], 6);
+        // A page with only edits has nothing to commit: once printed, its edits are handled, so
+        // the next peek asks after them and can wait.
+        peek(&mut Vec::new()).unwrap();
+        assert!(recorded.lock().unwrap()[2].ends_with("&editsAfter=3"));
+        assert_eq!(read_state(&file)["editsCommitted"], 4);
+        // An edited row past committedThrough is not an edit to processed work: refused.
+        assert!(peek(&mut Vec::new()).is_err());
+        assert!(recorded.lock().unwrap()[3].ends_with("&editsAfter=4"));
+        assert_eq!(read_state(&file)["editsFetched"], 4);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_reader_starts_at_the_boards_current_edit_position() {
+        const SEED: &str = r#"{"messages":[{"id":1,"tenant":"team","channel":"general"}],"nextCursor":1,"hasMore":false,"edited":[],"editCursor":40,"editsHasMore":false}"#;
+        let (url, recorded) = spawn_scripted(vec![(200, SEED)]);
+        let dir = tmp_dir();
+        let file = dir.join("proc.json");
+        peek_to(
+            &mut Vec::new(),
+            &url,
+            "team",
+            "tenant-secret",
+            "general",
+            "alice",
+            Some(&file),
+            0,
+            100,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(recorded.lock().unwrap()[0].ends_with("&editsAfter=latest"));
+        assert_eq!(read_state(&file)["editsCommitted"], 40);
+        assert_eq!(read_state(&file)["editsFetched"], 40);
         fs::remove_dir_all(dir).unwrap();
     }
 

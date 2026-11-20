@@ -131,3 +131,24 @@ test("messages keep known reactions and drop unknown kinds; bad reactions are pr
   assert.throws(() => decodeReactionPage({ reactions: [], hasMore: true }), ProtocolError);
   assert.throws(() => decodeReactionPage({ reactions: [{ id: 0, reactions: {} }], hasMore: false }), ProtocolError);
 });
+
+test("messages keep editedAt; edit pages carry the cursor (ADR 0052)", async () => {
+  const { decodeMessage, decodeEditPage } = await import("../src/core/decode.ts");
+  const raw = {
+    id: 3,
+    tenant: "acme",
+    channel: "general",
+    username: "asha",
+    text: "hi",
+    contentType: "text/plain",
+    createdAt: "2026-11-20T00:00:00.000Z",
+  };
+  assert.equal("editedAt" in decodeMessage(raw), false);
+  assert.equal(decodeMessage({ ...raw, editedAt: "2026-11-20T01:00:00.000Z" }).editedAt, "2026-11-20T01:00:00.000Z");
+  assert.throws(() => decodeMessage({ ...raw, editedAt: 5 }), ProtocolError);
+  const page = decodeEditPage({ edits: [raw], editCursor: 4, hasMore: false });
+  assert.equal(page.editCursor, 4);
+  assert.equal(page.edits[0].id, 3);
+  assert.throws(() => decodeEditPage({ edits: [], hasMore: false }), ProtocolError);
+  assert.throws(() => decodeEditPage({ edits: [{}], editCursor: 1, hasMore: false }), ProtocolError);
+});

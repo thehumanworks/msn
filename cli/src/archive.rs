@@ -173,6 +173,9 @@ pub struct MessageRecord {
     pub content_type: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// When the sender last changed the text (ADR 0052); absent for unedited messages.
+    #[serde(rename = "editedAt", default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
     #[serde(rename = "replyTo", skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
     #[serde(rename = "correlationId", skip_serializing_if = "Option::is_none")]

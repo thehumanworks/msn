@@ -35,6 +35,10 @@ pub struct MsnDesktopApp {
     /// When processed-by receipts were last asked for; commits are not channel events, so the
     /// open channel's receipts are reloaded on a timer (ADR 0040).
     receipts_at: Option<std::time::Instant>,
+    /// The message being edited and its draft text (ADR 0052); one at a time.
+    editing: Option<(u64, String)>,
+    /// The `editedAt` of the message when its editor opened (ADR 0052).
+    edit_base: Option<String>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
     /// This connection's read-mark file (ADR 0045), once the connection's name is known.
@@ -186,6 +190,10 @@ enum Action {
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
+    /// Open the editor on one of your messages, save it, or close it (ADR 0052).
+    StartEdit(u64),
+    SaveEdit,
+    CancelEdit,
     /// Address the next message as a reply to this one (ADR 0054).
     Reply(u64),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
@@ -236,6 +244,8 @@ impl MsnDesktopApp {
             link_origin: None,
             copied_link: None,
             receipts_at: None,
+            editing: None,
+            edit_base: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,
@@ -322,6 +332,9 @@ impl MsnDesktopApp {
             self.dispatch_all(command.into_iter().collect());
             // Reactions send no event either (ADR 0047), so they share the receipts timer.
             let command = self.state.reactions_command();
+            self.dispatch_all(command.into_iter().collect());
+            // Edits send no new message either (ADR 0052).
+            let command = self.state.edits_command();
             self.dispatch_all(command.into_iter().collect());
         }
     }
@@ -1010,6 +1023,7 @@ impl MsnDesktopApp {
                                             actions,
                                         );
                                         mark_selected(ui, &shown, selected == Some(id), reveal);
+                                        render_editor(ui, id, &mut self.editing, actions);
                                         render_reactions(ui, message, &me, can_react, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
@@ -1045,6 +1059,7 @@ impl MsnDesktopApp {
                                                 actions,
                                             );
                                             mark_selected(ui, &shown, selected == Some(id), reveal);
+                                            render_editor(ui, id, &mut self.editing, actions);
                                             render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
@@ -1668,6 +1683,30 @@ impl MsnDesktopApp {
                     self.state.status = Some(format!("Link to message #{id} copied."));
                 }
             }
+            Action::StartEdit(id) => {
+                let message = self
+                    .state
+                    .channel
+                    .as_ref()
+                    .and_then(|state| state.messages.get(&id));
+                let text = message
+                    .and_then(|message| message["text"].as_str())
+                    .map(str::to_string);
+                let base = message
+                    .and_then(|message| message["editedAt"].as_str())
+                    .map(str::to_string);
+                if let Some(text) = text {
+                    self.editing = Some((id, text));
+                    self.edit_base = base;
+                }
+            }
+            Action::SaveEdit => {
+                if let Some((id, text)) = self.editing.take() {
+                    let commands = self.state.edit_message(id, text, self.edit_base.take());
+                    self.dispatch_all(commands);
+                }
+            }
+            Action::CancelEdit => self.editing = None,
             Action::Reply(id) => self.reply_to(id),
             Action::React(id, kind, remove) => {
                 let commands = self.state.react(id, kind, remove);
@@ -2299,6 +2338,9 @@ fn render_message(
     let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
+    // Only the sender edits (ADR 0052); GitHub notices never; the server checks it too.
+    // Search hits (no fold) show no editor, so they offer no Edit.
+    let editable = own && can_post && fold.is_some() && username != "github";
     let text = message["text"].as_str().unwrap_or("");
     let body = if message["contentType"].as_str() == Some("application/json") {
         Body::Rich(
@@ -2318,7 +2360,10 @@ fn render_message(
     let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             bubble(ui, header, body, true, fold.as_mut(), |ui| {
-                link_controls(ui, id, can_post, actions)
+                link_controls(ui, id, can_post, actions);
+                if editable {
+                    edit_control(ui, id, actions);
+                }
             })
         })
         .inner
@@ -2352,8 +2397,69 @@ fn render_message(
             actions.push(Action::CopyLink(id));
             ui.close();
         }
+        if editable && ui.button("Edit this message").clicked() {
+            actions.push(Action::StartEdit(id));
+            ui.close();
+        }
     });
     shown
+}
+
+/// "Edit" beside "Link" on your own messages (ADR 0052).
+fn edit_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+    if ui
+        .link(egui::RichText::new("Edit").small().color(theme::muted()))
+        .on_hover_text(format!("Edit message #{id}"))
+        .clicked()
+    {
+        actions.push(Action::StartEdit(id));
+    }
+}
+
+/// The editor under a message being edited (ADR 0052): the draft, Save and Cancel. Ctrl+Enter
+/// saves and Escape cancels, as in the web app.
+fn render_editor(
+    ui: &mut egui::Ui,
+    id: u64,
+    editing: &mut Option<(u64, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let Some((editing_id, draft)) = editing.as_mut() else {
+        return;
+    };
+    if *editing_id != id {
+        return;
+    }
+    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+        let response = ui.add(
+            egui::TextEdit::multiline(draft)
+                .id(egui::Id::new(("edit-message", id)))
+                .desired_rows(3)
+                .desired_width(ui.available_width() * 0.8),
+        );
+        if !response.has_focus() && !response.lost_focus() {
+            response.request_focus();
+        }
+        let (save, cancel) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::Enter) && input.modifiers.command,
+                input.key_pressed(egui::Key::Escape),
+            )
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() || cancel {
+                actions.push(Action::CancelEdit);
+            }
+            let by_key = save && (response.has_focus() || response.lost_focus());
+            if by_key && draft.ends_with('\n') {
+                // The editor may already have taken the Enter as a new line.
+                draft.pop();
+            }
+            if ui.button("Save").clicked() || by_key {
+                actions.push(Action::SaveEdit);
+            }
+        });
+    });
 }
 
 /// The message j and k selected (ADR 0054): an accent ring around it, scrolled into view when
@@ -2504,6 +2610,9 @@ fn message_header(
     meta.push_str(&format!("#{}", message["id"].as_u64().unwrap_or(0)));
     if let Some(reply_to) = message["replyTo"].as_u64() {
         meta.push_str(&format!(" · re #{reply_to}"));
+    }
+    if message["editedAt"].is_string() {
+        meta.push_str(" · edited");
     }
     // Full muted, not dimmed: the time and id must meet AA in both themes (ADR 0049).
     job.append(&meta, 10.0, format(theme::muted()));
@@ -2792,6 +2901,8 @@ mod layout_tests {
             link_origin: None,
             copied_link: None,
             receipts_at: None,
+            editing: None,
+            edit_base: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,
