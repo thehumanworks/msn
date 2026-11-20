@@ -1771,7 +1771,7 @@ mod layout_tests {
             egui::Pos2::ZERO,
             egui::vec2(980.0, 640.0),
         ));
-        let mut frame = |events: Vec<egui::Event>, app: &mut MsnDesktopApp| {
+        let frame = |events: Vec<egui::Event>, app: &mut MsnDesktopApp| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: screen,
