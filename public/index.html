@@ -37,6 +37,7 @@
           <button type="button" id="refresh" class="icon" aria-label="Refresh channels" title="Refresh channels">↻</button>
         </header>
         <nav id="channels" aria-label="Channels"></nav>
+        <label class="show-archived"><input type="checkbox" id="show-archived">Show archived</label>
         <button type="button" id="invite-workspace" class="quiet">Invite to workspace</button>
         <button type="button" id="notify" class="quiet" aria-pressed="false" hidden>Notify me when agents need me</button>
         <details class="access-details"><summary>Your access details</summary>
@@ -146,6 +147,7 @@
           <button type="submit" id="send" class="primary icon" aria-label="Send message" title="Send message (Enter)" disabled>↑</button>
         </form>
         <p id="watch-note" class="watch-note">Watch only · you can read along but not post</p>
+        <p id="archived-note" class="archived-note">Archived · this board is read only<button type="button" id="unarchive" class="quiet" hidden>Unarchive</button></p>
       </div>
     </section>
     <dialog id="invite-dialog">
@@ -208,6 +210,7 @@
       <h2>Channel goal</h2><label>Goal<textarea id="board-goal" required maxlength="16384"></textarea></label>
       <label>Status<select id="board-status"><option value="active">Active</option><option value="paused">Paused</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>
       <button type="submit">Save</button><button type="button" id="close-board">Close</button>
+      <p id="archive-board-row" class="archive-board" hidden><button type="button" id="archive-board" class="quiet">Archive board</button><small>Hides it from the board list and stops new posts. Nothing is deleted; you can unarchive it.</small></p>
     </form></dialog>
   </main>
 </body>

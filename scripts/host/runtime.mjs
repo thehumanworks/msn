@@ -31,9 +31,11 @@ export class Pulse {
 function codeFor(error) {
   return error instanceof HostError
     ? error.code
-    : error.status
-      ? `http_${error.status}`
-      : "transport_or_protocol_failure";
+    : error.code === "board_archived" // ADR 0046: say why, not just http_409.
+      ? "board_archived"
+      : error.status
+        ? `http_${error.status}`
+        : "transport_or_protocol_failure";
 }
 export class HostRuntime {
   constructor(

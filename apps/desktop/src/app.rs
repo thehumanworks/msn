@@ -90,6 +90,8 @@ enum Action {
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
+    /// Archive (`true`) or unarchive the open board (ADR 0046).
+    SetArchived(bool),
     /// Mute the open board: 1h, 1d or `None` for until turned back on (ADR 0044).
     Mute(Option<&'static str>),
     Unmute,
@@ -550,13 +552,23 @@ impl MsnDesktopApp {
         } else if self.state.channels.is_empty() {
             ui.weak("No channels yet. Create one above.");
         }
+        if !self.state.archived.is_empty() {
+            ui.checkbox(&mut self.state.show_archived, "Show archived");
+        }
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                for name in &self.state.channels {
+                for name in self.state.visible_channels() {
                     let selected = self.state.selected_channel.as_deref() == Some(name.as_str());
                     let unread = self.state.unread_for(name);
-                    let response = ui.selectable_label(selected, channel_label(name, unread));
+                    let label = if self.state.is_archived(name) {
+                        egui::RichText::new(format!("{name} · archived"))
+                            .color(theme::MUTED)
+                            .into()
+                    } else {
+                        channel_label(name, unread)
+                    };
+                    let response = ui.selectable_label(selected, label);
                     let response = match unread {
                         Some(entry) => response.on_hover_text(entry.label()),
                         None => response,
@@ -620,6 +632,22 @@ impl MsnDesktopApp {
                 }
                 if self.state.connection.as_ref().is_some_and(|c| c.owner) {
                     self.mute_menu(ui, actions);
+                    // Archiving is owner only (ADR 0046).
+                    let archived = self.state.is_archived(&channel);
+                    let label = if archived { "Unarchive" } else { "Archive" };
+                    let archive = egui::Button::new(egui::RichText::new(label).color(theme::MUTED))
+                        .frame(false);
+                    if ui
+                        .add(archive)
+                        .on_hover_text(if archived {
+                            "Make this board writable again and return it to the list"
+                        } else {
+                            "Hide this finished board and stop new posts. Nothing is deleted."
+                        })
+                        .clicked()
+                    {
+                        actions.push(Action::SetArchived(!archived));
+                    }
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(&channel).heading()).truncate());
@@ -839,6 +867,19 @@ impl MsnDesktopApp {
     }
 
     fn composer_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        // Archived boards (ADR 0046) read but take no posts; the server refuses them with 409.
+        if self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| self.state.is_archived(channel))
+        {
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.add_space(12.0);
+                ui.weak("Archived · this board is read only. Unarchive it to post again.");
+            });
+            return;
+        }
         // Laid out upwards from the bottom edge so the input never moves when an error or a
         // narrow window changes what sits above it.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -1077,6 +1118,10 @@ impl MsnDesktopApp {
                     self.copied_link = Some(link);
                     self.state.status = Some(format!("Link to message #{id} copied."));
                 }
+            }
+            Action::SetArchived(archived) => {
+                let commands = self.state.set_archived(archived);
+                self.dispatch_all(commands);
             }
             Action::Mute(duration) => {
                 let commands = self.state.set_mute(duration, self.mute_everything);

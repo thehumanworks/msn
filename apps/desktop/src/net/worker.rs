@@ -67,6 +67,12 @@ pub enum Command {
         generation: u64,
         name: String,
     },
+    /// Archive (`archived: true`) or unarchive a board (ADR 0046).
+    SetArchived {
+        generation: u64,
+        channel: String,
+        archived: bool,
+    },
     SyncChannel {
         generation: u64,
         channel_generation: u64,
@@ -145,6 +151,7 @@ impl Command {
             | Command::ListChannels { generation }
             | Command::LoadUnread { generation, .. }
             | Command::CreateChannel { generation, .. }
+            | Command::SetArchived { generation, .. }
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
             | Command::LoadReceipts { generation, .. }
@@ -186,6 +193,13 @@ pub enum UiEvent {
     Channels {
         generation: u64,
         channels: Vec<String>,
+        /// The listed channels that are archived boards (ADR 0046).
+        archived: Vec<String>,
+    },
+    ArchiveChanged {
+        generation: u64,
+        channel: String,
+        archived: bool,
     },
     /// Counts are a hint: a failure only ends the request, it is not shown as an error.
     Unread {
@@ -500,18 +514,35 @@ fn handle_command(
             }
         }
         Command::ListChannels { .. } => {
-            match client_ops::list_channels(&cc.client, &cc.tenant, &cc.token) {
-                Ok(channels) => emit(
+            match client_ops::list_all_channels(&cc.client, &cc.tenant, &cc.token, true) {
+                Ok((channels, archived)) => emit(
                     tx,
                     wake,
                     UiEvent::Channels {
                         generation,
                         channels,
+                        archived,
                     },
                 ),
                 Err(err) => {
                     emit_error(tx, wake, generation, None, "list-channels", err, true, None)
                 }
+            }
+        }
+        Command::SetArchived {
+            channel, archived, ..
+        } => {
+            match client_ops::set_archived(&cc.client, &cc.tenant, &cc.token, &channel, archived) {
+                Ok(archived) => emit(
+                    tx,
+                    wake,
+                    UiEvent::ArchiveChanged {
+                        generation,
+                        channel,
+                        archived,
+                    },
+                ),
+                Err(err) => emit_error(tx, wake, generation, None, "archive", err, true, None),
             }
         }
         Command::LoadUnread { me, marks, .. } => {

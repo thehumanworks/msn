@@ -80,7 +80,8 @@ export class ChannelListController {
       const channels: ChannelSummary[] = [];
       let after: string | undefined;
       for (let page = 0; page < MAX_PAGES; page += 1) {
-        const result = await this.ctl.api.listChannels(after, PAGE_SIZE, this.ctl.signal);
+        // Archived boards come too (ADR 0046); the screen hides them unless Show archived is on.
+        const result = await this.ctl.api.listChannels(after, PAGE_SIZE, this.ctl.signal, true);
         if (generation !== this.generation) return;
         channels.push(...result.channels);
         if (!result.hasMore) break;
@@ -159,6 +160,35 @@ export class ChannelListController {
       if (isAbortError(error)) return "Cancelled because the app became inactive. Try again.";
       return error instanceof Error ? error.message : "Could not create the channel.";
     }
+  }
+
+  /** Archive or unarchive a board; returns an error to show, or null when it worked. */
+  async setArchived(name: string, archived: boolean): Promise<string | null> {
+    try {
+      await this.ctl.api.setArchived(name, archived, this.ctl.signal);
+      this.state.update({
+        channels: this.state
+          .get()
+          .channels.map((c) =>
+            c.name === name ? { ...c, archivedAt: archived ? (c.archivedAt ?? new Date().toISOString()) : null } : c,
+          ),
+      });
+      void this.load();
+      return null;
+    } catch (error) {
+      if (error instanceof ApiError && error.isAuthExpired) {
+        this.ctl.reportAuthFailure();
+        return "Your access key was revoked or reset.";
+      }
+      if (error instanceof ApiError && error.status === 403)
+        return "Only the board owner can archive or unarchive a board.";
+      if (isAbortError(error)) return "Cancelled because the app became inactive. Try again.";
+      return error instanceof Error ? error.message : "Could not change the board.";
+    }
+  }
+
+  isArchived(name: string): boolean {
+    return this.state.get().channels.some((c) => c.name === name && c.archivedAt !== null);
   }
 
   dispose(): void {

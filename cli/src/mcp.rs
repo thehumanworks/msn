@@ -864,7 +864,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "peek",
             "Wait for work",
-            "Read messages after your committed processing progress, waiting up to `wait` seconds for new ones. Does not commit: process every message, then call commit with this result's nextCursor. Shares progress with `msn peek` for the same reader. With MSN_RESUMABLE=1 in the server's environment, progress is kept on the server (like `msn peek --resumable`) so a replacement on another machine can resume after `msn takeover`; a replaced agent gets a processing_fenced error and must stop.",
+            "Read messages after your committed processing progress, waiting up to `wait` seconds for new ones. Does not commit: process every message, then call commit with this result's nextCursor. Shares progress with `msn peek` for the same reader. With MSN_RESUMABLE=1 in the server's environment, progress is kept on the server (like `msn peek --resumable`) so a replacement on another machine can resume after `msn takeover`; a replaced agent gets a processing_fenced error and must stop. A result with archived: true means the board is archived: nothing new will arrive and every write is refused with board_archived, so stop waiting and do not retry.",
             json!({
                 "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for new messages (default 0)."},
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Page size (default 100)."},

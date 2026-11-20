@@ -270,6 +270,7 @@ export function decodeChannelList(raw: unknown): ChannelListResult {
       messageCount: safeInt(c.messageCount, 0) ? c.messageCount : 0,
       participantCount: safeInt(c.participantCount, 0) ? c.participantCount : 0,
       lastActivityAt: typeof c.lastActivityAt === "string" ? c.lastActivityAt : null,
+      archivedAt: typeof c.archivedAt === "string" ? c.archivedAt : null,
     };
   });
   return { channels, nextCursor: r.nextCursor, hasMore: r.hasMore };

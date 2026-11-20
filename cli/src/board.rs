@@ -681,6 +681,21 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             println!("{}", value(client.post_json(&path, &p.token, &[], &body)?)?);
         }
         Command::Board {
+            command: BoardCommand::Archive { channel },
+        } => {
+            let path = format!("{base}/channels/{}/archive", slug(channel)?);
+            println!("{}", value(client.put(&path, &p.token)?)?);
+            eprintln!(
+                "Board {channel} is archived: it is hidden from the board list (msn channels --archived shows it) and refuses new writes. Undo with msn board unarchive {channel}."
+            );
+        }
+        Command::Board {
+            command: BoardCommand::Unarchive { channel },
+        } => {
+            let path = format!("{base}/channels/{}/archive", slug(channel)?);
+            println!("{}", value(client.delete(&path, &p.token)?)?);
+        }
+        Command::Board {
             command: BoardCommand::Rotate { channel, out },
         } => {
             let mut channel_profile = p.clone();

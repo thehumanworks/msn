@@ -83,6 +83,8 @@ export type ChannelSummary = {
   messageCount: number;
   participantCount: number;
   lastActivityAt: string | null;
+  /** Set on an archived board (ADR 0046): read only, listed only with include=archived. */
+  archivedAt: string | null;
 };
 
 export type ChannelListResult = {

@@ -93,6 +93,8 @@ export async function startMockServer(): Promise<MockServerHandle> {
       .filter((m) => m.channel === channel && !m.deleted && pins.has(m.id))
       .map((m) => ({ ...toMessage(m), pinnedAt: "2026-11-19T00:00:00.000Z", pinnedBy: "owner" }));
   const channels = new Map<string, string>();
+  /** Archived boards (ADR 0046): hidden unless include=archived; every write is refused with 409. */
+  const archived = new Map<string, string>();
   const requests: MockServerHandle["requests"] = [];
   const validTokens = new Set([TEST_TOKEN, SCOPED_TOKEN]);
   const waiters = new Set<{ wake: () => void }>();
@@ -241,7 +243,9 @@ export async function startMockServer(): Promise<MockServerHandle> {
           messageCount: live(name, 0).length,
           participantCount: new Set(live(name, 0).map((m) => m.username)).size,
           lastActivityAt: live(name, 0).at(-1)?.createdAt ?? null,
-        }));
+          ...(archived.has(name) ? { archivedAt: archived.get(name) } : {}),
+        }))
+        .filter((c) => url.searchParams.get("include") === "archived" || !archived.has(c.name));
       const after = url.searchParams.get("after") ?? "";
       const limit = Number(url.searchParams.get("limit") ?? "100");
       const page = list.filter((c) => c.name > after);
@@ -252,6 +256,14 @@ export async function startMockServer(): Promise<MockServerHandle> {
     if (rest[0] === "channels" && rest[1]) {
       const channel = rest[1];
       if (forbidden(channel)) return json(res, 403, { error: { code: "channel_forbidden", message: "Not granted." } });
+      if (rest.length === 3 && rest[2] === "archive" && (method === "PUT" || method === "DELETE")) {
+        if (scope !== null) return json(res, 403, { error: { code: "owner_required", message: "Owner only." } });
+        if (method === "PUT") archived.set(channel, archived.get(channel) ?? new Date().toISOString());
+        else archived.delete(channel);
+        return json(res, 200, { channel, archived: archived.has(channel) });
+      }
+      if (method !== "GET" && archived.has(channel))
+        return json(res, 409, { error: { code: "board_archived", message: `Board ${channel} is archived and read-only.` } });
       if (rest.length === 2 && method === "PUT") {
         const created = ensureChannel(channel);
         return json(res, created ? 201 : 200, { channel, created });

@@ -165,3 +165,74 @@ fn board_and_persona_dispatch_keep_shared_channel_key_and_distinct_reader() {
         format!("Bearer {}", lead["token"].as_str().unwrap())
     );
 }
+
+#[test]
+fn board_archive_unarchive_and_archived_listing_use_the_archive_route() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            200,
+            r#"{"channel":"work","archived":true,"archivedAt":"2026-11-20T00:00:00.000Z"}"#,
+        ),
+        Scripted::json(200, r#"{"channel":"work","archived":false}"#),
+        Scripted::json(200, r#"{"channels":[],"nextCursor":"","hasMore":false}"#),
+    ]);
+    let owner = [
+        "--url",
+        &server.url(),
+        "--tenant",
+        "team",
+        "--token",
+        "owner-secret",
+    ];
+    let archived = home.run(&[&owner[..], &["board", "archive", "work"]].concat());
+    assert_eq!(archived["archived"], true);
+    let restored = home.run(&[&owner[..], &["board", "unarchive", "work"]].concat());
+    assert_eq!(restored["archived"], false);
+    home.run(&[&owner[..], &["channels", "--archived"]].concat());
+    let requests = server.recorded();
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[0].path, "/api/tenants/team/channels/work/archive");
+    assert_eq!(requests[0].headers["authorization"], "Bearer owner-secret");
+    assert_eq!(requests[1].method, "DELETE");
+    assert_eq!(requests[1].path, "/api/tenants/team/channels/work/archive");
+    assert!(
+        requests[2].path.ends_with("&include=archived"),
+        "{}",
+        requests[2].path
+    );
+}
+
+#[test]
+fn wait_on_an_archived_board_stops_with_a_conflict_instead_of_polling_forever() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"messages":[],"nextCursor":7,"hasMore":false,"archived":true}"#,
+    )]);
+    let out = Command::new(env!("CARGO_BIN_EXE_msn"))
+        .env_clear()
+        .env("HOME", &home.0)
+        .env("XDG_CONFIG_HOME", home.0.join("config"))
+        .env("XDG_STATE_HOME", home.0.join("state"))
+        .args([
+            "--url",
+            &server.url(),
+            "--tenant",
+            "team",
+            "--token",
+            "agent-secret",
+            "wait",
+            "work",
+            "--after",
+            "7",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("board_archived"), "{stderr}");
+    assert!(stderr.contains("msn board unarchive work"), "{stderr}");
+    assert!(out.stdout.is_empty());
+    assert_eq!(server.recorded().len(), 1);
+}

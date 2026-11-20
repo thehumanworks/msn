@@ -61,10 +61,28 @@ export class ApiClient {
     return decodeIdentity(await this.http.request<unknown>("", { signal }), this.tenant);
   }
 
-  async listChannels(after?: string, limit?: number, signal?: AbortSignal): Promise<ChannelListResult> {
+  async listChannels(
+    after?: string,
+    limit?: number,
+    signal?: AbortSignal,
+    includeArchived = false,
+  ): Promise<ChannelListResult> {
+    const include = includeArchived ? "archived" : undefined;
     return decodeChannelList(
-      await this.http.request<unknown>("/channels", { query: { after, limit }, signal }),
+      await this.http.request<unknown>("/channels", { query: { after, limit, include }, signal }),
     );
+  }
+
+  /** PUT archives a board, DELETE unarchives it (ADR 0046). The server allows only the owner. */
+  async setArchived(channel: string, archived: boolean, signal?: AbortSignal): Promise<boolean> {
+    const result = await this.http.request<{ channel: string; archived: boolean }>(
+      `/channels/${encodeURIComponent(channel)}/archive`,
+      { method: archived ? "PUT" : "DELETE", signal },
+    );
+    if (result?.channel !== channel || typeof result.archived !== "boolean") {
+      throw new ProtocolError("The server sent an invalid archive result.");
+    }
+    return result.archived;
   }
 
   /** Counts above this device's read marks (ADR 0045); the server keeps no read state. */

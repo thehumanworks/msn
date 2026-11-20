@@ -290,6 +290,21 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
     expect(await messages(w)).toHaveLength(2);
   });
 
+  it("skips an archived board and posts again once it is unarchived (ADR 0046)", async () => {
+    const w = await workspace();
+    const { secret } = await hook(w);
+    await link(w);
+    const archive = (method: string) => call(`${w.channel}/archive`, w.token, { method });
+    expect((await archive("PUT")).status).toBe(200);
+    const skipped = await deliver(w, secret, "pull_request_review", fixtures.review);
+    expect(skipped.status).toBe(200);
+    expect(await skipped.json()).toEqual({ posted: 0, matched: 1, skipped: 1 });
+    expect(await messages(w)).toHaveLength(1);
+    expect((await archive("DELETE")).status).toBe(200);
+    const posted = await deliver(w, secret, "pull_request_review", fixtures.review);
+    expect(await posted.json()).toEqual({ posted: 1, matched: 1 });
+  });
+
   it("matches fork workflow runs by the head commit of the last push", async () => {
     const w = await workspace();
     const { secret } = await hook(w);

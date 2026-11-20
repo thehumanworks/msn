@@ -2,6 +2,8 @@ import { useState, type ReactNode } from "react";
 import { Alert, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { AppModel } from "../core/appModel.ts";
+import type { ChannelListController, ChannelListState } from "../core/channelList.ts";
+import { Store } from "../core/store.ts";
 import type { SessionController } from "../core/sessionController.ts";
 import { colors, spacing } from "../components/theme.ts";
 import { Banner, Button, Text } from "../components/ui.tsx";
@@ -36,6 +38,10 @@ export function WorkspaceScreen({
   const scoped = session.session.channel;
   const [selected, setSelected] = useState<string | null>(null);
   const channel = scoped ?? selected;
+  // One list for the picker and the open board, so the board knows whether it is archived.
+  const list = useChannelList(session);
+  const lists = useStore(list?.state ?? EMPTY_LIST);
+  const archived = channel !== null && lists.channels.some((c) => c.name === channel && c.archivedAt !== null);
 
   const banner = (
     <>
@@ -61,28 +67,33 @@ export function WorkspaceScreen({
         channel={channel}
         onBack={scoped ? null : () => setSelected(null)}
         banner={banner}
+        archived={archived}
+        onSetArchived={list && !scoped ? (value) => list.setArchived(channel, value) : undefined}
         trailing={
           scoped ? <Button label="Sign out" variant="ghost" onPress={() => confirmSignOut(model)} /> : undefined
         }
       />
     );
   }
-  return <ChannelPicker model={model} session={session} banner={banner} onSelect={setSelected} />;
+  return <ChannelPicker model={model} session={session} banner={banner} list={list} onSelect={setSelected} />;
 }
+
+const EMPTY_LIST = new Store<ChannelListState>({ phase: "loading", channels: [], error: null, unread: new Map() });
 
 function ChannelPicker({
   model,
   session,
   banner,
+  list,
   onSelect,
 }: {
   model: AppModel;
   session: SessionController;
   banner: ReactNode;
+  list: ChannelListController | null;
   onSelect: (channel: string) => void;
 }) {
   const insets = useSafeAreaInsets();
-  const list = useChannelList(session);
   const { username, tenant } = session.session;
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg, paddingBottom: insets.bottom }}>

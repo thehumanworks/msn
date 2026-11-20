@@ -499,7 +499,11 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
     await runInDurableObject(t.stub, (_, state) => {
       state.storage.transactionSync(() => {
         for (let i = 0; i < 1000; i++)
-          state.storage.sql.exec("INSERT INTO channels VALUES (?, ?)", `c-${i}`, new Date().toISOString());
+          state.storage.sql.exec(
+            "INSERT INTO channels (name, createdAt) VALUES (?, ?)",
+            `c-${i}`,
+            new Date().toISOString(),
+          );
       });
     });
     expect((await call(`${t.path}/channels/overflow`, t.token, { method: "PUT" })).status).toBe(409);
