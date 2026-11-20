@@ -1332,6 +1332,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
   $("agents").disabled = false;
+  showMute(name);
   $("search").disabled = false;
   $("search-submit").disabled = false;
   savePosition();
@@ -1481,6 +1482,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("invite-workspace").hidden = Boolean(identity.channel);
     $("start-template").hidden = !connection.owner;
     void showNotify(connection);
+    void loadMutes(connection);
     $("credential-name").value = `${connection.tenant}/${connection.username}`;
     $("credential-token").value = connection.token;
     if (offerSave) void savePassword(connection);
@@ -2316,6 +2318,101 @@ $("agents-dialog").addEventListener("close", () => {
   agentsTimer = null;
 });
 $("close-agents").addEventListener("click", () => $("agents-dialog").close());
+
+// Board mutes (ADR 0044): per person and stored on the server, so a mute holds on every device.
+// Expiry is decided by the server at send time; the page only shows the time it was given.
+async function loadMutes(connection) {
+  if (!connection.owner) return;
+  try {
+    const { mutes } = await api("/push/mutes", {}, connection);
+    if (session !== connection) return;
+    connection.mutes = new Map(mutes.map((mute) => [mute.channel, mute]));
+    if (channel) showMute(channel);
+  } catch {}
+}
+function activeMute(connection, name) {
+  const mute = connection?.mutes?.get(name);
+  if (!mute) return null;
+  if (mute.until !== null && Date.parse(mute.until) <= Date.now()) return null;
+  return mute;
+}
+/** The dialog's choice for an existing mute: a mute ending over an hour from now was a 1-day one. */
+function muteSpan(mute) {
+  if (!mute) return "1h";
+  if (mute.until === null) return "";
+  return Date.parse(mute.until) - Date.now() > 3_600_000 ? "1d" : "1h";
+}
+function muteText(mute) {
+  if (!mute) return "Mute";
+  if (mute.until === null) return "Muted";
+  const until = new Date(mute.until);
+  const sameDay = until.toDateString() === new Date().toDateString();
+  const time = until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `Muted until ${sameDay ? time : `${until.toLocaleDateString([], { weekday: "short" })} ${time}`}`;
+}
+function showMute(name) {
+  const button = $("mute");
+  button.hidden = !session?.owner;
+  if (button.hidden) return;
+  const mute = activeMute(session, name);
+  button.textContent = muteText(mute);
+  button.setAttribute("aria-pressed", String(Boolean(mute)));
+  button.classList.toggle("muted", Boolean(mute));
+}
+let muteChannel = null;
+$("mute").addEventListener("click", async () => {
+  muteChannel = channel;
+  await loadMutes(session);
+  const mute = activeMute(session, muteChannel);
+  $("mute-title").textContent = `Mute # ${muteChannel}`;
+  $("mute-everything").checked = mute?.everything === true;
+  for (const radio of document.querySelectorAll('input[name="mute-for"]'))
+    radio.checked = radio.value === muteSpan(mute);
+  $("mute-note").textContent = mute
+    ? `${muteText(mute)}. ${mute.everything ? "Nothing on this board notifies you." : "Messages addressed to you still notify."}`
+    : "Messages keep arriving on the board. Only notifications to your devices stop.";
+  $("mute-save").textContent = mute ? "Update" : "Mute";
+  $("mute-clear").hidden = !mute;
+  $("mute-dialog").showModal();
+});
+$("close-mute").addEventListener("click", () => $("mute-dialog").close());
+$("mute-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const connection = session;
+  const target = muteChannel;
+  const span = document.querySelector('input[name="mute-for"]:checked')?.value ?? "1h";
+  try {
+    const mute = await api(
+      `/push/mutes/${target}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...(span ? { for: span } : {}), everything: $("mute-everything").checked }),
+      },
+      connection,
+    );
+    connection.mutes ??= new Map();
+    connection.mutes.set(target, mute);
+    $("mute-dialog").close();
+    if (channel === target) showMute(target);
+    status(`${muteText(mute)} · # ${target}`);
+  } catch (error) {
+    status(error.message, true);
+  }
+});
+$("mute-clear").addEventListener("click", async () => {
+  const connection = session;
+  const target = muteChannel;
+  try {
+    await api(`/push/mutes/${target}`, { method: "DELETE" }, connection);
+    connection.mutes?.delete(target);
+    $("mute-dialog").close();
+    if (channel === target) showMute(target);
+    status(`Notifications are back on for # ${target}.`);
+  } catch (error) {
+    status(error.message, true);
+  }
+});
 
 // Owner notifications (ADR 0029). Only the human account can turn them on.
 async function showNotify(connection) {

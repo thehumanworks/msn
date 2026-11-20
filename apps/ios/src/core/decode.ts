@@ -294,6 +294,7 @@ export function decodeIdentity(raw: unknown, expectedTenant: string): Identity {
   if (i.initialChannel !== undefined && typeof i.initialChannel === "string") {
     identity.initialChannel = i.initialChannel;
   }
+  if (i.owner === true) identity.owner = true;
   return identity;
 }
 

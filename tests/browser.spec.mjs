@@ -1871,15 +1871,78 @@ test("the owner turns notifications on and off; disconnecting turns them off", a
   await expect(page.locator("#notify")).toBeHidden();
 });
 
+test("the owner mutes a board for an hour, forever, and turns it back on", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  for (const name of ["work", "other"])
+    expect((await request.put(`${t.path}/channels/${name}`, { headers: t.headers })).status()).toBe(201);
+  const mutes = async () =>
+    (await (await request.get(`${t.path}/push/mutes`, { headers: t.headers })).json()).mutes;
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const button = page.locator("#mute");
+  await expect(button).toHaveText("Mute");
+  await expect(button).toHaveAttribute("aria-pressed", "false");
+  await button.click();
+  await expect(page.locator("#mute-title")).toHaveText("Mute # work");
+  await expect(page.locator("#mute-clear")).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath("mute-dialog.png") });
+  await page.locator("#mute-save").click();
+  await expect(page.locator("#mute-dialog")).not.toBeVisible();
+  await expect(button).toHaveText(/^Muted until /);
+  await expect(button).toHaveAttribute("aria-pressed", "true");
+  const [hour] = await mutes();
+  expect(hour).toMatchObject({ channel: "work", everything: false });
+  expect(Date.parse(hour.until) - Date.now()).toBeGreaterThan(50 * 60_000);
+  await page.screenshot({ path: testInfo.outputPath("muted-board.png") });
+
+  // The mute belongs to the board: another board is not muted.
+  await openChannel(page, "other");
+  await expect(button).toHaveText("Mute");
+  await openChannel(page, "work");
+  await expect(button).toHaveText(/^Muted until /);
+
+  await button.click();
+  await expect(page.locator("#mute-note")).toContainText("Messages addressed to you still notify.");
+  await page.getByLabel("Until I turn it back on").check();
+  await page.locator("#mute-everything").check();
+  await page.locator("#mute-save").click();
+  await expect(button).toHaveText("Muted");
+  expect(await mutes()).toEqual([{ channel: "work", until: null, everything: true }]);
+
+  // A mute set elsewhere (the CLI, another device) shows after a reload.
+  await request.put(`${t.path}/push/mutes/other`, { headers: t.headers, data: { for: "1d" } });
+  await page.reload();
+  // The remembered board reopens first; on a phone that swaps to the chat pane.
+  await expect(page.locator("#channel-title")).toHaveText("# work");
+  await openChannel(page, "other");
+  await expect(button).toHaveText(/^Muted until /);
+  await button.click();
+  await expect(page.getByLabel("1 day")).toBeChecked();
+  await page.locator("#close-mute").click();
+
+  await openChannel(page, "work");
+  await button.click();
+  await page.locator("#mute-clear").click();
+  await expect(page.locator("#status")).toHaveText("Notifications are back on for # work.");
+  await expect(button).toHaveText("Mute");
+  expect((await mutes()).map((m) => m.channel)).toEqual(["other"]);
+});
+
 test("only the owner account is offered notifications", async ({ page, request }) => {
   const t = await provision(request);
   const key = await request.put(`/api/admin/tenants/${t.tenant}/keys/agent`, {
     headers: { Authorization: `Bearer ${ADMIN}` },
     data: { username: "agent" },
   });
+  await request.put(`${t.path}/channels/work`, { headers: t.headers });
   await connect(page, { tenant: t.tenant, token: (await key.json()).token }, "agent");
   await channelsPane(page);
   await expect(page.locator("#notify")).toBeHidden();
+  await openChannel(page, "work");
+  await expect(page.locator("#mute")).toBeHidden();
 });
 
 test("a board shows what changed since you last looked, with a marker where you stopped", async ({

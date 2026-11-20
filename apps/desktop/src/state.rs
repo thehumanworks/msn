@@ -39,6 +39,8 @@ pub struct Connection {
     pub generation: u64,
     pub tenant: String,
     pub username: String,
+    /// The workspace owner's key: offered board mutes (ADR 0044).
+    pub owner: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +310,10 @@ pub struct AppState {
     pub pending_task_events: BTreeMap<String, PendingTaskEvent>,
     deferred: Vec<Command>,
 
+    /// The owner's active board mutes by channel (ADR 0044); the server decides expiry.
+    pub mutes: BTreeMap<String, msn_cli::mutes::Mute>,
+    pub mutes_inflight: bool,
+
     pub status: Option<String>,
     /// Outcome of "Save as profile" for the current connection.
     pub profile_save: Option<SaveOutcome>,
@@ -390,6 +396,54 @@ impl AppState {
             })
     }
 
+    fn is_owner(&self) -> bool {
+        self.connection.as_ref().is_some_and(|c| c.owner)
+    }
+
+    /// Reloads the owner's mutes; nothing for other keys, whose request the server refuses.
+    pub fn load_mutes(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        self.is_owner().then_some(Command::LoadMutes { generation })
+    }
+
+    /// The selected board's mute, if the owner has one.
+    pub fn current_mute(&self) -> Option<&msn_cli::mutes::Mute> {
+        self.mutes.get(self.selected_channel.as_deref()?)
+    }
+
+    /// Mutes the selected board (ADR 0044). `duration` is 1h, 1d or `None` for until unmuted.
+    pub fn set_mute(&mut self, duration: Option<&str>, everything: bool) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if !self.is_owner() {
+            return Vec::new();
+        }
+        self.mutes_inflight = true;
+        vec![Command::SetMute {
+            generation,
+            channel,
+            duration: duration.map(str::to_string),
+            everything,
+        }]
+    }
+
+    pub fn clear_mute(&mut self) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if !self.is_owner() {
+            return Vec::new();
+        }
+        self.mutes_inflight = true;
+        vec![Command::ClearMute {
+            generation,
+            channel,
+        }]
+    }
+
     pub fn request_channels(&mut self) -> Vec<Command> {
         self.list_command().into_iter().collect()
     }
@@ -404,10 +458,15 @@ impl AppState {
         self.channel_generation += 1;
         self.selected_channel = Some(channel);
         self.channel = Some(ChannelState::default());
-        [self.sync_command(), self.snapshots_command()]
-            .into_iter()
-            .flatten()
-            .collect()
+        // Mutes are refreshed with each board, so an expired one does not linger (ADR 0044).
+        [
+            self.sync_command(),
+            self.snapshots_command(),
+            self.load_mutes(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Starts a new search of the selected channel. `input` is what the person typed; a
@@ -593,6 +652,7 @@ impl AppState {
             UiEvent::Connected {
                 generation,
                 username,
+                owner,
             } => {
                 let Some(pending) = self.pending_connect.take_if(|p| p.generation == generation)
                 else {
@@ -602,6 +662,7 @@ impl AppState {
                     generation,
                     tenant: pending.tenant,
                     username,
+                    owner,
                 });
                 self.events_ready = false;
                 self.status = Some("Synchronising with the event stream…".into());
@@ -622,7 +683,16 @@ impl AppState {
                 }
                 self.events_ready = true;
                 self.status = None;
-                self.request_channels()
+                let mut commands = self.request_channels();
+                commands.extend(self.load_mutes());
+                commands
+            }
+            UiEvent::Mutes { generation, mutes } => {
+                if self.generation() == Some(generation) {
+                    self.mutes_inflight = false;
+                    self.mutes = mutes.into_iter().map(|m| (m.channel.clone(), m)).collect();
+                }
+                Vec::new()
             }
             UiEvent::EventsStatus {
                 generation,
@@ -1014,6 +1084,10 @@ impl AppState {
                 self.channels_error = Some(message);
             }
             "create-channel" => self.channels_error = Some(message),
+            "mute" => {
+                self.mutes_inflight = false;
+                self.status = Some(format!("Mute: {message}"));
+            }
             "search" => {
                 if channel_generation != Some(self.channel_generation) {
                     return;
@@ -1073,6 +1147,7 @@ mod tests {
         state.apply(UiEvent::Connected {
             generation,
             username: "alice".into(),
+            owner: false,
         });
         state.apply(UiEvent::EventsReady { generation });
         state
@@ -1116,6 +1191,92 @@ mod tests {
                 complete: true,
             },
         })
+    }
+
+    #[test]
+    fn only_an_owner_loads_sets_and_clears_board_mutes() {
+        use msn_cli::mutes::Mute;
+        // A non-owner key never asks: the server would answer 403, which ends the session.
+        let mut guest = ready_state(1);
+        assert!(guest.load_mutes().is_none());
+        assert!(
+            !guest
+                .select_channel("ops".into())
+                .iter()
+                .any(|c| matches!(c, Command::LoadMutes { .. }))
+        );
+        assert!(guest.set_mute(Some("1h"), false).is_empty());
+
+        let mut state = AppState::default();
+        state.begin_connect(1, "acme".into());
+        state.apply(UiEvent::Connected {
+            generation: 1,
+            username: "alice".into(),
+            owner: true,
+        });
+        let ready = state.apply(UiEvent::EventsReady { generation: 1 });
+        assert!(
+            ready
+                .iter()
+                .any(|c| matches!(c, Command::LoadMutes { generation: 1 }))
+        );
+        let opened = state.select_channel("ops".into());
+        assert!(
+            opened
+                .iter()
+                .any(|c| matches!(c, Command::LoadMutes { .. }))
+        );
+        assert_eq!(state.current_mute(), None);
+
+        let set = state.set_mute(Some("1d"), true);
+        let [
+            Command::SetMute {
+                channel,
+                duration,
+                everything,
+                ..
+            },
+        ] = set.as_slice()
+        else {
+            panic!("expected one SetMute");
+        };
+        assert_eq!(
+            (channel.as_str(), duration.as_deref(), *everything),
+            ("ops", Some("1d"), true)
+        );
+        assert!(state.mutes_inflight);
+        let mute = Mute {
+            channel: "ops".into(),
+            until: Some("2026-11-21T04:00:00.000Z".into()),
+            everything: true,
+        };
+        state.apply(UiEvent::Mutes {
+            generation: 1,
+            mutes: vec![mute.clone()],
+        });
+        assert!(!state.mutes_inflight);
+        assert_eq!(state.current_mute(), Some(&mute));
+        // An answer for an older connection is ignored.
+        state.apply(UiEvent::Mutes {
+            generation: 0,
+            mutes: Vec::new(),
+        });
+        assert_eq!(state.current_mute(), Some(&mute));
+
+        assert!(matches!(
+            state.clear_mute().as_slice(),
+            [Command::ClearMute { channel, .. }] if channel == "ops"
+        ));
+        state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: None,
+            context: "mute",
+            message: "Offline".into(),
+            retryable: true,
+            key: None,
+        });
+        assert!(!state.mutes_inflight);
+        assert_eq!(state.status.as_deref(), Some("Mute: Offline"));
     }
 
     #[test]
@@ -1198,6 +1359,7 @@ mod tests {
         let commands = state.apply(UiEvent::Connected {
             generation: 1,
             username: "alice".into(),
+            owner: false,
         });
         assert!(
             commands.is_empty(),
@@ -1514,6 +1676,7 @@ mod tests {
         state.apply(UiEvent::Connected {
             generation: 2,
             username: "alice".into(),
+            owner: false,
         });
         state.apply(UiEvent::ProfileSaved {
             generation: 1,

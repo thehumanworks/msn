@@ -16,6 +16,7 @@ import { loadReceipts, type Receipt, RECEIPTS_EVERY_MS, receiptLine } from "../c
 import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
+import { MutePanel, muteButtonLabel, useMutes } from "../components/MutePanel.tsx";
 import { OutboxRow } from "../components/OutboxRow.tsx";
 import { PinnedStrip } from "../components/PinnedStrip.tsx";
 import { SearchView } from "../components/SearchView.tsx";
@@ -52,6 +53,9 @@ export function ChannelScreen({
   const controller = useChannel(session, channel);
   const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>("chat");
+  const [mutes, setMutes] = useMutes(session, channel);
+  const [muting, setMuting] = useState(false);
+  useEffect(() => setMuting(false), [channel]);
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -60,9 +64,29 @@ export function ChannelScreen({
         <Text style={styles.title} numberOfLines={1} accessibilityRole="header">
           #{channel}
         </Text>
+        {session.owner ? (
+          <Button
+            label={muteButtonLabel(mutes, channel)}
+            variant="ghost"
+            accessibilityHint="Hold back this board's notifications for you"
+            onPress={() => setMuting((open) => !open)}
+          />
+        ) : null}
         {trailing}
       </View>
       {banner}
+      {session.owner && muting ? (
+        <MutePanel
+          key={channel}
+          session={session}
+          channel={channel}
+          mutes={mutes}
+          onChange={(next) => {
+            setMutes(next);
+            setMuting(false);
+          }}
+        />
+      ) : null}
       <View style={styles.tabs}>
         <Segmented options={TABS} value={tab} onChange={setTab} />
       </View>

@@ -75,6 +75,7 @@
           <button type="button" id="invite-channel" class="quiet" disabled>Invite</button>
           <button type="button" id="board-settings" class="quiet" disabled>Goal &amp; status</button>
           <button type="button" id="agents" class="quiet" title="Which board agents are listening now" disabled>Agents</button>
+          <button type="button" id="mute" class="quiet" title="Hold back this board’s notifications for you" aria-pressed="false" hidden>Mute</button>
           <span id="cursor">Cursor 0</span>
           <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
           <button type="button" id="thread-jump" class="quiet jump" hidden>New reply in thread</button>
@@ -190,6 +191,19 @@
       <ul id="agents-list" class="agents"></ul>
       <button type="button" id="close-agents" class="quiet">Close</button>
     </dialog>
+    <dialog id="mute-dialog" aria-labelledby="mute-title"><form id="mute-form" method="dialog">
+      <h2 id="mute-title">Mute notifications</h2>
+      <p id="mute-note">Messages keep arriving on the board. Only notifications to your devices stop.</p>
+      <fieldset class="mute-span"><legend>For how long</legend>
+        <label class="check"><input type="radio" name="mute-for" value="1h" checked><span>1 hour</span></label>
+        <label class="check"><input type="radio" name="mute-for" value="1d"><span>1 day</span></label>
+        <label class="check"><input type="radio" name="mute-for" value=""><span>Until I turn it back on</span></label>
+      </fieldset>
+      <label class="check"><input type="checkbox" id="mute-everything"><span>Mute everything, including messages addressed to me</span></label>
+      <button type="submit" id="mute-save" value="save" class="primary">Mute</button>
+      <button type="button" id="mute-clear" class="quiet" hidden>Turn notifications back on</button>
+      <button type="button" id="close-mute" class="quiet">Close</button>
+    </form></dialog>
   <dialog id="board-dialog"><form id="board-form">
       <h2>Channel goal</h2><label>Goal<textarea id="board-goal" required maxlength="16384"></textarea></label>
       <label>Status<select id="board-status"><option value="active">Active</option><option value="paused">Paused</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>

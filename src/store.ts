@@ -136,6 +136,12 @@ export const PRESENCE_WRITE_INTERVAL_MS = 5 * 60_000;
 const QUIET_CONCLUSIONS = new Set(["skipped", "neutral"]);
 /** Owner devices that receive push notifications (ADR 0029). */
 const MAX_PUSH_SUBSCRIPTIONS = 20;
+/** How long a timed board mute lasts (ADR 0044). No `for` mutes until unmuted. */
+const MUTE_DURATIONS: Record<string, number | undefined> = Object.assign(Object.create(null), {
+  "1h": 3600_000,
+  "1d": 86400_000,
+});
+type MuteRow = { channel: string; until: string | null; everything: number };
 type InviteRow = {
   id: string;
   code_hash: string;
@@ -361,6 +367,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS push_subscriptions (
           endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, createdAt TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS push_mutes (
+          person TEXT NOT NULL, channel TEXT NOT NULL, until TEXT, everything INTEGER NOT NULL DEFAULT 0,
+          updatedAt TEXT NOT NULL, PRIMARY KEY(person, channel)
+        );
         CREATE TABLE IF NOT EXISTS processing_cursors (
           channel TEXT NOT NULL, reader TEXT NOT NULL, committedThrough INTEGER NOT NULL,
           generation INTEGER NOT NULL, holder TEXT, claimedAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
@@ -422,6 +432,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         // no schema_version step: older keys and invitations stay full participants.
         ["access_keys", "read_only", "INTEGER NOT NULL DEFAULT 0"],
         ["invites", "watch", "INTEGER NOT NULL DEFAULT 0"],
+        // Board mutes (ADR 0044): whose device this is. NULL for devices registered earlier, which
+        // count as the workspace's own owner. Additive, so no schema_version step.
+        ["push_subscriptions", "person", "TEXT"],
         ["messages", "personaId", "TEXT"],
         ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
@@ -879,6 +892,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   /** Owner-only device registration for push notifications (ADR 0029). */
   private async pushRoute(request: Request, url: URL, rest: string[], capability: TenantRow) {
     this.requireOwner(capability);
+    if (rest[0] === "mutes") return await this.muteRoute(request, rest.slice(1), capability);
     if (!rest.length && request.method === "GET") {
       if (!this.vapidKeys()) {
         const keys = await generateVapidKeys();
@@ -915,16 +929,85 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (!known && count >= MAX_PUSH_SUBSCRIPTIONS)
           throw new HttpError(409, "push_quota", "Turn notifications off on another device first.");
         this.ctx.storage.sql.exec(
-          "INSERT INTO push_subscriptions(endpoint,p256dh,auth,createdAt) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth",
+          "INSERT INTO push_subscriptions(endpoint,p256dh,auth,createdAt,person) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth, person=excluded.person",
           subscription.endpoint,
           subscription.p256dh,
           subscription.auth,
           new Date().toISOString(),
+          this.person(capability),
         );
       });
       return json({ subscribed: true }, 201);
     }
     throw new HttpError(404, "route_not_found", "Unknown push operation.");
+  }
+
+  /**
+   * The person a mute and a device belong to (ADR 0044): the owner credential's account name.
+   * An unbound legacy workspace token is the empty name.
+   */
+  private person(capability: TenantRow): string {
+    return capability.bound_username ?? "";
+  }
+
+  /** Mutes of one person that have not expired, by board. Expired rows are ignored, not swept. */
+  private activeMutes(person: string, now = Date.now()): MuteRow[] {
+    return this.ctx.storage.sql
+      .exec<MuteRow>(
+        "SELECT channel, until, everything FROM push_mutes WHERE person = ? AND (until IS NULL OR until > ?) ORDER BY channel",
+        person,
+        new Date(now).toISOString(),
+      )
+      .toArray();
+  }
+
+  /** Owner-only, per person: mute one board's notifications forever, for 1h or for 1d (ADR 0044). */
+  private async muteRoute(request: Request, rest: string[], capability: TenantRow) {
+    const person = this.person(capability);
+    const view = (row: MuteRow) => ({
+      channel: row.channel,
+      until: row.until,
+      everything: row.everything === 1,
+    });
+    if (!rest.length && request.method === "GET") return json({ mutes: this.activeMutes(person).map(view) });
+    if (rest.length !== 1 || !["PUT", "DELETE"].includes(request.method))
+      throw new HttpError(404, "route_not_found", "Unknown mute operation.");
+    const channel = slug(rest[0]);
+    if (request.method === "DELETE") {
+      this.ctx.storage.sql.exec("DELETE FROM push_mutes WHERE person = ? AND channel = ?", person, channel);
+      return new Response(null, { status: 204 });
+    }
+    const input = await optionalBody(request);
+    const span = input.for ?? null;
+    if (span !== null && (typeof span !== "string" || MUTE_DURATIONS[span] === undefined))
+      throw new HttpError(400, "invalid_mute", "for must be 1h or 1d; leave it out to mute until unmuted.");
+    const everything = input.everything ?? false;
+    if (typeof everything !== "boolean")
+      throw new HttpError(400, "invalid_mute", "everything must be true or false.");
+    this.requireChannel(channel);
+    const now = Date.now();
+    const row: MuteRow = {
+      channel,
+      until: span === null ? null : new Date(now + (MUTE_DURATIONS[span] as number)).toISOString(),
+      everything: everything ? 1 : 0,
+    };
+    this.ctx.storage.transactionSync(() => {
+      // Expired rows of this person go now, so the table only grows with live mutes.
+      this.ctx.storage.sql.exec(
+        "DELETE FROM push_mutes WHERE person = ? AND until IS NOT NULL AND until <= ?",
+        person,
+        new Date(now).toISOString(),
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO push_mutes(person,channel,until,everything,updatedAt) VALUES(?,?,?,?,?) ON CONFLICT(person,channel) DO UPDATE SET until=excluded.until, everything=excluded.everything, updatedAt=excluded.updatedAt",
+        person,
+        channel,
+        row.until,
+        row.everything,
+        new Date(now).toISOString(),
+      );
+    });
+    return json(view(row));
   }
 
   private vapidKeys(): (VapidKeys & { subject: string }) | undefined {
@@ -951,19 +1034,52 @@ export class MsnDurableObject extends DurableObject<Env> {
   private notifyOwner(message: Message): void {
     const keys = this.vapidKeys();
     if (!keys) return;
-    const subscriptions = this.ctx.storage.sql
-      .exec<PushSubscription>("SELECT endpoint, p256dh, auth FROM push_subscriptions")
+    const devices = this.ctx.storage.sql
+      .exec<PushSubscription & { person: string | null }>(
+        "SELECT endpoint, p256dh, auth, person FROM push_subscriptions",
+      )
       .toArray();
-    if (!subscriptions.length) return;
+    if (!devices.length) return;
     const attention = needsOwner(message, this.ownerNames());
     if (!attention) return;
-    // At most one push per board and reason per cooldown, so a looping or noisy sender cannot
-    // flood the owner. The board itself still records every message.
-    const throttle = JSON.stringify([message.channel, attention.reason]);
+    // Board mutes (ADR 0044), checked now so nothing runs while idle. A message addressed to the
+    // person still reaches them unless they also muted everything.
     const now = Date.now();
-    const last = this.pushSentAt.get(throttle);
-    if (last !== undefined && now - last < this.pushCooldownMs) return;
-    this.pushSentAt.set(throttle, now);
+    const fallback = this.tenantRow()?.bound_username ?? "";
+    const muted = new Map<string, boolean>();
+    const silenced = (person: string) => {
+      let value = muted.get(person);
+      if (value === undefined) {
+        const mute = this.ctx.storage.sql
+          .exec<{ everything: number }>(
+            "SELECT everything FROM push_mutes WHERE person = ? AND channel = ? AND (until IS NULL OR until > ?)",
+            person,
+            message.channel,
+            new Date(now).toISOString(),
+          )
+          .toArray()[0];
+        value = mute !== undefined && (mute.everything === 1 || message.to !== person);
+        muted.set(person, value);
+      }
+      return value;
+    };
+    // At most one push per board, reason and person per cooldown, so a looping or noisy sender
+    // cannot flood anyone. A person who muted the board does not start the cooldown, and one
+    // person's push does not hold back another's. The board itself still records every message.
+    const allowed = new Map<string, boolean>();
+    const due = (person: string) => {
+      let value = allowed.get(person);
+      if (value === undefined) {
+        const throttle = JSON.stringify([message.channel, attention.reason, person]);
+        const last = this.pushSentAt.get(throttle);
+        value = !silenced(person) && (last === undefined || now - last >= this.pushCooldownMs);
+        if (value) this.pushSentAt.set(throttle, now);
+        allowed.set(person, value);
+      }
+      return value;
+    };
+    const subscriptions = devices.filter((device) => due(device.person ?? fallback));
+    if (!subscriptions.length) return;
     const payload = {
       schema: "msn.push.v1",
       tenant: message.tenant,
@@ -975,7 +1091,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     };
     this.ctx.waitUntil(
       Promise.allSettled(
-        subscriptions.map(async (subscription) => {
+        subscriptions.map(async ({ endpoint, p256dh, auth }) => {
+          const subscription = { endpoint, p256dh, auth };
           const result = await sendPush(keys, subscription, keys.subject, payload, this.pushFetch);
           // The push service says this device unsubscribed; stop sending to it.
           if (result === "gone")
@@ -988,7 +1105,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     );
   }
 
-  /** Last push time per [board, reason]; memory only, so it resets when the object restarts. */
+  /** Last push time per [board, reason, person]; memory only, so it resets when the object restarts. */
   private pushSentAt = new Map<string, number>();
   /** Replaced in tests. */
   pushCooldownMs = 60_000;
@@ -2875,6 +2992,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.ctx.storage.sql.exec("DELETE FROM invites");
             // Owner devices subscribed under the old credentials stop receiving notifications.
             this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
+            // Rotation is the reset after a leaked owner key: mutes it may have left go too (ADR 0044).
+            this.ctx.storage.sql.exec("DELETE FROM push_mutes");
             // The webhook secret was readable with the old owner credential; GitHub deliveries
             // fail until the owner copies the new one (links stay).
             this.ctx.storage.sql.exec("DELETE FROM github_hook");

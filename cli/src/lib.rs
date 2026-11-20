@@ -15,6 +15,7 @@ pub mod import;
 pub mod labels;
 pub mod links;
 pub mod mcp;
+pub mod mutes;
 pub mod processing;
 pub mod profile;
 pub mod receipts;
@@ -153,6 +154,58 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 return Err(CliError::usage("message ID must be positive."));
             }
             agent::print_json(&agent::show(&url, &tenant, &token, channel, id)?)
+        }
+        Command::Mute {
+            channel,
+            duration,
+            everything,
+            json,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let Some(channel) = channel else {
+                if duration.is_some() || everything {
+                    return Err(CliError::usage("--for and --everything need a CHANNEL."));
+                }
+                let listed = mutes::list(&url, &tenant, &token)?;
+                if json {
+                    return agent::print_json(&listed);
+                }
+                let mut stdout = std::io::stdout().lock();
+                let rows = listed["mutes"].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    writeln!(stdout, "No boards muted.")?;
+                }
+                for row in rows {
+                    writeln!(stdout, "{}", mutes::describe(&row))?;
+                }
+                return Ok(());
+            };
+            let channel = slug(&channel)?;
+            let muted = mutes::mute(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                duration.as_deref(),
+                everything,
+            )?;
+            if json {
+                agent::print_json(&muted)
+            } else {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{}", mutes::describe(&muted))?;
+                Ok(())
+            }
+        }
+        Command::Unmute { channel } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            mutes::unmute(&url, &tenant, &token, channel)?;
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "#{channel} notifications are back on.")?;
+            Ok(())
         }
         Command::Link {
             channel,
