@@ -11,6 +11,7 @@ export function onViewportChange(callback) {
 }
 
 const KEYBOARD_MIN = 150;
+const SHORT_MAX = 300;
 let applied = 0;
 let appliedTop = -1;
 let appliedBelow = -1;
@@ -54,10 +55,19 @@ function sync() {
   applied = height;
   root.style.setProperty("--app-height", `${height}px`);
   // The keyboard is the only thing that takes this much of the screen from the visual viewport.
-  root.classList.toggle("keyboard-open", window.innerHeight - height > KEYBOARD_MIN);
+  const keyboard = window.innerHeight - height > KEYBOARD_MIN;
+  root.classList.toggle("keyboard-open", keyboard);
+  // A phone in landscape keeps well under 300px above its keyboard.
+  root.classList.toggle("keyboard-short", keyboard && height < SHORT_MAX);
   for (const callback of listeners) callback();
   if (shrank) revealFocused();
 }
+
+// Moving to another field while the keyboard stays up changes no height, so the resize path
+// above never sees it; reveal that field on focus instead.
+document.addEventListener("focusin", () => {
+  if (root.classList.contains("keyboard-open")) revealFocused();
+});
 
 if (window.visualViewport) {
   // resize fires as the keyboard animates; scroll fires when iOS shifts the visible area.

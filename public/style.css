@@ -865,6 +865,12 @@ nav .empty {
 .keyboard-open .pane-chat:has(.compose :focus) :is(.toolbar, search, .pins, .checkpoint, .since) {
   display: none;
 }
+/* In landscape the keyboard leaves room for little more than the composer: the board header
+   and the status line step aside too, so the message field and a few lines of log fit. */
+.keyboard-short .pane-chat:has(.compose :focus) > .bar,
+.keyboard-short body:has(.compose :focus) #status {
+  display: none;
+}
 /* A finger needs a larger target than a cursor; the dense toolbar is the reason .quiet exists. */
 @media (pointer: coarse) {
   .quiet {
@@ -1658,4 +1664,96 @@ nav button.has-unread .channel-name {
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 1px 6px;
+}
+
+/* Touch targets (mobile pass, PR 58). A finger needs about 44px. Controls that stand alone
+   grow to that; the small inline ones in a message row keep their look and get an invisible
+   hit area above and below instead, so the conversation stays as dense as before. */
+@media (pointer: coarse) {
+  .quiet,
+  .toolbar .quiet,
+  .compose-fields #recipient,
+  .theme-pick select,
+  .show-archived,
+  .check,
+  .live-toggle,
+  .template-delete,
+  .pins .pin-remove,
+  .since li button {
+    min-height: 44px;
+  }
+  .icon {
+    width: 44px;
+    min-height: 44px;
+  }
+  .access-details summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    margin-bottom: 0;
+  }
+  .access-details {
+    padding-block: 0;
+  }
+  .message-meta .pin-toggle,
+  .message-meta .copy-link,
+  .message-meta .reply-button,
+  .reaction-chip,
+  .label-chip,
+  .fold-toggle,
+  .thread-toggle {
+    position: relative;
+    min-height: 32px;
+    min-width: 44px;
+  }
+  .message-meta .pin-toggle,
+  .message-meta .copy-link,
+  .message-meta .reply-button {
+    padding: 0 8px;
+  }
+  :is(
+    .message-meta .pin-toggle,
+    .message-meta .copy-link,
+    .message-meta .reply-button,
+    .reaction-chip,
+    .label-chip,
+    .fold-toggle,
+    .thread-toggle
+  )::after {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
+  }
+}
+/* With the keyboard up, the home indicator is covered: its safe-area padding is empty space. */
+.keyboard-open :is(.compose, .identity) {
+  padding-bottom: 8px;
+}
+.keyboard-open #status {
+  padding-bottom: 4px;
+}
+/* The toolbar strip scrolls sideways with no scrollbar: fade the edge that has more. */
+.toolbar.more-right {
+  -webkit-mask-image: linear-gradient(to right, var(--text) calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, var(--text) calc(100% - 32px), transparent);
+}
+.toolbar.more-left {
+  -webkit-mask-image: linear-gradient(to left, var(--text) calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to left, var(--text) calc(100% - 32px), transparent);
+}
+.toolbar.more-left.more-right {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--text) 32px,
+    var(--text) calc(100% - 32px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--text) 32px,
+    var(--text) calc(100% - 32px),
+    transparent
+  );
 }

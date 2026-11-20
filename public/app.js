@@ -2072,14 +2072,30 @@ $("revoke-invite").addEventListener("click", async () => {
 // "msn chat" without saying why. Type it the way it will be saved instead.
 for (const id of ["new-channel", "template-channel", "template-name"]) {
   const field = $(id);
-  field.addEventListener("input", () => {
+  const slugify = () => {
     const slug = field.value.toLowerCase().replace(/\s/g, "-");
     if (slug === field.value) return;
     const caret = field.selectionStart;
     field.value = slug;
     field.setSelectionRange(caret, caret);
+  };
+  // Rewriting the value mid-composition breaks an IME; the composed text is slugged once it
+  // lands (Safari sends compositionend after the last input event, Chrome before it).
+  field.addEventListener("input", (event) => {
+    if (!event.isComposing) slugify();
   });
+  field.addEventListener("compositionend", slugify);
 }
+
+// The board toolbar scrolls sideways with its scrollbar hidden; a fade on the edge that has
+// more buttons says so.
+function toolbarEdges() {
+  const bar = document.querySelector(".toolbar");
+  bar.classList.toggle("more-left", bar.scrollLeft > 1);
+  bar.classList.toggle("more-right", bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 1);
+}
+document.querySelector(".toolbar").addEventListener("scroll", toolbarEdges, { passive: true });
+new ResizeObserver(toolbarEdges).observe(document.querySelector(".toolbar"));
 
 $("channel-form").addEventListener("submit", async (event) => {
   event.preventDefault();
