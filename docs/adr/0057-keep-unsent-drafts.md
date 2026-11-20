@@ -1,4 +1,4 @@
-# ADR 0056: keep unsent drafts on this device
+# ADR 0057: keep unsent drafts on this device
 
 Date: 2026-11-20. Status: implemented (web, desktop). No Worker, API or schema change. iOS is out of scope.
 

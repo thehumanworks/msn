@@ -13,7 +13,7 @@ const SESSION_KEY = "msn.session";
 const CHANNEL_KEY = (tenant) => `msn.channel.${tenant}`;
 // Where this reader stopped on each board. Device-local only; the server never learns it.
 const MARKS_KEY = (tenant) => `msn.read.${tenant}`;
-// Unsent drafts per board (ADR 0056). Device-local only, and only with "Stay signed in".
+// Unsent drafts per board (ADR 0057). Device-local only, and only with "Stay signed in".
 const DRAFTS_KEY = (tenant) => `msn.drafts.${tenant}`;
 const DRAFT_SAVE_MS = 400;
 let session = null;
@@ -126,7 +126,7 @@ function draft(connection = session, name = channel) {
 }
 
 /*
- * Keeping drafts on this device (ADR 0056). Only with "Stay signed in"; otherwise drafts live in
+ * Keeping drafts on this device (ADR 0057). Only with "Stay signed in"; otherwise drafts live in
  * memory for the connection, as before. Typing is written at most every DRAFT_SAVE_MS; a send
  * writes at once, so its retry key is on disk before the request leaves. The stored value is
  * read again before each write, so two tabs on different boards do not erase each other.
@@ -452,7 +452,7 @@ function showFiles(state) {
     item.append(remove);
     list.append(item);
   }
-  // Files are never kept on the device (ADR 0056): say which draft lost them on reload.
+  // Files are never kept on the device (ADR 0057): say which draft lost them on reload.
   if (state.missingFiles > 0) {
     const item = document.createElement("li");
     item.className = "attach-missing";
@@ -1592,7 +1592,7 @@ function render(messages, state) {
   if (visible) restorePosition(state);
   if (added) advanceMark();
   showJump(state);
-  // A reply target kept across a reload (ADR 0056) gets its author's name once its row loads.
+  // A reply target kept across a reload (ADR 0057) gets its author's name once its row loads.
   if (added && session?.channels.get(channel) === state && session.drafts.get(channel)?.replyTo != null)
     showReplyTo(draft());
   trimCache();
@@ -1751,7 +1751,7 @@ function selectChannel(name, { reset = false } = {}) {
     button.setAttribute("aria-current", String(button.dataset.channel === name));
   if (session.unread) showUnread(session, session.unread);
   if (session.remember) storage.set(CHANNEL_KEY(session.tenant), name);
-  // A send that may not have gone through (kept across a reload, ADR 0056): the same text
+  // A send that may not have gone through (kept across a reload, ADR 0057): the same text
   // retries with the same key, so the server replays it rather than posting it twice.
   if (selectedDraft.retry && !selectedDraft.sending)
     status(
@@ -1899,7 +1899,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     if (connection.watchOnly) note = "Watch only · you can read along but not post";
     connection.owner = identity.owner === true;
     connection.marks = connection.remember ? parseMarks(storage.get(MARKS_KEY(connection.tenant))) : {};
-    // Drafts kept from an earlier visit (ADR 0056), for this name only.
+    // Drafts kept from an earlier visit (ADR 0057), for this name only.
     if (connection.remember)
       for (const [name, entry] of draftsFor(
         parseDrafts(storage.get(DRAFTS_KEY(connection.tenant))),

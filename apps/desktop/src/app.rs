@@ -44,7 +44,7 @@ pub struct MsnDesktopApp {
     /// Marks waiting to be written: (file, reader, marks).
     pending_marks: Option<(std::path::PathBuf, String, read_marks::Marks)>,
     marks_saved_at: Option<std::time::Instant>,
-    /// Unsent drafts per board (ADR 0056). The composer shows `drafts_board`'s draft; the
+    /// Unsent drafts per board (ADR 0057). The composer shows `drafts_board`'s draft; the
     /// others wait here, and on disk once `drafts_path` is known.
     drafts: drafts::Drafts,
     drafts_board: Option<String>,
@@ -1442,7 +1442,7 @@ impl MsnDesktopApp {
         match action {
             Action::Disconnect => {
                 self.worker.next_generation();
-                // Disconnect forgets this reader's drafts on this computer (ADR 0056).
+                // Disconnect forgets this reader's drafts on this computer (ADR 0057).
                 if let Some((_, Some(path))) = self.drafts_path.take() {
                     let _ = drafts::remove(&path);
                 }
@@ -3347,7 +3347,7 @@ mod draft_tests {
     use super::layout_tests::fixture;
     use super::*;
 
-    /// Drafts (ADR 0056): each board keeps its own composer, sending clears only that board's,
+    /// Drafts (ADR 0057): each board keeps its own composer, sending clears only that board's,
     /// the file is written once the throttle allows, a new run reads it back, and Disconnect
     /// forgets it.
     #[test]

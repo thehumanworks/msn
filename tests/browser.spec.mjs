@@ -622,7 +622,7 @@ test("network-uncertain sends preserve drafts and reuse idempotency keys", async
   expect((await result.json()).messages).toMatchObject([{ to: "review-agent" }]);
 });
 
-test("drafts survive a reload per board and clear on send and Disconnect (ADR 0056)", async ({
+test("drafts survive a reload per board and clear on send and Disconnect (ADR 0057)", async ({
   page,
   request,
 }, testInfo) => {
@@ -673,7 +673,7 @@ test("drafts survive a reload per board and clear on send and Disconnect (ADR 00
   expect(await stored(page)).toEqual([0, 0]);
 });
 
-test("drafts stay in memory only without Stay signed in (ADR 0056)", async ({ page, request }) => {
+test("drafts stay in memory only without Stay signed in (ADR 0057)", async ({ page, request }) => {
   const t = await provision(request);
   await request.put(`${t.path}/channels/general`, { headers: t.headers });
   await connect(page, t, "Tomas", { remember: false });
@@ -684,7 +684,7 @@ test("drafts stay in memory only without Stay signed in (ADR 0056)", async ({ pa
   expect(await stored(page)).toEqual([0, 0]);
 });
 
-test("a draft's files are not kept; the draft says so after a reload (ADR 0056)", async ({
+test("a draft's files are not kept; the draft says so after a reload (ADR 0057)", async ({
   page,
   request,
 }) => {
@@ -714,7 +714,7 @@ test("a draft's files are not kept; the draft says so after a reload (ADR 0056)"
   await expect(page.locator("#attach-list button")).toContainText("notes.txt");
 });
 
-test("an uncertain send retried after a reload reuses its key and posts once (ADR 0056)", async ({
+test("an uncertain send retried after a reload reuses its key and posts once (ADR 0057)", async ({
   page,
   request,
 }) => {

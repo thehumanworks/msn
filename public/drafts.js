@@ -1,4 +1,4 @@
-// Unsent drafts kept on this device (ADR 0056). Pure functions only; app.js reads and writes
+// Unsent drafts kept on this device (ADR 0057). Pure functions only; app.js reads and writes
 // localStorage. Nothing here goes to the server, and nothing here ever holds an access key.
 //
 // One stored value per workspace: `{ [markId(username, board)]: entry }`, least recently changed

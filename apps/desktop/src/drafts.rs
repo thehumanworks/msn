@@ -1,4 +1,4 @@
-//! Unsent drafts, one per board, kept on this computer only (ADR 0056).
+//! Unsent drafts, one per board, kept on this computer only (ADR 0057).
 //!
 //! The file lives beside the read marks (ADR 0045):
 //! `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/desktop-drafts/<reader-hash>.json`, mode 0600 in
