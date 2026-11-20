@@ -80,6 +80,9 @@ test("safeHref allows http and https only", () => {
     "https://a\nb",
     " https://a",
     "https://a\u0085",
+    "https://a\u2028",
+    "https://a\u202e",
+    "https://a\u200b",
   ])
     assert.equal(safeHref(bad), null, bad);
 });
@@ -120,5 +123,17 @@ test("pathological 16 KiB inputs parse quickly with bounded nesting", () => {
     assert.ok(elapsed < 1500, `${JSON.stringify(input.slice(0, 12))} took ${elapsed.toFixed(0)} ms`);
     for (const block of tree)
       if (block.type === "paragraph") assert.ok(depth(block.children) <= 8, "inline nesting is capped");
+  }
+});
+
+test("16 KiB of mixed emphasis delimiters parses in a few milliseconds", () => {
+  const patterns = ["*_", "_*", ".*_", "*_ ", "**__", "*_~~", "(*_)", "*.", "_**", "[a](", "[x]"];
+  for (const p of patterns) parse(p.repeat(500));
+  for (const p of patterns) {
+    const input = p.repeat(Math.floor(16384 / p.length));
+    const started = performance.now();
+    parse(input);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 40, `${JSON.stringify(p)} took ${elapsed.toFixed(1)} ms`);
   }
 });

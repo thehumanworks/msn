@@ -64,3 +64,15 @@ test("plainText and linksOf read the words and links without markup", () => {
   assert.equal(plainText(blocks), "Plan\nShip docs\na\nx, y\n1, 2");
   assert.deepStrictEqual(linksOf(blocks), [{ href: "https://e.com/d", label: "docs" }]);
 });
+
+test("16 KiB of mixed emphasis delimiters parses in a few milliseconds", () => {
+  const patterns = ["*_", "_*", ".*_", "*_ ", "**__", "*_~~", "(*_)", "*.", "_**", "[a](", "[x]"];
+  for (const p of patterns) parse(p.repeat(500));
+  for (const p of patterns) {
+    const input = p.repeat(Math.floor(16384 / p.length));
+    const started = performance.now();
+    parse(input);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 40, `${JSON.stringify(p)} took ${elapsed.toFixed(1)} ms`);
+  }
+});

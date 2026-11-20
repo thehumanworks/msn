@@ -3,9 +3,9 @@
  * nested <Text> and <View> only: there is no HTML or web view, and a link opens only when its
  * target is http or https.
  */
-import { Fragment, memo, type ReactNode, useMemo } from "react";
+import { Fragment, memo, type ReactNode } from "react";
 import { Linking, ScrollView, StyleSheet, type StyleProp, type TextStyle, View } from "react-native";
-import { type Block, type Inline, parse, safeHref } from "../core/markdown.ts";
+import { type Block, type Inline, safeHref } from "../core/markdown.ts";
 import { colors, mono, radius, spacing } from "./theme.ts";
 import { Text } from "./ui.tsx";
 
@@ -117,6 +117,7 @@ function blocks(list: Block[], base: StyleProp<TextStyle>, key = "b"): ReactNode
                   {row.map((cell, c) => (
                     <Text
                       key={`${k}.${r}.${c}`}
+                      selectable
                       style={[
                         styles.cell,
                         r === 0 && styles.strong,
@@ -135,10 +136,10 @@ function blocks(list: Block[], base: StyleProp<TextStyle>, key = "b"): ReactNode
   });
 }
 
-type Props = { text: string; style?: StyleProp<TextStyle> };
+/** `blocks` is `parse(text)`, made once by the caller so a message is not parsed twice. */
+type Props = { text: string; blocks: Block[]; style?: StyleProp<TextStyle> };
 
-function MarkdownTextImpl({ text, style }: Props) {
-  const tree = useMemo(() => parse(text), [text]);
+function MarkdownTextImpl({ text, blocks: tree, style }: Props) {
   // One paragraph (all plain text is one) stays a single selectable <Text>, as before.
   if (tree.length === 0 || (tree.length === 1 && tree[0].type === "paragraph"))
     return (

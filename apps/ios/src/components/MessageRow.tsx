@@ -57,7 +57,8 @@ function MessageRowImpl({
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
   // Formatted text (ADR 0043): VoiceOver reads the words without markup and offers each link.
-  const tree = useMemo(() => (task || structured ? null : parse(message.text)), [task, structured, message.text]);
+  const formatted = !task && !structured;
+  const tree = useMemo(() => (formatted ? parse(message.text) : null), [formatted, message.text]);
   const spoken = tree ? plainText(tree) : message.text;
   const links = tree ? linksOf(tree).slice(0, 5) : [];
   const who = own ? "You" : message.username;
@@ -138,7 +139,7 @@ function MessageRowImpl({
           {message.text}
         </Text>
       ) : (
-        <MarkdownText text={message.text} style={styles.body} />
+        <MarkdownText text={message.text} blocks={tree ?? []} style={styles.body} />
       )}
       {receipts ? (
         <Text

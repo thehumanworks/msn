@@ -14,8 +14,26 @@ const MAX_BLOCK_DEPTH = 8;
 const MAX_INLINE_DEPTH = 8;
 /** A link label longer than this is not a link (bounds the bracket search). */
 const MAX_LABEL = 1000;
+/** Emphasis delimiter runs per paragraph; later ones are literal, which keeps matching linear. */
+const MAX_DELIMS = 500;
 
-const isSpace = (c) => c === undefined || /\s/u.test(c);
+/** Whitespace by code point, the same set in all three parsers (and faster than a regex). */
+const isSpaceCode = (n) =>
+  (n >= 9 && n <= 13) ||
+  n === 32 ||
+  n === 0x85 ||
+  n === 0xa0 ||
+  n === 0x1680 ||
+  (n >= 0x2000 && n <= 0x200a) ||
+  n === 0x2028 ||
+  n === 0x2029 ||
+  n === 0x202f ||
+  n === 0x205f ||
+  n === 0x3000;
+const isSpace = (c) => c === undefined || isSpaceCode(c.charCodeAt(0));
+/** Characters a backslash escapes. A backslash before anything else, itself included, stays. */
+const ESCAPABLE = "`*_~[]()<>#|!+-.";
+const isEscapable = (c) => c !== undefined && ESCAPABLE.includes(c);
 const isPunct = (c) => c !== undefined && /^[!-/:-@[-`{-~]$/.test(c);
 const isAlnum = (c) => c !== undefined && /^[\p{L}\p{N}]$/u.test(c);
 const isBlank = (line) => /^[ \t]*$/.test(line);
@@ -23,7 +41,8 @@ const indentOf = (line) => line.length - line.replace(/^ +/, "").length;
 
 /**
  * A link target is kept only when it is an absolute http or https URL with a host and no
- * whitespace, control characters, quotes or angle brackets. Everything else is not a link.
+ * whitespace, control or bidirectional characters, quotes or angle brackets. Everything
+ * else is not a link.
  */
 export function safeHref(url) {
   if (typeof url !== "string" || url.length > 2048) return null;
@@ -32,7 +51,17 @@ export function safeHref(url) {
   if (!rest || url.length === rest || url[rest] === "/") return null;
   for (const ch of url) {
     const code = ch.codePointAt(0);
-    if (code <= 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f) || `<>"\`\\`.includes(ch))
+    if (
+      code <= 0x20 ||
+      isSpaceCode(code) ||
+      code === 0x7f ||
+      (code >= 0x80 && code <= 0x9f) ||
+      // Zero-width and bidirectional controls can disguise where a link really goes.
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
+      `<>"\`\\`.includes(ch)
+    )
       return null;
   }
   return url;
@@ -155,6 +184,13 @@ function tableStart(lines, i) {
   return { head, align };
 }
 
+/** True when lines[i] starts a block after a blank line: any list may start there. */
+function startsBlock(lines, i, depth) {
+  if (interrupts(lines, i, depth)) return true;
+  const marker = depth < MAX_BLOCK_DEPTH ? listMarker(lines[i]) : null;
+  return marker !== null && marker.content !== "";
+}
+
 /** True when lines[i] starts a block that ends the paragraph or lazy list text before it. */
 function interrupts(lines, i, depth) {
   const line = lines[i];
@@ -259,7 +295,19 @@ function parseBlocks(lines, depth) {
     }
     const para = [line];
     i++;
-    while (i < lines.length && !isBlank(lines[i]) && !interrupts(lines, i, depth)) para.push(lines[i++]);
+    for (;;) {
+      if (i >= lines.length) break;
+      if (!isBlank(lines[i])) {
+        if (interrupts(lines, i, depth)) break;
+        para.push(lines[i++]);
+        continue;
+      }
+      // Blank lines inside running text stay in the paragraph, so they show as before.
+      let j = i;
+      while (j < lines.length && isBlank(lines[j])) j++;
+      if (j >= lines.length || startsBlock(lines, j, depth)) break;
+      while (i < j) para.push(lines[i++]);
+    }
     out.push({ type: "paragraph", children: parseInline(para.join("\n")) });
   }
   return out;
@@ -304,11 +352,17 @@ function bareUrlEnd(s, i) {
 
 /**
  * Parses "[label](target)" at i. Returns null when it is not a well-formed safe link.
- * `tail` holds the last index of "](" and of ")" in `s`, for cheap early exits.
+ * `tail` holds the last "](" and ")" in `s` and the next "]", ")" and whitespace seen, for
+ * cheap early exits.
  */
 function parseLink(s, i, tail) {
   // Cheap exits first, so a long run of "[" or "[a](" stays linear.
-  if (tail[0] < i || tail[1] < i) return null;
+  if (tail.bracket < i || tail.paren < i) return null;
+  if (tail.nextClose < i) {
+    const at = s.indexOf("]", i);
+    tail.nextClose = at < 0 ? s.length : at;
+  }
+  if (tail.nextClose - i > MAX_LABEL) return null;
   let depth = 0;
   let close = -1;
   for (let k = i; k < s.length && k - i <= MAX_LABEL; k++) {
@@ -331,8 +385,20 @@ function parseLink(s, i, tail) {
   } else {
     let parens = 0;
     const from = k;
+    // The target ends at a ")" or whitespace. When neither comes within the length limit the
+    // URL would be too long anyway; the cached positions keep repeated attempts linear.
+    if (tail.nextParen < from) {
+      const at = s.indexOf(")", from);
+      tail.nextParen = at < 0 ? s.length : at;
+    }
+    if (tail.nextSpace < from) {
+      let at = from;
+      while (at < s.length && !isSpace(s[at])) at++;
+      tail.nextSpace = at;
+    }
+    if (Math.min(tail.nextParen, tail.nextSpace) - from > 2048) return null;
     while (k < s.length && k - from <= 2048 && !isSpace(s[k])) {
-      if (s[k] === "\\" && isPunct(s[k + 1])) k++;
+      if (s[k] === "\\" && isEscapable(s[k + 1])) k++;
       else if (s[k] === "(") parens++;
       else if (s[k] === ")") {
         if (parens === 0) break;
@@ -351,7 +417,7 @@ function parseLink(s, i, tail) {
     while (s[k] === " ") k++;
   }
   if (s[k] !== ")") return null;
-  const href = safeHref(target.replace(/\\([!-/:-@[-`{-~])/g, "$1"));
+  const href = safeHref(target.replace(/\\([`*_~[\]()<>#|!+\-.])/g, "$1"));
   if (!href) return null;
   return { label: s.slice(i + 1, close), href, end: k + 1 };
 }
@@ -446,12 +512,19 @@ function parseInline(s, inLink = false) {
     if (text) nodes.push({ type: "text", text });
     text = "";
   };
-  const tail = [s.lastIndexOf("]("), s.lastIndexOf(")")];
+  const tail = {
+    bracket: s.lastIndexOf("]("),
+    paren: s.lastIndexOf(")"),
+    nextClose: -1,
+    nextParen: -1,
+    nextSpace: -1,
+  };
+  let delims = 0;
   const noCloser = new Set();
   let i = 0;
   while (i < s.length) {
     const c = s[i];
-    if (c === "\\" && isPunct(s[i + 1])) {
+    if (c === "\\" && isEscapable(s[i + 1])) {
       text += s[i + 1];
       i += 2;
       continue;
@@ -517,7 +590,7 @@ function parseInline(s, inLink = false) {
     }
     if (c === "*" || c === "_" || c === "~") {
       const n = runLength(s, i, c);
-      if (c === "~" && n !== 2) {
+      if ((c === "~" && n !== 2) || delims >= MAX_DELIMS) {
         text += s.slice(i, i + n);
         i += n;
         continue;
@@ -526,8 +599,11 @@ function parseInline(s, inLink = false) {
       const after = s[i + n];
       const left = !isSpace(after) && (!isPunct(after) || isSpace(before) || isPunct(before));
       const right = !isSpace(before) && (!isPunct(before) || isSpace(after) || isPunct(after));
-      const open = c === "_" ? left && (!right || isPunct(before)) : left;
-      const close = c === "_" ? right && (!left || isPunct(after)) : right;
+      // Between two letters or digits (snake_case, 2*3*4) a delimiter is literal.
+      const inWord = isAlnum(before) && isAlnum(after);
+      const open = !inWord && (c === "_" ? left && (!right || isPunct(before)) : left);
+      const close = !inWord && (c === "_" ? right && (!left || isPunct(after)) : right);
+      delims++;
       flush();
       nodes.push({ type: "delim", ch: c, len: n, orig: n, open, close });
       i += n;

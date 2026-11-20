@@ -1249,12 +1249,12 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
                 .color(theme::MUTED),
         )
     } else {
-        // Formatted text (ADR 0043); plain text keeps the single wrapped label it had before.
-        let blocks = markdown::parse(text);
-        if markdown::is_plain(&blocks) {
-            Body::Rich(egui::RichText::new(text))
-        } else {
-            Body::Markdown(blocks)
+        // Formatted text (ADR 0043), parsed once per text; plain text keeps the single wrapped
+        // label it had before.
+        let parsed = markdown::parse_cached(text);
+        match &*parsed {
+            markdown::Parsed::Plain(plain) => Body::Rich(egui::RichText::new(plain)),
+            markdown::Parsed::Blocks(_) => Body::Markdown(parsed.clone()),
         }
     };
     let header = message_header(ui, message, username, own);
@@ -1410,7 +1410,7 @@ fn message_header(
 /// it. The text is laid out first because a right-aligned bubble must know its width.
 enum Body {
     Rich(egui::RichText),
-    Markdown(Vec<markdown::Block>),
+    Markdown(std::rc::Rc<markdown::Parsed>),
 }
 
 impl From<egui::RichText> for Body {
@@ -1434,13 +1434,15 @@ fn bubble(ui: &mut egui::Ui, header: egui::text::LayoutJob, body: impl Into<Body
             );
             frame.show(ui, |ui| ui.label(galley));
         }
-        Body::Markdown(blocks) => {
-            frame.show(ui, |ui| {
-                ui.set_max_width(wrap_width);
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    markdown::show(ui, &blocks);
+        Body::Markdown(parsed) => {
+            if let markdown::Parsed::Blocks(blocks) = &*parsed {
+                frame.show(ui, |ui| {
+                    ui.set_max_width(wrap_width);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        markdown::show(ui, blocks);
+                    });
                 });
-            });
+            }
         }
     }
 }

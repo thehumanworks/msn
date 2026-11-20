@@ -17,6 +17,10 @@ const MAX_INLINE_DEPTH: usize = 8;
 /// A link label longer than this is not a link (bounds the bracket search).
 const MAX_LABEL: usize = 1000;
 const MAX_URL: usize = 2048;
+/// Emphasis delimiter runs per paragraph; later ones are literal, which keeps matching linear.
+const MAX_DELIMS: usize = 500;
+/// Characters a backslash escapes. A backslash before anything else, itself included, stays.
+const ESCAPABLE: &str = "`*_~[]()<>#|!+-.";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -59,8 +63,18 @@ pub enum Block {
     },
 }
 
+/// Whitespace by code point, the same set in all three parsers.
+fn is_space_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        9..=13 | 32 | 0x85 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000
+    )
+}
 fn is_space(c: Option<char>) -> bool {
-    c.is_none_or(char::is_whitespace)
+    c.is_none_or(is_space_char)
+}
+fn is_escapable(c: Option<char>) -> bool {
+    c.is_some_and(|c| ESCAPABLE.contains(c))
 }
 fn is_punct(c: Option<char>) -> bool {
     c.is_some_and(|c| c.is_ascii_punctuation())
@@ -94,7 +108,15 @@ pub fn safe_href(url: &str) -> Option<&str> {
     }
     let bad = url.chars().any(|ch| {
         let code = ch as u32;
-        code <= 0x20 || code == 0x7f || (0x80..=0x9f).contains(&code) || "<>\"`\\".contains(ch)
+        code <= 0x20
+            || is_space_char(ch)
+            || code == 0x7f
+            || (0x80..=0x9f).contains(&code)
+            // Zero-width and bidirectional controls can disguise where a link really goes.
+            || (0x200b..=0x200f).contains(&code)
+            || (0x202a..=0x202e).contains(&code)
+            || (0x2066..=0x2069).contains(&code)
+            || "<>\"`\\".contains(ch)
     });
     if bad { None } else { Some(url) }
 }
@@ -322,6 +344,13 @@ fn table_start(lines: &[String], i: usize) -> Option<(Vec<String>, Vec<String>)>
     (align.len() == head.len()).then_some((head, align))
 }
 
+/// True when lines[i] starts a block after a blank line: any list may start there.
+fn starts_block(lines: &[String], i: usize, depth: usize) -> bool {
+    interrupts(lines, i, depth)
+        || (depth < MAX_BLOCK_DEPTH
+            && list_marker(&lines[i]).is_some_and(|marker| !marker.content.is_empty()))
+}
+
 /// True when lines[i] starts a block that ends the paragraph or lazy list text before it.
 fn interrupts(lines: &[String], i: usize, depth: usize) -> bool {
     let line = &lines[i];
@@ -472,9 +501,27 @@ fn parse_blocks(lines: &[String], depth: usize) -> Vec<Block> {
         }
         let mut para = vec![line.as_str()];
         i += 1;
-        while i < lines.len() && !is_blank(&lines[i]) && !interrupts(lines, i, depth) {
-            para.push(&lines[i]);
-            i += 1;
+        while i < lines.len() {
+            if !is_blank(&lines[i]) {
+                if interrupts(lines, i, depth) {
+                    break;
+                }
+                para.push(&lines[i]);
+                i += 1;
+                continue;
+            }
+            // Blank lines inside running text stay in the paragraph, so they show as before.
+            let mut j = i;
+            while j < lines.len() && is_blank(&lines[j]) {
+                j += 1;
+            }
+            if j >= lines.len() || starts_block(lines, j, depth) {
+                break;
+            }
+            while i < j {
+                para.push(&lines[i]);
+                i += 1;
+            }
         }
         out.push(Block::Paragraph {
             children: parse_inline(&para.join("\n"), false),
@@ -571,7 +618,7 @@ fn bare_url_end(s: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let mut end = i + scheme;
-    while end < s.len() && !s[end].is_whitespace() && s[end] != '<' && s[end] != '`' {
+    while end < s.len() && !is_space_char(s[end]) && s[end] != '<' && s[end] != '`' {
         end += 1;
     }
     loop {
@@ -598,10 +645,32 @@ struct FoundLink {
     end: usize,
 }
 
+/// The last "](" and ")" in the text and the next "]", ")" and whitespace seen, so repeated
+/// link attempts (a long run of "[" or "[a](") stay linear.
+struct Tail {
+    bracket: Option<usize>,
+    paren: Option<usize>,
+    next_close: Option<usize>,
+    next_paren: Option<usize>,
+    next_space: Option<usize>,
+}
+
+fn next_at(s: &[char], from: usize, found: impl Fn(char) -> bool) -> usize {
+    s[from.min(s.len())..]
+        .iter()
+        .position(|&c| found(c))
+        .map_or(s.len(), |p| p + from)
+}
+
 /// Parses "[label](target)" at i. Returns None when it is not a well-formed safe link.
-/// `tail` is the last index of "](" and of ")" in `s`, so a long run of "[" stays linear.
-fn parse_link(s: &[char], i: usize, tail: (Option<usize>, Option<usize>)) -> Option<FoundLink> {
-    if tail.0.is_none_or(|last| last < i) || tail.1.is_none_or(|last| last < i) {
+fn parse_link(s: &[char], i: usize, tail: &mut Tail) -> Option<FoundLink> {
+    if tail.bracket.is_none_or(|last| last < i) || tail.paren.is_none_or(|last| last < i) {
+        return None;
+    }
+    if tail.next_close.is_none_or(|at| at < i) {
+        tail.next_close = Some(next_at(s, i, |c| c == ']'));
+    }
+    if tail.next_close.unwrap_or(0) - i > MAX_LABEL {
         return None;
     }
     let mut depth = 0usize;
@@ -638,8 +707,25 @@ fn parse_link(s: &[char], i: usize, tail: (Option<usize>, Option<usize>)) -> Opt
     } else {
         let mut parens = 0usize;
         let from = k;
-        while k < s.len() && k - from <= MAX_URL && !s[k].is_whitespace() {
-            if s[k] == '\\' && is_punct(at(s, k + 1)) {
+        // The target ends at a ")" or whitespace. When neither comes within the length limit the
+        // URL would be too long anyway; the cached positions keep repeated attempts linear.
+        if tail.next_paren.is_none_or(|at| at < from) {
+            tail.next_paren = Some(next_at(s, from, |c| c == ')'));
+        }
+        if tail.next_space.is_none_or(|at| at < from) {
+            tail.next_space = Some(next_at(s, from, is_space_char));
+        }
+        if tail
+            .next_paren
+            .unwrap_or(0)
+            .min(tail.next_space.unwrap_or(0))
+            .saturating_sub(from)
+            > MAX_URL
+        {
+            return None;
+        }
+        while k < s.len() && k - from <= MAX_URL && !is_space_char(s[k]) {
+            if s[k] == '\\' && is_escapable(at(s, k + 1)) {
                 k += 1;
             } else if s[k] == '(' {
                 parens += 1;
@@ -670,7 +756,7 @@ fn parse_link(s: &[char], i: usize, tail: (Option<usize>, Option<usize>)) -> Opt
     let t: Vec<char> = target.chars().collect();
     let mut j = 0;
     while j < t.len() {
-        if t[j] == '\\' && is_punct(t.get(j + 1).copied()) {
+        if t[j] == '\\' && is_escapable(t.get(j + 1).copied()) {
             j += 1;
         }
         unescaped.push(t[j]);
@@ -866,14 +952,18 @@ fn parse_chars(s: &[char], in_link: bool) -> Vec<Inline> {
         }
     };
     let mut no_closer: Vec<usize> = Vec::new();
-    let tail = (
-        s.windows(2).rposition(|w| w == [']', '(']),
-        s.iter().rposition(|&c| c == ')'),
-    );
+    let mut tail = Tail {
+        bracket: s.windows(2).rposition(|w| w == [']', '(']),
+        paren: s.iter().rposition(|&c| c == ')'),
+        next_close: None,
+        next_paren: None,
+        next_space: None,
+    };
+    let mut delims = 0usize;
     let mut i = 0;
     while i < s.len() {
         let c = s[i];
-        if c == '\\' && is_punct(at(s, i + 1)) {
+        if c == '\\' && is_escapable(at(s, i + 1)) {
             text.push(s[i + 1]);
             i += 2;
             continue;
@@ -923,7 +1013,7 @@ fn parse_chars(s: &[char], in_link: bool) -> Vec<Inline> {
         }
         if !in_link && (c == '[' || (c == '!' && at(s, i + 1) == Some('['))) {
             let from = if c == '!' { i + 1 } else { i };
-            if let Some(found) = parse_link(s, from, tail) {
+            if let Some(found) = parse_link(s, from, &mut tail) {
                 flush(&mut nodes, &mut text);
                 let mut children = parse_chars(&found.label, true);
                 if children.is_empty() {
@@ -974,7 +1064,7 @@ fn parse_chars(s: &[char], in_link: bool) -> Vec<Inline> {
         }
         if c == '*' || c == '_' || c == '~' {
             let n = run_length(s, i, c);
-            if c == '~' && n != 2 {
+            if (c == '~' && n != 2) || delims >= MAX_DELIMS {
                 text.extend(&s[i..i + n]);
                 i += n;
                 continue;
@@ -991,6 +1081,10 @@ fn parse_chars(s: &[char], in_link: bool) -> Vec<Inline> {
             } else {
                 (left, right)
             };
+            // Between two letters or digits (snake_case, 2*3*4) a delimiter is literal.
+            let in_word = is_alnum(prev) && is_alnum(after);
+            let (open, close) = (open && !in_word, close && !in_word);
+            delims += 1;
             flush(&mut nodes, &mut text);
             nodes.push(Work::Delim {
                 ch: c,
@@ -1012,15 +1106,58 @@ fn parse_chars(s: &[char], in_link: bool) -> Vec<Inline> {
 
 // ---------------------------------------------------------------- egui
 
-/// True when the text is one paragraph of plain words, which keeps the old single-label path.
-pub fn is_plain(blocks: &[Block]) -> bool {
+/// The text of a message that is one paragraph of plain words, with escapes resolved, so it
+/// keeps the old single-label path. None when the message has any formatting.
+pub fn plain_text(blocks: &[Block]) -> Option<String> {
     match blocks {
-        [] => true,
-        [Block::Paragraph { children }] => {
-            children.iter().all(|c| matches!(c, Inline::Text { .. }))
-        }
-        _ => false,
+        [] => Some(String::new()),
+        [Block::Paragraph { children }] => children
+            .iter()
+            .map(|child| match child {
+                Inline::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.concat()),
+        _ => None,
     }
+}
+
+/// What a message body shows: plain text, or formatted blocks.
+pub enum Parsed {
+    Plain(String),
+    Blocks(Vec<Block>),
+}
+
+thread_local! {
+    static PARSED: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<Parsed>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Parses message text once and reuses the result on later frames. The cache is keyed by the
+/// whole text and emptied when it grows past a few thousand messages.
+pub fn parse_cached(text: &str) -> std::rc::Rc<Parsed> {
+    PARSED.with(|cache| {
+        if let Some(found) = cache.borrow().get(text) {
+            return found.clone();
+        }
+        let blocks = parse(text);
+        let parsed = std::rc::Rc::new(match plain_text(&blocks) {
+            Some(plain) if blocks.is_empty() => Parsed::Plain(if plain.is_empty() {
+                text.to_string()
+            } else {
+                plain
+            }),
+            Some(plain) => Parsed::Plain(plain),
+            None => Parsed::Blocks(blocks),
+        });
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(text.to_string(), parsed.clone());
+        parsed
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1116,48 +1253,72 @@ fn format(ui: &egui::Ui, style: Style, size: f32, base: egui::Color32) -> egui::
     format
 }
 
-/// One run of inline text. Text without links is a single wrapping label; text with links is
-/// laid out word by word so each link is its own clickable label.
+/// One run of inline text as a single wrapping, selectable label. Links are character ranges
+/// of that label: a click on one opens it, so selecting across a link still works.
 fn show_inline(ui: &mut egui::Ui, nodes: &[Inline], size: f32, base: egui::Color32) {
     let mut spans = Vec::new();
     flatten(nodes, PLAIN, None, &mut spans);
-    if spans.iter().all(|s| s.href.is_none()) {
-        let mut job = egui::text::LayoutJob::default();
-        for span in &spans {
-            job.append(&span.text, 0.0, format(ui, span.style, size, base));
+    let mut job = egui::text::LayoutJob::default();
+    let mut links: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
+    let mut chars = 0;
+    for span in &spans {
+        job.append(&span.text, 0.0, format(ui, span.style, size, base));
+        let count = span.text.chars().count();
+        if let Some(href) = span.href.as_deref().and_then(safe_href) {
+            links.push((chars..chars + count, href));
         }
-        job.wrap.max_width = ui.available_width();
-        ui.add(egui::Label::new(job).wrap());
+        chars += count;
+    }
+    let galley = egui::WidgetText::from(job).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        ui.available_width(),
+        egui::TextStyle::Body,
+    );
+    let label = egui::Label::new(galley.clone());
+    let response = if links.is_empty() {
+        ui.add(label)
+    } else {
+        // Click and drag, so text stays selectable across links.
+        ui.add(label.sense(egui::Sense::click_and_drag()))
+    };
+    if links.is_empty() {
         return;
     }
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for span in &spans {
-            for (n, line) in span.text.split('\n').enumerate() {
-                if n > 0 {
-                    ui.end_row();
-                }
-                for word in line.split_inclusive(' ') {
-                    let mut job = egui::text::LayoutJob::default();
-                    job.append(word, 0.0, format(ui, span.style, size, base));
-                    match span.href.as_deref().and_then(safe_href) {
-                        Some(href) => {
-                            let response = ui
-                                .add(egui::Label::new(job).sense(egui::Sense::click()))
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text(href);
-                            if response.clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(href));
-                            }
-                        }
-                        None => {
-                            ui.add(egui::Label::new(job));
-                        }
-                    }
-                }
+    let link_at = |pointer: egui::Pos2| -> Option<&str> {
+        let rel = pointer - response.rect.min;
+        let cursor = galley.cursor_from_pos(rel);
+        // The cursor sits between two characters; take the one whose box holds the pointer.
+        [Some(cursor.index.0), cursor.index.0.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .find(|&c| {
+                let left = galley.pos_from_cursor(egui::text::CCursor::new(c));
+                let right = galley.pos_from_cursor(egui::text::CCursor::new(c + 1));
+                left.min.y == right.min.y
+                    && rel.x >= left.min.x
+                    && rel.x < right.min.x
+                    && rel.y >= left.min.y
+                    && rel.y < left.max.y
+            })
+            .and_then(|c| links.iter().find(|(range, _)| range.contains(&c)))
+            .map(|(_, href)| *href)
+    };
+    if let Some(href) = response.hover_pos().and_then(link_at) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let href = href.to_string();
+        let response = response.clone().on_hover_text_at_pointer(href);
+        if response.clicked() {
+            // safe_href again so nothing but http(s) ever reaches the browser.
+            if let Some(href) = response
+                .interact_pointer_pos()
+                .and_then(link_at)
+                .and_then(safe_href)
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(href));
             }
         }
-    });
+    }
 }
 
 fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color32) {
@@ -1359,12 +1520,40 @@ mod tests {
 
     #[test]
     fn plain_text_keeps_the_single_label_path() {
-        assert!(is_plain(&parse(
-            "Deploy done (see #41) - all good.\nSecond line"
-        )));
-        assert!(is_plain(&parse("")));
-        assert!(!is_plain(&parse("**bold**")));
-        assert!(!is_plain(&parse("a\n\nb")));
+        let plain = |text: &str| plain_text(&parse(text));
+        assert_eq!(
+            plain("Deploy done (see #41) - all good.\nSecond line").as_deref(),
+            Some("Deploy done (see #41) - all good.\nSecond line")
+        );
+        assert_eq!(plain("").as_deref(), Some(""));
+        assert_eq!(plain("a\n\n\nb").as_deref(), Some("a\n\n\nb"));
+        // Escapes resolve the same way as on web and iOS.
+        assert_eq!(
+            plain(r"a\*b and \\server\share").as_deref(),
+            Some(r"a*b and \\server\share")
+        );
+        assert_eq!(plain("**bold**"), None);
+        assert_eq!(plain("a\n\n- b"), None);
+        let first = parse_cached("**cached**");
+        assert!(std::rc::Rc::ptr_eq(&first, &parse_cached("**cached**")));
+    }
+
+    #[test]
+    fn mixed_emphasis_delimiters_stay_fast() {
+        let patterns = [
+            "*_", "_*", ".*_", "*_ ", "**__", "*_~~", "(*_)", "*.", "_**", "[a](", "[x]",
+        ];
+        for p in patterns {
+            let input = p.repeat(16384 / p.len());
+            let started = std::time::Instant::now();
+            parse(&input);
+            // Debug builds are several times slower than release; this is still linear-time.
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(250),
+                "{p:?} took {:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]
@@ -1393,5 +1582,66 @@ mod tests {
                 }
             }
         }
+    }
+    /// Clicking a link opens it; the paragraph is one label, so its text stays selectable.
+    #[test]
+    fn a_click_on_a_link_opens_it_and_plain_words_do_not() {
+        let blocks = parse("see [docs](https://example.com/docs) now");
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 200.0));
+        let frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &blocks),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let first = frame(Vec::new());
+        let (origin, galley) = first
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.pos, text.galley.clone())),
+                _ => None,
+            })
+            .expect("one text shape");
+        assert_eq!(galley.job.text, "see docs now");
+        let point = |c: usize| {
+            let rect = galley.pos_from_cursor(egui::text::CCursor::new(c));
+            origin + egui::vec2(rect.min.x + 2.0, rect.center().y)
+        };
+        let click = |at: egui::Pos2| {
+            frame(vec![egui::Event::PointerMoved(at)]);
+            frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }]);
+            frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }])
+            .platform_output
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            click(point(5)),
+            vec!["https://example.com/docs".to_string()]
+        );
+        assert!(click(point(1)).is_empty(), "plain words are not a link");
     }
 }
