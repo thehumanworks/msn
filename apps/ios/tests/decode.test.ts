@@ -68,3 +68,40 @@ test("channel summaries use the API's `name` field", () => {
   assert.equal(list.channels[0].name, "general");
   assert.throws(() => decodeChannelList({ channels: [{ channel: "general", createdAt: "x" }], nextCursor: "", hasMore: false }), ProtocolError);
 });
+
+test("catchup pins must belong to the stream and lead only a first page (ADR 0038)", async () => {
+  const { decodeCatchup } = await import("../src/core/decode.ts");
+  const message = (id: number, tenant = "acme", channel = "general") => ({
+    id,
+    tenant,
+    channel,
+    username: "asha",
+    text: `m${id}`,
+    contentType: "text/plain",
+    createdAt: "2026-11-19T00:00:00.000Z",
+  });
+  const pin = (id: number, tenant = "acme") => ({ ...message(id, tenant), pinnedAt: "2026-11-19T00:00:00.000Z" });
+  const body = (pinned: unknown) => ({
+    pinned,
+    pinnedOmitted: 0,
+    snapshot: null,
+    snapshotVersion: 0,
+    historyRevision: 0,
+    messages: [message(1)],
+    nextCursor: 1,
+    hasMore: false,
+    incomplete: false,
+    headCursor: 1,
+    pendingMessages: 1,
+    pendingBytes: 0,
+    snapshotDue: true,
+    snapshotDueReasons: ["no_snapshot"],
+  });
+  const stream = { tenant: "acme", channel: "general" };
+  assert.deepEqual(decodeCatchup(body([pin(1)]), undefined, stream).pinned?.map((m) => m.id), [1]);
+  assert.equal(decodeCatchup({ ...body([]), pinned: undefined }, 0, stream).pinned, undefined);
+  assert.throws(() => decodeCatchup(body([pin(1)]), 0, stream), ProtocolError);
+  assert.throws(() => decodeCatchup(body([pin(1, "evil")]), undefined, stream), ProtocolError);
+  assert.throws(() => decodeCatchup(body([message(1)]), undefined, stream), ProtocolError);
+  assert.throws(() => decodeCatchup(body([pin(2), pin(1)]), undefined, stream), ProtocolError);
+});

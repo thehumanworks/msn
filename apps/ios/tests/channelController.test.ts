@@ -341,3 +341,36 @@ test("a failing canonical read does not spin: events during backoff do not bypas
     await server.close();
   }
 });
+
+test("pinned messages load with the channel and refresh on a later sync (ADR 0038)", async () => {
+  const server = await startMockServer();
+  try {
+    server.createChannel("general");
+    server.post("general", "asha", "Rules: one task each");
+    server.post("general", "asha", "chatter");
+    server.setPin(1, true);
+    const ctl = track(
+      new SessionController(
+        { origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", usernamePrefix: null },
+        { ...fast, fetchImpl: nodeFetch },
+      ),
+    );
+    await ctl.start();
+    const channelCtl = track(new ChannelController(ctl, "general", { baseMs: 5, maxMs: 20 }, 0));
+    channelCtl.start();
+    await waitFor(() => channelCtl.state.get().phase === "ready", "channel ready");
+    assert.deepEqual(channelCtl.state.get().pinned.map((m) => [m.id, m.text, m.pinnedBy]), [
+      [1, "Rules: one task each", "owner"],
+    ]);
+    // Pins change without a message; the next sync (any new message) picks them up.
+    server.setPin(1, false);
+    server.setPin(2, true);
+    server.post("general", "asha", "later");
+    await waitFor(() => channelCtl.state.get().pinned.map((m) => m.id).join() === "2", "pins refreshed");
+    assert.deepEqual(ids(channelCtl), [1, 2, 3]);
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});

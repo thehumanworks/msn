@@ -4,7 +4,7 @@ import { createPendingSend } from "./composer.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
 import { Store } from "./store.ts";
-import type { CoordinationEvent, Message, Snapshot } from "./types.ts";
+import type { CoordinationEvent, Message, PinnedMessage, Snapshot } from "./types.ts";
 
 export const MAX_MESSAGES = 500;
 export const MAX_OUTBOX = 20;
@@ -13,6 +13,8 @@ const JUMP_WINDOW = 2000;
 const MAX_PAGES = 40;
 const MAX_TEXT_BYTES = 16384;
 const MAX_TO_BYTES = 128;
+/** Pins send no message or event, so a sync re-reads them at most this often (ADR 0038). */
+export const PIN_REFRESH_MS = 30_000;
 
 export type OutboxStatus = "queued" | "sending" | "uncertain" | "rejected";
 
@@ -31,6 +33,8 @@ export type ChannelState = {
   /** Canonical data may be behind; a refresh is pending or failed. */
   stale: boolean;
   messages: Message[];
+  /** The board owner's pinned messages, shown above the conversation. */
+  pinned: PinnedMessage[];
   olderNotLoaded: boolean;
   snapshot: Snapshot | null;
   snapshotVersion: number;
@@ -59,6 +63,7 @@ export class ChannelController {
     error: null,
     stale: false,
     messages: [],
+    pinned: [],
     olderNotLoaded: false,
     snapshot: null,
     snapshotVersion: 0,
@@ -73,6 +78,7 @@ export class ChannelController {
   private readonly unsubscribe: Array<() => void> = [];
   private readonly byId = new Map<number, Message>();
   private syncCursor = 0;
+  private pinsAt = 0;
   private needReload = true;
   private needSync = false;
   private pendingSnapshot: number | null = null;
@@ -86,7 +92,15 @@ export class ChannelController {
   private holdOff = false;
   private readonly backoff: BackoffOptions;
 
-  constructor(ctl: SessionController, channel: string, backoff: BackoffOptions = {}) {
+  private readonly pinRefreshMs: number;
+
+  constructor(
+    ctl: SessionController,
+    channel: string,
+    backoff: BackoffOptions = {},
+    pinRefreshMs = PIN_REFRESH_MS,
+  ) {
+    this.pinRefreshMs = pinRefreshMs;
     this.backoff = backoff;
     this.ctl = ctl;
     this.channel = channel;
@@ -246,8 +260,10 @@ export class ChannelController {
     this.byId.clear();
     for (const message of all) this.byId.set(message.id, message);
     this.syncCursor = cursor;
+    if (first.pinned && !first.pinnedOmitted) this.pinsAt = Date.now();
     this.state.update({
       phase: "ready",
+      ...(first.pinned && !first.pinnedOmitted ? { pinned: first.pinned } : {}),
       snapshot: first.snapshot,
       snapshotVersion: first.snapshotVersion,
       historyRevision: first.historyRevision,
@@ -265,9 +281,21 @@ export class ChannelController {
       for (const message of next.messages) this.byId.set(message.id, message);
       this.syncCursor = next.nextCursor;
       this.publishMessages();
-      if (!next.hasMore) return;
+      if (!next.hasMore) return this.refreshPins();
     }
     this.needSync = true;
+  }
+
+  /** Best effort: a failed or unsupported pins read keeps what is shown. */
+  private async refreshPins(): Promise<void> {
+    if (Date.now() - this.pinsAt < this.pinRefreshMs) return;
+    this.pinsAt = Date.now();
+    try {
+      const pinned = await this.ctl.api.listPins(this.channel, this.ctl.signal);
+      if (!this.disposed) this.state.update({ pinned });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
   }
 
   private async fetchSnapshot(version: number): Promise<void> {

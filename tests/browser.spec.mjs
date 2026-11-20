@@ -2070,6 +2070,73 @@ test("files attached to messages show as chips and previews, and a person can at
   await page.screenshot({ path: testInfo.outputPath("attachments.png") });
 });
 
+test("the owner pins messages to the top of a board; agents see the pins but cannot change them", async ({
+  page,
+  browser,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: shared,
+    data: { displayName: "lead" },
+  });
+  const ids = [];
+  for (const text of [
+    "Rules: one task per agent. <img src=x onerror=alert(1)>",
+    "Decision: use SQLite",
+    "chatter",
+  ]) {
+    const sent = await request.post(`${t.path}/channels/work/messages`, {
+      headers: shared,
+      data: { username: "lead", text },
+    });
+    ids.push((await sent.json()).message.id);
+  }
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await expect(page.locator("#pins")).toBeHidden();
+  const row = (id) => page.locator(`#messages [data-id="${id}"]`);
+  await row(ids[1]).getByRole("button", { name: "Pin" }).click();
+  await row(ids[0]).getByRole("button", { name: "Pin" }).click();
+  await expect(page.locator("#pins-title")).toHaveText("Pinned · 2");
+  const pins = page.locator("#pins-list li");
+  // Message order, not pin order; untrusted text stays plain text.
+  await expect(pins.nth(0)).toContainText("lead: Rules: one task per agent. <img src=x onerror=alert(1)>");
+  await expect(pins.nth(1)).toContainText("Decision: use SQLite");
+  await expect(row(ids[0]).getByRole("button", { name: "Unpin" })).toBeVisible();
+  // Pinning sends nothing: the log still has the same three messages.
+  await expect(page.locator("#messages .message")).toHaveCount(3);
+  await page.screenshot({ path: testInfo.outputPath("pins.png") });
+
+  // An agent on the shared credential sees the same pins and has no pin controls.
+  const agentContext = await browser.newContext({ viewport: page.viewportSize() ?? undefined });
+  const agent = await agentContext.newPage();
+  await connect(agent, { tenant: t.tenant, token: credential }, "lead");
+  await openChannel(agent, "work");
+  await expect(agent.locator("#pins-title")).toHaveText("Pinned · 2");
+  await expect(agent.locator("#pins-list .pin-remove")).toHaveCount(0);
+  await expect(agent.locator("#messages .pin-toggle")).toHaveCount(0);
+  const denied = await request.put(`${t.path}/channels/work/pins/${ids[2]}`, { headers: shared });
+  expect(denied.status()).toBe(403);
+  await agentContext.close();
+
+  await pins.nth(0).getByRole("button", { name: "Unpin" }).click();
+  await expect(page.locator("#pins-title")).toHaveText("Pinned · 1");
+  await expect(row(ids[0]).getByRole("button", { name: "Pin" })).toBeVisible();
+  await row(ids[1]).getByRole("button", { name: "Unpin" }).click();
+  await expect(page.locator("#pins")).toBeHidden();
+});
+
 test("a watch-only invitation lets someone read a board live without posting", async ({
   page,
   request,

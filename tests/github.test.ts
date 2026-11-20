@@ -503,7 +503,7 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
     expect(spoof.status).toBe(403);
   });
 
-  it("creates a fresh database with schema rows 14, 15 and 16 present", async () => {
+  it("creates a fresh database at schema 18 with rows 14 to 17 present", async () => {
     const w = await workspace();
     const versions = await runInDurableObject(
       env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", w.name])),
@@ -513,8 +513,8 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
           .toArray()
           .map((row) => row.version),
     );
-    expect(versions.at(-1)).toBeGreaterThanOrEqual(16);
-    expect(versions).toEqual(expect.arrayContaining([14, 15, 16]));
+    expect(versions.at(-1)).toBe(18);
+    expect(versions).toEqual(expect.arrayContaining([14, 15, 16, 17, 18]));
   });
 
   it("keeps linking and the secret to the owner, and rotation cuts old signatures", async () => {

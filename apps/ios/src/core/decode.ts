@@ -12,6 +12,7 @@ import type {
   MessagePage,
   SearchPage,
   Snapshot,
+  PinnedMessage,
 } from "./types.ts";
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -185,7 +186,31 @@ export function decodeSnapshot(raw: unknown): Snapshot {
   };
 }
 
-export function decodeCatchup(raw: unknown, after: number | undefined): CatchupResult {
+/** Pinned messages (ADR 0038): same tenant and channel as the stream, in message order. */
+export function decodePins(raw: unknown, tenant: string, channel: string): PinnedMessage[] {
+  if (!Array.isArray(raw)) bad("pinned messages");
+  let previous = 0;
+  return raw.map((item) => {
+    const message = decodeMessage(item);
+    const pin = item as Record<string, unknown>;
+    if (message.tenant !== tenant || message.channel !== channel || message.id <= previous)
+      bad("pinned messages");
+    if (typeof pin.pinnedAt !== "string") bad("pinned messages");
+    if (pin.pinnedBy !== undefined && typeof pin.pinnedBy !== "string") bad("pinned messages");
+    previous = message.id;
+    return {
+      ...message,
+      pinnedAt: pin.pinnedAt,
+      ...(typeof pin.pinnedBy === "string" ? { pinnedBy: pin.pinnedBy } : {}),
+    };
+  });
+}
+
+export function decodeCatchup(
+  raw: unknown,
+  after: number | undefined,
+  stream?: { tenant: string; channel: string },
+): CatchupResult {
   const c = obj(raw, "catchup");
   const snapshot = c.snapshot === null ? null : decodeSnapshot(c.snapshot);
   const base = snapshot?.coversThrough ?? after ?? 0;
@@ -204,7 +229,14 @@ export function decodeCatchup(raw: unknown, after: number | undefined): CatchupR
     !c.snapshotDueReasons.every((r) => typeof r === "string")
   )
     bad("catchup");
+  let pinned: PinnedMessage[] | undefined;
+  if (c.pinned !== undefined) {
+    // Pins lead only a first page, and must belong to the requested stream.
+    if (after !== undefined || !stream) bad("catchup");
+    pinned = decodePins(c.pinned, stream.tenant, stream.channel);
+  }
   return {
+    ...(pinned ? { pinned, pinnedOmitted: safeInt(c.pinnedOmitted, 0) ? c.pinnedOmitted : 0 } : {}),
     snapshot,
     snapshotVersion: c.snapshotVersion,
     historyRevision: c.historyRevision,

@@ -319,12 +319,12 @@ describe("message search (ADR 0037)", () => {
     const old = [];
     for (let i = 0; i < 3; i++) old.push(await send(w, `legacy note ${i}`));
     await send(w, "deleted legacy note");
-    // Rewind to v16: no index, no backfill state, no schema row 17.
+    // Rewind to v16: no index, no backfill state, no schema rows 17 (search) or 18 (pins, ADR 0038).
     await runInDurableObject(w.stub(), (_, state) => {
       state.storage.transactionSync(() => {
         state.storage.sql.exec("DROP TABLE message_search");
         state.storage.sql.exec("DROP TABLE search_backfill");
-        state.storage.sql.exec("DELETE FROM schema_version WHERE version = 17");
+        state.storage.sql.exec("DELETE FROM schema_version WHERE version >= 17");
         state.storage.sql.exec(
           "UPDATE messages SET deleted = 1, text = '' WHERE text = 'deleted legacy note'",
         );
@@ -344,7 +344,7 @@ describe("message search (ADR 0037)", () => {
         .toArray()
         .map((row) => row.version),
     );
-    expect(versions.at(-1)).toBe(17);
+    expect(versions.at(-1)).toBe(18);
     expect(await runInDurableObject(w.stub(), (_, state) => state.storage.getAlarm())).toBeNull();
   });
 });

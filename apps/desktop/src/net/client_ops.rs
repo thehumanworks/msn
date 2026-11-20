@@ -556,6 +556,41 @@ fn scan_once(
 
 /// Projects history through the authoritative reducer (`msn_cli::tasks::project`, ADR0010),
 /// refusing oversized output rather than rendering a partial board.
+/// The board's pinned messages (ADR 0038), in message order. Rows that name another workspace or
+/// channel are dropped. A server without pins (404) or a plain channel simply has none.
+pub fn fetch_pins(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<Vec<Value>, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let value = get_json(
+        client,
+        &format!("/api/tenants/{tenant}/channels/{channel}/pins"),
+        token,
+    )?;
+    Ok(parse_pins(&value, tenant, channel))
+}
+
+pub fn parse_pins(value: &Value, tenant: &str, channel: &str) -> Vec<Value> {
+    value["pins"]
+        .as_array()
+        .map(|pins| {
+            pins.iter()
+                .filter(|pin| {
+                    pin["tenant"].as_str() == Some(tenant)
+                        && pin["channel"].as_str() == Some(channel)
+                        && pin["id"].as_u64().is_some()
+                })
+                .take(10)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn project_board(history: &History) -> Result<Value, String> {
     let mut board = tasks::project(&history.messages);
     board["headCursor"] = json!(history.head);
@@ -873,6 +908,20 @@ mod tests {
         );
         assert!(parse_send_outcome(&ok, "acme", "other").is_err());
         assert!(parse_send_outcome(&json!({"message": message(7)}), "acme", "general").is_err());
+    }
+
+    #[test]
+    fn pins_keep_only_this_streams_rows() {
+        let value = json!({"pins": [
+            {"id": 1, "tenant": "t", "channel": "c", "text": "rules"},
+            {"id": 2, "tenant": "x", "channel": "c"},
+            {"id": 3, "tenant": "t", "channel": "other"},
+            {"tenant": "t", "channel": "c"}
+        ]});
+        let pins = parse_pins(&value, "t", "c");
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0]["text"], "rules");
+        assert!(parse_pins(&json!({}), "t", "c").is_empty());
     }
 
     #[test]
