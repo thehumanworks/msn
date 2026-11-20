@@ -48,6 +48,86 @@ pub struct MsnDesktopApp {
     /// Where this computer keeps its theme choice (ADR 0049); `None` keeps it in memory only.
     theme_file: Option<std::path::PathBuf>,
     theme_error: Option<String>,
+    /// Keyboard shortcuts (ADR 0054): the message j and k selected, and whether to scroll to it.
+    selected: Option<u64>,
+    reveal_selected: bool,
+    /// When a lone `g` was pressed; `b` within `CHORD` opens the board list.
+    chord_at: Option<std::time::Instant>,
+    show_keys: bool,
+    /// A field or list that takes keyboard focus on the next frame.
+    focus: Option<FocusTarget>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FocusTarget {
+    Search,
+    Composer,
+    Boards,
+}
+
+/// What a key press asks for (ADR 0054).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shortcut {
+    Search,
+    Next,
+    Previous,
+    Reply,
+    Boards,
+    Close,
+    Help,
+    /// A lone `g`: wait for `b`.
+    Chord,
+}
+
+/// How long `g` waits for its second key.
+const CHORD: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The help window, in the order it lists them.
+const SHORTCUTS: [(&str, &str); 7] = [
+    ("/", "Search this board"),
+    ("j", "Next message"),
+    ("k", "Previous message"),
+    ("r", "Reply to the selected message"),
+    ("g then b", "Go to the board list"),
+    ("Esc", "Close, cancel the reply or leave search"),
+    ("?", "Show these shortcuts"),
+];
+
+/// The shortcut one input event asks for. Nothing fires while a text field has focus or with
+/// Ctrl, Alt or the command key held; Escape types nothing, so it also works from a field.
+fn key_shortcut(event: &egui::Event, typing: bool, chord: bool) -> Option<Shortcut> {
+    match event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            pressed: true,
+            ..
+        } => Some(Shortcut::Close),
+        egui::Event::Text(text) if !typing => match (text.as_str(), chord) {
+            ("b", true) => Some(Shortcut::Boards),
+            (_, true) => None,
+            ("/", _) => Some(Shortcut::Search),
+            ("j", _) => Some(Shortcut::Next),
+            ("k", _) => Some(Shortcut::Previous),
+            ("r", _) => Some(Shortcut::Reply),
+            ("g", _) => Some(Shortcut::Chord),
+            ("?", _) => Some(Shortcut::Help),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The message to select after j (`forward`) or k, from `rows` in reading order. With nothing
+/// selected (or a selection no longer shown) j starts at the oldest and k at the newest.
+fn step(rows: &[u64], current: Option<u64>, forward: bool) -> Option<u64> {
+    let at = current.and_then(|id| rows.iter().position(|row| *row == id));
+    let index = match (at, forward) {
+        (None, true) => 0,
+        (None, false) => rows.len().checked_sub(1)?,
+        (Some(at), true) => (at + 1).min(rows.len() - 1),
+        (Some(at), false) => at.saturating_sub(1),
+    };
+    rows.get(index).copied()
 }
 
 #[derive(Default)]
@@ -92,6 +172,8 @@ enum Action {
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
+    /// Address the next message as a reply to this one (ADR 0054).
+    Reply(u64),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
     React(u64, &'static str, bool),
     /// Archive (`true`) or unarchive the open board (ADR 0046).
@@ -148,6 +230,11 @@ impl MsnDesktopApp {
             mute_everything: false,
             theme_file,
             theme_error: None,
+            selected: None,
+            reveal_selected: false,
+            chord_at: None,
+            show_keys: false,
+            focus: None,
         }
     }
 
@@ -443,6 +530,7 @@ impl MsnDesktopApp {
 
     fn workspace_screen(&mut self, ui: &mut egui::Ui) {
         let mut actions: Vec<Action> = Vec::new();
+        self.shortcuts(ui.ctx());
         egui::Panel::left("channels")
             .default_size(230.0)
             .min_size(190.0)
@@ -455,6 +543,7 @@ impl MsnDesktopApp {
         egui::CentralPanel::default()
             .frame(theme::glass())
             .show(ui, |ui| self.main_panel(ui, &mut actions));
+        self.keys_window(ui.ctx());
         for action in actions {
             self.perform(action);
         }
@@ -506,6 +595,15 @@ impl MsnDesktopApp {
             actions.push(Action::Disconnect);
         }
         self.theme_switch(ui);
+        let keys = egui::Button::new(
+            egui::RichText::new("Keyboard shortcuts · ?")
+                .small()
+                .color(theme::muted()),
+        )
+        .frame(false);
+        if ui.add(keys).clicked() {
+            self.show_keys = true;
+        }
         if let Some(outcome) = &self.state.profile_save {
             let (color, text) = match outcome {
                 profile::SaveOutcome::Saved(name) => {
@@ -584,6 +682,13 @@ impl MsnDesktopApp {
                         channel_label(name, unread)
                     };
                     let response = ui.selectable_label(selected, label);
+                    // g then b (ADR 0054): focus the open board, or the first one.
+                    if self.focus == Some(FocusTarget::Boards)
+                        && (selected || self.state.selected_channel.is_none())
+                    {
+                        response.request_focus();
+                        self.focus = None;
+                    }
                     let response = match unread {
                         Some(entry) => response.on_hover_text(entry.label()),
                         None => response,
@@ -805,6 +910,8 @@ impl MsnDesktopApp {
             .as_deref()
             .is_some_and(|channel| !self.state.is_archived(channel));
         let scroll_to = self.scroll_to.take();
+        let selected = self.selected;
+        let reveal = std::mem::take(&mut self.reveal_selected);
         let channel_name = self.state.selected_channel.clone().unwrap_or_default();
         // A reply that landed in a folded thread: point at it, since the log does not show it.
         if let Some((root, id)) = self.state.channel.as_ref().and_then(|s| s.first_unseen()) {
@@ -878,7 +985,15 @@ impl MsnDesktopApp {
                                             seen = seen.max(id);
                                         }
                                         let fold = Fold::new(&channel_name, id, &state.unfolded);
-                                        render_message(ui, message, &me, Some(fold), actions);
+                                        let shown = render_message(
+                                            ui,
+                                            message,
+                                            &me,
+                                            can_react,
+                                            Some(fold),
+                                            actions,
+                                        );
+                                        mark_selected(ui, &shown, selected == Some(id), reveal);
                                         render_reactions(ui, message, &me, can_react, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
@@ -905,7 +1020,15 @@ impl MsnDesktopApp {
                                             let reply = &state.messages[&id];
                                             let fold =
                                                 Fold::new(&channel_name, id, &state.unfolded);
-                                            render_message(ui, reply, &me, Some(fold), actions);
+                                            let shown = render_message(
+                                                ui,
+                                                reply,
+                                                &me,
+                                                can_react,
+                                                Some(fold),
+                                                actions,
+                                            );
+                                            mark_selected(ui, &shown, selected == Some(id), reveal);
                                             render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
@@ -957,6 +1080,10 @@ impl MsnDesktopApp {
                             .hint_text("Type a message…")
                             .desired_width((ui.available_width() - 38.0).max(60.0)),
                     );
+                    if self.focus == Some(FocusTarget::Composer) {
+                        response.request_focus();
+                        self.focus = None;
+                    }
                     let enter =
                         response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let armed = !self.composer.text.trim().is_empty();
@@ -1003,9 +1130,14 @@ impl MsnDesktopApp {
         ui.horizontal(|ui| {
             let response = ui.add(
                 theme::field(&mut self.search_input)
+                    .id(egui::Id::new("search-input"))
                     .hint_text("Search words, \"a phrase\" or from:name")
                     .desired_width((ui.available_width() - 80.0).max(80.0)),
             );
+            if self.focus == Some(FocusTarget::Search) {
+                response.request_focus();
+                self.focus = None;
+            }
             let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Search").clicked() || enter {
                 actions.push(Action::Search);
@@ -1036,13 +1168,19 @@ impl MsnDesktopApp {
             .as_ref()
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
+        // Archived boards (ADR 0046) take no posts, so their results offer no Reply.
+        let can_post = self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| !self.state.is_archived(channel));
         egui::ScrollArea::vertical()
             .id_salt("search-results")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Search hits show in full: the match may be below the fold (ADR 0050).
                 for message in &search.results {
-                    render_message(ui, message, &me, None, actions);
+                    render_message(ui, message, &me, can_post, None, actions);
                     ui.add_space(4.0);
                 }
                 if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
@@ -1141,6 +1279,143 @@ impl MsnDesktopApp {
         }
     }
 
+    /// Keyboard shortcuts (ADR 0054). Runs before the panels draw, and removes the keys it uses
+    /// so a field focused by `/` or `r` does not also type them.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let typing = ctx.text_edit_focused();
+        let blocked = ctx.input(|i| i.modifiers.ctrl || i.modifiers.alt || i.modifiers.mac_cmd);
+        let mut found = Vec::new();
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                if blocked
+                    && !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            ..
+                        }
+                    )
+                {
+                    return true;
+                }
+                let chord = self.chord_at.is_some_and(|at| at.elapsed() <= CHORD);
+                let Some(shortcut) = key_shortcut(event, typing, chord) else {
+                    // Any other key typed ends a pending g.
+                    if matches!(event, egui::Event::Text(_)) && !typing {
+                        self.chord_at = None;
+                    }
+                    return true;
+                };
+                self.chord_at = (shortcut == Shortcut::Chord).then(std::time::Instant::now);
+                found.push(shortcut);
+                // Escape stays in the input so egui can also let go of a focused field.
+                shortcut == Shortcut::Close
+            });
+        });
+        for shortcut in found {
+            self.run_shortcut(ctx, shortcut);
+        }
+    }
+
+    fn run_shortcut(&mut self, ctx: &egui::Context, shortcut: Shortcut) {
+        match shortcut {
+            Shortcut::Chord => {}
+            Shortcut::Help => self.show_keys = true,
+            Shortcut::Boards => self.focus = Some(FocusTarget::Boards),
+            Shortcut::Close => {
+                if self.show_keys {
+                    self.show_keys = false;
+                } else if !self.composer.reply_to.trim().is_empty() {
+                    self.composer.reply_to.clear();
+                } else if self.active_tab == Tab::Search {
+                    self.active_tab = Tab::Chat;
+                } else if self.selected.is_some() {
+                    self.selected = None;
+                }
+            }
+            _ if self.state.selected_channel.is_none() => {}
+            Shortcut::Search => {
+                self.active_tab = Tab::Search;
+                self.focus = Some(FocusTarget::Search);
+            }
+            Shortcut::Next | Shortcut::Previous => {
+                self.active_tab = Tab::Chat;
+                let rows: Vec<u64> = self
+                    .state
+                    .channel
+                    .as_ref()
+                    .map(|state| {
+                        state
+                            .thread_rows()
+                            .iter()
+                            .map(|row| match *row {
+                                ThreadRow::Message { id, .. } | ThreadRow::Reply { id } => id,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(id) = step(&rows, self.selected, shortcut == Shortcut::Next) {
+                    self.selected = Some(id);
+                    self.reveal_selected = true;
+                    ctx.memory_mut(|memory| {
+                        if let Some(focused) = memory.focused() {
+                            memory.surrender_focus(focused);
+                        }
+                    });
+                }
+            }
+            Shortcut::Reply => match self.selected {
+                Some(id) => self.reply_to(id),
+                None => {
+                    self.state.status =
+                        Some("Choose a message with j or k first, then press r to reply.".into())
+                }
+            },
+        }
+    }
+
+    /// Addresses the next message to `id` and puts the cursor in the message field. Archived
+    /// boards take no posts (ADR 0046), so nothing changes there.
+    fn reply_to(&mut self, id: u64) {
+        let archived = self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| self.state.is_archived(channel));
+        if archived || self.state.channel.is_none() {
+            return;
+        }
+        self.composer.reply_to = id.to_string();
+        self.active_tab = Tab::Chat;
+        self.focus = Some(FocusTarget::Composer);
+    }
+
+    fn keys_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_keys;
+        egui::Window::new("Keyboard shortcuts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.weak(
+                    "They work when you are not typing in a field. Esc also works from a field.",
+                );
+                ui.add_space(6.0);
+                egui::Grid::new("keys-grid")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        for (keys, does) in SHORTCUTS {
+                            ui.label(egui::RichText::new(keys).monospace().color(theme::accent()));
+                            ui.label(does);
+                            ui.end_row();
+                        }
+                    });
+            });
+        self.show_keys &= open;
+    }
+
     fn perform(&mut self, action: Action) {
         match action {
             Action::Disconnect => {
@@ -1150,6 +1425,7 @@ impl MsnDesktopApp {
                 self.refresh_profiles();
             }
             Action::Select(name) => {
+                self.selected = None;
                 let commands = self.state.select_channel(name);
                 self.dispatch_all(commands);
             }
@@ -1184,6 +1460,7 @@ impl MsnDesktopApp {
                     self.state.status = Some(format!("Link to message #{id} copied."));
                 }
             }
+            Action::Reply(id) => self.reply_to(id),
             Action::React(id, kind, remove) => {
                 let commands = self.state.react(id, kind, remove);
                 self.dispatch_all(commands);
@@ -1247,6 +1524,8 @@ impl MsnDesktopApp {
         };
         self.composer.error = None;
         self.composer.text.clear();
+        // A reply target is for one message (ADR 0054); the next message starts unaddressed.
+        self.composer.reply_to.clear();
         // Your reply folds into its thread; open it so the reply does not seem to vanish.
         if let Some(parent) = reply_to {
             self.state.open_thread_of(parent);
@@ -1719,7 +1998,15 @@ fn render_reactions(
 }
 
 /// "Link" beside the header, and the same in the bubble's right-click menu (ADR 0042).
-fn link_controls(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+fn link_controls(ui: &mut egui::Ui, id: u64, can_post: bool, actions: &mut Vec<Action>) {
+    if can_post
+        && ui
+            .link(egui::RichText::new("Reply").small().color(theme::muted()))
+            .on_hover_text(format!("Reply to message #{id} (r)"))
+            .clicked()
+    {
+        actions.push(Action::Reply(id));
+    }
     if ui
         .link(egui::RichText::new("Link").small().color(theme::muted()))
         .on_hover_text(format!("Copy a link to message #{id}"))
@@ -1791,9 +2078,10 @@ fn render_message(
     ui: &mut egui::Ui,
     message: &Value,
     me: &str,
+    can_post: bool,
     mut fold: Option<Fold>,
     actions: &mut Vec<Action>,
-) {
+) -> egui::Response {
     let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
@@ -1816,7 +2104,7 @@ fn render_message(
     let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             bubble(ui, header, body, true, fold.as_mut(), |ui| {
-                link_controls(ui, id, actions)
+                link_controls(ui, id, can_post, actions)
             })
         })
         .inner
@@ -1825,7 +2113,7 @@ fn render_message(
             theme::avatar(ui, username, 30.0, None);
             ui.vertical(|ui| {
                 bubble(ui, header, body, false, fold.as_mut(), |ui| {
-                    link_controls(ui, id, actions)
+                    link_controls(ui, id, can_post, actions)
                 })
             })
             .inner
@@ -1842,11 +2130,33 @@ fn render_message(
         egui::Sense::click(),
     );
     shown.context_menu(|ui| {
+        if can_post && ui.button("Reply").clicked() {
+            actions.push(Action::Reply(id));
+            ui.close();
+        }
         if ui.button("Copy link to this message").clicked() {
             actions.push(Action::CopyLink(id));
             ui.close();
         }
     });
+    shown
+}
+
+/// The message j and k selected (ADR 0054): an accent ring around it, scrolled into view when
+/// the selection just moved.
+fn mark_selected(ui: &egui::Ui, shown: &egui::Response, selected: bool, reveal: bool) {
+    if !selected {
+        return;
+    }
+    ui.painter().rect_stroke(
+        shown.rect.expand(3.0),
+        10,
+        egui::Stroke::new(2.0, theme::accent()),
+        egui::StrokeKind::Outside,
+    );
+    if reveal {
+        shown.scroll_to_me(None);
+    }
 }
 
 struct ThreadToggle {
@@ -2276,6 +2586,11 @@ mod layout_tests {
             mute_everything: false,
             theme_file: None,
             theme_error: None,
+            selected: None,
+            reveal_selected: false,
+            chord_at: None,
+            show_keys: false,
+            focus: None,
         }
     }
 
@@ -2381,6 +2696,215 @@ mod layout_tests {
         app.state.mutes_inflight = false;
         app.perform(Action::Unmute);
         assert!(app.state.mutes_inflight);
+    }
+
+    /// One frame at desktop size with these input events.
+    fn press(ctx: &egui::Context, app: &mut MsnDesktopApp, events: Vec<egui::Event>) {
+        press_with(ctx, app, events, egui::Modifiers::NONE);
+    }
+
+    fn press_with(
+        ctx: &egui::Context,
+        app: &mut MsnDesktopApp,
+        mut events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) {
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(980.0, 640.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| app.draw(ui),
+        );
+        output.textures_delta.clear();
+    }
+
+    fn text(key: &str) -> Vec<egui::Event> {
+        vec![egui::Event::Text(key.into())]
+    }
+
+    fn escape() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    fn focused(ctx: &egui::Context) -> Option<egui::Id> {
+        ctx.memory(|memory| memory.focused())
+    }
+
+    #[test]
+    fn shortcut_keys_never_fire_while_typing_and_g_waits_for_b() {
+        let key = |text: &str| egui::Event::Text(text.into());
+        assert_eq!(key_shortcut(&key("j"), false, false), Some(Shortcut::Next));
+        assert_eq!(
+            key_shortcut(&key("k"), false, false),
+            Some(Shortcut::Previous)
+        );
+        assert_eq!(
+            key_shortcut(&key("/"), false, false),
+            Some(Shortcut::Search)
+        );
+        assert_eq!(key_shortcut(&key("r"), false, false), Some(Shortcut::Reply));
+        assert_eq!(key_shortcut(&key("?"), false, false), Some(Shortcut::Help));
+        assert_eq!(key_shortcut(&key("g"), false, false), Some(Shortcut::Chord));
+        assert_eq!(key_shortcut(&key("b"), false, true), Some(Shortcut::Boards));
+        assert_eq!(key_shortcut(&key("b"), false, false), None);
+        assert_eq!(
+            key_shortcut(&key("j"), false, true),
+            None,
+            "g then j does nothing"
+        );
+        assert_eq!(key_shortcut(&key("J"), false, false), None);
+        for typed in ["j", "k", "/", "r", "?", "g", "b"] {
+            assert_eq!(key_shortcut(&key(typed), true, false), None, "{typed}");
+            assert_eq!(key_shortcut(&key(typed), true, true), None, "{typed}");
+        }
+        assert_eq!(
+            key_shortcut(&escape()[0], true, false),
+            Some(Shortcut::Close)
+        );
+        assert_eq!(SHORTCUTS.len(), 7);
+    }
+
+    #[test]
+    fn j_and_k_step_through_rows_and_stop_at_the_ends() {
+        let rows = [1, 2, 5];
+        assert_eq!(step(&[], None, true), None);
+        assert_eq!(step(&rows, None, true), Some(1));
+        assert_eq!(step(&rows, None, false), Some(5));
+        assert_eq!(step(&rows, Some(2), true), Some(5));
+        assert_eq!(step(&rows, Some(5), true), Some(5));
+        assert_eq!(step(&rows, Some(1), false), Some(1));
+        assert_eq!(
+            step(&rows, Some(9), false),
+            Some(5),
+            "a gone selection restarts"
+        );
+    }
+
+    #[test]
+    fn keyboard_shortcuts_select_reply_search_and_open_the_board_list() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(3);
+        press(&ctx, &mut app, vec![]);
+
+        press(&ctx, &mut app, text("k"));
+        assert_eq!(app.selected, Some(3), "k starts at the newest");
+        press(&ctx, &mut app, text("k"));
+        press(&ctx, &mut app, text("k"));
+        press(&ctx, &mut app, text("k"));
+        assert_eq!(app.selected, Some(1));
+        press(&ctx, &mut app, text("j"));
+        assert_eq!(app.selected, Some(2));
+        // Ctrl, Alt or the command key keep their own meaning.
+        press_with(&ctx, &mut app, text("j"), egui::Modifiers::CTRL);
+        assert_eq!(app.selected, Some(2));
+
+        // r addresses the reply and puts the cursor in the message field.
+        press(&ctx, &mut app, text("r"));
+        press(&ctx, &mut app, vec![]);
+        assert_eq!(app.composer.reply_to, "2");
+        assert_eq!(focused(&ctx), Some(egui::Id::new("message-input")));
+        // Typing in the field types; no shortcut fires.
+        press(&ctx, &mut app, text("j"));
+        press(&ctx, &mut app, text("?"));
+        assert_eq!(app.composer.text, "j?");
+        assert_eq!(app.selected, Some(2));
+        assert!(!app.show_keys);
+        // Escape cancels the reply and keeps the text.
+        press(&ctx, &mut app, escape());
+        assert_eq!(app.composer.reply_to, "");
+        assert_eq!(app.composer.text, "j?");
+        press(&ctx, &mut app, vec![]);
+
+        // / opens search with the cursor in its field, and types no slash.
+        press(&ctx, &mut app, text("/"));
+        press(&ctx, &mut app, vec![]);
+        assert!(app.active_tab == Tab::Search);
+        assert_eq!(focused(&ctx), Some(egui::Id::new("search-input")));
+        assert_eq!(app.search_input, "");
+        press(&ctx, &mut app, escape());
+        press(&ctx, &mut app, escape());
+        assert!(app.active_tab == Tab::Chat);
+
+        // ? opens the help window; Escape closes it.
+        press(&ctx, &mut app, text("?"));
+        assert!(app.show_keys);
+        press(&ctx, &mut app, escape());
+        assert!(!app.show_keys);
+
+        // g then b focuses the open board in the list.
+        press(&ctx, &mut app, text("g"));
+        press(&ctx, &mut app, text("b"));
+        press(&ctx, &mut app, vec![]);
+        let board = focused(&ctx).expect("a board has focus");
+        assert!(
+            ![
+                egui::Id::new("search-input"),
+                egui::Id::new("message-input")
+            ]
+            .contains(&board)
+        );
+        assert_eq!(app.focus, None);
+
+        // r with nothing selected says how to choose a message.
+        press(&ctx, &mut app, escape());
+        app.selected = None;
+        press(&ctx, &mut app, text("r"));
+        assert_eq!(app.composer.reply_to, "");
+        assert!(app.state.status.as_deref().unwrap().contains("j or k"));
+    }
+
+    #[test]
+    fn r_on_an_archived_board_starts_no_reply() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(2);
+        app.state.archived.insert("general".into());
+        press(&ctx, &mut app, text("k"));
+        assert_eq!(app.selected, Some(2));
+        press(&ctx, &mut app, text("r"));
+        assert_eq!(app.composer.reply_to, "");
+        assert_eq!(app.focus, None);
+        // Nor does it offer a Reply link (ADR 0046): no widget is labelled Reply.
+        let shown_reply = |app: &mut MsnDesktopApp| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut found = false;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(980.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+            for shape in output.shapes {
+                if let egui::epaint::Shape::Text(text) = shape.shape
+                    && text.galley.text() == "Reply"
+                {
+                    found = true;
+                }
+            }
+            found
+        };
+        assert!(!shown_reply(&mut app));
+        app.state.archived.clear();
+        assert!(shown_reply(&mut app));
     }
 
     #[test]
