@@ -86,8 +86,8 @@ pub fn start(
 }
 
 /// The `start` page as a value; `start` prints it and `msn mcp` returns it as a tool result.
-/// It always asks for edits (ADR 0052), from `edits_after` or 0, so a continuation reports
-/// earlier messages whose senders changed them since.
+/// It always asks for edits (ADR 0052): after `edits_after`, or from the board's current edit
+/// position when it is None, so a continuation reports earlier messages changed since.
 #[allow(clippy::too_many_arguments)]
 pub fn start_page(
     url: &Url,
@@ -185,7 +185,7 @@ pub fn start_page(
         .ok_or_else(|| {
             CliError::usage("Increase start max-bytes to fit identity and workflow metadata.")
         })?;
-    let continuation = catchup_query(after, Some(edits_after.unwrap_or(0)));
+    let continuation = catchup_query(after, Some(edits_after));
     let response = MsnClient::new(url)?.get(
         &format!(
             "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={server_budget}{continuation}"
@@ -220,11 +220,15 @@ pub fn start_page(
     Ok(page)
 }
 
-/// The `&after=…&editsAfter=…` tail of a catch-up query; either part only when given.
-pub(crate) fn catchup_query(after: Option<u64>, edits_after: Option<u64>) -> String {
+/// The `&after=…&editsAfter=…` tail of a catch-up query. `edits`: None asks for no edits,
+/// `Some(None)` starts at the board's current edit position (`latest`, so a new reader gets no
+/// old edits) and `Some(Some(n))` continues after edit cursor `n` (ADR 0052).
+pub(crate) fn catchup_query(after: Option<u64>, edits: Option<Option<u64>>) -> String {
     let mut query = after.map(|n| format!("&after={n}")).unwrap_or_default();
-    if let Some(edits) = edits_after {
-        query.push_str(&format!("&editsAfter={edits}"));
+    match edits {
+        None => {}
+        Some(None) => query.push_str("&editsAfter=latest"),
+        Some(Some(cursor)) => query.push_str(&format!("&editsAfter={cursor}")),
     }
     query
 }

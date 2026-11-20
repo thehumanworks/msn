@@ -1645,7 +1645,7 @@ fn catchup(
     limit: u64,
     max_bytes: u64,
 ) -> Result<(), CliError> {
-    let continuation = agent::catchup_query(after, edits_after);
+    let continuation = agent::catchup_query(after, edits_after.map(Some));
     finish(&MsnClient::new(url)?.get(
         &format!(
             "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}"

@@ -259,13 +259,6 @@ type Receipt = {
 function toProcessing(row: ProcessingRow) {
   return { ...row };
 }
-/** `editsAfter` on a message page (ADR 0052): the reader's edit cursor, or null when not asked. */
-function editsAfterParam(url: URL): number | null {
-  return url.searchParams.has("editsAfter")
-    ? integer(url.searchParams.get("editsAfter"), 0, Number.MAX_SAFE_INTEGER)
-    : null;
-}
-
 function processingReader(value: string | undefined): string {
   let reader: string;
   try {
@@ -2156,6 +2149,18 @@ export class MsnDurableObject extends DurableObject<Env> {
     );
   }
 
+  /**
+   * `editsAfter` on a catch-up or message page (ADR 0052): the reader's edit cursor, `latest` for
+   * the board's current one (a new reader starts there and gets no old edits), or null when not
+   * asked.
+   */
+  private editsAfterParam(url: URL, channel: string): number | null {
+    if (!url.searchParams.has("editsAfter")) return null;
+    const raw = url.searchParams.get("editsAfter");
+    if (raw === "latest") return this.editCursor(channel);
+    return integer(raw, 0, Number.MAX_SAFE_INTEGER);
+  }
+
   /** Earlier messages (id ≤ through) edited after `editsAfter`, oldest edit first (ADR 0052). */
   private editedSince(tenant: string, channel: string, editsAfter: number, through: number, limit: number) {
     const rows = this.ctx.storage.sql
@@ -3141,9 +3146,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     // Edits to messages the reader already has (ADR 0052), opt-in with the edit cursor from the
     // previous page so older clients keep today's shape. Messages after the cursor carry their
     // current text anyway.
-    const editsAfter = url.searchParams.has("editsAfter")
-      ? integer(url.searchParams.get("editsAfter"), 0, Number.MAX_SAFE_INTEGER)
-      : null;
+    const editsAfter = this.editsAfterParam(url, channel);
     const edits =
       editsAfter === null ? null : this.editedSince(tenant, channel, editsAfter, after, CATCHUP_EDITS);
     const boardEdits = editsAfter === null ? 0 : this.editCursor(channel);
@@ -4221,7 +4224,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                   [],
                   Number.MAX_SAFE_INTEGER,
                   fence,
-                  editsAfterParam(url),
+                  this.editsAfterParam(url, channel),
                 );
               }
               const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
@@ -4241,7 +4244,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                 filters,
                 before,
                 null,
-                editsAfterParam(url),
+                this.editsAfterParam(url, channel),
               );
             }
           }

@@ -271,6 +271,13 @@ describe("edit a message you sent (ADR 0052)", () => {
     const later = await page(`after=${first.id}&editsAfter=${partial.editCursor}`);
     expect(later.edited).toEqual([]);
     expect(later.editCursor).toBe(partial.editCursor);
+    // A new reader starts at the board's current edit position: no old edits replay.
+    const fresh = await page(`after=${second.id}&editsAfter=latest`);
+    expect(fresh.edited).toEqual([]);
+    expect(fresh.editCursor).toBe(partial.editCursor);
+    const freshWait = Date.now();
+    await call(f.tenant, `/channels/work/messages?after=${second.id}&wait=1&editsAfter=latest`, f.agent);
+    expect(Date.now() - freshWait).toBeGreaterThanOrEqual(900);
     // Resumable peeks (processingReader) carry the same fields.
     const reader = "/channels/work/processing/dev";
     const claim = (await (

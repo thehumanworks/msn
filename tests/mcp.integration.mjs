@@ -422,8 +422,10 @@ try {
     told.edited.map((m) => [m.id, m.text]),
     [[task.message.id, "fix the parser"]],
   );
-  await editReader.ok("commit", { through: told.nextCursor });
-  const settled = await editReader.ok("peek", { wait: 0 });
+  // A page with only edits has nothing to commit: the next peek, without a commit, waits.
+  const waitStart = Date.now();
+  const settled = await editReader.ok("peek", { wait: 2 });
+  assert.ok(Date.now() - waitStart >= 1500, "a peek after an edits-only page waits");
   assert.deepEqual([settled.edited, settled.committedThrough], [[], processed.nextCursor]);
   await editReader.close();
   const cliCatchup = await cli([

@@ -453,7 +453,14 @@ fn peek_inner(
     let server: Value = json_body(&response)?;
     let committed = generation_of(&server, "committedThrough")?;
     let (mut page, last_id) = parse_processing_page(&response.body, tenant, channel, committed)?;
-    crate::processing::note_edits(&page, &mut state, tenant, channel, committed)?;
+    crate::processing::note_edits(
+        &page,
+        &mut state,
+        tenant,
+        channel,
+        committed,
+        last_id.is_none(),
+    )?;
     state.committed_through = committed;
     state.highest_fetched = state
         .highest_fetched
@@ -547,7 +554,9 @@ fn commit_inner(
     let saved = json_body(&response)?;
     state.committed_through = generation_of(&saved, "committedThrough")?;
     state.highest_fetched = state.highest_fetched.max(state.committed_through);
-    state.edits_committed = state.edits_fetched;
+    if state.edits_committed.is_some() {
+        state.edits_committed = Some(state.edits_fetched);
+    }
     write_processing(path, &state)?;
     writeln!(
         out,
@@ -621,7 +630,7 @@ pub(crate) fn takeover_to(
         generation: Some(generation),
         // Edits this machine already handled stay handled (ADR 0052).
         edits_committed: local.edits_committed,
-        edits_fetched: local.edits_committed,
+        edits_fetched: local.edits_committed.unwrap_or(0),
         ..ProcessingState::fresh(url, tenant, channel, reader)
     };
     write_processing(path, &state)?;

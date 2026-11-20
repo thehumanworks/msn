@@ -319,7 +319,7 @@ pub enum Command {
         channel: String,
         #[arg(long)]
         after: Option<String>,
-        /// Edit cursor from the previous page's editCursor (default 0, ADR 0052)
+        /// Edit cursor from the previous page's editCursor (default: the board's current one, ADR 0052)
         #[arg(long = "edits-after")]
         edits_after: Option<String>,
         #[arg(long)]

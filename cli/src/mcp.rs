@@ -304,7 +304,7 @@ impl Server {
             self.username.as_deref(),
             self.reader.as_deref(),
             after,
-            Some(edits_after),
+            edits_after,
             limit,
             max_bytes,
         )?;
@@ -312,11 +312,15 @@ impl Server {
         Ok(page)
     }
 
-    /// `editsAfter` when given, else the board's edit cursor from this session, else 0.
-    fn edits_after(&self, args: &Map<String, Value>, channel: &str) -> Result<u64, CliError> {
+    /// `editsAfter` when given, else the board's edit cursor from this session; None the first
+    /// time, which starts at the board's current edit position so no old edits replay.
+    fn edits_after(
+        &self,
+        args: &Map<String, Value>,
+        channel: &str,
+    ) -> Result<Option<u64>, CliError> {
         Ok(optional_int(args, "editsAfter", MAX_SAFE_INTEGER)?
-            .or_else(|| self.edit_cursors.get(channel).copied())
-            .unwrap_or(0))
+            .or_else(|| self.edit_cursors.get(channel).copied()))
     }
 
     fn note_edit_cursor(&mut self, channel: &str, page: &Value) {
@@ -922,7 +926,7 @@ pub fn tools() -> Vec<Value> {
             "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's pinned messages (read these first), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true. `edited` lists earlier messages whose senders changed the text since your last start or catch_up in this session; the new text replaces what you read.",
             json!({
                 "after": cursor("Exact message id to continue after; omit for the latest snapshot."),
-                "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else 0."),
+                "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else the board's current edit position."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the page (default 20)."},
                 "maxBytes": {"type":"integer","minimum":2048,"maximum":262144,"description":"Total result budget in bytes (default 32768)."},
             }),
@@ -935,7 +939,7 @@ pub fn tools() -> Vec<Value> {
             "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor. `edited` lists earlier messages, at or before the page start, whose senders changed the text since your last start or catch_up on this board in this session (or since editsAfter); the new text replaces what you read. Messages show editedAt when edited.",
             json!({
                 "after": cursor("Exact message id to continue after; omit to allow the latest snapshot."),
-                "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else 0. Continue while editsHasMore."),
+                "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else the board's current edit position. Continue while editsHasMore."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the tail (default 20)."},
                 "maxBytes": {"type":"integer","minimum":1024,"maximum":262144,"description":"Response budget in bytes (default 32768)."},
             }),
