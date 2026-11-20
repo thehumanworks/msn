@@ -1855,6 +1855,8 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("welcome").hidden = true;
     $("workspace").hidden = false;
     $("workspace-name").textContent = connection.tenant;
+    // An account workspace is a long generated id; the full id stays one long-press away.
+    $("workspace-name").title = connection.tenant;
     $("display-name").textContent = connection.username;
     $("channel-form").hidden = Boolean(identity.channel);
     $("invite-workspace").hidden = Boolean(identity.channel);
@@ -2064,6 +2066,20 @@ $("revoke-invite").addEventListener("click", async () => {
     status(error.message, true);
   }
 });
+
+// Board and template names are lower-case slugs. A phone keyboard offers a capital and a
+// space far more readily than a hyphen, and the browser's pattern bubble then refuses
+// "msn chat" without saying why. Type it the way it will be saved instead.
+for (const id of ["new-channel", "template-channel", "template-name"]) {
+  const field = $(id);
+  field.addEventListener("input", () => {
+    const slug = field.value.toLowerCase().replace(/\s/g, "-");
+    if (slug === field.value) return;
+    const caret = field.selectionStart;
+    field.value = slug;
+    field.setSelectionRange(caret, caret);
+  });
+}
 
 $("channel-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2833,6 +2849,7 @@ async function showAgents() {
     list.replaceChildren();
     if (!personas.length) {
       const empty = document.createElement("li");
+      empty.className = "agents-empty";
       empty.textContent = "No personas on this board yet.";
       list.append(empty);
     }

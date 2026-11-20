@@ -1807,6 +1807,102 @@ test("the interface fits a phone, refuses zoom, and stays usable behind the keyb
   expect(box.docWidth).toBeLessThanOrEqual(box.innerWidth);
 });
 
+// iOS does not shrink the page for the keyboard: it pans the visible area down inside the layout
+// viewport until the focused field clears the keyboard. A shell pinned to the top of the layout
+// viewport then sits above the screen, and the person sees an empty page over the keyboard.
+test("an iOS keyboard pan keeps every field and dialog in the visible area", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone viewport only");
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general/board`, {
+    headers: t.headers,
+    data: { credential: "b".repeat(64), goal: "Ship it" },
+  });
+  for (const name of ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"])
+    await request.put(`${t.path}/channels/${name}`, { headers: t.headers });
+  for (let i = 0; i < 12; i++)
+    await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username: "agent", text: `message ${i}` },
+    });
+  await connect(page, t);
+  await channelsPane(page);
+
+  // Keyboard shortcuts need a keyboard; a touch-only phone does not list them.
+  await expect(page.locator("#show-keys")).toBeHidden();
+
+  const full = await page.evaluate(() => window.innerHeight);
+  const visible = Math.round(full * 0.55);
+  const pan = full - visible;
+  const keyboard = (height, offsetTop) =>
+    page.evaluate(
+      ([height, offsetTop]) => {
+        const viewport = window.visualViewport;
+        Object.defineProperty(viewport, "height", { value: height, configurable: true });
+        Object.defineProperty(viewport, "offsetTop", { value: offsetTop, configurable: true });
+        viewport.dispatchEvent(new Event("resize"));
+        viewport.dispatchEvent(new Event("scroll"));
+      },
+      [height, offsetTop],
+    );
+  const inView = (selector) =>
+    page.evaluate(
+      ([selector, top, bottom]) => {
+        const rect = document.querySelector(selector).getBoundingClientRect();
+        return rect.height > 0 && rect.top >= top - 1 && rect.bottom <= bottom + 1;
+      },
+      [selector, pan, full],
+    );
+
+  // The board list: naming a new channel at the foot of the list, as in the report. A phone
+  // keyboard capitalises and spaces; the name is typed the way it will be saved.
+  await page.locator("#new-channel").pressSequentially("MSN chat");
+  await expect(page.locator("#new-channel")).toHaveValue("msn-chat");
+  await page.locator("#new-channel").focus();
+  await keyboard(visible, pan);
+  await expect
+    .poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().top)))
+    .toBe(pan);
+  await expect.poll(() => inView("#new-channel")).toBe(true);
+  expect(await inView(".pane-channels .bar")).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("board-list-keyboard.png") });
+  await page.locator("#new-channel").blur();
+  await keyboard(full, 0);
+  await expect.poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().top))).toBe(0);
+
+  // The composer: while writing, the board's toolbar steps aside for the conversation.
+  await openChannel(page, "general");
+  await expect(page.locator(".message")).toHaveCount(12);
+  await page.locator("#message").focus();
+  await keyboard(visible, pan);
+  await expect(page.locator(".toolbar")).toBeHidden();
+  await expect(page.locator("#search")).toBeHidden();
+  await expect.poll(() => inView("#message")).toBe(true);
+  expect(await inView("#channel-title")).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("composer-keyboard.png") });
+  await page.locator("#message").blur();
+  await expect(page.locator(".toolbar")).toBeVisible();
+  await keyboard(full, 0);
+
+  // A dialog field: the dialog centres in what the keyboard leaves, not behind it.
+  await page.locator("#board-settings").click();
+  await page.locator("#board-goal").focus();
+  await keyboard(visible, pan);
+  await expect.poll(() => inView("#board-dialog")).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("dialog-keyboard.png") });
+  await keyboard(full, 0);
+  await page.locator("#close-board").click();
+
+  // A board with no personas says so on one line, not one word per line.
+  await page.locator("#agents").click();
+  const empty = page.locator("#agents-list .agents-empty");
+  await expect(empty).toHaveText("No personas on this board yet.");
+  expect(await empty.evaluate((el) => el.getBoundingClientRect().height)).toBeLessThan(60);
+  await page.locator("#close-agents").click();
+});
+
 // The shell is pinned to the visual viewport, so any region that can grow past a short screen
 // needs its own scroll. Landscape is where that bites first.
 test("every control stays reachable on a landscape phone", async ({ page, request }, testInfo) => {
