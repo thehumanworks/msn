@@ -55,6 +55,19 @@ pub struct ProcessingState {
     /// The edit cursor of the last printed peek.
     #[serde(rename = "editsFetched", default, skip_serializing_if = "is_zero")]
     pub edits_fetched: u64,
+    /// Why default mode keeps this reader's progress local (ADR 0053): the server refused the
+    /// claim with this code (`processing_held`, `watch_only`, `username_bound`, `route_not_found`).
+    /// Remembered so later default-mode peeks do not ask again; `--resumable` claims and clears it.
+    #[serde(default, rename = "keptLocal", skip_serializing_if = "Option::is_none")]
+    pub kept_local: Option<String>,
+    /// When `kept_local` was recorded, in Unix seconds. Every reason except `processing_held` is
+    /// retried a day later, so an upgraded server or a changed key starts sending receipts again.
+    #[serde(
+        default,
+        rename = "keptLocalAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kept_local_at: Option<u64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -73,6 +86,8 @@ impl ProcessingState {
             generation: None,
             edits_committed: 0,
             edits_fetched: 0,
+            kept_local: None,
+            kept_local_at: None,
         }
     }
 
@@ -266,7 +281,7 @@ pub(crate) fn commit_to(
 fn refuse_resumable(state: &ProcessingState) -> Result<(), CliError> {
     if state.generation.is_some() {
         return Err(CliError::usage(
-            "This reader's progress is resumable (kept on the server). Pass --resumable or set MSN_RESUMABLE=1.",
+            "This reader's progress is resumable (kept on the server). Leave out --local and unset MSN_RESUMABLE=0 to keep using it.",
         ));
     }
     Ok(())
@@ -341,6 +356,16 @@ pub(crate) fn load_processing(
     };
     let edits_committed = edits(&saved.edits_committed, "editsCommitted")?;
     let edits_fetched = edits(&saved.edits_fetched, "editsFetched")?;
+    // A reason this CLI does not know is kept as is; only its presence matters.
+    let kept_local = match &saved.kept_local {
+        Some(Value::String(code)) if !code.is_empty() && code.len() <= 64 => Some(code.clone()),
+        None | Some(Value::Null) => None,
+        Some(_) => return Err(corrupt_state()),
+    };
+    let kept_local_at = match &saved.kept_local_at {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_watermark(value, "keptLocalAt")?),
+    };
     Ok(ProcessingState {
         server: saved.server,
         tenant: saved.tenant,
@@ -351,6 +376,8 @@ pub(crate) fn load_processing(
         generation,
         edits_committed,
         edits_fetched: edits_fetched.max(edits_committed),
+        kept_local,
+        kept_local_at,
     })
 }
 
@@ -400,6 +427,10 @@ struct ProcessingFile {
     edits_committed: Option<Value>,
     #[serde(rename = "editsFetched", default)]
     edits_fetched: Option<Value>,
+    #[serde(default, rename = "keptLocal")]
+    kept_local: Option<Value>,
+    #[serde(default, rename = "keptLocalAt")]
+    kept_local_at: Option<Value>,
 }
 
 /// The `&editsAfter=` tail of a peek request (ADR 0052).
@@ -431,7 +462,9 @@ pub(crate) fn note_edits(
         || rows.iter().any(|row| {
             row["tenant"].as_str() != Some(tenant)
                 || row["channel"].as_str() != Some(channel)
-                || row["id"].as_u64().is_none_or(|id| id == 0 || id > committed)
+                || row["id"]
+                    .as_u64()
+                    .is_none_or(|id| id == 0 || id > committed)
         })
     {
         return Err(invalid_page());
@@ -1058,7 +1091,16 @@ mod tests {
         assert!(read_state(&file).get("editsCommitted").is_none());
         peek(&mut Vec::new()).unwrap();
         assert!(recorded.lock().unwrap()[1].ends_with("&editsAfter=0"));
-        commit_to(&mut Vec::new(), &url, "team", "general", "alice", Some(&file), 5).unwrap();
+        commit_to(
+            &mut Vec::new(),
+            &url,
+            "team",
+            "general",
+            "alice",
+            Some(&file),
+            5,
+        )
+        .unwrap();
         assert_eq!(read_state(&file)["editsCommitted"], 3);
         assert_eq!(read_state(&file)["committedThrough"], 5);
         // An edited row past committedThrough is not an edit to processed work: refused.

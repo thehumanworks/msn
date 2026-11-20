@@ -306,7 +306,12 @@ fn given_two_message_pages_when_export_then_archive_contains_both_and_stops_at_h
         .collect();
     assert_eq!(
         edited,
-        [&Value::Null, &Value::Null, &json!("2026-11-20T10:00:00.000Z"), &Value::Null]
+        [
+            &Value::Null,
+            &Value::Null,
+            &json!("2026-11-20T10:00:00.000Z"),
+            &Value::Null
+        ]
     );
     assert_eq!(lines.last().unwrap()["record"], "completion");
     verify_archive_path(&out, |_| Ok(())).unwrap();

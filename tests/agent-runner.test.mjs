@@ -355,3 +355,14 @@ test("explicit state-dir persists launch and durable state under its private roo
   ])
     assert.throws(() => parseArgs(argv));
 });
+test("--local is saved as serverCommits: false; without it receipts are on (ADR 0053)", async (t) => {
+  const { env, path } = await fixture(t);
+  const local = parseArgs(["work", "--local", "--", process.execPath, "-e", "process.exit(0)"]);
+  assert.equal(local.local, true);
+  assert.equal((await buildConfig(local, path, env)).agents[0].serverCommits, false);
+  const plain = parseArgs(["work", "--", process.execPath, "-e", "process.exit(0)"]);
+  assert.equal((await buildConfig(plain, path, env)).agents[0].serverCommits, true);
+  // Saved with the launch configuration only, never as a bare resume or status flag.
+  assert.throws(() => parseArgs(["work", "--local"]), /--local is saved/);
+  assert.throws(() => parseArgs(["work", "--status", "--local"]));
+});

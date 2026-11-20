@@ -51,6 +51,8 @@ The checkpoint is a separate versioned event cursor, not a message processing or
 
 Cursor advancement happens only after each event's successful handling or deliberate filtering. A crash between a successful side effect and checkpoint persistence replays that input with the same idempotency key. Auth/permission failures stop dispatch. Retryable transport, 429 and 5xx failures reconnect with bounded exponential backoff without moving the cursor. Redirects are never followed. `--once` handles one bounded page and exits; continuous mode requires a positive server wait to avoid a tight poll loop.
 
+After each acknowledged `message.created` event, the dispatcher also commits that message id on the server for its reader, so processed-by receipts name it ([ADR 0053](adr/0053-receipts-by-default.md)). A failed handler is never acknowledged, so it is never committed. Like any watermark, the first commit also covers channel history from before the dispatcher's checkpoint began. The server generation is saved in the checkpoint as an optional `generation` field. A takeover (`msn takeover` elsewhere) makes the next commit fail with `processing_fenced`, and the dispatcher exits 5. A reader held elsewhere, a watch-only key or an older server leaves the dispatcher working with one stderr line and no receipts. `--local` or `MSN_RESUMABLE=0` keeps progress on this machine only.
+
 The journal begins when the event-capable Worker is deployed: it does not fabricate events for earlier messages. Use `msn start` and the canonical task/message APIs to establish pre-upgrade context. Deploying code is separate from migrating/copying channel history. No Worker is deployed by this PR.
 
 ## Verification

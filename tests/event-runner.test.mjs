@@ -41,12 +41,50 @@ async function fixture(t, events = [], messages = {}) {
   const state = join(dir, "checkpoint.json");
   await writeFile(handler, handlerSource);
   const requests = [];
-  const config = { eventStatus: 200, identityStatus: 200, page: null, events, messages, archived: false };
-  const server = createServer((req, res) => {
+  const config = {
+    eventStatus: 200,
+    identityStatus: 200,
+    page: null,
+    events,
+    messages,
+    archived: false,
+    // Server processing cursor for the reader (ADR 0034); null routes stand in for an older server.
+    processing: { generation: 0, committedThrough: 0, holder: null },
+    processingRoutes: true,
+  };
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     requests.push(url.pathname + url.search);
     assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
     res.setHeader("Content-Type", "application/json");
+    const route = /^\/api\/tenants\/team\/channels\/work\/processing\/reviewer\/(claim|commit)$/.exec(
+      url.pathname,
+    );
+    if (route && req.method === "POST") {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw);
+      const row = config.processing;
+      const fail = (status, code) => {
+        res.writeHead(status);
+        res.end(JSON.stringify({ error: { code, message: code } }));
+      };
+      if (!config.processingRoutes) return fail(404, "route_not_found");
+      if (route[1] === "claim") {
+        if (row.generation && !body.expectGeneration) return fail(409, "processing_held");
+        config.processing = {
+          generation: row.generation + 1,
+          committedThrough: row.committedThrough,
+          holder: body.holder,
+        };
+        res.writeHead(201);
+        return res.end(JSON.stringify({ reader: "reviewer", ...config.processing }));
+      }
+      if (body.generation !== row.generation) return fail(409, "processing_fenced");
+      if (body.through < row.committedThrough) return fail(409, "commit_behind");
+      row.committedThrough = body.through;
+      return res.end(JSON.stringify({ reader: "reviewer", ...row }));
+    }
     if (url.pathname === "/api/tenants/team") {
       res.writeHead(config.identityStatus);
       return res.end(JSON.stringify({ tenant: "team", username: "reviewer", usernamePrefix: null }));
@@ -92,7 +130,7 @@ async function fixture(t, events = [], messages = {}) {
     server.close();
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
-  function start({ code = "0", extra = [], argument = "literal", onceFlag = true } = {}) {
+  function start({ code = "0", extra = [], argument = "literal", onceFlag = true, env = {} } = {}) {
     const args = [
       SCRIPT,
       "--channel",
@@ -120,6 +158,7 @@ async function fixture(t, events = [], messages = {}) {
         MSN_PROFILE: "",
         MSN_USERNAME: "",
         MSN_ADMIN_TOKEN: "do-not-inherit-admin",
+        ...env,
       },
     });
     let stdout = "",
@@ -265,7 +304,10 @@ test("an edit to a message the handler already processed dispatches again with a
   assert.equal(JSON.parse(await readFile(f.state)).after, 1);
   // The sender edits message 4: the server appends one message.edited event, nothing else moves.
   f.config.events.push(event(2, 4, "message.edited"));
-  f.config.messages[4] = message(4, { text: "Review the patch, then the docs", editedAt: "2026-09-20T10:05:00.000Z" });
+  f.config.messages[4] = message(4, {
+    text: "Review the patch, then the docs",
+    editedAt: "2026-09-20T10:05:00.000Z",
+  });
   const result = await f.start().done;
   assert.equal(result.code, 0, result.stderr);
   const records = await f.records();
@@ -276,7 +318,11 @@ test("an edit to a message the handler already processed dispatches again with a
   assert.match(records[1].input.notice, /^Message 4 from planner was edited at 2026-09-20T10:05:00.000Z\./);
   assert.notEqual(records[1].key, records[0].key);
   assert.equal(JSON.parse(await readFile(f.state)).after, 2);
-  assert.ok(f.requests.filter((r) => r.startsWith("/api/tenants/team/events")).every((r) => r.includes("include=edits")));
+  assert.ok(
+    f.requests
+      .filter((r) => r.startsWith("/api/tenants/team/events"))
+      .every((r) => r.includes("include=edits")),
+  );
   // An edit to a message that was not addressed to this reader, or to its own message, stays quiet.
   f.config.events.push(event(3, 5, "message.edited"));
   f.config.messages[5] = message(5, { to: "another-agent", editedAt: "2026-09-20T10:06:00.000Z" });
@@ -428,4 +474,79 @@ test("HTTP redirect is not followed with workspace credentials", async (t) => {
   const [code] = await once(child, "close");
   assert.equal(code, 1);
   assert.equal(targetHits, 0);
+});
+
+// ADR 0053: acknowledged messages are committed on the server, so processed-by receipts name the reader.
+test("acknowledged messages are committed on the server and the generation is saved", async (t) => {
+  const f = await fixture(t, [event(1, null, "channel.created"), event(2), event(3, 3)], {
+    2: message(2),
+    3: message(3, { to: "another-agent" }),
+  });
+  const result = await f.start().done;
+  assert.equal(result.code, 0, result.stderr);
+  // 3 was not addressed to the reader but acknowledged: the watermark covers it.
+  assert.equal(f.config.processing.committedThrough, 3);
+  assert.equal(f.config.processing.generation, 1);
+  assert.match(f.config.processing.holder, /\(msn dispatcher\)$/);
+  const saved = JSON.parse(await readFile(f.state, "utf8"));
+  assert.equal(saved.generation, 1);
+  assert.equal(saved.after, 3);
+  // A restart reuses the saved generation instead of claiming again.
+  f.config.events.push(event(4, 4));
+  f.config.messages[4] = message(4);
+  assert.equal((await f.start().done).code, 0);
+  assert.equal(f.requests.filter((r) => r.endsWith("/claim")).length, 1);
+  assert.equal(f.config.processing.committedThrough, 4);
+});
+
+test("a failed handler is never committed on the server", async (t) => {
+  const f = await fixture(t, [event(1, 5)], { 5: message(5) });
+  assert.equal((await f.start({ code: "7" }).done).code, 1);
+  assert.equal(f.config.processing.committedThrough, 0);
+  assert.equal(f.requests.filter((r) => r.includes("/processing/")).length, 0);
+});
+
+test("a takeover elsewhere stops the dispatcher with exit 5", async (t) => {
+  const f = await fixture(t, [event(1, 1)], { 1: message(1) });
+  assert.equal((await f.start().done).code, 0);
+  f.config.processing.generation += 1; // msn takeover on another machine
+  f.config.events.push(event(2, 2));
+  f.config.messages[2] = message(2);
+  const result = await f.start().done;
+  assert.equal(result.code, 5);
+  assert.match(result.stderr, /processing_fenced/);
+  assert.equal(f.config.processing.committedThrough, 1);
+});
+
+test("a held reader or an older server leaves the dispatcher working with no receipts", async (t) => {
+  for (const setup of [
+    (f) => {
+      f.config.processing = { generation: 2, committedThrough: 0, holder: "old-box" };
+    },
+    (f) => {
+      f.config.processingRoutes = false;
+    },
+  ]) {
+    const f = await fixture(t, [event(1, 1), event(2, 2)], { 1: message(1), 2: message(2) });
+    setup(f);
+    const result = await f.start().done;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal((await f.records()).length, 2);
+    assert.match(result.stderr, /No processed-by receipts for reviewer/);
+    // One refused claim, then nothing more in this run.
+    assert.equal(f.requests.filter((r) => r.includes("/processing/")).length, 1);
+    assert.equal(f.config.processing.committedThrough, 0);
+  }
+});
+
+test("--local and MSN_RESUMABLE=0 keep progress on this machine", async (t) => {
+  const f = await fixture(t, [event(1, 1)], { 1: message(1) });
+  assert.equal((await f.start({ extra: ["--local"] }).done).code, 0);
+  assert.equal(f.requests.filter((r) => r.includes("/processing/")).length, 0);
+  assert.equal(JSON.parse(await readFile(f.state, "utf8")).generation, undefined);
+  f.config.events.push(event(2, 2));
+  f.config.messages[2] = message(2);
+  assert.equal((await f.start({ env: { MSN_RESUMABLE: "0" } }).done).code, 0);
+  assert.equal(f.requests.filter((r) => r.includes("/processing/")).length, 0);
+  assert.equal(parseArgs(["--channel", "work", "--state-file", "s", "--local", "--", "x"]).local, true);
 });

@@ -1,6 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { executeTurn } from "./process.mjs";
 import { diagnostic, HostError, turnLease, validateMessage, validateResult } from "./protocol.mjs";
+import { Fenced, ServerCommits, serverCommitsEnabled, unavailableHint } from "./server-commits.mjs";
 import { request, validateHostPage } from "./transport.mjs";
 
 /** Edge-triggered notification with an epoch to close check/register lost-wakeup races. */
@@ -56,6 +57,52 @@ export class HostRuntime {
     this.controls = new Map(config.agents.map((a) => [a.id, new AbortController()]));
     this.rotation = 0;
     this.fatal = null;
+    this.commits = new Map();
+  }
+  /** Per agent and channel: the server commit reporter, or null when receipts are off (ADR 0053). */
+  commitsFor(agent, channel) {
+    const key = JSON.stringify([agent.id, channel]);
+    if (!this.commits.has(key)) {
+      const connection = this.connections.get(agent.id);
+      this.commits.set(
+        key,
+        serverCommitsEnabled(agent.serverCommits, this.env)
+          ? new ServerCommits({
+              request,
+              connection,
+              channel,
+              reader: agent.username,
+              generation: this.store.serverGeneration(agent.id, channel),
+              save: (generation) => this.store.saveServerGeneration(agent.id, channel, generation),
+              role: "msn run",
+            })
+          : null,
+      );
+    }
+    return this.commits.get(key);
+  }
+  /**
+   * Sends the channel's finished-message watermark to the server, so receipts name this agent. Best
+   * effort: a failure never stops the agent, except a takeover, which must (ADR 0034).
+   */
+  async reportProcessed(agent, channel, signal) {
+    const commits = this.commitsFor(agent, channel);
+    if (!commits || signal.aborted) return;
+    try {
+      const result = await commits.commit(this.store.processedThrough(agent.id, channel), signal);
+      if (result.status === "unavailable" && !commits.reported) {
+        commits.reported = true;
+        this.emit("receipts.unavailable", {
+          agent: agent.id,
+          channel,
+          reason: result.reason,
+          hint: unavailableHint(result.reason),
+        });
+      }
+    } catch (error) {
+      if (!(error instanceof Fenced)) throw error;
+      this.disable(agent, new HostError("processing_fenced"));
+    }
   }
   emit(type, fields = {}) {
     this.log({ type, hostId: this.config.hostId, ...fields });
@@ -117,6 +164,10 @@ export class HostRuntime {
     }
   }
   async dispatch(agent, job, signal) {
+    await this.dispatchTurn(agent, job, signal);
+    if (job.event) await this.reportProcessed(agent, job.channel, signal);
+  }
+  async dispatchTurn(agent, job, signal) {
     const connection = this.connections.get(agent.id);
     try {
       let message = null;

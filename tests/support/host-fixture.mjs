@@ -54,6 +54,8 @@ export async function hostFixture(t, options = {}) {
     denied = new Set(),
     deleted = new Set();
   const board = { channel: "work", goal: "Test shared board", status: "active", revision: 1 };
+  // Server processing cursors (ADR 0034) by "channel/reader": what receipts (ADR 0040) read.
+  const processing = new Map();
   let dropNextReply = false,
     rejectNextSend = false;
   const server = createServer(async (req, res) => {
@@ -115,6 +117,59 @@ export async function hostFixture(t, options = {}) {
       return;
     }
     const channel = url.pathname.split("/")[5];
+    const route = /^\/api\/tenants\/team\/channels\/([a-z0-9_-]+)\/processing\/([^/]+)\/(claim|commit)$/.exec(
+      url.pathname,
+    );
+    if (route && req.method === "POST") {
+      // A server before ADR 0034 has no such route; a fixture option stands in for it.
+      if (options.processing === false)
+        return respond({ error: { code: "route_not_found", message: "Unknown route." } }, 404);
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw);
+      const reader = decodeURIComponent(route[2]);
+      // Like a key bound to a name: an agent commits only its own reader.
+      assert.equal(reader, who);
+      const key = `${route[1]}/${reader}`;
+      const row = processing.get(key) ?? { generation: 0, committedThrough: 0, holder: null };
+      if (route[3] === "claim") {
+        if (row.generation && !body.expectGeneration)
+          return respond(
+            {
+              error: {
+                code: "processing_held",
+                message: "Held.",
+                details: {
+                  generation: row.generation,
+                  holder: row.holder,
+                  committedThrough: row.committedThrough,
+                },
+              },
+            },
+            409,
+          );
+        if (body.expectGeneration !== row.generation)
+          return respond({ error: { code: "processing_generation_mismatch", message: "Raced." } }, 409);
+        const next = {
+          generation: row.generation + 1,
+          holder: body.holder ?? null,
+          committedThrough: row.generation ? row.committedThrough : (body.committedThrough ?? 0),
+        };
+        processing.set(key, next);
+        changes.emit("processing");
+        return respond({ reader, ...next }, row.generation ? 200 : 201);
+      }
+      if (!row.generation) return respond({ error: { code: "processing_not_claimed", message: "No." } }, 404);
+      if (body.generation !== row.generation)
+        return respond({ error: { code: "processing_fenced", message: "Taken over." } }, 409);
+      if (body.through < row.committedThrough)
+        return respond({ error: { code: "commit_behind", message: "Behind." } }, 409);
+      if (body.through > messages.filter((m) => m.channel === route[1]).length)
+        return respond({ error: { code: "invalid_cursor", message: "Beyond head." } }, 400);
+      row.committedThrough = body.through;
+      changes.emit("processing");
+      return respond({ reader, ...row });
+    }
     if (req.method === "POST") {
       let raw = "";
       for await (const chunk of req) raw += chunk;
@@ -210,6 +265,7 @@ export async function hostFixture(t, options = {}) {
           permissionMode: "yolo",
           attempts: 1,
           timeoutMs: options.timeoutMs === undefined ? 1200 : options.timeoutMs,
+          ...(options.serverCommits === false ? { serverCommits: false } : {}),
         })),
       },
       dir,
@@ -238,6 +294,7 @@ export async function hostFixture(t, options = {}) {
     CAROL_TOKEN: "carol-secret-fixture",
     HOST_TEST_RECORDS: records,
     MSN_ADMIN_TOKEN: "must-not-pass",
+    ...options.env,
   };
   let controller, running, runError;
   // start(ids) restarts against the same state directory with a changed roster (ADR 0025).
@@ -315,6 +372,20 @@ export async function hostFixture(t, options = {}) {
     messages,
     events,
     requests,
+    processing,
+    /** Resolves when `reader` has committed through at least `id` on the server. */
+    committed: (reader, id, timeout) =>
+      until(
+        "processing",
+        [processing],
+        (map) => (map.get(`work/${reader}`)?.committedThrough ?? 0) >= id,
+        timeout,
+      ),
+    /** Another machine takes the reader over, as `msn takeover` does. */
+    takeover(reader) {
+      const row = processing.get(`work/${reader}`);
+      processing.set(`work/${reader}`, { ...row, generation: row.generation + 1, holder: "other-box" });
+    },
     logs,
     deleted,
     status: () => inspectState(config),

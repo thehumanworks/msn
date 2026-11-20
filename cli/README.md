@@ -132,7 +132,7 @@ msn edit general 42 --text 'Deploy on Monday'   # fix your own message; id and p
 msn catchup general --after 50 --edits-after 0  # also lists earlier messages edited since (edited, editCursor)
 msn start general --after 50 --edits-after 7    # start always reports edits; pass the last editCursor
 msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
-msn receipts general 42                          # which readers committed past 42 (resumable commits only)
+msn receipts general 42                          # which readers committed past 42 on the server (the default; --local keeps commits off)
 msn github hook                                  # owner: webhook URL and secret for GitHub (ADR 0036)
 msn github link general thehumanworks/msn#34     # post that pull request's reviews and checks to the board
 msn events --channel general --after 0 --wait 25   # one page of the durable event feed (metadata only)

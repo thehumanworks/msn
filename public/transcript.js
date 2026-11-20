@@ -113,7 +113,9 @@ export function renderTranscript(meta, messages) {
   );
   out.push(`- Exported: ${utc(exportedAt)}`);
   out.push("");
-  out.push("Times are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.");
+  out.push(
+    "Times are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.",
+  );
   const shown = new Set();
   for (const message of messages) {
     out.push("", "---", "");

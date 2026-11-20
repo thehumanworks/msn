@@ -276,7 +276,10 @@ describe("edit a message you sent (ADR 0052)", () => {
     const claim = (await (
       await call(f.tenant, `${reader}/claim`, f.agent, "POST", { expectGeneration: 0 })
     ).json()) as { generation: number };
-    await call(f.tenant, `${reader}/commit`, f.agent, "POST", { generation: claim.generation, through: second.id });
+    await call(f.tenant, `${reader}/commit`, f.agent, "POST", {
+      generation: claim.generation,
+      through: second.id,
+    });
     const fenced = await page(`processingReader=dev&generation=${claim.generation}&editsAfter=0`);
     expect(fenced.edited?.map((m) => m.id)).toEqual([first.id, second.id]);
     expect(fenced.editCursor).toBe(partial.editCursor);
