@@ -1671,6 +1671,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
   closeMentions();
+  mention.dismissed = -1;
   showFiles(selectedDraft);
   clearLabel();
   clearSearch();
@@ -2362,6 +2363,8 @@ $("send-form").addEventListener("submit", async (event) => {
       state.recipient = "";
       state.mentionTo = null;
       if (state.replyTo === replyId) state.replyTo = null;
+      // A closed @ belonged to the sent text; the next message's @ opens the list again.
+      mention.dismissed = -1;
     }
     state.files = state.files.filter((file) => !files.includes(file));
     if (state.retry === attempt) state.retry = null;
@@ -2426,6 +2429,8 @@ $("recipient").addEventListener("input", () => {
   }
 });
 $("message").addEventListener("keydown", (event) => {
+  // An input method still composing owns Enter and the arrows: it is choosing a word, not sending.
+  if (event.isComposing || event.keyCode === 229) return;
   if (mentionKey(event)) return;
   // Enter sends; Shift+Enter inserts a newline. Ctrl/⌘+Enter always sends.
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey || !event.shiftKey)) {
@@ -3253,8 +3258,9 @@ async function loadPersonas(connection, name, state) {
     state.personas = personas;
   } catch (error) {
     if (error.name === "AbortError") return;
-    // Senders still work; a failure is retried at the next @.
-    if (error.status === 404) state.personas = [];
+    // A plain channel (404) has no personas; any other failure is not retried on every key
+    // either. Senders still work, and the next visit to the board asks again.
+    state.personas = [];
   } finally {
     state.personasLoading = false;
   }

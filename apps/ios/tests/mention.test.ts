@@ -9,6 +9,7 @@ import {
   insertMention,
   MAX_SUGGESTIONS,
   mentionAt,
+  nextDismissed,
   people,
   suggest,
 } from "../src/core/mention.ts";
@@ -67,6 +68,12 @@ test("a pick writes @name; the first pick fills To; deleting it clears To", () =
   assert.deepEqual(address, { to: "lead", mentionTo: "lead" });
   assert.deepEqual(addressAfterEdit("lead", "lead", "hi @lea"), { to: "", mentionTo: null });
   assert.deepEqual(addressAfterEdit("ops", "lead", "hi"), { to: "ops", mentionTo: null });
+});
+
+test("a closed list stays closed for its @ only while that @ is being typed", () => {
+  assert.equal(nextDismissed({ start: 0 }, 0), 0, "typing on after the closed @");
+  assert.equal(nextDismissed(null, 0), -1, "the @ was deleted or ended: forget the close");
+  assert.equal(nextDismissed(mentionAt("@b", 2), nextDismissed(null, 0)), -1, "a new @ in the same place opens");
 });
 
 test("decodePersonas keeps names and listening, and skips anything malformed", () => {

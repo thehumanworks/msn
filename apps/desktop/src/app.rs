@@ -1627,6 +1627,13 @@ impl MsnDesktopApp {
             }
             Action::Select(name) => {
                 self.selected = None;
+                // The composer is shared by every board: a To filled by an @ pick named someone
+                // on the board being left, so it goes; a To typed by hand stays (ADR 0055).
+                if self.composer.mention_to.take().as_deref() == Some(self.composer.to.as_str()) {
+                    self.composer.to.clear();
+                }
+                self.mention = None;
+                self.mention_dismissed = None;
                 let commands = self.state.select_channel(name);
                 self.dispatch_all(commands);
             }
@@ -1730,6 +1737,7 @@ impl MsnDesktopApp {
             self.composer.to.clear();
         }
         self.mention = None;
+        self.mention_dismissed = None;
         // A reply target is for one message (ADR 0054); the next message starts unaddressed.
         self.composer.reply_to.clear();
         // Your reply folds into its thread; open it so the reply does not seem to vanish.
@@ -3156,6 +3164,21 @@ mod layout_tests {
         assert_eq!(pending[0].to.as_deref(), Some("Jamie"));
         assert_eq!(pending[0].text, "Please @Jamie and @reviewer @le @j jk");
         assert_eq!(app.composer.to, "");
+
+        // The composer is shared by every board: switching boards drops a To an @ pick filled
+        // and forgets a closed @, but keeps a To typed by hand.
+        press(&ctx, &mut app, text("@l"));
+        press(&ctx, &mut app, key(egui::Key::Enter));
+        press(&ctx, &mut app, text("@j"));
+        press(&ctx, &mut app, escape());
+        assert_eq!(app.composer.to, "lead");
+        assert!(app.mention_dismissed.is_some());
+        app.perform(Action::Select("design".into()));
+        assert_eq!(app.composer.to, "");
+        assert!(app.mention.is_none() && app.mention_dismissed.is_none());
+        app.composer.to = "ops".into();
+        app.perform(Action::Select("general".into()));
+        assert_eq!(app.composer.to, "ops");
     }
 
     #[test]

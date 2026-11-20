@@ -3527,4 +3527,49 @@ test("typing @ suggests the board's people; a pick writes @name and fills an emp
   await box.fill("");
   await box.dispatchEvent("input");
   await expect(to).toHaveValue("ops");
+  await to.fill("");
+
+  // A list closed with Escape and then sent does not stay closed for the next message's @.
+  await box.pressSequentially("@b");
+  await expect(list).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(list).toBeHidden();
+  await page.keyboard.press("Enter");
+  await expect(box).toHaveValue("");
+  await box.pressSequentially("@b");
+  await expect(list).toBeVisible();
+
+  // An input method still composing owns Enter: it neither picks nor sends.
+  await box.evaluate((node) =>
+    node.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true }),
+    ),
+  );
+  await expect(box).toHaveValue("@b");
+  await expect(list).toBeVisible();
+});
+
+test("a failed persona load is not retried on every key after @ (ADR 0055)", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential: "f".repeat(64), goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  let asked = 0;
+  await page.route("**/channels/work/personas", (route) => {
+    asked += 1;
+    return route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"down"}' });
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#message").pressSequentially("@abc");
+  await expect.poll(() => asked).toBe(1);
+  await page.locator("#message").pressSequentially("def");
+  await page.waitForTimeout(300);
+  expect(asked).toBe(1);
+  await expect(page.locator("#status")).not.toHaveClass(/error/);
 });

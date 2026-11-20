@@ -6,6 +6,7 @@ import {
   addressAfterPick,
   insertMention,
   mentionAt,
+  nextDismissed,
   type Persona,
   people,
   suggest,
@@ -60,6 +61,12 @@ export function Composer({
 
   const at = selection.start === selection.end ? mentionAt(text, selection.start) : null;
   const open = at !== null && at.start !== dismissed;
+  // Once no @ is being typed, a Close is forgotten: typing @ again (even in the same place)
+  // opens the list again.
+  const forget = nextDismissed(at, dismissed);
+  useEffect(() => {
+    if (forget !== dismissed) setDismissed(forget);
+  }, [forget, dismissed]);
   const options = useMemo(
     () => (open && at ? suggest(people(personas ?? [], messages, me), at.query) : []),
     [open, at?.query, personas, messages, me],

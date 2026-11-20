@@ -93,6 +93,14 @@ export function hasMention(text: string, name: string): boolean {
   return false;
 }
 
+/**
+ * The @ the reader closed, after the caret moved: once no @ is being typed it is forgotten, so
+ * typing @ again (even in the same place) opens the list again. -1 means none.
+ */
+export function nextDismissed(at: { start: number } | null, dismissed: number): number {
+  return at === null ? -1 : dismissed;
+}
+
 export type Address = { to: string; mentionTo: string | null };
 
 /** To after a pick: the picked name when To is empty; otherwise To stays. */
