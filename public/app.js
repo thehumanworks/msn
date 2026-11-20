@@ -502,6 +502,13 @@ function appendMessage(message, target = $("messages")) {
     }
     article.append(row);
   }
+  // Reactions (ADR 0047) on every log message; the chips toggle your own.
+  if (target === $("messages") || message.reactions) {
+    const reactions = document.createElement("div");
+    reactions.className = "message-reactions";
+    fillReactions(reactions, message, target === $("messages"));
+    article.append(reactions);
+  }
   if (target === $("messages")) {
     const receipts = document.createElement("div");
     receipts.className = "message-receipts";
@@ -722,6 +729,115 @@ async function loadReceipts(connection, name, state, force = false) {
     const element = article.querySelector(":scope > .message-receipts");
     const message = byId.get(Number(article.dataset.id));
     if (element && message) showReceipt(element, message, state.receipts);
+  }
+}
+
+/*
+ * Reactions (ADR 0047): a fixed set, one of each per name per message. Reacting sends no message,
+ * so the log, cursors and read marks never move; the chips are re-read now and then instead.
+ */
+const REACTIONS = [
+  ["done", "✓", "Done"],
+  ["seen", "👀", "Seen"],
+  ["yes", "👍", "Yes"],
+  ["no", "✗", "No"],
+];
+const REACTION_REFRESH_MS = 15_000;
+
+function fillReactions(row, message, interactive = true) {
+  row.replaceChildren();
+  const me = session?.username;
+  const canReact =
+    interactive && Boolean(session) && !session.watchOnly && !archivedBoards.has(message.channel);
+  for (const [kind, symbol, label] of REACTIONS) {
+    const names = message.reactions?.[kind] ?? [];
+    if (!names.length && !canReact) continue;
+    const mine = names.includes(me);
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = names.length ? "reaction-chip" : "reaction-chip reaction-add";
+    chip.dataset.kind = kind;
+    chip.setAttribute("aria-pressed", String(mine));
+    const glyph = document.createElement("span");
+    glyph.className = "reaction-glyph";
+    glyph.textContent = symbol;
+    chip.append(glyph);
+    if (names.length) chip.append(` ${names.length}`);
+    // Names are untrusted: textContent and attributes only.
+    chip.title = names.length
+      ? `${label}: ${names.join(", ")}${canReact ? (mine ? " · click to remove yours" : " · click to add yours") : ""}`
+      : `React: ${label.toLowerCase()}`;
+    chip.setAttribute(
+      "aria-label",
+      names.length ? `${label}, ${names.length}: ${names.join(", ")}` : `React ${label.toLowerCase()}`,
+    );
+    if (canReact) chip.addEventListener("click", () => react(message, kind, !mine));
+    else chip.disabled = true;
+    row.append(chip);
+  }
+  row.hidden = !row.childElementCount;
+}
+
+/** Applies current reactions to the cached message and every row that shows it. */
+function showReactions(state, id, reactions) {
+  for (const message of state.messages)
+    if (message.id === id) {
+      if (reactions && Object.keys(reactions).length) message.reactions = reactions;
+      else delete message.reactions;
+    }
+  const message = state.messages.find((item) => item.id === id);
+  if (!message) return;
+  for (const article of $("messages").querySelectorAll(`article[data-id="${id}"]`)) {
+    const row = article.querySelector(":scope > .message-reactions");
+    if (row) fillReactions(row, message);
+  }
+}
+
+async function react(message, kind, add) {
+  if (!session || !channel) return;
+  const connection = session;
+  const name = channel;
+  try {
+    const data = await api(
+      `/channels/${name}/messages/${message.id}/reactions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: connection.username, kind, ...(add ? {} : { remove: true }) }),
+      },
+      connection,
+    );
+    const state = connection.channels.get(name);
+    if (state && session === connection && channel === name)
+      showReactions(state, message.id, data.message?.reactions);
+  } catch (error) {
+    if (error.name !== "AbortError") status(error.message, true);
+  }
+}
+
+/** Re-reads reactions for the loaded messages. Failure keeps what is shown. */
+async function loadReactions(connection, name, state) {
+  if (!state.messages.length) return;
+  state.reactionsAt = Date.now();
+  const ids = state.messages.map((message) => message.id);
+  const before = Math.max(...ids) + 1;
+  let after = Math.min(...ids) - 1;
+  const found = new Map();
+  try {
+    for (let page = 0; page < 5; page++) {
+      const data = await api(`/channels/${name}/reactions?after=${after}&before=${before}`, {}, connection);
+      for (const entry of data.reactions) found.set(entry.id, entry.reactions);
+      if (!data.hasMore) break;
+      after = data.nextAfter;
+    }
+  } catch {
+    return;
+  }
+  if (session !== connection || channel !== name) return;
+  for (const message of state.messages) {
+    const next = found.get(message.id);
+    if (JSON.stringify(next ?? null) !== JSON.stringify(message.reactions ?? null))
+      showReactions(state, message.id, next);
   }
 }
 
@@ -1311,6 +1427,9 @@ async function poll(live = false) {
       state.hasMore = data.hasMore;
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
       if (Date.now() - (state.pinsAt ?? 0) > PIN_REFRESH_MS) void loadPins(connection, selected);
+      // Reactions send no message either (ADR 0047).
+      if (Date.now() - (state.reactionsAt ?? 0) > REACTION_REFRESH_MS)
+        void loadReactions(connection, selected, state);
       if (Date.now() - (connection.unreadAt ?? 0) > UNREAD_REFRESH_MS) void loadUnread(connection);
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
@@ -1410,6 +1529,7 @@ function selectChannel(name, { reset = false } = {}) {
   showCheckpoint(state);
   showPins(state);
   void loadPins(session, name);
+  void loadReactions(session, name, state);
   // Capture where the reader stopped before this visit's own reading moves the mark.
   const mark = state.since?.mark ?? readMark(name);
   showSince(state);

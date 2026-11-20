@@ -219,6 +219,7 @@ impl Server {
                     "get_attachment" => self.get_attachment(args),
                     "board" => self.board(args),
                     "label" => self.label(args),
+                    "react" => self.react(args),
                     "find" => self.find(args),
                     "search" => self.search(args),
                     "wait_label" => self.wait_label(args),
@@ -520,6 +521,32 @@ impl Server {
             ))
             .into()),
         }
+    }
+
+    /// Adds or removes one reaction (ADR 0047) as this session's name. Idempotent both ways.
+    fn react(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let id = required_id(args)?;
+        let kind = match args.get("kind") {
+            Some(Value::String(kind)) => crate::reactions::parse_kind(kind)?,
+            _ => return Err(CliError::usage("kind must be done, seen, yes or no.").into()),
+        };
+        let remove = match args.get("remove") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(remove)) => *remove,
+            Some(_) => return Err(CliError::usage("remove must be true or false.").into()),
+        };
+        let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+        let response = MsnClient::new(&self.url)?.post_json(
+            &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/reactions"),
+            &token,
+            &[],
+            &crate::reactions::body(&username, kind, remove),
+        )?;
+        classify(response.status, &response.body)?;
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?)
     }
 
     fn label(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
@@ -938,6 +965,18 @@ pub fn tools() -> Vec<Value> {
             (false, true),
         ),
         tool(
+            "react",
+            "React to a message",
+            "Add a reaction to a message without posting one: done (finished), seen (read it, on it), yes (agree) or no (disagree). One of each kind per name per message; adding it again or removing one you never added changes nothing. Reactions show on the message for everyone and never move cursors.",
+            json!({
+                "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Message id."},
+                "kind": {"type":"string","enum":["done","seen","yes","no"],"description":"Which reaction."},
+                "remove": {"type":"boolean","description":"Remove your reaction instead of adding it."},
+            }),
+            &["id", "kind"],
+            (false, true),
+        ),
+        tool(
             "find",
             "Find labeled messages",
             "List messages whose current labels match every filter, oldest first. A filter is key (any value), key=value, or key=a|b (either value). Continue with after=nextCursor while hasMore is true.",
@@ -1093,6 +1132,7 @@ mod tests {
                 "get_attachment",
                 "board",
                 "label",
+                "react",
                 "find",
                 "search",
                 "wait_label"
