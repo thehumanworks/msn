@@ -120,6 +120,11 @@ export class ApiClient {
     return { message: decodeMessage(r?.message), historyRevision: r.historyRevision };
   }
 
+  /** Every reader's explicit commit position on a channel (ADR 0040); decode with decodeReceipts. */
+  async channelReceipts(channel: string, signal?: AbortSignal): Promise<unknown> {
+    return this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/receipts`, { signal });
+  }
+
   /** Board search (ADR 0037): words in `q`, an optional sender, older pages with `before`. */
   async searchMessages(
     channel: string,

@@ -513,6 +513,15 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
+.message-receipts {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.message-receipts[hidden] {
+  display: none;
+}
 .message-labels {
   display: flex;
   flex-wrap: wrap;

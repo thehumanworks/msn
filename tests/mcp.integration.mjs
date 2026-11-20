@@ -48,11 +48,11 @@ async function cli(args) {
 }
 
 /** A minimal MCP stdio client: newline-delimited JSON-RPC, responses matched by id. */
-function mcp(profile) {
+function mcp(profile, extraEnv = {}) {
   // The scratch directory is the MCP server's working directory, where saveTo may write.
   const p = spawn(binary, ["--profile", profile, "mcp", "--channel", "work"], {
     cwd: dir,
-    env,
+    env: { ...env, ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   p.errors = "";
@@ -135,6 +135,7 @@ try {
       "peek",
       "commit",
       "show_message",
+      "receipts",
       "get_attachment",
       "board",
       "label",
@@ -359,6 +360,27 @@ try {
   console.log(
     "PASS: labels on send, conditional claims, filters, waiting on a label and search over MCP and CLI",
   );
+
+  // Receipts (ADR 0040): a local commit is invisible, so the reviewer is "no server commit",
+  // never "not yet". After a resumable commit the reviewer is processed. The sender is never listed.
+  const before = await cli(["--profile", "lead", "receipts", "work", String(sent.message.id)]);
+  assert.deepEqual(before.processed, []);
+  assert.deepEqual(before.notYet, []);
+  assert.ok(before.noServerCommit.some((r) => r.name === "reviewer"));
+  assert.ok(!before.noServerCommit.some((r) => r.name === "lead"), "the sender is left out");
+  const resumable = mcp("reviewer", { MSN_RESUMABLE: "1" });
+  await resumable.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+  const all = await resumable.ok("peek", { wait: 0, limit: 100 });
+  assert.equal(all.hasMore, false);
+  await resumable.ok("commit", { through: all.nextCursor });
+  const after = await resumable.ok("receipts", { id: sent.message.id });
+  assert.deepEqual(
+    after.processed.map((r) => r.name),
+    ["reviewer"],
+  );
+  assert.deepEqual(after.notYet, []);
+  await resumable.close();
+  console.log("PASS: receipts name only server commits and never the sender");
 } finally {
   for (const p of children)
     if (p.exitCode === null) {

@@ -134,6 +134,9 @@ pub struct ChannelState {
     pub task_board: Option<Value>,
     pub task_board_error: Option<String>,
     pub search: SearchState,
+    /// Explicit commit positions (ADR 0040); empty until loaded or on a server without them.
+    pub receipts: Vec<msn_cli::receipts::Receipt>,
+    pub receipts_flight: Flight,
 }
 
 impl ChannelState {
@@ -222,6 +225,23 @@ impl AppState {
             channel_generation,
             channel,
         })
+    }
+
+    /// Reloads processed-by receipts for the open channel; the app also calls this on a timer,
+    /// because a commit is not a channel event.
+    pub fn receipts_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        state
+            .receipts_flight
+            .request()
+            .then_some(Command::LoadReceipts {
+                generation,
+                channel_generation,
+                channel,
+            })
     }
 
     fn snapshots_command(&mut self) -> Option<Command> {
@@ -326,6 +346,11 @@ impl AppState {
                     ..
                 }
                 | Command::LoadSnapshots {
+                    generation: g,
+                    channel_generation: c,
+                    ..
+                }
+                | Command::LoadReceipts {
                     generation: g,
                     channel_generation: c,
                     ..
@@ -479,6 +504,29 @@ impl AppState {
                     revision,
                     board,
                 )
+            }
+            UiEvent::Receipts {
+                generation,
+                channel_generation,
+                channel,
+                receipts,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                state.receipts = receipts;
+                if state.receipts_flight.finish() {
+                    vec![Command::LoadReceipts {
+                        generation,
+                        channel_generation,
+                        channel,
+                    }]
+                } else {
+                    Vec::new()
+                }
             }
             UiEvent::Snapshots {
                 generation,
@@ -647,7 +695,9 @@ impl AppState {
                 state.task_board_error = Some(message);
             }
         }
-        if rerun { vec![again] } else { Vec::new() }
+        let mut commands = if rerun { vec![again] } else { Vec::new() };
+        commands.extend(self.receipts_command());
+        commands
     }
 
     fn apply_coordination_events(
@@ -748,6 +798,14 @@ impl AppState {
                 if let Some(state) = self.channel.as_mut() {
                     state.search.inflight = false;
                     state.search.error = Some(message);
+                }
+            }
+            // Receipts are an extra: an older server or a failed load keeps the last line shown.
+            "receipts" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.receipts_flight.fail();
                 }
             }
             "sync-channel" | "load-snapshots" => {
@@ -956,6 +1014,61 @@ mod tests {
         });
         assert_eq!(state.selected_channel.as_deref(), Some("random"));
         assert!(state.channel.as_ref().unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn a_sync_reloads_receipts_once_and_only_the_open_channel_keeps_them() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let commands = synced(&mut state, vec![msg(1, "a")], 1, 0);
+        assert!(
+            matches!(commands.as_slice(), [Command::LoadReceipts { channel, .. }] if channel == "general")
+        );
+        // A second request while one is in flight is coalesced, not sent twice.
+        assert!(state.receipts_command().is_none());
+        let receipt = msn_cli::receipts::Receipt {
+            name: "lead".into(),
+            reader: Some("p1".into()),
+            persona_id: Some("p1".into()),
+            committed_through: Some(1),
+            updated_at: None,
+        };
+        let cg = state.channel_generation;
+        let rerun = state.apply(UiEvent::Receipts {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            receipts: vec![receipt.clone()],
+        });
+        assert!(matches!(rerun.as_slice(), [Command::LoadReceipts { .. }]));
+        assert_eq!(
+            state.channel.as_ref().unwrap().receipts,
+            vec![receipt.clone()]
+        );
+        // A failed load is quiet and keeps what was shown.
+        state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: Some(cg),
+            context: "receipts",
+            message: "404".into(),
+            retryable: false,
+            key: None,
+        });
+        assert_eq!(state.status, None);
+        assert_eq!(
+            state.channel.as_ref().unwrap().receipts,
+            vec![receipt.clone()]
+        );
+        assert!(state.receipts_command().is_some());
+        // An answer for a channel that is no longer open is dropped.
+        state.select_channel("random".into());
+        state.apply(UiEvent::Receipts {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            receipts: vec![receipt],
+        });
+        assert!(state.channel.as_ref().unwrap().receipts.is_empty());
     }
 
     #[test]

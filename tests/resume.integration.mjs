@@ -120,6 +120,17 @@ try {
   );
   console.log("PASS: first agent claims the reader and commits on the server");
 
+  // Receipts (ADR 0040): human sent every task, so its own commits are never listed on them,
+  // and an unknown message is an error.
+  const own = await ok("old", ["receipts", "general", String(first.nextCursor)]);
+  assert.deepEqual([own.processed, own.notYet, own.noServerCommit], [[], [], []]);
+  const toolReceipts = await mcpTool("old", "receipts", { id: inFlight.nextCursor });
+  assert.equal(toolReceipts.isError, false, JSON.stringify(toolReceipts));
+  assert.deepEqual(toolReceipts.structuredContent.processed, []);
+  const missing = await run("old", ["receipts", "general", "999"]);
+  assert.notEqual(missing.code, 0);
+  console.log("PASS: receipts leave the sender out and refuse unknown messages");
+
   // A replacement never takes over silently.
   const held = await run("new", ["peek", "general"]);
   assert.equal(held.code, 5, held.errors);
