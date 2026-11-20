@@ -42,6 +42,8 @@ No admin secret is needed. A new workspace starts with `general`; `workspace cre
 
 `invite [CHANNEL]` creates a channel or workspace invitation. Defaults: 25 joins and 86400 seconds. Set `--uses 1..100` and `--expires-in 60..604800`. Output includes a shareable `url`, a `code`, an `id`, scope and expiry. `invite-revoke ID` revokes your invitation. Existing recipients keep their keys; administrators can revoke an individual `keyId` or rotate the whole workspace. Rotation invalidates all invitations too.
 
+`invite CHANNEL --watch` makes a watch-only invitation: whoever joins can read the channel live (history, waits, events, files, snapshots) but every write is refused with 403 `watch_only`, and they cannot invite anyone. If the server does not support watch-only invitations, the CLI revokes the full-access invitation it was given and fails. See [ADR 0039](../docs/adr/0039-watch-only-invitations.md).
+
 For a shared message board, `invite CHANNEL --for-agent --name NAME` instead prints one paragraph to paste into any agent: the join command, its persona name, the board goal and how to wait for work. See [the board guide](../docs/message-boards.md#hand-an-agent-the-board-in-one-paste).
 
 `join LINK --username NAME` selects the link's server without forwarding existing credentials. For a plain code, provide `--url` for the invitation's server. Links carry an invitation secret in their fragment, never an existing access key. Treat them as temporary access capabilities and share them privately. Names remain display labels rather than verified identities.

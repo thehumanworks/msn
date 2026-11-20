@@ -880,6 +880,10 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
       note = `Display name · your access key requires the prefix “${identity.usernamePrefix}”`;
     }
     connection.sharedChannel = identity.sharedChannel === true;
+    // Watch-only keys (ADR 0039) read live; the server refuses every write, so hide the controls.
+    connection.watchOnly = identity.watchOnly === true;
+    $("workspace").classList.toggle("watching", connection.watchOnly);
+    if (connection.watchOnly) note = "Watch only · you can read along but not post";
     connection.owner = identity.owner === true;
     connection.marks = connection.remember ? parseMarks(storage.get(MARKS_KEY(connection.tenant))) : {};
     if (identity.sharedChannel) {
@@ -1028,6 +1032,8 @@ let inviteChannel = null;
 let activeInvite = null;
 async function openInvite(scope) {
   $("revoke-invite").hidden = false;
+  $("invite-watch-instead").hidden = true;
+  $("invite-watch").checked = false;
   if (scope) {
     try {
       const shared = await api(`/channels/${scope}/board/connection`);
@@ -1035,6 +1041,8 @@ async function openInvite(scope) {
       $("invite-form").hidden = true;
       $("invite-result").hidden = false;
       $("revoke-invite").hidden = true;
+      // Only the owner may invite; the board's shared credential gets 400 shared_channel_invitation.
+      $("invite-watch-instead").hidden = !session?.owner;
       $("invite-link").value = `${location.origin}/#board=${encodeURIComponent(JSON.stringify(shared))}`;
       $("invite-expiry").textContent =
         "All personas share this channel credential. Access lasts until the owner rotates it.";
@@ -1047,14 +1055,23 @@ async function openInvite(scope) {
       }
     }
   }
+  showInviteForm(scope);
+  $("invite-dialog").showModal();
+}
+function showInviteForm(scope, { watch = false } = {}) {
   inviteChannel = scope;
   activeInvite = null;
   $("invite-title").textContent = scope ? `Invite to # ${scope}` : "Invite to workspace";
+  $("invite-watch").checked = watch;
+  $("invite-watch-instead").hidden = true;
   $("invite-form").hidden = false;
   $("invite-result").hidden = true;
   $("invite-link").value = "";
-  $("invite-dialog").showModal();
 }
+// A board's owner sees the shared agent link first; a watcher gets their own read-only invitation.
+$("invite-watch-instead").addEventListener("click", () => {
+  showInviteForm(channel, { watch: true });
+});
 $("invite-channel").addEventListener("click", () => openInvite(channel));
 $("invite-workspace").addEventListener("click", () => openInvite(null));
 $("close-invite").addEventListener("click", () => $("invite-dialog").close());
@@ -1069,7 +1086,11 @@ $("invite-form").addEventListener("submit", async (event) => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel: inviteChannel, maxUses: Number($("invite-uses").value) }),
+        body: JSON.stringify({
+          channel: inviteChannel,
+          maxUses: Number($("invite-uses").value),
+          ...($("invite-watch").checked ? { watch: true } : {}),
+        }),
       },
       connection,
     );
@@ -1077,7 +1098,7 @@ $("invite-form").addEventListener("submit", async (event) => {
     activeInvite = result.id;
     $("invite-link").value = result.url;
     $("invite-expiry").textContent =
-      `Up to ${result.maxUses} recipients · Expires ${new Date(result.expiresAt).toLocaleString()}`;
+      `${result.watch ? "Watch only · " : ""}Up to ${result.maxUses} recipients · Expires ${new Date(result.expiresAt).toLocaleString()}`;
     $("invite-form").hidden = true;
     $("invite-result").hidden = false;
   } catch (error) {
