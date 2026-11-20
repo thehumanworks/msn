@@ -157,6 +157,11 @@ function ChannelBody({
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [restored, setRestored] = useState<{ draft: Draft; n: number } | null>(null);
   const me = session.session.username;
+  // @ suggestions (ADR 0055) ask for the board's personas the first time @ is typed.
+  const loadPersonas = useCallback(
+    () => session.api.listPersonas(controller.channel),
+    [session, controller],
+  );
 
   const receipts = useReceipts(session, controller.channel, state.messages.at(-1)?.id ?? 0);
   const byId = useMemo(() => new Map(state.messages.map((m) => [m.id, m])), [state.messages]);
@@ -390,6 +395,9 @@ function ChannelBody({
           onClearReply={() => setReplyTo(null)}
           bottomInset={bottomInset}
           restored={restored}
+          messages={state.messages}
+          me={me}
+          loadPersonas={loadPersonas}
         />
       )}
     </View>

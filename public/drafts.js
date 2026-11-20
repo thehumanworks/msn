@@ -120,3 +120,27 @@ export function draftsFor(drafts, username) {
     .filter(([key]) => key.startsWith(prefix))
     .map(([key, entry]) => [key.slice(prefix.length), entry]);
 }
+
+/**
+ * The attachments of a kept uncertain send, when the composer still holds the same message:
+ * same name, text, To and reply target. Files are not kept across a reload, but the uploads are
+ * on the server already (keyed by content), so the send can be retried with its exact payload and
+ * key instead of a new one without the files. Anything else returns null.
+ */
+export function unchangedRetryFiles(retry, { username, content, recipient, replyTo }) {
+  if (!retry) return null;
+  let sent;
+  try {
+    sent = JSON.parse(retry.payload);
+  } catch {
+    return null;
+  }
+  if (!sent || !Array.isArray(sent.attachments) || !sent.attachments.length) return null;
+  const to = recipient.trim() ? recipient : undefined;
+  const same =
+    sent.username === username &&
+    sent.text === content &&
+    sent.to === to &&
+    (sent.replyTo ?? null) === replyTo;
+  return same ? sent.attachments : null;
+}

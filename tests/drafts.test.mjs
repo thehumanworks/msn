@@ -108,3 +108,25 @@ test("only the connected name's drafts come back", () => {
   );
   assert.equal(hasContent(memory()), false);
 });
+
+test("an unchanged uncertain send keeps its uploaded files; any change does not", async () => {
+  const { unchangedRetryFiles } = await import("../public/drafts.js");
+  const attachments = [{ id: "a".repeat(64), name: "notes.txt", mediaType: "text/plain" }];
+  const retry = {
+    payload: JSON.stringify({ username: "Tomas", text: "see file", to: "lead", replyTo: 4, attachments }),
+    key: "k1",
+  };
+  const now = { username: "Tomas", content: "see file", recipient: "lead", replyTo: 4 };
+  assert.deepEqual(unchangedRetryFiles(retry, now), attachments);
+  assert.equal(unchangedRetryFiles(retry, { ...now, content: "see file!" }), null);
+  assert.equal(unchangedRetryFiles(retry, { ...now, recipient: "" }), null);
+  assert.equal(unchangedRetryFiles(retry, { ...now, replyTo: null }), null);
+  assert.equal(unchangedRetryFiles(retry, { ...now, username: "Tom" }), null);
+  assert.equal(unchangedRetryFiles(null, now), null);
+  assert.equal(unchangedRetryFiles({ payload: "nope", key: "k" }, now), null);
+  const noFiles = {
+    payload: JSON.stringify({ username: "Tomas", text: "see file", to: "lead", replyTo: 4 }),
+    key: "k",
+  };
+  assert.equal(unchangedRetryFiles(noFiles, now), null);
+});

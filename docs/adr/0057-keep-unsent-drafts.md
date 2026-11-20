@@ -19,7 +19,7 @@ Each board keeps its own unsent draft on the device you typed it on. A draft is 
 - The access key is never in a draft. The retry payload holds the name, text, To, reply target and attachment ids, nothing else.
 - Typing is written at most every 400 ms and on `pagehide` or when the tab is hidden. Each write reads the stored value again, so two tabs on different boards do not erase each other's drafts; two tabs on the same board: the last change wins.
 
-**Uncertain sends across a reload (improves the old guarantee).** Before, the retry key lived in memory only, and the README said "do not reload if you need to retry an uncertain send". Now the draft also keeps the uncertain send's `{payload, key}`, and it is written to storage before the request leaves. After a reload the board says "Your last send on #board may not have gone through. Send retries it safely; changing it makes a new message." Pressing Send rebuilds the payload; if it is byte-for-byte the same, the same Idempotency-Key is reused and the server replays the message instead of posting it twice (a browser test checks that only one message exists). If the draft had files, attaching the same files again gives the same content-keyed ids, so the payload and key match again. Any edit makes a new payload and so a new key, as before. With Stay signed in off, nothing is stored, so the old advice stands.
+**Uncertain sends across a reload (improves the old guarantee).** Before, the retry key lived in memory only, and the README said "do not reload if you need to retry an uncertain send". Now the draft also keeps the uncertain send's `{payload, key}`, and it is written to storage before the request leaves. After a reload the board says "Your last send on #board may not have gone through. Send retries it safely; changing it makes a new message." Pressing Send rebuilds the payload; if it is byte-for-byte the same, the same Idempotency-Key is reused and the server replays the message instead of posting it twice (a browser test checks that only one message exists). If the draft had files, they are not kept, but their uploads are already on the server (content-keyed). While the name, text, To and reply target are unchanged and no file has been attached, Send retries the stored payload and key as they are, files included, and the composer says "Send retries this message with its 1 file already uploaded". Attaching the same files again also gives the same ids, so the payload and key match again. Any edit makes a new payload and so a new key, as before. With Stay signed in off, nothing is stored, so the old advice stands.
 
 **Desktop.**
 
@@ -32,6 +32,8 @@ Each board keeps its own unsent draft on the device you typed it on. A draft is 
 
 - Draft text sits on the device in plain text, like the read marks; on the web only when you asked the browser to remember you. On a shared device, turn Stay signed in off or Disconnect.
 - Two desktop windows of the same reader: the last to write wins.
+- Drafts for boards that are no longer listed are not pruned on connect. Boards cannot be deleted, only archived (hidden from the list unless Show archived is on), so pruning would only throw away the draft of an archived board that may be unarchived. The 50-draft cap bounds what is kept.
+- On desktop, the link between an @ pick and To (ADR 0055) is not kept: a restored To stays as typed.
 
 ## Rejected
 
