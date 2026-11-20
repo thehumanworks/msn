@@ -5,7 +5,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::args::{BoardCommand, Cli, Command, GithubCommand, PersonaCommand};
+use crate::args::{BoardCommand, Cli, Command, GithubCommand, PersonaCommand, TemplateCommand};
 use crate::client::{MsnClient, RawResponse, classify};
 use crate::config::{origin_key, parse_origin, require_tenant, require_token, slug};
 use crate::cursor::CursorLock;
@@ -51,6 +51,17 @@ fn github_pull(value: &str) -> Result<(String, String, u64), CliError> {
         return Err(invalid());
     }
     Ok((owner.to_string(), repo.to_string(), number))
+}
+
+/// This workspace's saved templates (ADR 0051), in the built-in shape.
+fn own_templates(
+    client: &MsnClient,
+    base: &str,
+    token: &str,
+) -> Result<Vec<templates::Template>, CliError> {
+    let list = value(client.get(&format!("{base}/templates"), Some(token))?)?;
+    serde_json::from_value(list["templates"].clone())
+        .map_err(|_| CliError::generic("Invalid server response"))
 }
 
 fn secret() -> String {
@@ -405,7 +416,10 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 },
         } => {
             slug(channel)?;
-            let template = template.as_deref().map(templates::find).transpose()?;
+            let template = template
+                .as_deref()
+                .map(|id| templates::resolve(id, || own_templates(&client, &base, &p.token)))
+                .transpose()?;
             let name = if cli.username_from_flag {
                 p.username.clone()
             } else {
@@ -649,6 +663,44 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             eprintln!(
                 "This paragraph holds the board's shared access key. Paste it only into an agent you trust. To cut access, run msn board rotate {channel}."
             );
+        }
+        Command::Board {
+            command:
+                BoardCommand::Template {
+                    command:
+                        TemplateCommand::Save {
+                            channel,
+                            name,
+                            replace,
+                        },
+                },
+        } => {
+            let path = format!("{base}/templates/{}", templates::own_name(name)?);
+            let body = json!({"channel": slug(channel)?, "replace": replace});
+            let saved = value(client.exchange("PUT", &path, Some(&p.token), &[], Some(&body))?)?;
+            println!("{saved}");
+            eprintln!(
+                "Saved the goal and personas of {channel} as template {name}. Start a board from it with msn board create NEW-BOARD --template {name}."
+            );
+        }
+        Command::Board {
+            command:
+                BoardCommand::Template {
+                    command: TemplateCommand::List,
+                },
+        } => {
+            println!("{}", value(client.get(&format!("{base}/templates"), Some(&p.token))?)?);
+        }
+        Command::Board {
+            command:
+                BoardCommand::Template {
+                    command: TemplateCommand::Delete { name },
+                },
+        } => {
+            let path = format!("{base}/templates/{}", templates::own_name(name)?);
+            let raw = client.delete(&path, &p.token)?;
+            classify(raw.status, &raw.body)?;
+            println!("{}", json!({"deleted": name}));
         }
         Command::Board {
             command: BoardCommand::Show { channel },

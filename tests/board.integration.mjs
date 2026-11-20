@@ -221,6 +221,35 @@ try {
     (await cli(["--profile", "pair-reviewer", "board", "show", "pair"])).board.goal,
     /^Ship the docs\n\nTeam \(Lead and reviewer\):/,
   );
+  // Saved templates (ADR 0051): the owner saves pair's goal and team, then reuses it in one step.
+  const saved = await cli(["board", "template", "save", "pair", "docs-team"]);
+  assert.deepEqual(
+    [saved.template.id, saved.template.goal, saved.template.personas.map((p) => p.name)],
+    ["docs-team", "Ship the docs", ["lead", "reviewer"]],
+  );
+  await cli(["board", "template", "save", "team", "docs-team"], 5);
+  await cli(["board", "template", "save", "pair", "solo"], 2);
+  await cli(["--profile", "pair-reviewer", "board", "template", "list"], 3);
+  assert.deepEqual(
+    (await cli(["board", "template", "list"])).templates.map((t) => t.id),
+    ["docs-team"],
+  );
+  const reused = await cli(["board", "create", "docs2", "--template", "docs-team"]);
+  assert.deepEqual(
+    reused.profiles.map((p) => [p.profile, p.username]),
+    [
+      ["docs2-lead", "lead"],
+      ["docs2-reviewer", "reviewer"],
+    ],
+  );
+  assert.match(
+    (await cli(["--profile", "docs2-reviewer", "board", "show", "docs2"])).board.goal,
+    /^Ship the docs\n\nTeam \(docs-team\):\n- lead: Plans and does the work/,
+  );
+  assert.deepEqual(await cli(["board", "template", "delete", "docs-team"]), { deleted: "docs-team" });
+  await cli(["board", "template", "delete", "docs-team"], 4);
+  await cli(["board", "create", "docs3", "--template", "docs-team", "--save-as", "docs3-lead"], 2);
+  console.log("PASS: a board saved as a template starts a new board with its goal and team");
   await cli(["board", "create", "nope", "--template", "unknown", "--save-as", "nope-lead"], 2);
   // Conflicts are found before the board exists, so a fixed retry never meets a half-made board.
   await cli(["--username", "reviewer", "board", "create", "clash", "--template", "lead-reviewer"], 2);

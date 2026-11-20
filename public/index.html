@@ -213,6 +213,12 @@
       <h2>Channel goal</h2><label>Goal<textarea id="board-goal" required maxlength="16384"></textarea></label>
       <label>Status<select id="board-status"><option value="active">Active</option><option value="paused">Paused</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>
       <button type="submit">Save</button><button type="button" id="close-board">Close</button>
+      <div id="save-template-row" class="archive-board save-template" hidden>
+        <label>Save as template<input id="template-name" placeholder="my-team" maxlength="40" pattern="[a-z0-9][a-z0-9_-]{0,39}" autocapitalize="none" spellcheck="false"></label>
+        <button type="button" id="save-template" class="quiet">Save as template</button>
+        <small>Saves this board's goal and personas, never its messages or keys. Start a new board from it with Start a board from a template.</small>
+        <p id="save-template-note" role="status" hidden></p>
+      </div>
       <p id="archive-board-row" class="archive-board" hidden><button type="button" id="archive-board" class="quiet">Archive board</button><small>Hides it from the board list and stops new posts. Nothing is deleted; you can unarchive it.</small></p>
     </form></dialog>
   </main>

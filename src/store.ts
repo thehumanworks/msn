@@ -59,6 +59,7 @@ import {
   sendPush,
   type VapidKeys,
 } from "./push";
+import { MAX_TEMPLATES, type TemplatePersona, templateFromBoard, templateName } from "./templates";
 
 export type Message = {
   id: number;
@@ -117,7 +118,7 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 20;
 /** Pinned messages per board (ADR 0038). */
 export const MAX_PINS = 10;
 /** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
@@ -411,6 +412,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(
           text, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2'
         );
+        CREATE TABLE IF NOT EXISTS board_templates (
+          name TEXT PRIMARY KEY, goal TEXT NOT NULL, personas TEXT NOT NULL, savedFrom TEXT NOT NULL,
+          savedBy TEXT, createdAt TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS search_backfill (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), indexedThrough INTEGER NOT NULL,
           target INTEGER NOT NULL
@@ -518,6 +523,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         // v17 → v18: owner-pinned messages (ADR 0038). The table is created above and starts empty.
         if (version < 18) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (18)");
+        // v19 → v20: saved board templates (ADR 0051). The table is created above and starts empty.
+        // v19 (ADR 0047, reactions) belongs to another change and only records its version, so
+        // recording it here too is safe in any merge order, like v14 and v15 above.
+        if (version < 20)
+          for (const applied of [19, 20])
+            ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -1374,6 +1385,90 @@ export class MsnDurableObject extends DurableObject<Env> {
           .toArray(),
       );
     return [...found.values()].sort((a, b) => a.channel.localeCompare(b.channel) || a.number - b.number);
+  }
+
+  /**
+   * Saved board templates (ADR 0051). They belong to the workspace: every owner connection of this
+   * workspace lists, saves, uses and deletes the same set. Shared board keys, invited members and
+   * watch-only keys get 403, because only the owner creates boards.
+   */
+  private async templateRoute(request: Request, rest: string[], hash: string): Promise<Response> {
+    const input = request.method === "PUT" ? await body(request) : null;
+    const capability = this.authorize(hash);
+    this.requireOwner(capability);
+    if (!rest.length && request.method === "GET")
+      return json({ templates: this.savedTemplates(), max: MAX_TEMPLATES });
+    if (rest.length !== 1) throw new HttpError(404, "route_not_found", "Unknown API endpoint.");
+    const name = templateName(rest[0]);
+    if (request.method === "DELETE") {
+      const deleted = this.ctx.storage.sql
+        .exec("DELETE FROM board_templates WHERE name = ? RETURNING name", name)
+        .toArray();
+      if (!deleted.length) throw new HttpError(404, "template_not_found", `No saved template named ${name}.`);
+      return new Response(null, { status: 204 });
+    }
+    if (request.method !== "PUT") throw new HttpError(404, "route_not_found", "Unknown API endpoint.");
+    const channel = slug(text(input?.channel, "channel", 64, "invalid_template"));
+    if (input?.replace !== undefined && typeof input.replace !== "boolean")
+      throw new HttpError(400, "invalid_template", "replace must be true or false.");
+    const saved = templateFromBoard(this.board(channel).goal, this.roster(channel));
+    const created = this.ctx.storage.transactionSync(() => {
+      const exists = this.ctx.storage.sql
+        .exec("SELECT name FROM board_templates WHERE name = ?", name)
+        .toArray().length;
+      if (exists && input?.replace !== true)
+        throw new HttpError(
+          409,
+          "template_exists",
+          `A saved template is already named ${name}. Choose another name, or replace it.`,
+        );
+      const count = this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM board_templates")
+        .one().n;
+      if (!exists && count >= MAX_TEMPLATES)
+        throw new HttpError(
+          409,
+          "template_limit",
+          `A workspace keeps at most ${MAX_TEMPLATES} saved templates. Delete one first.`,
+        );
+      this.ctx.storage.sql.exec(
+        "INSERT OR REPLACE INTO board_templates(name, goal, personas, savedFrom, savedBy, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+        name,
+        saved.goal,
+        JSON.stringify(saved.personas),
+        channel,
+        capability.bound_username,
+        new Date().toISOString(),
+      );
+      return !exists;
+    });
+    const template = this.savedTemplates().find((t) => t.id === name);
+    return json({ template }, created ? 201 : 200);
+  }
+
+  /** Saved templates in the same shape as public/board-templates.json, plus where each came from. */
+  private savedTemplates() {
+    return this.ctx.storage.sql
+      .exec<{
+        name: string;
+        goal: string;
+        personas: string;
+        savedFrom: string;
+        savedBy: string | null;
+        createdAt: string;
+      }>("SELECT * FROM board_templates ORDER BY name")
+      .toArray()
+      .map((row) => ({
+        id: row.name,
+        title: row.name,
+        summary: `Saved from board ${row.savedFrom}.`,
+        goal: row.goal,
+        personas: JSON.parse(row.personas) as TemplatePersona[],
+        own: true,
+        savedFrom: row.savedFrom,
+        ...(row.savedBy ? { savedBy: row.savedBy } : {}),
+        createdAt: row.createdAt,
+      }));
   }
 
   private requireOwner(capability: TenantRow) {
@@ -3267,6 +3362,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
+        if (rest[0] === "templates") return await this.templateRoute(request, rest.slice(1), hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
           return await this.boardRoute(request, tenant, slug(rest[1]), rest.slice(2), hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.
