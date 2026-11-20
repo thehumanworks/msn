@@ -1670,11 +1670,15 @@ fn render_reactions(
                 let mine = names.contains(&me);
                 let (text, hover) = if names.is_empty() {
                     (
-                        egui::RichText::new(*symbol).small().color(theme::MUTED),
+                        egui::RichText::new(*symbol).small().color(theme::muted()),
                         format!("React: {}", label.to_lowercase()),
                     )
                 } else {
-                    let color = if mine { theme::ACCENT } else { theme::MUTED };
+                    let color = if mine {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    };
                     (
                         egui::RichText::new(format!("{symbol} {}", names.len()))
                             .small()
