@@ -87,6 +87,8 @@ enum Action {
     Search,
     SearchOlder,
     ToggleThread(u64),
+    /// Show more / Show less on a long message (ADR 0050).
+    ToggleFold(u64),
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
@@ -792,6 +794,7 @@ impl MsnDesktopApp {
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
         let scroll_to = self.scroll_to.take();
+        let channel_name = self.state.selected_channel.clone().unwrap_or_default();
         // A reply that landed in a folded thread: point at it, since the log does not show it.
         if let Some((root, id)) = self.state.channel.as_ref().and_then(|s| s.first_unseen()) {
             egui::Panel::bottom("thread-pointer")
@@ -863,7 +866,8 @@ impl MsnDesktopApp {
                                         if ui.cursor().top() < ui.clip_rect().bottom() {
                                             seen = seen.max(id);
                                         }
-                                        render_message(ui, message, &me, actions);
+                                        let fold = Fold::new(&channel_name, id, &state.unfolded);
+                                        render_message(ui, message, &me, Some(fold), actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
                                         if replies > 0 {
@@ -887,7 +891,9 @@ impl MsnDesktopApp {
                                         }
                                         let shown = ui.indent(("thread-reply", id), |ui| {
                                             let reply = &state.messages[&id];
-                                            render_message(ui, reply, &me, actions);
+                                            let fold =
+                                                Fold::new(&channel_name, id, &state.unfolded);
+                                            render_message(ui, reply, &me, Some(fold), actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
                                         if scroll_to == Some(id) {
@@ -1021,8 +1027,9 @@ impl MsnDesktopApp {
             .id_salt("search-results")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Search hits show in full: the match may be below the fold (ADR 0050).
                 for message in &search.results {
-                    render_message(ui, message, &me, actions);
+                    render_message(ui, message, &me, None, actions);
                     ui.add_space(4.0);
                 }
                 if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
@@ -1148,8 +1155,10 @@ impl MsnDesktopApp {
                 self.dispatch_all(commands);
             }
             Action::ToggleThread(root) => self.state.toggle_thread(root),
+            Action::ToggleFold(id) => self.state.toggle_fold(id),
             Action::ShowReply(id) => {
                 self.state.open_thread_of(id);
+                self.state.unfold(id);
                 self.scroll_to = Some(id);
             }
             Action::LoadParent(id) => {
@@ -1618,7 +1627,71 @@ fn link_controls(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     }
 }
 
-fn render_message(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Vec<Action>) {
+/// Long messages fold (ADR 0050): a body taller than `FOLD_LINES` body lines shows its first
+/// `FOLDED_LINES`, clipped, with Show more under it. Display only: the text, search, links and
+/// exports are unchanged, and the rendered height decides, so Markdown is never cut in its source.
+const FOLD_LINES: f32 = 15.0;
+const FOLDED_LINES: f32 = 10.0;
+
+/// One message's fold: whether the person opened it, and whether its toggle was pressed.
+#[derive(Clone, Copy)]
+struct Fold {
+    /// Where the measured height is kept: the board and the message.
+    key: egui::Id,
+    open: bool,
+    toggled: bool,
+}
+
+impl Fold {
+    fn new(channel: &str, id: u64, unfolded: &std::collections::BTreeSet<u64>) -> Self {
+        Fold {
+            key: egui::Id::new(("message-fold", channel, id)),
+            open: unfolded.contains(&id),
+            toggled: false,
+        }
+    }
+}
+
+/// Draws a body, clipped to `FOLDED_LINES` when it is long and not opened. The height is the
+/// one measured on the previous frame, so a new long message folds one frame after it shows.
+/// Returns whether the body is long.
+fn fold_clip(ui: &mut egui::Ui, fold: Option<&Fold>, add: impl FnOnce(&mut egui::Ui)) -> bool {
+    let Some(fold) = fold else {
+        add(ui);
+        return false;
+    };
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let key = fold.key;
+    let measured: Option<f32> = ui.data(|data| data.get_temp(key));
+    let long = |height: f32| height > FOLD_LINES * line;
+    let height = if measured.is_some_and(long) && !fold.open {
+        egui::ScrollArea::vertical()
+            .id_salt(key)
+            .max_height(FOLDED_LINES * line)
+            .scroll_source(egui::scroll_area::ScrollSource::NONE)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, add)
+            .content_size
+            .y
+    } else {
+        ui.scope(add).response.rect.height()
+    };
+    if measured.map(long) != Some(long(height)) {
+        ui.ctx().request_repaint();
+    }
+    if measured != Some(height) {
+        ui.data_mut(|data| data.insert_temp(key, height));
+    }
+    long(height)
+}
+
+fn render_message(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    mut fold: Option<Fold>,
+    actions: &mut Vec<Action>,
+) {
     let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
@@ -1640,17 +1713,26 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Ve
     let header = message_header(ui, message, username, own);
     let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            bubble(ui, header, body, true, |ui| link_controls(ui, id, actions))
+            bubble(ui, header, body, true, fold.as_mut(), |ui| {
+                link_controls(ui, id, actions)
+            })
         })
         .inner
     } else {
         ui.horizontal_top(|ui| {
             theme::avatar(ui, username, 30.0, None);
-            ui.vertical(|ui| bubble(ui, header, body, false, |ui| link_controls(ui, id, actions)))
-                .inner
+            ui.vertical(|ui| {
+                bubble(ui, header, body, false, fold.as_mut(), |ui| {
+                    link_controls(ui, id, actions)
+                })
+            })
+            .inner
         })
         .inner
     };
+    if fold.is_some_and(|fold| fold.toggled) {
+        actions.push(Action::ToggleFold(id));
+    }
     // The bubble's frame only senses hover; give it a stable id that senses the right click.
     let shown = ui.interact(
         shown.rect,
@@ -1820,6 +1902,7 @@ fn bubble(
     header: egui::text::LayoutJob,
     body: impl Into<Body>,
     own: bool,
+    fold: Option<&mut Fold>,
     controls: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     ui.spacing_mut().item_spacing.y = 3.0;
@@ -1840,7 +1923,8 @@ fn bubble(
             controls(ui);
         }
     });
-    match body.into() {
+    let mut long = false;
+    let response = match body.into() {
         Body::Rich(text) => {
             let galley = egui::WidgetText::from(text).into_galley(
                 ui,
@@ -1848,22 +1932,49 @@ fn bubble(
                 wrap_width,
                 egui::TextStyle::Body,
             );
-            frame.show(ui, |ui| ui.label(galley)).response
+            frame
+                .show(ui, |ui| {
+                    long = fold_clip(ui, fold.as_deref(), |ui| {
+                        ui.label(galley);
+                    });
+                })
+                .response
         }
         // Formatted text (ADR 0043).
         Body::Markdown(parsed) => {
             frame
                 .show(ui, |ui| {
                     ui.set_max_width(wrap_width);
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        if let markdown::Parsed::Blocks(blocks) = &*parsed {
-                            markdown::show(ui, blocks);
-                        }
+                    long = fold_clip(ui, fold.as_deref(), |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            if let markdown::Parsed::Blocks(blocks) = &*parsed {
+                                markdown::show(ui, blocks);
+                            }
+                        });
                     });
                 })
                 .response
         }
+    };
+    if let Some(fold) = fold
+        && long
+    {
+        let label = if fold.open { "Show less" } else { "Show more" };
+        let button = egui::Button::new(egui::RichText::new(label).small().color(theme::accent()))
+            .frame(false);
+        if ui
+            .add(button)
+            .on_hover_text(if fold.open {
+                "Fold this long message"
+            } else {
+                "Show the whole message"
+            })
+            .clicked()
+        {
+            fold.toggled = true;
+        }
     }
+    response
 }
 
 /// A send that has not been confirmed yet: a dimmed own-side bubble with its status below.
@@ -1886,7 +1997,14 @@ fn render_pending(ui: &mut egui::Ui, key: &str, pending: &PendingSend, actions: 
         );
         ui.scope(|ui| {
             ui.set_opacity(0.55);
-            bubble(ui, header, egui::RichText::new(&pending.text), true, |_| {});
+            bubble(
+                ui,
+                header,
+                egui::RichText::new(&pending.text),
+                true,
+                None,
+                |_| {},
+            );
         });
     });
     if let Some(error) = &pending.error {
@@ -2335,6 +2453,93 @@ mod layout_tests {
             );
         }
     }
+    /// Long messages fold to their first lines with Show more; opening one shows it whole, and a
+    /// short message has no control (ADR 0050).
+    #[test]
+    fn long_messages_fold_behind_show_more() {
+        let long = (1..=40)
+            .map(|n| format!("Report line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let code = format!(
+            "## Log\n\n```\n{}\n```\n\nDone **ok**.",
+            (1..=30)
+                .map(|n| format!("output {n}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(0);
+        if let Some(channel) = app.state.channel.as_mut() {
+            for (id, text) in [(1u64, "short note"), (2, long.as_str()), (3, code.as_str())] {
+                channel.messages.insert(
+                    id,
+                    json!({"id": id, "username": "Jamie", "text": text, "createdAt": "2026-11-20T03:00:00Z"}),
+                );
+            }
+        }
+        let frame = |app: &mut MsnDesktopApp| {
+            let mut texts = Vec::new();
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(980.0, 4000.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| app.draw(ui),
+                );
+                output.textures_delta.clear();
+                texts = output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+            }
+            let height = |id: u64| {
+                ctx.read_response(egui::Id::new(("message-bubble", id)))
+                    .unwrap()
+                    .rect
+                    .height()
+            };
+            (texts, [height(1), height(2), height(3)])
+        };
+        let (texts, folded) = frame(&mut app);
+        let more = texts.iter().filter(|text| *text == "Show more").count();
+        assert_eq!(more, 2, "{texts:?}");
+        app.state.toggle_fold(2);
+        app.state.toggle_fold(3);
+        let (texts, open) = frame(&mut app);
+        assert_eq!(
+            texts.iter().filter(|text| *text == "Show less").count(),
+            2,
+            "{texts:?}"
+        );
+        assert!(texts.iter().all(|text| text != "Show more"), "{texts:?}");
+        assert!(
+            open[1] > folded[1] * 2.5,
+            "open {open:?} vs folded {folded:?}"
+        );
+        assert!(open[2] > folded[2], "open {open:?} vs folded {folded:?}");
+        assert!(
+            (open[0] - folded[0]).abs() < 0.5,
+            "a short message never folds"
+        );
+        // Show less folds it back.
+        app.state.toggle_fold(2);
+        let (_, again) = frame(&mut app);
+        assert!(
+            (again[1] - folded[1]).abs() < 0.5,
+            "{again:?} vs {folded:?}"
+        );
+    }
+
     /// Formatted messages (ADR 0043) render without markup characters, keep the composer in
     /// view, and a long code line scrolls instead of widening the window.
     #[test]
