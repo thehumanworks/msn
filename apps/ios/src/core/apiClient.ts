@@ -23,6 +23,7 @@ import type {
   Snapshot,
 } from "./types.ts";
 import { ProtocolError } from "./errors.ts";
+import { decodeMute, decodeMutes, type Mute } from "./mutes.ts";
 
 export type SendMessageInput = {
   username: string;
@@ -118,6 +119,34 @@ export class ApiClient {
       { signal },
     );
     return { message: decodeMessage(r?.message), historyRevision: r.historyRevision };
+  }
+
+  /** The owner's active board mutes (ADR 0044). Owner keys only; others get 403. */
+  async listMutes(signal?: AbortSignal): Promise<Mute[]> {
+    return decodeMutes(await this.http.request<unknown>("/push/mutes", { signal }));
+  }
+
+  /** Mutes one board for 1h, 1d or (`null`) until turned back on. */
+  async setMute(
+    channel: string,
+    span: "1h" | "1d" | null,
+    everything: boolean,
+    signal?: AbortSignal,
+  ): Promise<Mute> {
+    return decodeMute(
+      await this.http.request<unknown>(`/push/mutes/${encodeURIComponent(channel)}`, {
+        method: "PUT",
+        body: { ...(span ? { for: span } : {}), everything },
+        signal,
+      }),
+    );
+  }
+
+  async clearMute(channel: string, signal?: AbortSignal): Promise<void> {
+    await this.http.request<unknown>(`/push/mutes/${encodeURIComponent(channel)}`, {
+      method: "DELETE",
+      signal,
+    });
   }
 
   /** Every reader's explicit commit position on a channel (ADR 0040); decode with decodeReceipts. */

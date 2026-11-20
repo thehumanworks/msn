@@ -93,6 +93,8 @@ export type Identity = {
   channel?: string;
   initialChannel?: string;
   keyId?: string;
+  /** The workspace owner's key: may mute boards (ADR 0044). */
+  owner?: boolean;
 };
 
 /** GET /api/tenants/:tenant/events — metadata only, no message text/tokens/usernames. */
