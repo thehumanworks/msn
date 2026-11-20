@@ -425,7 +425,7 @@ test("message text renders as safe Markdown built from DOM nodes (ADR 0043)", as
   await expect(bad.locator("img, script, iframe")).toHaveCount(0);
   await expect(bad).toContainText("[click](javascript:window.pwned=true)");
   await expect(bad).toContainText('<img src=x onerror="window.pwned=true">');
-  await expect(bad.locator("strong")).toHaveText("<script>window.pwned=true</script>");
+  await expect(bad.locator("p strong")).toHaveText("<script>window.pwned=true</script>");
   const hrefs = await page
     .locator("#messages a[href]")
     .evaluateAll((all) => all.map((a) => a.getAttribute("href")));
