@@ -89,6 +89,12 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// The open board's personas, for @ suggestions (ADR 0055).
+    LoadPersonas {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
     /// Current reactions (ADR 0047) for the open channel's messages after `after`.
     LoadReactions {
         generation: u64,
@@ -172,6 +178,7 @@ impl Command {
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
             | Command::LoadReceipts { generation, .. }
+            | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
             | Command::SendMessage { generation, .. }
@@ -268,6 +275,13 @@ pub enum UiEvent {
         channel_generation: u64,
         channel: String,
         receipts: Vec<msn_cli::receipts::Receipt>,
+    },
+    /// The open board's personas as (name, listening) (ADR 0055); empty on a plain channel.
+    Personas {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        personas: Vec<(String, bool)>,
     },
     /// Reactions for every message after `after` that has any (ADR 0047); others have none.
     Reactions {
@@ -676,6 +690,34 @@ fn handle_command(
                 err,
                 false,
                 None,
+            ),
+        },
+        Command::LoadPersonas {
+            channel_generation,
+            channel,
+            ..
+        } => match client_ops::fetch_personas(&cc.client, &cc.tenant, &cc.token, &channel) {
+            Err(err @ CliError::Auth(_)) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "personas",
+                err,
+                false,
+                None,
+            ),
+            // A plain channel has no personas (404), and a failed load only leaves @ with the
+            // senders it already knows: neither is worth an error line.
+            result => emit(
+                tx,
+                wake,
+                UiEvent::Personas {
+                    generation,
+                    channel_generation,
+                    channel,
+                    personas: result.unwrap_or_default(),
+                },
             ),
         },
         Command::LoadReactions {
