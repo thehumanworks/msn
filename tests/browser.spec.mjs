@@ -935,7 +935,7 @@ test("channel history is bounded to 1000 rows and pruning preserves the visible 
   expect(Math.abs(afterHiddenPoll.y - resumed.y)).toBeLessThan(2);
 });
 
-test("reply and correlation annotations are plain text, not threads or read receipts", async ({
+test("reply and correlation annotations are plain text and never read receipts", async ({
   page,
   request,
 }) => {

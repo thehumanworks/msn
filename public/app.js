@@ -591,13 +591,15 @@ async function showParent(message, article) {
   let parent = state.parents.get(id);
   if (parent === undefined) {
     try {
-      const data = await api(`/channels/${message.channel}/messages?after=${id - 1}&limit=1`);
-      parent = data.messages[0]?.id === id ? data.messages[0] : null;
-      state.parents.set(id, parent);
+      parent = (await api(`/channels/${message.channel}/messages/${id}`)).message;
     } catch (error) {
-      status(error.message, true);
-      return;
+      if (error.status !== 404) {
+        status(error.message, true);
+        return;
+      }
+      parent = null;
     }
+    state.parents.set(id, parent);
   }
   if (article.querySelector(":scope > .reply-parent")) return;
   const quote = document.createElement("blockquote");
