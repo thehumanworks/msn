@@ -451,7 +451,10 @@ try {
   assertPeekEnvelope(peekFile);
   assert.equal(peekFile.committedThrough, 0);
   await rust(commitCmd(channel, "owner-agent", firstId, ["--cursor-file", cursorFile, "--local"]), ownerEnv);
-  const defaultOwnerPeek = await rust(peekCmd(channel, "owner-agent", ["--limit", "100", "--local"]), ownerEnv);
+  const defaultOwnerPeek = await rust(
+    peekCmd(channel, "owner-agent", ["--limit", "100", "--local"]),
+    ownerEnv,
+  );
   assert.equal(defaultOwnerPeek.committedThrough, 0);
   const fileAgain = await rust(
     peekCmd(channel, "owner-agent", ["--cursor-file", cursorFile, "--limit", "100", "--local"]),
@@ -470,7 +473,10 @@ try {
       highestFetched: 0,
     }),
   );
-  const foreign = await attempt(peekCmd(channel, "owner-agent", ["--cursor-file", foreignPath, "--local"]), ownerEnv);
+  const foreign = await attempt(
+    peekCmd(channel, "owner-agent", ["--cursor-file", foreignPath, "--local"]),
+    ownerEnv,
+  );
   assert.equal(foreign.ok, false);
   assert.equal(foreign.code, 2);
 
