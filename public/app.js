@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
@@ -102,7 +103,14 @@ function advanceMark() {
 
 function draft(connection = session, name = channel) {
   if (!connection.drafts.has(name))
-    connection.drafts.set(name, { content: "", recipient: "", files: [], retry: null, sending: false });
+    connection.drafts.set(name, {
+      content: "",
+      recipient: "",
+      replyTo: null,
+      files: [],
+      retry: null,
+      sending: false,
+    });
   return connection.drafts.get(name);
 }
 
@@ -180,6 +188,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
     for (const state of connection.drafts.values()) {
       state.content = "";
       state.recipient = "";
+      state.replyTo = null;
       state.files = [];
       state.retry = null;
     }
@@ -207,6 +216,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   autosize();
   $("attach-list").replaceChildren();
   $("attach-list").hidden = true;
+  showReplyTo(null);
   $("messages").replaceChildren();
   showCheckpoint(null);
   showSince(null);
@@ -398,6 +408,8 @@ function appendMessage(message, target = $("messages")) {
   const article = document.createElement("article");
   article.className = message.username === session?.username ? "message mine" : "message";
   article.dataset.id = message.id;
+  // Log rows take focus from j and k (ADR 0054); Tab still moves only between controls.
+  if (target === $("messages")) article.tabIndex = -1;
   const meta = document.createElement("div");
   meta.className = "message-meta";
   const name = document.createElement("strong");
@@ -456,6 +468,18 @@ function appendMessage(message, target = $("messages")) {
       ),
     );
     meta.append(link);
+  }
+  // Reply (ADR 0054): the button and the r key both address the next message to this one.
+  if (session && target === $("messages")) {
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "quiet reply-button";
+    reply.textContent = "Reply";
+    reply.title = `Reply to message #${message.id} (r)`;
+    reply.setAttribute("aria-label", `Reply to message #${message.id}`);
+    reply.setAttribute("aria-keyshortcuts", "r");
+    reply.addEventListener("click", () => replyTo(message));
+    meta.append(reply);
   }
   // Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043).
   let content;
@@ -1633,6 +1657,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
   showFiles(selectedDraft);
+  showReplyTo(selectedDraft);
   clearLabel();
   clearSearch();
   $("search").value = "";
@@ -2269,6 +2294,7 @@ $("send-form").addEventListener("submit", async (event) => {
   if (state.sending) return;
   const content = $("message").value;
   const recipient = $("recipient").value;
+  const replyId = state.replyTo;
   state.content = content;
   state.recipient = recipient;
   if (!content.trim() || new TextEncoder().encode(content).length > 16384) {
@@ -2301,6 +2327,7 @@ $("send-form").addEventListener("submit", async (event) => {
       username: connection.username,
       text: content,
       ...(recipient.trim() ? { to: recipient } : {}),
+      ...(replyId !== null ? { replyTo: replyId } : {}),
       ...(attachments.length ? { attachments } : {}),
     });
     if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
@@ -2317,6 +2344,7 @@ $("send-form").addEventListener("submit", async (event) => {
     if (state.content === content && state.recipient === recipient) {
       state.content = "";
       state.recipient = "";
+      if (state.replyTo === replyId) state.replyTo = null;
     }
     state.files = state.files.filter((file) => !files.includes(file));
     if (state.retry === attempt) state.retry = null;
@@ -2324,6 +2352,8 @@ $("send-form").addEventListener("submit", async (event) => {
     $("message").value = state.content;
     $("recipient").value = state.recipient;
     showFiles(state);
+    showReplyTo(state);
+    if (replyId !== null) openThreadOf(replyId);
     autosize();
     poll($("live").checked); // Read from the last cursor, not the sent ID: no skipped concurrent replies.
   } catch (error) {
@@ -2986,3 +3016,180 @@ if ("serviceWorker" in navigator)
     if ([...$("channels").children].some((button) => button.dataset.channel === data.channel))
       selectChannel(data.channel);
   });
+
+/*
+ * Reply and keyboard shortcuts (ADR 0054). The reply target belongs to the board's draft, so it
+ * survives switching boards like the text does, and it is part of the retry payload, so a retry
+ * resends exactly what was meant.
+ */
+function showReplyTo(state) {
+  const id = state?.replyTo ?? null;
+  $("reply-note").hidden = id === null;
+  if (id === null) {
+    $("reply-note-text").textContent = "";
+    return;
+  }
+  const name = logArticle(id)?.querySelector(".message-meta strong")?.textContent;
+  $("reply-note-text").textContent = name ? `Replying to #${id} · ${name}` : `Replying to #${id}`;
+}
+
+function canPost() {
+  const workspace = $("workspace");
+  return (
+    Boolean(session && channel) &&
+    !$("message").disabled &&
+    !workspace.classList.contains("watching") &&
+    !workspace.classList.contains("archived")
+  );
+}
+
+function replyTo(message) {
+  if (!canPost()) return;
+  const state = draft();
+  state.replyTo = message.id;
+  showReplyTo(state);
+  view("chat");
+  $("message").focus();
+}
+
+function cancelReply() {
+  if (!session || !channel || draft().replyTo === null) return false;
+  draft().replyTo = null;
+  showReplyTo(draft());
+  return true;
+}
+$("reply-cancel").addEventListener("click", () => {
+  cancelReply();
+  $("message").focus();
+});
+
+/** Open the thread a message belongs to, so a reply just sent to it shows where it lands. */
+function openThreadOf(id) {
+  const node = logArticle(id);
+  const state = session?.channels.get(channel);
+  if (!node || !state) return;
+  const root = topLevel(node);
+  state.expanded ??= new Set();
+  state.expanded.add(Number(root.dataset.id));
+  state.unseen?.delete(Number(root.dataset.id));
+  threadOf(root);
+  showThread(root);
+}
+
+/** Log rows a reader can see now, in reading order: replies in folded threads are skipped. */
+function visibleMessages() {
+  return [...$("messages").querySelectorAll("article")].filter(
+    (article) => article.getClientRects().length > 0,
+  );
+}
+
+function moveSelection(move) {
+  const rows = visibleMessages();
+  const current = rows.indexOf(document.activeElement?.closest?.("#messages article"));
+  const top = $("messages").getBoundingClientRect().top;
+  const firstInView = rows.findIndex((row) => row.getBoundingClientRect().bottom > top);
+  const next = rows[step(move, current, rows.length, firstInView)];
+  if (!next) return;
+  next.focus({ preventScroll: true });
+  next.scrollIntoView({ block: "nearest" });
+}
+
+function selectedMessage() {
+  const article = document.activeElement?.closest?.("#messages article");
+  if (!article) return null;
+  const id = Number(article.dataset.id);
+  return session?.channels.get(channel)?.messages.find((message) => message.id === id) ?? null;
+}
+
+function openHelp() {
+  if (!$("keys-list").children.length)
+    for (const { keys, does } of SHORTCUTS) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      keys.forEach((key, index) => {
+        if (index) term.append(" then ");
+        const kbd = document.createElement("kbd");
+        kbd.textContent = key;
+        term.append(kbd);
+      });
+      const description = document.createElement("dd");
+      description.textContent = does;
+      row.append(term, description);
+      $("keys-list").append(row);
+    }
+  $("keys-dialog").showModal();
+}
+$("close-keys").addEventListener("click", () => $("keys-dialog").close());
+$("show-keys").addEventListener("click", openHelp);
+
+function goToBoards() {
+  if (getComputedStyle($("back")).display !== "none" && $("workspace").dataset.view === "chat")
+    $("back").click();
+  const boards = [...$("channels").querySelectorAll("button[data-channel]")];
+  const current = boards.find((button) => button.getAttribute("aria-current") === "true");
+  (current ?? boards[0])?.focus();
+}
+
+/** Escape: the nearest thing to undo, one per press. */
+function closeSomething(target) {
+  if (cancelReply()) return true;
+  if (target === $("search") && ($("search").value || !$("search-panel").hidden)) {
+    $("search").value = "";
+    clearSearch();
+    return true;
+  }
+  if (!$("search-panel").hidden) {
+    clearSearch();
+    return true;
+  }
+  if (!$("label-filter").hidden) {
+    clearLabel();
+    return true;
+  }
+  if (target === $("search") || target?.closest?.("#messages article")) {
+    target.blur();
+    return true;
+  }
+  return false;
+}
+
+let chord = null;
+document.addEventListener("keydown", (event) => {
+  // Open dialogs keep their own keys; Escape already closes them.
+  if (event.defaultPrevented || !session || document.querySelector("dialog[open]")) return;
+  if ($("workspace").hidden) return;
+  const result = shortcut(event, chord);
+  chord = result.chord;
+  const action = result.action;
+  if (!action) return;
+  if (action === "help") {
+    event.preventDefault();
+    return openHelp();
+  }
+  if (action === "boards") {
+    event.preventDefault();
+    return goToBoards();
+  }
+  if (action === "close") {
+    if (closeSomething(event.target)) event.preventDefault();
+    return;
+  }
+  if (!channel) return;
+  if (action === "search") {
+    if ($("search").disabled) return;
+    event.preventDefault();
+    view("chat");
+    $("search").focus();
+    $("search").select();
+  } else if (action === "next" || action === "previous") {
+    event.preventDefault();
+    view("chat");
+    moveSelection(action);
+  } else if (action === "reply") {
+    const message = selectedMessage();
+    if (!message) return status("Choose a message with j or k first, then press r to reply.");
+    if (!canPost()) return;
+    event.preventDefault();
+    replyTo(message);
+  }
+});
