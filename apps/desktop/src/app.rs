@@ -29,6 +29,10 @@ pub struct MsnDesktopApp {
     search_input: String,
     /// A reply the chat should scroll to on its next frame (the "New reply in thread" pointer).
     scroll_to: Option<u64>,
+    /// The server the current connection talks to; message links (ADR 0042) start with it.
+    link_origin: Option<url::Url>,
+    /// A link waiting to go to the clipboard on the next frame (the clipboard needs the context).
+    copied_link: Option<String>,
     /// When processed-by receipts were last asked for; commits are not channel events, so the
     /// open channel's receipts are reloaded on a timer (ADR 0040).
     receipts_at: Option<std::time::Instant>,
@@ -75,6 +79,7 @@ enum Action {
     ToggleThread(u64),
     ShowReply(u64),
     LoadParent(u64),
+    CopyLink(u64),
     Send,
     RetrySend(String),
     DiscardSend(String),
@@ -108,6 +113,8 @@ impl MsnDesktopApp {
             active_tab: Tab::Chat,
             search_input: String::new(),
             scroll_to: None,
+            link_origin: None,
+            copied_link: None,
             receipts_at: None,
             profile_store,
         }
@@ -370,6 +377,7 @@ impl MsnDesktopApp {
         };
         let generation = self.worker.next_generation();
         self.state.begin_connect(generation, tenant.clone());
+        self.link_origin = Some(origin.clone());
         self.dispatch(Command::Connect {
             generation,
             origin,
@@ -692,7 +700,7 @@ impl MsnDesktopApp {
                                                 );
                                             });
                                         }
-                                        render_message(ui, message, &me);
+                                        render_message(ui, message, &me, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
                                         if replies > 0 {
@@ -713,7 +721,7 @@ impl MsnDesktopApp {
                                     ThreadRow::Reply { id } => {
                                         let shown = ui.indent(("thread-reply", id), |ui| {
                                             let reply = &state.messages[&id];
-                                            render_message(ui, reply, &me);
+                                            render_message(ui, reply, &me, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
                                         if scroll_to == Some(id) {
@@ -831,7 +839,7 @@ impl MsnDesktopApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for message in &search.results {
-                    render_message(ui, message, &me);
+                    render_message(ui, message, &me, actions);
                     ui.add_space(4.0);
                 }
                 if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
@@ -964,6 +972,12 @@ impl MsnDesktopApp {
             Action::LoadParent(id) => {
                 let commands = self.state.load_parent(id);
                 self.dispatch_all(commands);
+            }
+            Action::CopyLink(id) => {
+                if let Some(link) = self.message_link(id) {
+                    self.copied_link = Some(link);
+                    self.state.status = Some(format!("Link to message #{id} copied."));
+                }
             }
             Action::Send => self.send_composer_message(),
             Action::RetrySend(key) => self.retry_send(&key),
@@ -1102,6 +1116,14 @@ impl MsnDesktopApp {
         });
     }
 
+    /// The web link to message `id` of the open channel (ADR 0042). It carries no credential.
+    fn message_link(&self, id: u64) -> Option<String> {
+        let origin = self.link_origin.as_ref()?;
+        let tenant = &self.state.connection.as_ref()?.tenant;
+        let channel = self.state.selected_channel.as_deref()?;
+        Some(msn_cli::links::message_link(origin, tenant, channel, id))
+    }
+
     fn retry_task_event(&mut self, key: &str) {
         let Some(username) = self.state.connection.as_ref().map(|c| c.username.clone()) else {
             return;
@@ -1125,6 +1147,9 @@ impl MsnDesktopApp {
 impl MsnDesktopApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
+        if let Some(link) = self.copied_link.take() {
+            ui.ctx().copy_text(link);
+        }
         if self.state.channel.is_some() {
             // Wakes an idle window so the receipts timer in drain_events can fire.
             ui.ctx().request_repaint_after(RECEIPTS_EVERY);
@@ -1239,7 +1264,19 @@ fn render_receipts(
     }
 }
 
-fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
+/// "Link" beside the header, and the same in the bubble's right-click menu (ADR 0042).
+fn link_controls(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+    if ui
+        .link(egui::RichText::new("Link").small().color(theme::MUTED))
+        .on_hover_text(format!("Copy a link to message #{id}"))
+        .clicked()
+    {
+        actions.push(Action::CopyLink(id));
+    }
+}
+
+fn render_message(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Vec<Action>) {
+    let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
     let text = message["text"].as_str().unwrap_or("");
@@ -1258,16 +1295,31 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
         }
     };
     let header = message_header(ui, message, username, own);
-    if own {
+    let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            bubble(ui, header, body, true);
-        });
+            bubble(ui, header, body, true, |ui| link_controls(ui, id, actions))
+        })
+        .inner
     } else {
         ui.horizontal_top(|ui| {
             theme::avatar(ui, username, 30.0, None);
-            ui.vertical(|ui| bubble(ui, header, body, false));
-        });
-    }
+            ui.vertical(|ui| bubble(ui, header, body, false, |ui| link_controls(ui, id, actions)))
+                .inner
+        })
+        .inner
+    };
+    // The bubble's frame only senses hover; give it a stable id that senses the right click.
+    let shown = ui.interact(
+        shown.rect,
+        egui::Id::new(("message-bubble", id)),
+        egui::Sense::click(),
+    );
+    shown.context_menu(|ui| {
+        if ui.button("Copy link to this message").clicked() {
+            actions.push(Action::CopyLink(id));
+            ui.close();
+        }
+    });
 }
 
 struct ThreadToggle {
@@ -1419,11 +1471,31 @@ impl From<egui::RichText> for Body {
     }
 }
 
-fn bubble(ui: &mut egui::Ui, header: egui::text::LayoutJob, body: impl Into<Body>, own: bool) {
+fn bubble(
+    ui: &mut egui::Ui,
+    header: egui::text::LayoutJob,
+    body: impl Into<Body>,
+    own: bool,
+    controls: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
     ui.spacing_mut().item_spacing.y = 3.0;
     let frame = theme::bubble(own);
     let wrap_width = (ui.available_width() * 0.82 - frame.total_margin().sum().x).max(120.0);
-    ui.label(header);
+    // The header row's direction follows the bubble's side, so "Link" sits beside the name.
+    let direction = if own {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.allocate_ui_with_layout(egui::vec2(wrap_width, 0.0), direction, |ui| {
+        if own {
+            controls(ui);
+            ui.label(header);
+        } else {
+            ui.label(header);
+            controls(ui);
+        }
+    });
     match body.into() {
         Body::Rich(text) => {
             let galley = egui::WidgetText::from(text).into_galley(
@@ -1432,17 +1504,20 @@ fn bubble(ui: &mut egui::Ui, header: egui::text::LayoutJob, body: impl Into<Body
                 wrap_width,
                 egui::TextStyle::Body,
             );
-            frame.show(ui, |ui| ui.label(galley));
+            frame.show(ui, |ui| ui.label(galley)).response
         }
+        // Formatted text (ADR 0043).
         Body::Markdown(parsed) => {
-            if let markdown::Parsed::Blocks(blocks) = &*parsed {
-                frame.show(ui, |ui| {
+            frame
+                .show(ui, |ui| {
                     ui.set_max_width(wrap_width);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        markdown::show(ui, blocks);
+                        if let markdown::Parsed::Blocks(blocks) = &*parsed {
+                            markdown::show(ui, blocks);
+                        }
                     });
-                });
-            }
+                })
+                .response
         }
     }
 }
@@ -1467,7 +1542,7 @@ fn render_pending(ui: &mut egui::Ui, key: &str, pending: &PendingSend, actions: 
         );
         ui.scope(|ui| {
             ui.set_opacity(0.55);
-            bubble(ui, header, egui::RichText::new(&pending.text), true);
+            bubble(ui, header, egui::RichText::new(&pending.text), true, |_| {});
         });
     });
     if let Some(error) = &pending.error {
@@ -1609,6 +1684,8 @@ mod layout_tests {
             active_tab: Tab::Chat,
             search_input: String::new(),
             scroll_to: None,
+            link_origin: None,
+            copied_link: None,
             receipts_at: None,
             profile_store: None,
         }
@@ -1680,6 +1757,88 @@ mod layout_tests {
             widths[2..].iter().all(|width| *width == widths[2]),
             "sidebar width must not drift: {widths:?}"
         );
+    }
+
+    #[test]
+    fn copy_link_puts_the_message_link_on_the_clipboard() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(3);
+        // No connection origin yet: nothing to copy.
+        app.perform(Action::CopyLink(2));
+        assert_eq!(app.copied_link, None);
+        app.link_origin = Some(url::Url::parse("https://msn.test/").unwrap());
+        app.perform(Action::CopyLink(2));
+        assert_eq!(
+            app.state.status.as_deref(),
+            Some("Link to message #2 copied.")
+        );
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(980.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.draw(ui),
+        );
+        output.textures_delta.clear();
+        let copied: Vec<_> = output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            copied,
+            ["https://msn.test/#board=design-studio/general&msg=2"]
+        );
+        assert_eq!(app.copied_link, None);
+    }
+
+    #[test]
+    fn right_click_on_a_message_opens_the_copy_link_menu() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(3);
+        let screen = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(980.0, 640.0),
+        ));
+        let frame = |events: Vec<egui::Event>, app: &mut MsnDesktopApp| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        };
+        frame(vec![], &mut app);
+        frame(vec![], &mut app);
+        let bubble = ctx
+            .read_response(egui::Id::new(("message-bubble", 2_u64)))
+            .expect("message 2 is drawn");
+        assert!(bubble.sense.senses_click());
+        assert!(!ctx.any_popup_open());
+        let pos = bubble.rect.center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(pos)], &mut app);
+        frame(vec![button(true)], &mut app);
+        frame(vec![button(false)], &mut app);
+        frame(vec![], &mut app);
+        assert!(ctx.any_popup_open(), "the right-click menu opens");
     }
 
     #[test]

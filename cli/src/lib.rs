@@ -13,6 +13,7 @@ pub mod export;
 pub mod identity;
 pub mod import;
 pub mod labels;
+pub mod links;
 pub mod mcp;
 pub mod processing;
 pub mod profile;
@@ -152,6 +153,27 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 return Err(CliError::usage("message ID must be positive."));
             }
             agent::print_json(&agent::show(&url, &tenant, &token, channel, id)?)
+        }
+        Command::Link {
+            channel,
+            message_id,
+            json,
+        } => {
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let id = parse_int(&message_id, MAX_SAFE_INTEGER)?;
+            if id == 0 {
+                return Err(CliError::usage("message ID must be positive."));
+            }
+            let link = links::checked_link(&url, &tenant, &token, channel, id)?;
+            if json {
+                agent::print_json(&link)
+            } else {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{}", link["link"].as_str().unwrap_or_default())?;
+                Ok(())
+            }
         }
         Command::Peek {
             channel,

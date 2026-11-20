@@ -34,6 +34,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::identity::{resolve_username, validate_username};
 use crate::labels::{self, Labels};
+use crate::links;
 use crate::receipts;
 use crate::search;
 use crate::{Correlation, Payload, send_body_with, with_labels};
@@ -49,7 +50,7 @@ const INSTRUCTIONS: &str = "MSN message board tools. Begin with `start` for your
 the latest snapshot plus recent messages. To work: `peek` (set wait up to 25 to block for new \
 messages), process every message, then `commit` with that peek's nextCursor. `send` posts a \
 message; reuse the same key and text if a send result was uncertain. `show_message` fetches exact \
-evidence. Messages can carry key=value labels such as state=open: set them on `send` or later \
+evidence, and `message_link` gives a link to one message to cite in a hand-off. Messages can carry key=value labels such as state=open: set them on `send` or later \
 with `label` (use `if` to claim safely), list matches with `find`, and block on one with \
 `wait_label`. `get_attachment` reads a file attached to a message, and `send` takes `attach` \
 paths. `search` finds earlier messages by words, sender, kind or label, so you can look up a past \
@@ -213,6 +214,7 @@ impl Server {
                     "peek" => self.peek(args),
                     "commit" => self.commit(args),
                     "show_message" => self.show_message(args),
+                    "message_link" => self.message_link(args),
                     "receipts" => self.receipts(args),
                     "get_attachment" => self.get_attachment(args),
                     "board" => self.board(args),
@@ -451,6 +453,17 @@ impl Server {
             .ok_or_else(|| CliError::usage("id is required."))?;
         positive(id, "id")?;
         Ok(agent::show(&self.url, &tenant, &token, &channel, id)?)
+    }
+
+    fn message_link(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let id = optional_int(args, "id", MAX_SAFE_INTEGER)?
+            .ok_or_else(|| CliError::usage("id is required."))?;
+        positive(id, "id")?;
+        Ok(links::checked_link(
+            &self.url, &tenant, &token, &channel, id,
+        )?)
     }
 
     fn receipts(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
@@ -876,6 +889,14 @@ pub fn tools() -> Vec<Value> {
             (true, true),
         ),
         tool(
+            "message_link",
+            "Link to one message",
+            "A link that opens this message on its board in the web app, scrolled to it and highlighted. Put it in a hand-off or a summary to cite an exact decision. The link carries no credential; whoever opens it needs their own access. Not found and deleted messages are errors.",
+            json!({"id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Message id."}}),
+            &["id"],
+            (true, true),
+        ),
+        tool(
             "receipts",
             "See who processed a message",
             "List which readers have committed past one message on the server. processed: a resumable commit (MSN_RESUMABLE=1) covers it. notYet: the reader has committed, but not this far; it may still have seen it. noServerCommit: board personas that never committed to the server, so their progress is unknown. The sender's own readers are left out.",
@@ -1067,6 +1088,7 @@ mod tests {
                 "peek",
                 "commit",
                 "show_message",
+                "message_link",
                 "receipts",
                 "get_attachment",
                 "board",

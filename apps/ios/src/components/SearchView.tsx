@@ -11,7 +11,17 @@ import { Banner, Button, EmptyState, Text } from "./ui.tsx";
 const noop = () => {};
 
 /** Board search (ADR 0037): words, "a phrase" or from:name; newest matches first. */
-export function SearchView({ api, channel, me }: { api: ApiClient; channel: string; me: string }) {
+export function SearchView({
+  api,
+  channel,
+  me,
+  onShareLink,
+}: {
+  api: ApiClient;
+  channel: string;
+  me: string;
+  onShareLink?: (message: Message) => void;
+}) {
   const search = useMemo(() => new ChannelSearch(api, channel), [api, channel]);
   useEffect(() => () => search.cancel(), [search]);
   const state = useStore(search.state);
@@ -59,7 +69,7 @@ export function SearchView({ api, channel, me }: { api: ApiClient; channel: stri
             ) : null
           }
           renderItem={({ item }) => (
-            <MessageRow message={item} own={item.username === me} quoted={undefined} selected={false} onReply={noop} />
+            <MessageRow message={item} own={item.username === me} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} />
           )}
         />
       )}

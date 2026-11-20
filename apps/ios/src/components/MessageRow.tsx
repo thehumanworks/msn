@@ -26,6 +26,10 @@ type Props = {
   onLoadParent?: (id: number) => void;
   /** Processed-by line from explicit commits only (ADR 0040), or null. */
   receipts?: string | null;
+  /** Opens the share sheet with a link to this message (ADR 0042); it offers Copy. */
+  onShareLink?: (message: Message) => void;
+  /** False where tapping a row does nothing, such as search results. */
+  replyable?: boolean;
 };
 
 function preview(text: string): string {
@@ -53,6 +57,8 @@ function MessageRowImpl({
   parent,
   onLoadParent,
   receipts = null,
+  onShareLink,
+  replyable = true,
 }: Props) {
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
@@ -74,27 +80,29 @@ function MessageRowImpl({
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
       }`}
-      accessibilityHint="Double tap to reply. Swipe up or down for more actions."
+      accessibilityHint={`${replyable ? "Double tap to reply. " : ""}Swipe up or down for more actions.`}
       // VoiceOver reads the row as one element, so its inner controls are offered as actions.
       accessibilityActions={[
-        { name: "activate", label: "Reply" },
+        ...(replyable ? [{ name: "activate", label: "Reply" }] : []),
         ...(thread && onToggleThread
           ? [{ name: "toggleThread", label: threadLabel(thread.replies, thread.open, thread.unseen) }]
           : []),
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
-        ...links.map((link, index) => ({ name: `link${index}`, label: `Open link ${link.label}` })),
+        ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
+        ...links.map((link, index) => ({ name: `openLink${index}`, label: `Open link ${link.label}` })),
       ]}
       onAccessibilityAction={({ nativeEvent }) => {
-        if (nativeEvent.actionName === "activate") onReply(message);
+        if (nativeEvent.actionName === "activate" && replyable) onReply(message);
         else if (nativeEvent.actionName === "toggleThread") onToggleThread?.(message.id);
         else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
           onLoadParent?.(message.replyTo);
-        else if (nativeEvent.actionName.startsWith("link")) {
-          const link = links[Number(nativeEvent.actionName.slice(4))];
+        else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
+        else if (nativeEvent.actionName.startsWith("openLink")) {
+          const link = links[Number(nativeEvent.actionName.slice("openLink".length))];
           if (link) openMessageLink(link.href);
         }
       }}
-      onPress={() => onReply(message)}
+      onPress={replyable ? () => onReply(message) : undefined}
       style={[styles.row, own ? styles.own : styles.other, nested && styles.nested, selected && styles.selected]}
     >
       <View style={styles.head}>
@@ -107,6 +115,17 @@ function MessageRowImpl({
           </Text>
         ) : null}
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
+        {onShareLink ? (
+          // An explicit control: touch and hold stays free for selecting the text.
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Copy or share link to message ${message.id}`}
+            onPress={() => onShareLink(message)}
+            hitSlop={12}
+          >
+            <Text style={styles.linkAction}>Link</Text>
+          </Pressable>
+        ) : null}
       </View>
       {message.replyTo !== undefined ? (
         canLoadParent && onLoadParent ? (
@@ -197,4 +216,5 @@ const styles = StyleSheet.create({
   },
   toggleText: { color: colors.accent, fontSize: 13, fontWeight: "600" },
   receipts: { color: colors.muted, fontSize: 12 },
+  linkAction: { color: colors.accent, fontSize: 12, fontWeight: "600" },
 });
