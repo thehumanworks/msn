@@ -972,6 +972,81 @@ test("reply and correlation annotations are plain text, not threads or read rece
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("replies fold under the message they answer, and a reply to an unloaded message fetches it", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (username, text, replyTo) => {
+    const response = await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username, text, ...(replyTo ? { replyTo } : {}) },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message;
+  };
+  const root = await send("planner", "Plan the release");
+  const snapshot = await request.post(`${t.path}/channels/general/snapshots`, {
+    headers: { ...t.headers, "Idempotency-Key": "threads-checkpoint" },
+    data: {
+      username: "planner",
+      text: "Plan agreed",
+      coversThrough: root.id,
+      baseVersion: 0,
+      historyRevision: 0,
+    },
+  });
+  expect(snapshot.status()).toBe(201);
+  const first = await send("reviewer", "Tests first", root.id);
+  const nested = await send("planner", "Agreed, tests first", first.id);
+  const other = await send("agent", "Unrelated status");
+  await connect(page, t);
+  const log = page.locator("#messages");
+  // Two rows in the log, in id order; both replies live in the root's folded thread.
+  await expect(log.locator(":scope > article")).toHaveCount(2);
+  await expect(log.locator(":scope > article").nth(0)).toHaveAttribute("data-id", String(root.id));
+  await expect(log.locator(":scope > article").nth(1)).toHaveAttribute("data-id", String(other.id));
+  await expect(page.locator(".message")).toHaveCount(4);
+  const toggle = log.locator(`article[data-id="${root.id}"] > .thread-toggle`);
+  await expect(toggle).toHaveText("Show 2 replies");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(`[data-id="${first.id}"]`)).toBeHidden();
+  // A reply that arrives while the thread is folded counts as new on the toggle.
+  const late = await send("reviewer", "Release notes drafted", root.id);
+  await expect(toggle).toHaveText("Show 3 replies · 1 new");
+  await expect(log.locator(":scope > article")).toHaveCount(2);
+  await toggle.click();
+  await expect(toggle).toHaveText("Hide 3 replies");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(log.locator(`article[data-id="${root.id}"] > .thread > article`)).toHaveText([
+    /Tests first/,
+    /Agreed, tests first/,
+    /Release notes drafted/,
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("threads-open.png") });
+  // The parent link in a folded reply jumps to the parent in the log.
+  await log.locator(`article[data-id="${late.id}"] .reply-link`).click();
+  await expect(log.locator(`article[data-id="${root.id}"]`)).toHaveClass(/flash/);
+  // Catch-up starts after the snapshot, so the first reply's parent is not loaded: it stays in
+  // the log at its own place, keeps the reply under it, and its link fetches the parent.
+  await page.getByRole("button", { name: "Catch up", exact: true }).click();
+  await expect(page.locator("#checkpoint")).toBeVisible();
+  await expect(log.locator(":scope > article")).toHaveCount(3);
+  await expect(log.locator(":scope > article").nth(0)).toHaveAttribute("data-id", String(first.id));
+  await expect(log.locator(`article[data-id="${first.id}"] > .thread-toggle`)).toHaveText("Show 1 reply");
+  await expect(log.locator(`article[data-id="${first.id}"] > .thread > article`)).toHaveAttribute(
+    "data-id",
+    String(nested.id),
+  );
+  await expect(page.locator(".reply-parent")).toHaveCount(0);
+  await log.locator(`article[data-id="${first.id}"] > .message-annotation .reply-link`).click();
+  await expect(log.locator(`article[data-id="${first.id}"] > .reply-parent`)).toHaveText(
+    "planner: Plan the release",
+  );
+  await expect(page.locator(".message")).toHaveCount(4);
+});
+
 test("label chips are plain text and list the channel's messages with that label now", async ({
   page,
   request,
