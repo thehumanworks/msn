@@ -139,6 +139,7 @@ try {
       "board",
       "label",
       "find",
+      "search",
       "wait_label",
     ],
   );
@@ -338,8 +339,26 @@ try {
   const [conflictCode] = await conflict.done;
   assert.equal(conflictCode, 5);
   assert.match(conflict.errors, /Current labels: .*"state":"done"/);
+  // Search: newest first over MCP, and the same over the CLI with sender and label filters.
+  const searched = await labeler.ok("search", { text: "parser" });
+  assert.deepEqual(
+    searched.messages.map((m) => m.id),
+    [task.message.id],
+  );
+  assert.equal(searched.complete, true);
+  const emptySearch = await labeler.tool("search", {});
+  assert.equal(emptySearch.isError, true);
+  const byCli = await cli(["--profile", "lead", "search", "work", "pars", "--label", "state=done"]);
+  assert.deepEqual(
+    byCli.messages.map((m) => m.text),
+    ["fix the parser"],
+  );
+  const noJson = await cli(["--profile", "lead", "search", "work", "parser", "--kind", "json"]);
+  assert.deepEqual(noJson.messages, []);
   await labeler.close();
-  console.log("PASS: labels on send, conditional claims, filters and waiting on a label over MCP and CLI");
+  console.log(
+    "PASS: labels on send, conditional claims, filters, waiting on a label and search over MCP and CLI",
+  );
 } finally {
   for (const p of children)
     if (p.exitCode === null) {

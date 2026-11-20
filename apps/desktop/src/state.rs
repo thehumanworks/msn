@@ -99,6 +99,23 @@ impl Flight {
     }
 }
 
+/// The channel's search view (ADR 0037): the words asked for and the matches loaded so far.
+#[derive(Debug, Default)]
+pub struct SearchState {
+    /// Numbers each search; only the answer to the newest one is shown.
+    pub query: u64,
+    pub text: String,
+    pub from: Option<String>,
+    pub results: Vec<Value>,
+    pub has_more: bool,
+    pub next_before: Option<u64>,
+    pub complete: bool,
+    pub inflight: bool,
+    pub error: Option<String>,
+    /// A search has been asked for since the channel opened (or the view was cleared).
+    pub active: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct ChannelState {
     pub messages: BTreeMap<u64, Value>,
@@ -116,6 +133,7 @@ pub struct ChannelState {
     pub snapshots_error: Option<String>,
     pub task_board: Option<Value>,
     pub task_board_error: Option<String>,
+    pub search: SearchState,
 }
 
 impl ChannelState {
@@ -241,6 +259,59 @@ impl AppState {
             .collect()
     }
 
+    /// Starts a new search of the selected channel. `input` is what the person typed; a
+    /// `from:name` word becomes the sender filter. Empty input clears the view.
+    pub fn search(&mut self, input: &str) -> Vec<Command> {
+        let (text, from) = msn_cli::search::split_from(input);
+        let Some(state) = self.channel.as_mut() else {
+            return Vec::new();
+        };
+        if text.is_empty() && from.is_none() {
+            state.search = SearchState::default();
+            return Vec::new();
+        }
+        let query = state.search.query + 1;
+        state.search = SearchState {
+            query,
+            text,
+            from,
+            active: true,
+            ..SearchState::default()
+        };
+        self.search_command(None).into_iter().collect()
+    }
+
+    /// Loads the next page of older matches for the current search.
+    pub fn search_older(&mut self) -> Vec<Command> {
+        let Some(before) = self
+            .channel
+            .as_ref()
+            .filter(|state| state.search.has_more && !state.search.inflight)
+            .and_then(|state| state.search.next_before)
+        else {
+            return Vec::new();
+        };
+        self.search_command(Some(before)).into_iter().collect()
+    }
+
+    fn search_command(&mut self, before: Option<u64>) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let search = &mut self.channel.as_mut()?.search;
+        search.inflight = true;
+        search.error = None;
+        Some(Command::Search {
+            generation,
+            channel_generation,
+            channel,
+            query: search.query,
+            text: search.text.clone(),
+            from: search.from.clone(),
+            before,
+        })
+    }
+
     /// Commands that could not be queued earlier (worker queue full); retry when convenient.
     pub fn take_deferred(&mut self) -> Vec<Command> {
         let generation = self.generation();
@@ -286,6 +357,17 @@ impl AppState {
                 }
             }
             Command::CreateChannel { .. } => self.channels_error = Some(BUSY.into()),
+            Command::Search { query, .. } => {
+                if let Some(search) = self
+                    .channel
+                    .as_mut()
+                    .map(|state| &mut state.search)
+                    .filter(|search| search.query == query)
+                {
+                    search.inflight = false;
+                    search.error = Some(BUSY.into());
+                }
+            }
             Command::Disconnect => {}
             invalidation => {
                 let duplicate = self
@@ -453,6 +535,31 @@ impl AppState {
             }
             UiEvent::CoordinationEvents { generation, events } => {
                 self.apply_coordination_events(generation, &events)
+            }
+            UiEvent::SearchResults {
+                generation,
+                channel_generation,
+                channel,
+                query,
+                page,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                if let Some(search) = self
+                    .channel
+                    .as_mut()
+                    .map(|state| &mut state.search)
+                    .filter(|search| search.query == query && search.active)
+                {
+                    search.inflight = false;
+                    search.error = None;
+                    search.results.extend(page.messages);
+                    search.has_more = page.has_more;
+                    search.next_before = page.next_before;
+                    search.complete = page.complete;
+                }
+                Vec::new()
             }
             UiEvent::Error {
                 generation,
@@ -634,6 +741,15 @@ impl AppState {
                 self.channels_error = Some(message);
             }
             "create-channel" => self.channels_error = Some(message),
+            "search" => {
+                if channel_generation != Some(self.channel_generation) {
+                    return;
+                }
+                if let Some(state) = self.channel.as_mut() {
+                    state.search.inflight = false;
+                    state.search.error = Some(message);
+                }
+            }
             "sync-channel" | "load-snapshots" => {
                 if channel_generation != Some(self.channel_generation) {
                     return;
@@ -657,6 +773,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::client_ops::SearchPage;
     use serde_json::json;
     use url::Url;
 
@@ -692,6 +809,78 @@ mod tests {
             revision,
             board: Ok(json!({"tasks": [], "warnings": []})),
         })
+    }
+
+    fn search_reply(state: &mut AppState, query: u64, ids: &[u64], has_more: bool) -> Vec<Command> {
+        let (generation, cg) = (state.generation().unwrap(), state.channel_generation);
+        state.apply(UiEvent::SearchResults {
+            generation,
+            channel_generation: cg,
+            channel: state.selected_channel.clone().unwrap(),
+            query,
+            page: SearchPage {
+                messages: ids.iter().map(|id| msg(*id, "found")).collect(),
+                has_more,
+                next_before: has_more.then(|| *ids.last().unwrap()),
+                complete: true,
+            },
+        })
+    }
+
+    #[test]
+    fn search_splits_sender_pages_older_and_ignores_stale_answers() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let commands = state.search("deploy from:ada");
+        let [
+            Command::Search {
+                query,
+                text,
+                from,
+                before,
+                ..
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("expected one search command, got {commands:?}");
+        };
+        assert_eq!(
+            (text.as_str(), from.as_deref(), *before),
+            ("deploy", Some("ada"), None)
+        );
+        let first = *query;
+        // A newer search replaces the first; the first's late answer is ignored.
+        let second = match state.search("deploy").as_slice() {
+            [Command::Search { query, .. }] => *query,
+            other => panic!("expected a search, got {other:?}"),
+        };
+        search_reply(&mut state, first, &[9], false);
+        assert!(state.channel.as_ref().unwrap().search.results.is_empty());
+        search_reply(&mut state, second, &[8, 5], true);
+        match state.search_older().as_slice() {
+            [Command::Search { query, before, .. }] => {
+                assert_eq!((*query, *before), (second, Some(5)))
+            }
+            other => panic!("expected an older page, got {other:?}"),
+        }
+        // Only one older page in flight at a time.
+        assert!(state.search_older().is_empty());
+        search_reply(&mut state, second, &[3], false);
+        let search = &state.channel.as_ref().unwrap().search;
+        let ids: Vec<_> = search
+            .results
+            .iter()
+            .map(|m| m["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, [8, 5, 3]);
+        assert!(!search.has_more && !search.inflight);
+        assert!(state.search_older().is_empty());
+        // Empty input clears the view; switching channels starts empty too.
+        assert!(state.search("  ").is_empty());
+        assert!(!state.channel.as_ref().unwrap().search.active);
+        state.search("x");
+        state.select_channel("other".into());
+        assert!(!state.channel.as_ref().unwrap().search.active);
     }
 
     fn event(

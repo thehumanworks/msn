@@ -18,7 +18,7 @@
     "test:worker": "node tests/lead-worker.integration.mjs"
   },
   "dependencies": {
-    "expo": "~57.0.24",
+    "expo": "~57.0.33",
     "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",

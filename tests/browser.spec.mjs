@@ -1849,3 +1849,45 @@ test("files attached to messages show as chips and previews, and a person can at
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("attachments.png") });
 });
+
+test("the search box finds a board's messages by words and sender, newest first, with older pages", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (text, username = "agent") => {
+    const response = await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username, text },
+    });
+    expect(response.status()).toBe(201);
+  };
+  const attack = '<img src=x onerror="window.pwned=true"> deploy';
+  await send("We decided to deploy on Friday", "lead");
+  await send("Lunch at noon");
+  await send(attack);
+  for (let i = 0; i < 20; i++) await send(`deploy check ${i}`, "bot");
+  await connect(page, t);
+  await page.locator("#search").fill("deploy from:lead");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.locator("#search-title")).toHaveText(
+    "1 message matching “deploy” from lead, newest first",
+  );
+  await expect(page.locator("#search-results .message p")).toHaveText(["We decided to deploy on Friday"]);
+  await page.locator("#search").fill("deplo");
+  await page.locator("#search").press("Enter");
+  await expect(page.locator("#search-title")).toHaveText("20+ messages matching “deplo”, newest first");
+  await expect(page.locator("#search-results .message p").first()).toHaveText("deploy check 19");
+  await page.getByRole("button", { name: "Older matches" }).click();
+  await expect(page.locator("#search-title")).toHaveText("22 messages matching “deplo”, newest first");
+  await expect(page.locator("#search-results .message p").last()).toHaveText(
+    "We decided to deploy on Friday",
+  );
+  await expect(page.locator("#search-results img")).toHaveCount(0);
+  await expect(page.locator("#search-older")).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath("search.png") });
+  await page.locator("#search-clear").click();
+  await expect(page.locator("#search-panel")).toBeHidden();
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

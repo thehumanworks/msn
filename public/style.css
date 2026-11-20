@@ -538,7 +538,7 @@ nav .empty {
   border-color: var(--accent);
 }
 .label-filter {
-  padding: 10px 14px;
+  padding: 0 14px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
   font-size: 12px;
@@ -546,7 +546,29 @@ nav .empty {
   overflow-y: auto;
   flex-shrink: 0;
 }
+.search-form {
+  display: flex;
+  gap: 6px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.search-form input {
+  flex: 1;
+  min-width: 0;
+}
+.search-form button {
+  flex-shrink: 0;
+}
+#search-older {
+  margin-top: 6px;
+}
 .label-filter-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 0 4px;
+  background: var(--bg);
+  box-shadow: 0 -12px 0 var(--bg);
   display: flex;
   align-items: center;
   justify-content: space-between;
