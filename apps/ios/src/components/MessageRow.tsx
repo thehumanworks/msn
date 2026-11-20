@@ -16,7 +16,7 @@ type Props = {
   /** A reply shown inside an open thread (ADR 0041). */
   nested?: boolean;
   /** A thread root's folded replies. */
-  thread?: { replies: number; open: boolean };
+  thread?: { replies: number; open: boolean; unseen: number };
   onToggleThread?: (root: number) => void;
   /** The parent of a reply whose parent is not loaded, once asked for. */
   parent?: ParentState;
@@ -51,13 +51,33 @@ function MessageRowImpl({
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
   const who = own ? "You" : message.username;
+  const canLoadParent =
+    message.replyTo !== undefined &&
+    onLoadParent !== undefined &&
+    !quoted &&
+    parent?.status !== "loading" &&
+    parent?.status !== "loaded";
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(message.text)
       }`}
-      accessibilityHint="Double tap to reply"
+      accessibilityHint="Double tap to reply. Swipe up or down for more actions."
+      // VoiceOver reads the row as one element, so its inner controls are offered as actions.
+      accessibilityActions={[
+        { name: "activate", label: "Reply" },
+        ...(thread && onToggleThread
+          ? [{ name: "toggleThread", label: threadLabel(thread.replies, thread.open, thread.unseen) }]
+          : []),
+        ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
+      ]}
+      onAccessibilityAction={({ nativeEvent }) => {
+        if (nativeEvent.actionName === "activate") onReply(message);
+        else if (nativeEvent.actionName === "toggleThread") onToggleThread?.(message.id);
+        else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
+          onLoadParent?.(message.replyTo);
+      }}
       onPress={() => onReply(message)}
       style={[styles.row, own ? styles.own : styles.other, nested && styles.nested, selected && styles.selected]}
     >
@@ -73,7 +93,7 @@ function MessageRowImpl({
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
       </View>
       {message.replyTo !== undefined ? (
-        onLoadParent && !quoted && parent?.status !== "loading" && parent?.status !== "loaded" ? (
+        canLoadParent && onLoadParent ? (
           <Pressable
             accessibilityRole="link"
             accessibilityHint="Loads the message this replies to"
@@ -115,7 +135,7 @@ function MessageRowImpl({
           style={styles.toggle}
           hitSlop={8}
         >
-          <Text style={styles.toggleText}>{threadLabel(thread.replies, thread.open)}</Text>
+          <Text style={styles.toggleText}>{threadLabel(thread.replies, thread.open, thread.unseen)}</Text>
         </Pressable>
       ) : null}
     </Pressable>

@@ -11,12 +11,59 @@ import type { Message } from "./types.ts";
 
 export type ThreadRow =
   /** A message in the log; `replies` counts every loaded reply folded under it. */
-  | { kind: "message"; message: Message; replies: number; open: boolean }
+  | { kind: "message"; message: Message; replies: number; open: boolean; unseen: number }
   /** A reply shown under its open thread root. */
   | { kind: "reply"; message: Message; root: number };
 
+/** The root each message is drawn under: itself unless it is a folded reply. Ids in order. */
+export function threadRoots(messages: readonly Message[]): Map<number, number> {
+  const rootOf = new Map<number, number>();
+  for (const message of messages) {
+    const root = message.replyTo === undefined ? undefined : rootOf.get(message.replyTo);
+    rootOf.set(message.id, root ?? message.id);
+  }
+  return rootOf;
+}
+
+/**
+ * Someone else's replies that arrived (are not in `known`) into a folded thread: the log does
+ * not show them, so they are unseen until their thread opens.
+ */
+export function arrivedUnseen(
+  known: ReadonlySet<number>,
+  messages: readonly Message[],
+  expanded: ReadonlySet<number>,
+  me: string,
+): number[] {
+  const roots = threadRoots(messages);
+  return messages
+    .filter((m) => {
+      const root = roots.get(m.id) as number;
+      return !known.has(m.id) && root !== m.id && !expanded.has(root) && m.username !== me;
+    })
+    .map((m) => m.id);
+}
+
+/** The oldest unseen reply still loaded, with its root: what "New reply in thread" points at. */
+export function firstUnseen(
+  messages: readonly Message[],
+  unseen: ReadonlySet<number>,
+): { root: number; id: number } | null {
+  const roots = threadRoots(messages);
+  let first: { root: number; id: number } | null = null;
+  for (const id of unseen) {
+    const root = roots.get(id);
+    if (root !== undefined && root !== id && (first === null || id < first.id)) first = { root, id };
+  }
+  return first;
+}
+
 /** Rows oldest first. `messages` must be in id order, as the channel controller keeps them. */
-export function threadRows(messages: readonly Message[], expanded: ReadonlySet<number>): ThreadRow[] {
+export function threadRows(
+  messages: readonly Message[],
+  expanded: ReadonlySet<number>,
+  unseen: ReadonlySet<number> = new Set(),
+): ThreadRow[] {
   const rootOf = new Map<number, number>();
   const replies = new Map<number, Message[]>();
   const top: Message[] = [];
@@ -36,14 +83,15 @@ export function threadRows(messages: readonly Message[], expanded: ReadonlySet<n
   for (const message of top) {
     const thread = replies.get(message.id) ?? [];
     const open = thread.length > 0 && expanded.has(message.id);
-    rows.push({ kind: "message", message, replies: thread.length, open });
+    const fresh = open ? 0 : thread.filter((reply) => unseen.has(reply.id)).length;
+    rows.push({ kind: "message", message, replies: thread.length, open, unseen: fresh });
     if (open) for (const reply of thread) rows.push({ kind: "reply", message: reply, root: message.id });
   }
   return rows;
 }
 
-export function threadLabel(replies: number, open: boolean): string {
-  return `${open ? "Hide" : "Show"} ${replies} repl${replies === 1 ? "y" : "ies"}`;
+export function threadLabel(replies: number, open: boolean, unseen = 0): string {
+  return `${open ? "Hide" : "Show"} ${replies} repl${replies === 1 ? "y" : "ies"}${unseen ? ` · ${unseen} new` : ""}`;
 }
 
 /** A fetched parent, `null` when it no longer exists, or loading / failed. */
@@ -72,7 +120,9 @@ export class ParentLoader {
       this.put(id, { status: "loaded", message });
     } catch (error) {
       if (this.abort.signal.aborted) return;
-      if (error instanceof ApiError && error.status === 404) this.put(id, { status: "loaded", message: null });
+      // 404: no such message; 410: it was deleted. Either way it is gone.
+      if (error instanceof ApiError && (error.status === 404 || error.status === 410))
+        this.put(id, { status: "loaded", message: null });
       else this.put(id, { status: "error", error: error instanceof Error ? error.message : String(error) });
     }
   }

@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { FlatList, KeyboardAvoidingView, Platform, StyleSheet, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Draft } from "../core/channelController.ts";
 import type { SessionController } from "../core/sessionController.ts";
-import { ParentLoader, threadRows, type ThreadRow } from "../core/threads.ts";
+import {
+  arrivedUnseen,
+  firstUnseen,
+  ParentLoader,
+  threadRoots,
+  threadRows,
+  type ThreadRow,
+} from "../core/threads.ts";
 import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
@@ -90,15 +97,56 @@ function ChannelBody({
   const byId = useMemo(() => new Map(state.messages.map((m) => [m.id, m])), [state.messages]);
   // Reply threads (ADR 0041): folded by default; the list is inverted, so newest row first.
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
-  const rows = useMemo(() => threadRows(state.messages, expanded).reverse(), [state.messages, expanded]);
+  // Someone else's replies that arrived into a folded thread after the first load.
+  const [unseen, setUnseen] = useState<ReadonlySet<number>>(() => new Set());
+  const known = useRef<Set<number> | null>(null);
+  useEffect(() => {
+    if (state.phase !== "ready" && state.messages.length === 0) return;
+    const ids = new Set(state.messages.map((m) => m.id));
+    if (known.current) {
+      const arrived = arrivedUnseen(known.current, state.messages, expanded, me);
+      if (arrived.length) setUnseen((current) => new Set([...current, ...arrived]));
+    }
+    known.current = ids;
+    // Only new messages matter here; `expanded` is read as it stands when they arrive.
+  }, [state.messages]);
+  const rows = useMemo(
+    () => threadRows(state.messages, expanded, unseen).reverse(),
+    [state.messages, expanded, unseen],
+  );
+  const open = useCallback(
+    (root: number) => {
+      setExpanded((current) => new Set([...current, root]));
+      const roots = threadRoots(state.messages);
+      setUnseen((current) => new Set([...current].filter((id) => roots.get(id) !== root)));
+    },
+    [state.messages],
+  );
   const toggle = useCallback(
-    (root: number) =>
-      setExpanded((current) => {
-        const next = new Set(current);
-        if (!next.delete(root)) next.add(root);
-        return next;
-      }),
-    [],
+    (root: number) => {
+      if (expanded.has(root))
+        setExpanded((current) => new Set([...current].filter((id) => id !== root)));
+      else open(root);
+    },
+    [expanded, open],
+  );
+  const pointer = useMemo(() => firstUnseen(state.messages, unseen), [state.messages, unseen]);
+  const list = useRef<FlatList<ThreadRow>>(null);
+  const [scrollTo, setScrollTo] = useState<number | null>(null);
+  useEffect(() => {
+    if (scrollTo === null) return;
+    const index = rows.findIndex((row) => row.message.id === scrollTo);
+    setScrollTo(null);
+    if (index >= 0) list.current?.scrollToIndex({ index, viewPosition: 0.5, animated: true });
+  }, [rows, scrollTo]);
+  // Your reply folds into its thread; open it so the reply does not seem to vanish.
+  const onSent = useCallback(
+    (draft: Draft) => {
+      if (draft.replyTo === undefined) return;
+      const root = threadRoots(state.messages).get(draft.replyTo);
+      if (root !== undefined) open(root);
+    },
+    [state.messages, open],
   );
   const loader = useMemo(() => new ParentLoader(session.api, controller.channel), [session, controller]);
   useEffect(() => () => loader.cancel(), [loader]);
@@ -155,7 +203,11 @@ function ChannelBody({
         <EmptyState title="No messages yet" body="Say something to start the conversation." />
       ) : (
         <FlatList<ThreadRow>
+          ref={list}
           inverted
+          onScrollToIndexFailed={({ index }) =>
+            list.current?.scrollToOffset({ offset: Math.max(0, index * 80), animated: true })
+          }
           data={rows}
           keyExtractor={(row) => String(row.message.id)}
           keyboardShouldPersistTaps="handled"
@@ -191,7 +243,11 @@ function ChannelBody({
                 parent={parent}
                 onLoadParent={item.replyTo !== undefined && !byId.has(item.replyTo) ? (id) => void loader.load(id) : undefined}
                 nested={row.kind === "reply"}
-                thread={row.kind === "message" && row.replies > 0 ? { replies: row.replies, open: row.open } : undefined}
+                thread={
+                  row.kind === "message" && row.replies > 0
+                    ? { replies: row.replies, open: row.open, unseen: row.unseen }
+                    : undefined
+                }
                 onToggleThread={toggle}
                 selected={replyTo?.id === item.id}
                 onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
@@ -200,8 +256,22 @@ function ChannelBody({
           }}
         />
       )}
+      {pointer ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityHint="Opens the thread and scrolls to the reply"
+          onPress={() => {
+            open(pointer.root);
+            setScrollTo(pointer.id);
+          }}
+          style={styles.pointer}
+        >
+          <Text style={styles.pointerText}>New reply in thread #{pointer.root} · Show</Text>
+        </Pressable>
+      ) : null}
       <Composer
         channel={controller}
+        onSent={onSent}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}
         bottomInset={bottomInset}
@@ -223,4 +293,12 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: "800", flex: 1 },
   tabs: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
   older: { color: colors.muted, textAlign: "center", padding: spacing.md, fontSize: 13 },
+  pointer: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  pointerText: { color: colors.accent, fontWeight: "600", fontSize: 14 },
 });
