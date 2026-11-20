@@ -1,10 +1,12 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
+import { linksOf, parse, plainText } from "../core/markdown.ts";
 import type { Message } from "../core/types.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
 import { formatTime } from "./format.ts";
+import { MarkdownText, openMessageLink } from "./MarkdownText.tsx";
 import { colors, mono, radius, spacing } from "./theme.ts";
 import { Text } from "./ui.tsx";
 
@@ -54,6 +56,10 @@ function MessageRowImpl({
 }: Props) {
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
+  // Formatted text (ADR 0043): VoiceOver reads the words without markup and offers each link.
+  const tree = useMemo(() => (task || structured ? null : parse(message.text)), [task, structured, message.text]);
+  const spoken = tree ? plainText(tree) : message.text;
+  const links = tree ? linksOf(tree).slice(0, 5) : [];
   const who = own ? "You" : message.username;
   const canLoadParent =
     message.replyTo !== undefined &&
@@ -65,7 +71,7 @@ function MessageRowImpl({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
-        task ? `task ${task.body.action} ${task.body.task}` : preview(message.text)
+        task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
       }`}
       accessibilityHint="Double tap to reply. Swipe up or down for more actions."
       // VoiceOver reads the row as one element, so its inner controls are offered as actions.
@@ -75,12 +81,17 @@ function MessageRowImpl({
           ? [{ name: "toggleThread", label: threadLabel(thread.replies, thread.open, thread.unseen) }]
           : []),
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
+        ...links.map((link, index) => ({ name: `link${index}`, label: `Open link ${link.label}` })),
       ]}
       onAccessibilityAction={({ nativeEvent }) => {
         if (nativeEvent.actionName === "activate") onReply(message);
         else if (nativeEvent.actionName === "toggleThread") onToggleThread?.(message.id);
         else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
           onLoadParent?.(message.replyTo);
+        else if (nativeEvent.actionName.startsWith("link")) {
+          const link = links[Number(nativeEvent.actionName.slice(4))];
+          if (link) openMessageLink(link.href);
+        }
       }}
       onPress={() => onReply(message)}
       style={[styles.row, own ? styles.own : styles.other, nested && styles.nested, selected && styles.selected]}
@@ -127,9 +138,7 @@ function MessageRowImpl({
           {message.text}
         </Text>
       ) : (
-        <Text style={styles.body} selectable>
-          {message.text}
-        </Text>
+        <MarkdownText text={message.text} style={styles.body} />
       )}
       {receipts ? (
         <Text

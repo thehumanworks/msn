@@ -354,6 +354,85 @@ test("untrusted content is plain text; channel switches ignore late polls; keys 
   await expect(page.locator("#workspace")).toBeHidden();
 });
 
+test("message text renders as safe Markdown built from DOM nodes (ADR 0043)", async ({ page, request }) => {
+  const t = await provision(request);
+  const formatted = [
+    "## Plan",
+    "Ship **bold**, *italic*, ~~old~~ and `inline` with [docs](https://example.com/docs).",
+    "",
+    "- first",
+    "- second",
+    "",
+    "1. one",
+    "2. two",
+    "",
+    "> quoted",
+    "",
+    "```js",
+    `const line = "${"x".repeat(300)}";`,
+    "```",
+    "",
+    "| Name | Score |",
+    "|:-----|------:|",
+    "| ann | 1 |",
+  ].join("\n");
+  const hostile = [
+    "[click](javascript:window.pwned=true)",
+    "[data](data:text/html,<script>window.pwned=true</script>)",
+    '<a href="javascript:window.pwned=true">raw</a>',
+    '<img src=x onerror="window.pwned=true">',
+    "![x](javascript:window.pwned=true)",
+    "<javascript:window.pwned=true>",
+    "**<script>window.pwned=true</script>**",
+    "`<img src=x onerror=window.pwned=true>`",
+  ].join("\n");
+  for (const text of ["plain words stay a paragraph", formatted, hostile])
+    await request.post(`${t.path}/channels/alpha/messages`, {
+      headers: t.headers,
+      data: { username: "agent", text },
+    });
+  await connect(page, t, "Tomas", { remember: false });
+  const rows = page.locator("#messages > article");
+  await expect(rows).toHaveCount(3);
+  // Plain text is still exactly one <p> with the raw text.
+  await expect(rows.nth(0).locator("p")).toHaveText("plain words stay a paragraph");
+  await expect(rows.nth(0).locator(".md")).toHaveCount(0);
+  const md = rows.nth(1).locator(".md");
+  await expect(md.locator('[role="heading"][aria-level="4"]')).toHaveText("Plan");
+  await expect(md.locator("strong")).toHaveText("bold");
+  await expect(md.locator("em")).toHaveText("italic");
+  await expect(md.locator("del")).toHaveText("old");
+  await expect(md.locator("p code")).toHaveText("inline");
+  const link = md.locator("a");
+  await expect(link).toHaveText("docs");
+  await expect(link).toHaveAttribute("href", "https://example.com/docs");
+  await expect(link).toHaveAttribute("rel", "noopener noreferrer nofollow");
+  await expect(link).toHaveAttribute("target", "_blank");
+  await expect(md.locator("ul > li")).toHaveText(["first", "second"]);
+  await expect(md.locator("ol > li")).toHaveText(["one", "two"]);
+  await expect(md.locator("blockquote")).toHaveText("quoted");
+  await expect(md.locator("th")).toHaveText(["Name", "Score"]);
+  await expect(md.locator("td")).toHaveText(["ann", "1"]);
+  // A long code line scrolls inside its block instead of widening the page.
+  const code = md.locator("pre.md-code");
+  await expect(code).toHaveCSS("white-space", "pre");
+  const sizes = await code.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+  expect(sizes.scroll).toBeGreaterThan(sizes.client);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  // Hostile input: no link other than https, no raw HTML elements, nothing executed.
+  const bad = rows.nth(2);
+  await expect(bad.locator("a")).toHaveCount(0);
+  await expect(bad.locator("img, script, iframe")).toHaveCount(0);
+  await expect(bad).toContainText("[click](javascript:window.pwned=true)");
+  await expect(bad).toContainText('<img src=x onerror="window.pwned=true">');
+  await expect(bad.locator("strong")).toHaveText("<script>window.pwned=true</script>");
+  const hrefs = await page
+    .locator("#messages a[href]")
+    .evaluateAll((all) => all.map((a) => a.getAttribute("href")));
+  for (const href of hrefs) expect(href).toMatch(/^https?:\/\//);
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+});
+
 test("remembered credentials reconnect on reload, restore the last channel, and are forgotten on disconnect or rejection", async ({
   page,
   request,
