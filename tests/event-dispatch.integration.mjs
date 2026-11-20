@@ -208,6 +208,9 @@ try {
   assert.equal(reviewDispatch.filter((e) => e.dispatched).length, 1);
   // The worker already processed the assignment. When the planner edits it, the worker's runner
   // dispatches it again as an explicit edit notice with the new text (ADR 0052).
+  // Both readers catch up first (their own last messages), so the receipts are settled.
+  assert.equal((await runner("worker", worker.token)).filter((e) => e.dispatched).length, 0);
+  assert.equal((await runner("reviewer", reviewer.token)).filter((e) => e.dispatched).length, 0);
   const receiptsBefore = await api(`/api/tenants/${tenant}/channels/work/receipts`, planner.token);
   const edited = await cli(
     ["edit", "work", String(assignment.message.id), "--text", "Complete deliver; also attach the log"],
