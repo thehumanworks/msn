@@ -135,6 +135,7 @@ try {
       "peek",
       "commit",
       "show_message",
+      "receipts",
       "get_attachment",
       "board",
       "label",
