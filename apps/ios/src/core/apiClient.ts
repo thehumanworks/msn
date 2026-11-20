@@ -30,6 +30,7 @@ import type {
 import { ProtocolError } from "./errors.ts";
 import { decodeUnread, type MarkList, type Unread } from "./readMarks.ts";
 import { decodeMute, decodeMutes, type Mute } from "./mutes.ts";
+import { decodePersonas, type Persona } from "./mention.ts";
 
 export type SendMessageInput = {
   username: string;
@@ -254,6 +255,12 @@ export class ApiClient {
       cursor = nextAfter;
     }
     return found;
+  }
+
+  /** GET …/personas: the board's personas, for @ suggestions (ADR 0055); 404 on a plain channel. */
+  async listPersonas(channel: string, signal?: AbortSignal): Promise<Persona[]> {
+    const r = await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/personas`, { signal });
+    return decodePersonas(r);
   }
 
   /** GET …/pins: the board owner's pinned messages (ADR 0038). */

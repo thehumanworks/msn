@@ -2,6 +2,7 @@ import { acquire, invitation, savePassword } from "./access.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
+import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { renderTranscript } from "./transcript.js";
@@ -19,6 +20,11 @@ let generation = 0;
 let polling = null;
 // Paste-ready curl steps for the invite link on show (ADR 0056); null hides the button.
 let inviteCurlText = null;
+/**
+ * The open @ suggestions (ADR 0055): where the @ is, the names shown and the highlighted one.
+ * `dismissed` is the @ that Escape closed, so typing on after it does not reopen the list.
+ */
+const mention = { start: -1, options: [], active: 0, dismissed: -1 };
 /** Boards the server reports archived (ADR 0046): read only, hidden unless Show archived. */
 const archivedBoards = new Set();
 // A bounded, memory-only delivery cache, not a durable read receipt or unread counter.
@@ -109,6 +115,8 @@ function draft(connection = session, name = channel) {
     connection.drafts.set(name, {
       content: "",
       recipient: "",
+      // The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
+      mentionTo: null,
       replyTo: null,
       files: [],
       retry: null,
@@ -191,6 +199,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
     for (const state of connection.drafts.values()) {
       state.content = "";
       state.recipient = "";
+      state.mentionTo = null;
       state.replyTo = null;
       state.files = [];
       state.retry = null;
@@ -216,6 +225,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("invite-dialog").close();
   $("message").value = "";
   $("recipient").value = "";
+  closeMentions();
   $("new-channel").value = "";
   autosize();
   $("attach-list").replaceChildren();
@@ -1664,6 +1674,8 @@ function selectChannel(name, { reset = false } = {}) {
   const selectedDraft = draft();
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
+  closeMentions();
+  mention.dismissed = -1;
   showFiles(selectedDraft);
   clearLabel();
   clearSearch();
@@ -2370,7 +2382,10 @@ $("send-form").addEventListener("submit", async (event) => {
     if (state.content === content && state.recipient === recipient) {
       state.content = "";
       state.recipient = "";
+      state.mentionTo = null;
       if (state.replyTo === replyId) state.replyTo = null;
+      // A closed @ belonged to the sent text; the next message's @ opens the list again.
+      mention.dismissed = -1;
     }
     state.files = state.files.filter((file) => !files.includes(file));
     if (state.retry === attempt) state.retry = null;
@@ -2415,13 +2430,29 @@ $("attach-input").addEventListener("change", () => {
 });
 
 $("message").addEventListener("input", () => {
-  if (session && channel) draft().content = $("message").value;
+  if (session && channel) {
+    const state = draft();
+    state.content = $("message").value;
+    const address = addressAfterEdit($("recipient").value, state.mentionTo, state.content);
+    state.mentionTo = address.mentionTo;
+    if (address.to !== $("recipient").value) {
+      $("recipient").value = state.recipient = address.to;
+    }
+  }
   autosize();
+  showMentions();
 });
 $("recipient").addEventListener("input", () => {
-  if (session && channel) draft().recipient = $("recipient").value;
+  if (session && channel) {
+    const state = draft();
+    state.recipient = $("recipient").value;
+    if (state.recipient !== state.mentionTo) state.mentionTo = null;
+  }
 });
 $("message").addEventListener("keydown", (event) => {
+  // An input method still composing owns Enter and the arrows: it is choosing a word, not sending.
+  if (event.isComposing || event.keyCode === 229) return;
+  if (mentionKey(event)) return;
   // Enter sends; Shift+Enter inserts a newline. Ctrl/⌘+Enter always sends.
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey || !event.shiftKey)) {
     event.preventDefault();
@@ -2849,6 +2880,8 @@ async function showAgents() {
   const target = agentsChannel;
   try {
     const { personas } = await api(`/channels/${target}/personas`, {}, connection);
+    const cached = connection.channels.get(target);
+    if (cached) cached.personas = personas;
     if (session !== connection || agentsChannel !== target) return;
     const list = $("agents-list");
     list.replaceChildren();
@@ -3220,3 +3253,144 @@ document.addEventListener("keydown", (event) => {
     replyTo(message);
   }
 });
+
+/*
+ * Mention someone with @ (ADR 0055). Typing @ in the message suggests the board's personas and
+ * recent senders; Up and Down move, Enter or Tab (or a tap) picks, Escape or a space closes.
+ * A pick writes @name into the text and, when To is empty, puts the name in To: the first
+ * mention picked addresses the message. The list is a listbox the message field controls, so
+ * focus never leaves the field and screen readers hear the highlighted name.
+ */
+function closeMentions() {
+  mention.start = -1;
+  mention.options = [];
+  $("mention-list").hidden = true;
+  $("mention-list").replaceChildren();
+  $("message").setAttribute("aria-expanded", "false");
+  $("message").removeAttribute("aria-activedescendant");
+}
+
+/** Loads the board's personas once per visit; a plain channel has none (404). */
+async function loadPersonas(connection, name, state) {
+  if (state.personas || state.personasLoading) return;
+  state.personasLoading = true;
+  try {
+    const { personas } = await api(`/channels/${name}/personas`, {}, connection);
+    state.personas = personas;
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    // A plain channel (404) has no personas; any other failure is not retried on every key
+    // either. Senders still work, and the next visit to the board asks again.
+    state.personas = [];
+  } finally {
+    state.personasLoading = false;
+  }
+  if (session === connection && channel === name && mention.start >= 0) showMentions();
+}
+
+function showMentions() {
+  const box = $("message");
+  if (!session || !channel || !canPost() || document.activeElement !== box) return closeMentions();
+  const at = box.selectionStart === box.selectionEnd ? mentionAt(box.value, box.selectionStart) : null;
+  if (!at || at.start === mention.dismissed) {
+    if (!at) mention.dismissed = -1;
+    return closeMentions();
+  }
+  const state = session.channels.get(channel);
+  if (!state) return closeMentions();
+  void loadPersonas(session, channel, state);
+  const options = suggest(
+    people({ personas: state.personas ?? [], messages: state.messages, me: session.username }),
+    at.query,
+  );
+  if (!options.length) return closeMentions();
+  const previous = mention.options[mention.active]?.name;
+  mention.start = at.start;
+  mention.options = options;
+  mention.active = Math.max(
+    0,
+    options.findIndex((person) => person.name === previous),
+  );
+  const list = $("mention-list");
+  list.replaceChildren(
+    ...options.map((person, index) => {
+      const item = document.createElement("div");
+      item.id = `mention-${index}`;
+      item.setAttribute("role", "option");
+      item.dataset.index = String(index);
+      const name = document.createElement("span");
+      name.textContent = `@${person.name}`;
+      item.append(name);
+      if (person.listening) {
+        const note = document.createElement("small");
+        note.textContent = "listening";
+        item.append(note);
+      }
+      return item;
+    }),
+  );
+  list.hidden = false;
+  box.setAttribute("aria-expanded", "true");
+  highlightMention(mention.active);
+}
+
+function highlightMention(index) {
+  mention.active = index;
+  for (const item of $("mention-list").children)
+    item.setAttribute("aria-selected", String(Number(item.dataset.index) === index));
+  const item = $(`mention-${index}`);
+  $("message").setAttribute("aria-activedescendant", item?.id ?? "");
+  item?.scrollIntoView({ block: "nearest" });
+}
+
+function pickMention(index) {
+  const person = mention.options[index];
+  const box = $("message");
+  if (!person || mention.start < 0 || !session || !channel) return;
+  const next = insertMention(box.value, mention.start, box.selectionStart, person.name);
+  box.value = next.text;
+  box.setSelectionRange(next.caret, next.caret);
+  const state = draft();
+  state.content = next.text;
+  const address = addressAfterPick($("recipient").value, state.mentionTo, person.name);
+  state.mentionTo = address.mentionTo;
+  $("recipient").value = state.recipient = address.to;
+  closeMentions();
+  autosize();
+  status(
+    address.to === person.name
+      ? `Mentioned ${person.name} · the message goes to ${person.name}`
+      : `Mentioned ${person.name} · the message still goes to ${address.to}`,
+  );
+}
+
+/** Keys for the open list. Returns true when the key was used, so it neither sends nor types. */
+function mentionKey(event) {
+  if (mention.start < 0 || event.isComposing) return false;
+  const count = mention.options.length;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const move = event.key === "ArrowDown" ? 1 : -1;
+    highlightMention((mention.active + move + count) % count);
+  } else if (
+    (event.key === "Enter" || event.key === "Tab") &&
+    !event.shiftKey &&
+    !event.ctrlKey &&
+    !event.metaKey
+  ) {
+    pickMention(mention.active);
+  } else if (event.key === "Escape") {
+    // Closes only the list: a pending reply stays for the next press.
+    mention.dismissed = mention.start;
+    closeMentions();
+  } else return false;
+  event.preventDefault();
+  return true;
+}
+
+$("mention-list").addEventListener("mousedown", (event) => event.preventDefault());
+$("mention-list").addEventListener("click", (event) => {
+  const item = event.target.closest?.("[data-index]");
+  if (item) pickMention(Number(item.dataset.index));
+});
+$("message").addEventListener("click", showMentions);
+$("message").addEventListener("blur", closeMentions);

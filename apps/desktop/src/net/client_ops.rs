@@ -363,6 +363,36 @@ pub fn fetch_receipts(
     msn_cli::receipts::parse_channel(&value, channel)
 }
 
+/// The board's personas as (display name, listening now), for @ suggestions (ADR 0055).
+pub fn fetch_personas(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<Vec<(String, bool)>, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let value = get_json(
+        client,
+        &format!("/api/tenants/{tenant}/channels/{channel}/personas"),
+        token,
+    )?;
+    Ok(value["personas"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|persona| {
+                    let name = persona["displayName"].as_str()?;
+                    Some((
+                        name.to_owned(),
+                        persona["listening"].as_bool() == Some(true),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Adds or removes one reaction (ADR 0047) as `username`. Returns the message's reactions after
 /// the change (`Value::Null` when it has none left).
 #[allow(clippy::too_many_arguments)]
