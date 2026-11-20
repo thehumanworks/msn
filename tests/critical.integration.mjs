@@ -441,23 +441,20 @@ try {
   assert.deepEqual(aliceAgain.messages, []);
 
   // I5 explicit --cursor-file binding + lock + foreign file. Reader always required (G01).
-  // Two files for one reader are separate progress only when kept local (--local, ADR 0053); by
-  // default both would share the reader's one server cursor.
+  // ADR 0053: the first file claims owner-agent on the server. The default file then finds the
+  // reader held, so it keeps its own progress locally (no takeover, no error) and stays separate.
   const cursorFile = join(dir, "processing-owner.json");
   const peekFile = await rust(
-    peekCmd(channel, "owner-agent", ["--cursor-file", cursorFile, "--limit", "100", "--local"]),
+    peekCmd(channel, "owner-agent", ["--cursor-file", cursorFile, "--limit", "100"]),
     ownerEnv,
   );
   assertPeekEnvelope(peekFile);
   assert.equal(peekFile.committedThrough, 0);
-  await rust(commitCmd(channel, "owner-agent", firstId, ["--cursor-file", cursorFile, "--local"]), ownerEnv);
-  const defaultOwnerPeek = await rust(
-    peekCmd(channel, "owner-agent", ["--limit", "100", "--local"]),
-    ownerEnv,
-  );
+  await rust(commitCmd(channel, "owner-agent", firstId, ["--cursor-file", cursorFile]), ownerEnv);
+  const defaultOwnerPeek = await rust(peekCmd(channel, "owner-agent", ["--limit", "100"]), ownerEnv);
   assert.equal(defaultOwnerPeek.committedThrough, 0);
   const fileAgain = await rust(
-    peekCmd(channel, "owner-agent", ["--cursor-file", cursorFile, "--limit", "100", "--local"]),
+    peekCmd(channel, "owner-agent", ["--cursor-file", cursorFile, "--limit", "100"]),
     ownerEnv,
   );
   assert.equal(fileAgain.committedThrough, firstId);
@@ -473,17 +470,14 @@ try {
       highestFetched: 0,
     }),
   );
-  const foreign = await attempt(
-    peekCmd(channel, "owner-agent", ["--cursor-file", foreignPath, "--local"]),
-    ownerEnv,
-  );
+  const foreign = await attempt(peekCmd(channel, "owner-agent", ["--cursor-file", foreignPath]), ownerEnv);
   assert.equal(foreign.ok, false);
   assert.equal(foreign.code, 2);
 
   const lockFile = join(dir, "idle-lock.json");
   const waiter = spawn(
     binary,
-    peekCmd(idleChannel, "owner-agent", ["--wait", "3", "--cursor-file", lockFile, "--local"]),
+    peekCmd(idleChannel, "owner-agent", ["--wait", "3", "--cursor-file", lockFile]),
     {
       cwd,
       env: envWith(ownerEnv),
@@ -492,7 +486,7 @@ try {
   );
   await new Promise((resolve) => setTimeout(resolve, 250));
   const locked = await attempt(
-    peekCmd(idleChannel, "owner-agent", ["--wait", "0", "--cursor-file", lockFile, "--local"]),
+    peekCmd(idleChannel, "owner-agent", ["--wait", "0", "--cursor-file", lockFile]),
     ownerEnv,
   );
   assert.equal(locked.ok, false);

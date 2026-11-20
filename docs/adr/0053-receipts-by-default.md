@@ -24,13 +24,16 @@ Three modes, from flags first and then `MSN_RESUMABLE`:
 
 `--resumable` and `--local` conflict. The MCP tools read only `MSN_RESUMABLE`.
 
-Default mode differs from Server mode in three cases only, all where the server *cannot* keep this key's progress:
+Default mode must not break a setup that works today, so it falls back to local progress whenever this key's progress cannot be on the server for this reader:
 
+- **Another machine already holds the reader** (`409 processing_held`). Examples: two agents run under one name, a `msn run` listener and a CLI agent share a name, or two `--cursor-file` paths use one reader. The holder keeps the reader. This agent keeps working on its own local progress, exactly as before this ADR, and no receipt names it. Nothing is taken over.
 - **Watch-only keys** (ADR 0039) get `403 watch_only` on the claim.
 - **A key bound to another name** reading under `--reader` gets `403 username_bound`. Reading under another name is allowed; committing under it is not (ADR 0034).
 - **Servers older than ADR 0034** answer `404 route_not_found`.
 
-Then the peek continues locally and prints one line on stderr. Any other refusal is an error, as in Server mode. In particular a reader that **another machine holds** (`409 processing_held`) fails with exit 5. The error names the holder, `msn takeover CHANNEL --reader R`, and `--local`. Nothing is taken over and nothing falls back silently: two machines running the same reader is exactly what ADR 0034 refuses.
+The peek then continues locally and prints one line on stderr. For a held reader, that line names the holder, `msn takeover CHANNEL --reader R` and `--resumable`. The progress file remembers the choice (`keptLocal`, the refusal code), so later default-mode peeks make no claim request and print nothing. `--resumable` (or `MSN_RESUMABLE=1`) claims again, fails with exit 5 on a held reader as before, and clears `keptLocal` when the claim succeeds. Any other refusal is an error, as in Server mode.
+
+This still rests only on explicit commits. A fallback just means no receipt for that agent, never a guessed one.
 
 A default-mode commit follows the progress file. If a peek claimed the reader (the file has a `generation`), the commit goes to the server. If the peek stayed local, the commit stays local. A local-mode commit still refuses a file with a `generation` (ADR 0034), and the message now says to leave out `--local`.
 
@@ -53,14 +56,14 @@ The CLI and MCP make one claim per reader and channel, once. After that, a commi
 
 ## What this does not change
 
-- **A receipt is still an explicit commit.** Listening, peeking, posting and claiming a task do not count. A runner's commit means "this runner is finished with every message up to N". This includes messages it skipped because they were not addressed to it, and, for the host, a turn that failed for good and was reported on the board. That is the watermark meaning ADR 0040 already documents.
+- **A receipt is still an explicit commit.** Listening, peeking, posting and claiming a task do not count. A runner's commit means "this runner is finished with every message up to N". This includes messages it skipped because they were not addressed to it, and, for the host, a turn that failed for good and was reported on the board. That is the watermark meaning ADR 0040 already documents. **It also covers board history from before the runner started.** A runner bootstraps at the board's head and never replays older messages, but its first commit through N marks every message up to N as processed by it. A watermark cannot leave a prefix out, and carrying a lower `committedThrough` on the claim would not change that. So read a runner's receipt as "this agent has finished with the board up to here", not "this agent handled each of these messages". The same holds for a `msn peek` agent that commits through a message it skipped.
 - **Takeover stays explicit and fenced** (ADR 0034). A runner's own resume after losing its machine still uses its local state. The server cursor is for receipts and for `msn peek` resumption, not for a host's event stream.
 - **Attribution** is by reader name, with the same shared-key caveat as ADR 0040.
 - **Web, desktop and iOS** are unchanged. They already show whatever readers committed on the server.
 
 ## Rejected
 
-- **Falling back to local when the reader is held.** An agent would quietly run beside another holder of the same name, and the board would show the other machine's progress as this agent's. An explicit error with both ways out (takeover or `--local`) is clearer.
+- **Failing (exit 5) when the reader is held, in default mode.** That would make setups that work today fail after an upgrade, which nobody asked for. It stays the behaviour of `--resumable`, where the person asked for server progress.
 - **A runner taking over its own stale claim** (for example after its state directory was deleted). There is no proof that the other holder is gone. That is the "silence" signal the owner rejected. The runner keeps working without receipts and says so.
 - **Committing a host turn only when it succeeded.** One permanently failed message would hold the watermark forever, and every later message would read "not yet" while the agent keeps working. A failure for good is already reported on the board, and the watermark moves past it, as a peek/commit agent that skips a message would.
 - **A profile setting for the mode.** The flag and `MSN_RESUMABLE` cover the CLI and MCP. Persistent runners save the choice in their own configuration.

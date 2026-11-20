@@ -175,19 +175,19 @@ msn send collaboration \
 msn commit collaboration --through 41
 ```
 
-Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched}`. `nextCursor` is this page's watermark — the usual `--through` value. `highestFetched` is the max prefix ever printed and is not lowered by a smaller replay. Commit stdout is `{committedThrough, highestFetched}`. Default files live under `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/processing/<reader-hash>/<channel>.json`. They never adopt an eager `readers/` cursor. `--cursor-file` remains bound to origin, tenant, channel, and reader; pass `--reader` whenever two agents share a token.
+Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched}`. `nextCursor` is this page's watermark — the usual `--through` value. `highestFetched` is the max prefix ever printed and is not lowered by a smaller replay. Commit stdout is `{committedThrough, highestFetched}`. Default files live under `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/processing/<reader-hash>/<channel>.json`. They never adopt an eager `readers/` cursor. `--cursor-file` remains bound to origin, tenant, channel, and reader; pass `--reader` whenever two agents share a token. Since ADR 0053, progress for a reader lives on the server by default, and one machine holds it at a time. A second cursor file or machine for the same reader finds it held, keeps its own progress locally with one stderr note, and gets no receipt.
 
 `read` and `wait` still exist for awareness. They persist a **different** delivery cursor. Do not use `read` as the work loop: a successful `read` can hide an assignment from a later cold start without proving you processed it.
 
 ### Resume on a new machine
 
-Processing progress lives on the server by default ([ADR 0053](adr/0053-receipts-by-default.md)). The first `peek` claims the reader (generation 1) and carries any local progress forward; every `commit` is sent there. Peek and commit output adds `generation`. `--resumable` (or `MSN_RESUMABLE=1`) makes this strict: never fall back. `--local` (or `MSN_RESUMABLE=0`, which the MCP `peek`/`commit` tools also read) keeps progress in a file on this machine, as before: no receipts and no resume elsewhere. With no flag, a watch-only key, a key bound to another name than `--reader`, or a server too old to keep progress falls back to local with one line on stderr.
+Processing progress lives on the server by default ([ADR 0053](adr/0053-receipts-by-default.md)). The first `peek` claims the reader (generation 1) and carries any local progress forward; every `commit` is sent there. Peek and commit output adds `generation`. `--resumable` (or `MSN_RESUMABLE=1`) makes this strict: never fall back. `--local` (or `MSN_RESUMABLE=0`, which the MCP `peek`/`commit` tools also read) keeps progress in a file on this machine, as before: no receipts and no resume elsewhere. With no flag, a reader already held by another machine, a watch-only key, a key bound to another name than `--reader`, or a server too old to keep progress falls back to local with one line on stderr, and the file remembers it so later peeks stay quiet. `--resumable` claims again and clears that.
 
-A second machine never takes over by itself. Its peek fails with exit 5, and the error names the holder, the command to run, and `--local` for an agent that should keep its own progress instead:
+A second machine never takes over by itself. Without a flag it keeps its progress locally and its note names the holder and the command; with `--resumable` its peek fails with exit 5 instead:
 
 ```sh
 msn takeover general --reader reviewer   # only when the old agent is gone for good
-msn peek general                         # resumes after the old agent's last commit
+msn peek general --resumable             # resumes after the old agent's last commit
 ```
 
 After the takeover the old agent's next peek or commit fails with `processing_fenced` (exit 5): it must stop. Anything it fetched but did not commit is replayed to the replacement, so keep stable `--key`s on sends. Sends and task actions (`msn task claim`, `close` and the rest, which are sends) are **not** fenced: a still-running old agent can post or change a task once more before its next peek or commit fails, so check the task board after a takeover. A key bound to a name can only claim or take over that name's readers (`name` or `name/<worker>`); shared board keys can take over any reader on the board. See [ADR 0034](adr/0034-resumable-processing-cursors.md).

@@ -755,27 +755,101 @@ fn default_peek_and_commit_use_the_server() {
 }
 
 #[test]
-fn default_held_reader_names_takeover_and_local() {
-    let server = MockServer::spawn(vec![Scripted::json(
-        409,
-        r#"{"error":{"code":"processing_held","message":"Generation 4 holds this reader.","details":{"generation":4,"holder":"old-box","committedThrough":9}}}"#,
-    )]);
+fn default_held_reader_stays_local_and_names_takeover() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            409,
+            r#"{"error":{"code":"processing_held","message":"Generation 4 holds this reader.","details":{"generation":4,"holder":"old-box","committedThrough":9}}}"#,
+        ),
+        Scripted::json(200, PAGE),
+        Scripted::json(200, EMPTY),
+    ]);
     let home = TestHome::new("default-held");
     let cursor = home.file("proc.json");
     let output = output_capped(
         home.command().args(base_peek_args(&server.url(), &cursor)),
         Duration::from_secs(8),
     );
-    // Held is not "this server cannot keep progress": no silent fallback, no silent takeover.
-    assert_eq!(output.status.code(), Some(5));
+    // Held stays the other machine's: no takeover, no error, no receipt for this agent.
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("held by old-box"), "{stderr}");
     assert!(
         stderr.contains("msn takeover general --reader 'alice'"),
         "{stderr}"
     );
-    assert!(stderr.contains("--local"), "{stderr}");
-    assert!(output.stdout.is_empty());
-    assert_eq!(server.recorded().len(), 1);
+    assert!(stderr.contains("--resumable"), "{stderr}");
+    assert!(parse_stdout(&output).get("generation").is_none());
+    let state = state_json(&cursor);
+    assert_eq!(state["keptLocal"], "processing_held");
+    assert!(state.get("generation").is_none());
+    // The choice is remembered: the next peek reads locally with no claim and no warning.
+    let again = output_capped(
+        home.command().args(base_peek_args(&server.url(), &cursor)),
+        Duration::from_secs(8),
+    );
+    assert!(again.status.success());
+    assert!(
+        again.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    let recorded = server.recorded();
+    assert_eq!(recorded.len(), 3);
+    assert!(recorded[0].path.ends_with("/claim"));
+    assert!(recorded[1].path.contains("after=0"));
+    assert!(recorded[2].path.contains("after=0"));
+}
+
+#[test]
+fn resumable_claims_and_clears_a_kept_local_reader() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(201, CLAIMED),
+        Scripted::json(200, RESUMED),
+    ]);
+    let home = TestHome::new("clear-kept");
+    let cursor = home.file("proc.json");
+    fs::write(
+        &cursor,
+        format!(
+            r#"{{"server":"{}","tenant":"team","channel":"general","reader":"alice","committedThrough":0,"highestFetched":0,"keptLocal":"processing_held"}}"#,
+            server.url()
+        ),
+    )
+    .unwrap();
+    let output = output_capped(
+        home.command()
+            .args(resumable(base_peek_args(&server.url(), &cursor))),
+        Duration::from_secs(8),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = state_json(&cursor);
+    assert_eq!(state["generation"], 1);
+    assert!(state.get("keptLocal").is_none());
+}
+
+#[test]
+fn resumable_held_reader_is_an_error() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        409,
+        r#"{"error":{"code":"processing_held","message":"Generation 4 holds this reader.","details":{"generation":4,"holder":"old-box","committedThrough":9}}}"#,
+    )]);
+    let home = TestHome::new("strict-held");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command()
+            .args(resumable(base_peek_args(&server.url(), &cursor))),
+        Duration::from_secs(8),
+    );
+    assert_eq!(output.status.code(), Some(5));
     assert!(!cursor.exists());
 }
 
@@ -839,6 +913,7 @@ fn default_fallbacks() {
         assert_eq!(server.recorded().len(), 2);
         let state = state_json(&cursor);
         assert!(state.get("generation").is_none());
+        assert!(state["keptLocal"].is_string());
         assert_eq!(state["committedThrough"], 7);
     }
 }

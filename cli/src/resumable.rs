@@ -14,8 +14,9 @@
 //! Default mode (ADR 0053): with neither `--resumable` nor `--local` (and `MSN_RESUMABLE` unset),
 //! progress goes to the server, so processed-by receipts (ADR 0040) name this reader.
 //! D1 default_peek_claims_and_commits_on_server -> tests/processing.rs::default_peek_and_commit_use_the_server
-//! D2 default_held_reader_names_takeover_and_local -> tests/processing.rs::default_held_reader_names_takeover_and_local
-//! D3 default_keeps_local_when_server_cannot_hold_progress (watch-only, bound to another name, old server) -> tests/processing.rs::default_falls_back_to_local_for_watch_only_and_old_servers
+//! D2 default_held_reader_stays_local_and_names_takeover -> tests/processing.rs::default_held_reader_stays_local_and_names_takeover
+//! D3 default_keeps_local_when_server_cannot_hold_progress (held, watch-only, bound to another name, old server), remembered -> tests/processing.rs::default_falls_back_to_local_for_watch_only_and_old_servers
+//! D5 resumable_claims_and_clears_a_kept_local_reader -> tests/processing.rs::resumable_claims_and_clears_a_kept_local_reader
 //! D4 local_flag_and_env_keep_progress_local -> tests/processing.rs::local_flag_and_env_keep_progress_local
 
 use std::io::{self, Write};
@@ -38,8 +39,9 @@ use crate::processing::{
 /// Where a reader's processing progress lives (ADR 0053).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// The default: send commits to the server, unless the server cannot hold them (a watch-only
-    /// key, or a server older than ADR 0034), in which case progress stays on this machine.
+    /// The default: send commits to the server, unless this key's progress cannot be there (another
+    /// machine holds the reader, a watch-only key, a key bound to another name, a server older than
+    /// ADR 0034); then progress stays on this machine, and the file remembers that choice.
     Default,
     /// `--resumable` or `MSN_RESUMABLE=1`: the server or an error, never a fallback.
     Server,
@@ -76,25 +78,37 @@ pub fn mode(resumable: bool, local: bool) -> Mode {
 /// What a resumable step did when the default mode allows keeping progress local.
 enum Outcome {
     Done,
-    /// The server cannot hold this reader's progress; carry on locally. The reason is printed.
-    KeepLocal(&'static str),
+    /// Carry on locally. `Some` is a one-time explanation to print; `None` means the choice was
+    /// already made (and explained) on an earlier peek.
+    KeepLocal(Option<String>),
 }
 
-/// The server refusals that mean "this server cannot keep your progress", not "someone else holds
-/// it": a watch-only key (ADR 0039) may not write, and a server before ADR 0034 has no route.
-fn cannot_hold(response: &RawResponse) -> Option<&'static str> {
-    match (response.status, error_code(&response.body).as_deref()) {
-        (403, Some("watch_only")) => Some(
-            "This key is watch-only, so processing progress stays on this machine and no receipt names this reader.",
-        ),
-        (403, Some("username_bound")) => Some(
-            "This key is bound to another name, so this reader's processing progress stays on this machine and no receipt names it.",
-        ),
-        (404, Some("route_not_found")) => Some(
-            "This server does not keep processing progress, so it stays on this machine and no receipt names this reader.",
-        ),
-        _ => None,
-    }
+/// The claim refusals after which default mode keeps progress local (ADR 0053), as
+/// (code to remember, one-time explanation). Each means "this reader's progress cannot be on the
+/// server for this key right now", never "take it over": a reader held by another machine stays
+/// theirs, a watch-only key (ADR 0039) or a key bound to another name may not commit as this
+/// reader, and a server before ADR 0034 has no route. Anything else is an error.
+fn keep_local(response: &RawResponse, channel: &str, reader: &str) -> Option<(String, String)> {
+    let code = error_code(&response.body)?;
+    let why = match (response.status, code.as_str()) {
+        (409, "processing_held") => {
+            let holder = serde_json::from_str::<Value>(&response.body)
+                .ok()
+                .and_then(|v| v["error"]["details"]["holder"].as_str().map(str::to_string))
+                .unwrap_or_else(|| "another machine".into());
+            format!(
+                "Reader '{reader}' on {channel} is held by {holder}, so this agent keeps its progress on this machine and no receipt names it. If that agent is gone for good, run msn takeover {channel} --reader '{reader}'; pass --resumable to require server progress."
+            )
+        }
+        (403, "watch_only") => "This key is watch-only, so processing progress stays on this machine and no receipt names this reader.".into(),
+        (403, "username_bound") => "This key is bound to another name, so this reader's processing progress stays on this machine and no receipt names it.".into(),
+        (404, "route_not_found") => "This server does not keep processing progress, so it stays on this machine and no receipt names this reader.".into(),
+        _ => return None,
+    };
+    Some((
+        code,
+        format!("{why} Later peeks for this reader stay local without asking again."),
+    ))
 }
 
 fn note(reason: &str) {
@@ -146,7 +160,9 @@ pub(crate) fn peek_with(
     )? {
         Outcome::Done => Ok(()),
         Outcome::KeepLocal(reason) => {
-            note(reason);
+            if let Some(reason) = reason {
+                note(&reason);
+            }
             crate::processing::peek_to(
                 out,
                 url,
@@ -272,7 +288,7 @@ fn refusal(response: &RawResponse, channel: &str, reader: &str) -> CliError {
                 .and_then(|v| v["error"]["details"]["holder"].as_str().map(str::to_string))
                 .unwrap_or_else(|| "unknown".into());
             CliError::conflict(format!(
-                "{} Holder: {holder}. If that agent is gone for good, take over explicitly: msn takeover {channel} --reader '{reader}'. To keep this agent's progress on this machine instead (no receipts), pass --local or set MSN_RESUMABLE=0.",
+                "{} Holder: {holder}. If that agent is gone for good, take over explicitly: msn takeover {channel} --reader '{reader}'. Without --resumable, this agent would keep its progress on this machine instead (no receipts).",
                 error_message(response.status, &response.body)
             ))
         }
@@ -366,14 +382,18 @@ fn peek_inner(
     let client = Arc::new(MsnClient::new(url)?);
     let generation = match state.generation {
         Some(generation) => generation,
+        // Default mode already chose local for this reader: no claim request on every peek.
+        None if fallback && state.kept_local.is_some() => return Ok(Outcome::KeepLocal(None)),
         None => {
             // First resumable use: claim only an unheld reader, carrying local progress forward.
             let carry = (state.committed_through > 0).then_some(state.committed_through);
             let claimed = match claim(&client, tenant, token, channel, reader, 0, carry)? {
                 Ok(claimed) => claimed,
                 Err(response) => {
-                    if fallback && let Some(reason) = cannot_hold(&response) {
-                        return Ok(Outcome::KeepLocal(reason));
+                    if fallback && let Some((code, why)) = keep_local(&response, channel, reader) {
+                        state.kept_local = Some(code);
+                        write_processing(path, &state)?;
+                        return Ok(Outcome::KeepLocal(Some(why)));
                     }
                     return Err(refusal(&response, channel, reader));
                 }
@@ -381,6 +401,7 @@ fn peek_inner(
             let generation = generation_of(&claimed, "generation")?;
             let committed = generation_of(&claimed, "committedThrough")?;
             state.generation = Some(generation);
+            state.kept_local = None;
             state.committed_through = committed;
             state.highest_fetched = state.highest_fetched.max(committed);
             // Persist before reading: a crash here must not leave this machine locked out by itself.
@@ -467,7 +488,7 @@ fn commit_inner(
     let mut state = load_processing(path, &ProcessingState::fresh(url, tenant, channel, reader))?;
     let Some(generation) = state.generation else {
         if follow_file {
-            return Ok(Outcome::KeepLocal("progress file was never claimed"));
+            return Ok(Outcome::KeepLocal(None));
         }
         return Err(CliError::usage(
             "Nothing to commit: run a resumable peek (or msn takeover) for this reader first.",
