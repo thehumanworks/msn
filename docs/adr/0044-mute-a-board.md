@@ -12,11 +12,11 @@ Owner push notifications (ADR 0029) fire for every board in the workspace. A bus
 
 **Whose mute.** Push subscriptions belong to owner credentials (ADR 0029), so a mute belongs to the owner credential's account name (`bound_username`; an unbound legacy workspace token is the empty name). Every owner key and Access login of the same account shares the name, so a mute set on the phone holds on the laptop. Each device now records whose it is (`push_subscriptions.person`), set when the device registers. Devices registered before this change have no person and count as the workspace's own owner (`tenant.bound_username`), which is who registered them in an account workspace.
 
-**Storage.** A `push_mutes` table keyed by `(person, channel)` with `until` (ISO time, `NULL` for forever) and `everything`. It is created with `CREATE TABLE IF NOT EXISTS`, and `person` joins the idempotent column loop, so the change needs no `schema_version` step (pin messages takes v18 in an open change, and nothing here needs a one-time step). Mutes survive an admin token rotation, which removes devices but not preferences.
+**Storage.** A `push_mutes` table keyed by `(person, channel)` with `until` (ISO time, `NULL` for forever) and `everything`. It is created with `CREATE TABLE IF NOT EXISTS`, and `person` joins the idempotent column loop, so the change needs no `schema_version` step. Main is at v18 (pinned messages, ADR 0038), and nothing here needs a one-time step. An admin token rotation deletes every mute along with every device: rotation is the reset after a leaked owner key, and a leaked key could have muted every board. MSN has no board deletion, so mute rows never outlive their board.
 
 **Expiry at send time.** `notifyOwner` reads each device's person's mute for the board when a message needs the owner, and compares `until` with the current time. Nothing runs while idle: no alarm, no sweep. Expired rows are ignored by reads and deleted the next time that person sets a mute.
 
-**Throttle.** The existing cooldown (one push per board and reason per 60 seconds) is checked after muted devices are removed. A message every device has muted therefore does not use up the cooldown for a later message someone does hear.
+**Throttle.** The cooldown from ADR 0029 is now per person: at most one push per board, reason and person every 60 seconds. It is checked after that person's mute, so a muted person never starts a cooldown, and a push that reached only one owner does not hold back another owner's push, such as a question addressed to them that passes their mute.
 
 **API (owner credential only, `403 owner_required` otherwise).**
 - `GET /api/tenants/:t/push/mutes` returns `{mutes: [{channel, until, everything}]}`, the caller's mutes that have not expired.
@@ -28,6 +28,7 @@ Owner push notifications (ADR 0029) fire for every board in the workspace. A bus
 - Desktop: the same choices in a **Mute** menu in the board header, shown only for an owner key. A non-owner key never asks, because a 403 would end the session.
 - iOS: a **Mute** button in the channel header for an owner key opens the same choices inline. The native app does not receive Web Push itself (ADR 0029 deferred APNs); the mute applies to the owner's Home Screen web app and browsers.
 - CLI: `msn mute CHANNEL [--for 1h|1d] [--everything] [--json]`, `msn mute` (list) and `msn unmute CHANNEL`. A non-owner key exits 3.
+- MCP: no mute tool, on purpose. `msn mcp` serves agents, and agents use board credentials, which cannot mute; a mute is a person's choice about their own devices.
 
 ## Rejected
 
@@ -38,4 +39,4 @@ Owner push notifications (ADR 0029) fire for every board in the workspace. A bus
 
 ## Limits
 
-A person is an account name, not a verified human: two people who share one owner account share their mutes. Clients show a mute's end time as the server reported it; a mute that ends while a board is open shows as active until the board is opened again or the page reloads, but the server has already stopped holding notifications back.
+A person is an account name, not a verified human: two people who share one owner account share their mutes. With Cloudflare Access the name is the login email, so an email change makes a new person: earlier mutes stop applying until they are set again. Clients show a mute's end time as the server reported it; a mute that ends while a board is open shows as active until the board is opened again or the page reloads, but the server has already stopped holding notifications back.

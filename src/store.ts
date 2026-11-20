@@ -1063,14 +1063,23 @@ export class MsnDurableObject extends DurableObject<Env> {
       }
       return value;
     };
-    const subscriptions = devices.filter((device) => !silenced(device.person ?? fallback));
+    // At most one push per board, reason and person per cooldown, so a looping or noisy sender
+    // cannot flood anyone. A person who muted the board does not start the cooldown, and one
+    // person's push does not hold back another's. The board itself still records every message.
+    const allowed = new Map<string, boolean>();
+    const due = (person: string) => {
+      let value = allowed.get(person);
+      if (value === undefined) {
+        const throttle = JSON.stringify([message.channel, attention.reason, person]);
+        const last = this.pushSentAt.get(throttle);
+        value = !silenced(person) && (last === undefined || now - last >= this.pushCooldownMs);
+        if (value) this.pushSentAt.set(throttle, now);
+        allowed.set(person, value);
+      }
+      return value;
+    };
+    const subscriptions = devices.filter((device) => due(device.person ?? fallback));
     if (!subscriptions.length) return;
-    // At most one push per board and reason per cooldown, so a looping or noisy sender cannot
-    // flood the owner. The board itself still records every message.
-    const throttle = JSON.stringify([message.channel, attention.reason]);
-    const last = this.pushSentAt.get(throttle);
-    if (last !== undefined && now - last < this.pushCooldownMs) return;
-    this.pushSentAt.set(throttle, now);
     const payload = {
       schema: "msn.push.v1",
       tenant: message.tenant,
@@ -1096,7 +1105,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     );
   }
 
-  /** Last push time per [board, reason]; memory only, so it resets when the object restarts. */
+  /** Last push time per [board, reason, person]; memory only, so it resets when the object restarts. */
   private pushSentAt = new Map<string, number>();
   /** Replaced in tests. */
   pushCooldownMs = 60_000;
@@ -2983,6 +2992,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.ctx.storage.sql.exec("DELETE FROM invites");
             // Owner devices subscribed under the old credentials stop receiving notifications.
             this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
+            // Rotation is the reset after a leaked owner key: mutes it may have left go too (ADR 0044).
+            this.ctx.storage.sql.exec("DELETE FROM push_mutes");
             // The webhook secret was readable with the old owner credential; GitHub deliveries
             // fail until the owner copies the new one (links stay).
             this.ctx.storage.sql.exec("DELETE FROM github_hook");

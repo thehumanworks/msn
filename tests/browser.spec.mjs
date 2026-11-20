@@ -1836,8 +1836,13 @@ test("the owner mutes a board for an hour, forever, and turns it back on", async
   // A mute set elsewhere (the CLI, another device) shows after a reload.
   await request.put(`${t.path}/push/mutes/other`, { headers: t.headers, data: { for: "1d" } });
   await page.reload();
+  // The remembered board reopens first; on a phone that swaps to the chat pane.
+  await expect(page.locator("#channel-title")).toHaveText("# work");
   await openChannel(page, "other");
   await expect(button).toHaveText(/^Muted until /);
+  await button.click();
+  await expect(page.getByLabel("1 day")).toBeChecked();
+  await page.locator("#close-mute").click();
 
   await openChannel(page, "work");
   await button.click();

@@ -2333,6 +2333,12 @@ function activeMute(connection, name) {
   if (mute.until !== null && Date.parse(mute.until) <= Date.now()) return null;
   return mute;
 }
+/** The dialog's choice for an existing mute: a mute ending over an hour from now was a 1-day one. */
+function muteSpan(mute) {
+  if (!mute) return "1h";
+  if (mute.until === null) return "";
+  return Date.parse(mute.until) - Date.now() > 3_600_000 ? "1d" : "1h";
+}
 function muteText(mute) {
   if (!mute) return "Mute";
   if (mute.until === null) return "Muted";
@@ -2358,7 +2364,7 @@ $("mute").addEventListener("click", async () => {
   $("mute-title").textContent = `Mute # ${muteChannel}`;
   $("mute-everything").checked = mute?.everything === true;
   for (const radio of document.querySelectorAll('input[name="mute-for"]'))
-    radio.checked = radio.value === (mute ? (mute.until === null ? "" : "1h") : "1h");
+    radio.checked = radio.value === muteSpan(mute);
   $("mute-note").textContent = mute
     ? `${muteText(mute)}. ${mute.everything ? "Nothing on this board notifies you." : "Messages addressed to you still notify."}`
     : "Messages keep arriving on the board. Only notifications to your devices stop.";

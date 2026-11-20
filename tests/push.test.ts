@@ -638,4 +638,50 @@ describe("board mutes (ADR 0044)", () => {
     expect(f.sent.at(-1)?.url).toBe(theirs.subscription.endpoint);
     expect(f.sent).toHaveLength(5);
   });
+
+  it("throttles per person, and a muted send does not start anyone's cooldown", async () => {
+    const f = await fixture();
+    await runInDurableObject(f.stub, (instance: MsnDurableObject) => {
+      instance.pushCooldownMs = 60_000;
+    });
+    const bob = (await f.stub.accountSession(f.tenant, "bob")).token;
+    const mine = await browser("https://fcm.googleapis.com/fcm/send/human-phone");
+    const theirs = await browser("https://fcm.googleapis.com/fcm/send/bob-phone");
+    await call(f.tenant, "/push", f.owner);
+    await call(f.tenant, "/push/subscriptions", f.owner, "PUT", mine.subscription);
+    await call(f.tenant, "/push/subscriptions", bob, "PUT", theirs.subscription);
+    await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { everything: true });
+    await call(f.tenant, "/push/mutes/work", bob, "PUT", { everything: true });
+
+    // Muted for both: nothing is sent and no cooldown starts.
+    await say(f, "Anyone?", { to: "human" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(f.sent).toHaveLength(0);
+    await call(f.tenant, "/push/mutes/work", f.owner, "DELETE");
+    await call(f.tenant, "/push/mutes/work", bob, "PUT", {});
+    await say(f, "Human, the region?", { to: "human" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(f.sent[0].url).toBe(mine.subscription.endpoint);
+
+    // Human's push started only human's cooldown: a question to bob passes bob's mute at once,
+    // and human's device stays quiet inside its own cooldown.
+    await say(f, "Bob, the key?", { to: "bob" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(f.sent.map((s) => s.url)).toEqual([mine.subscription.endpoint, theirs.subscription.endpoint]);
+  });
+
+  it("an admin token rotation clears every mute", async () => {
+    const f = await fixture();
+    await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { everything: true });
+    const rotated = await exports.default.fetch(`https://msn.test/api/admin/tenants/${f.tenant}/token`, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-admin-secret-000000000000000000000" },
+    });
+    const { token } = await rotated.json<{ token: string }>();
+    expect(await mutes(f.tenant, token)).toEqual([]);
+    await runInDurableObject(f.stub, (_, state) => {
+      expect(state.storage.sql.exec("SELECT COUNT(*) AS n FROM push_mutes").one().n).toBe(0);
+    });
+  });
 });
