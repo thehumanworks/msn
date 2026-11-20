@@ -542,9 +542,8 @@ fn handle_command(
             ..
         } => {
             let message =
-                match client_ops::show_message(&cc.client, &cc.tenant, &cc.token, &channel, id) {
-                    Ok(value) => Some(value["message"].clone()),
-                    Err(CliError::NotFound(_)) => None,
+                match client_ops::load_parent(&cc.client, &cc.tenant, &cc.token, &channel, id) {
+                    Ok(message) => message,
                     Err(err) => {
                         return emit_error(
                             tx,

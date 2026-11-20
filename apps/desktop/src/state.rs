@@ -5,7 +5,9 @@
 //! history/subscription ordering unit-testable without a server (`tests/mock_server.rs` covers
 //! the same behaviour end to end over real HTTP).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use serde_json::Value;
 
@@ -139,14 +141,29 @@ pub struct ChannelState {
     /// Parents fetched for replies whose parent is not loaded; `None` means it no longer exists.
     pub parents: BTreeMap<u64, Option<Value>>,
     pub parents_inflight: BTreeSet<u64>,
+    /// Someone else's replies that arrived after the first load into a folded thread, and have
+    /// not been shown yet. Cleared when their thread opens.
+    pub unseen: BTreeSet<u64>,
+    /// `thread_rows` for the key it was built for; the chat tab asks every frame.
+    pub(crate) rows_cache: RefCell<Option<(RowsKey, Rc<Vec<ThreadRow>>)>>,
 }
+
+/// What `thread_rows` depends on. Messages are only ever added, replaced or removed, so their
+/// count and bounds with the sync revision and head identify a set of messages.
+type RowsKey = (usize, u64, u64, u64, u64, Vec<u64>, Vec<u64>);
 
 /// One row of the conversation as the chat tab draws it (ADR 0041).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadRow {
     /// A message in the log: not a reply, or a reply whose parent is not loaded. `replies`
     /// counts every loaded reply folded under it, replies to replies included.
-    Message { id: u64, replies: usize, open: bool },
+    Message {
+        id: u64,
+        replies: usize,
+        open: bool,
+        /// Replies in this folded thread that arrived since the first load and are unseen.
+        unseen: usize,
+    },
     /// A reply shown under its open thread root.
     Reply { id: u64 },
 }
@@ -155,7 +172,60 @@ impl ChannelState {
     /// Folds replies under the message they answer. A reply to a reply joins the same thread,
     /// so threads are one level deep. Rows keep id order, and replies keep id order within a
     /// thread; the messages themselves, and the cursors, are untouched.
-    pub fn thread_rows(&self) -> Vec<ThreadRow> {
+    pub fn thread_rows(&self) -> Rc<Vec<ThreadRow>> {
+        let key: RowsKey = (
+            self.messages.len(),
+            self.messages.keys().next().copied().unwrap_or(0),
+            self.messages.keys().next_back().copied().unwrap_or(0),
+            self.revision,
+            self.head,
+            self.expanded.iter().copied().collect(),
+            self.unseen.iter().copied().collect(),
+        );
+        if let Some((cached, rows)) = self.rows_cache.borrow().as_ref()
+            && *cached == key
+        {
+            return Rc::clone(rows);
+        }
+        let rows = Rc::new(self.build_rows());
+        *self.rows_cache.borrow_mut() = Some((key, Rc::clone(&rows)));
+        rows
+    }
+
+    /// The root each loaded message is drawn under (itself when it is not a folded reply).
+    pub fn roots(&self) -> BTreeMap<u64, u64> {
+        let mut root_of: BTreeMap<u64, u64> = BTreeMap::new();
+        for (&id, message) in &self.messages {
+            let root = message["replyTo"]
+                .as_u64()
+                .and_then(|parent| root_of.get(&parent).copied())
+                .unwrap_or(id);
+            root_of.insert(id, root);
+        }
+        root_of
+    }
+
+    /// The oldest unseen reply and its root: what "New reply in thread" points at.
+    pub fn first_unseen(&self) -> Option<(u64, u64)> {
+        let id = *self.unseen.iter().next()?;
+        Some((*self.roots().get(&id)?, id))
+    }
+
+    /// Opens the thread that holds `id` (its root, or `id` itself when it is a root).
+    pub fn open_thread_of(&mut self, id: u64) {
+        let Some(&root) = self.roots().get(&id) else {
+            return;
+        };
+        self.expanded.insert(root);
+        self.clear_unseen(root);
+    }
+
+    fn clear_unseen(&mut self, root: u64) {
+        let roots = self.roots();
+        self.unseen.retain(|id| roots.get(id) != Some(&root));
+    }
+
+    fn build_rows(&self) -> Vec<ThreadRow> {
         let mut root_of: BTreeMap<u64, u64> = BTreeMap::new();
         let mut replies: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut top = Vec::new();
@@ -178,10 +248,16 @@ impl ChannelState {
         for id in top {
             let thread = replies.remove(&id).unwrap_or_default();
             let open = !thread.is_empty() && self.expanded.contains(&id);
+            let unseen = if open {
+                0
+            } else {
+                thread.iter().filter(|r| self.unseen.contains(r)).count()
+            };
             rows.push(ThreadRow::Message {
                 id,
                 replies: thread.len(),
                 open,
+                unseen,
             });
             if open {
                 rows.extend(thread.into_iter().map(|id| ThreadRow::Reply { id }));
@@ -371,6 +447,15 @@ impl AppState {
             && !state.expanded.remove(&root)
         {
             state.expanded.insert(root);
+            state.clear_unseen(root);
+        }
+    }
+
+    /// Opens the thread holding `id` in the selected channel: after sending a reply to it, or
+    /// to show an unseen reply.
+    pub fn open_thread_of(&mut self, id: u64) {
+        if let Some(state) = self.channel.as_mut() {
+            state.open_thread_of(id);
         }
     }
 
@@ -742,7 +827,29 @@ impl AppState {
             return vec![again];
         }
         state.stale_streak = 0;
+        let before: BTreeSet<u64> = if state.loaded {
+            state.messages.keys().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
+        let first = !state.loaded;
         state.replace_messages(messages);
+        // Someone else's reply that lands in a folded thread after the first load is unseen.
+        let roots = state.roots();
+        let me = self.connection.as_ref().map(|c| c.username.as_str());
+        state.unseen.retain(|id| roots.contains_key(id));
+        if !first {
+            for (&id, message) in &state.messages {
+                let root = roots[&id];
+                if root != id
+                    && !before.contains(&id)
+                    && !state.expanded.contains(&root)
+                    && message["username"].as_str() != me
+                {
+                    state.unseen.insert(id);
+                }
+            }
+        }
         state.head = head;
         state.revision = revision;
         state.loaded = true;
@@ -1446,22 +1553,25 @@ mod tests {
         synced(&mut state, messages, 6, 0);
         let rows = state.channel.as_ref().unwrap().thread_rows();
         assert_eq!(
-            rows,
+            *rows,
             vec![
                 ThreadRow::Message {
                     id: 1,
                     replies: 2,
-                    open: false
+                    open: false,
+                    unseen: 0
                 },
                 ThreadRow::Message {
                     id: 3,
                     replies: 0,
-                    open: false
+                    open: false,
+                    unseen: 0
                 },
                 ThreadRow::Message {
                     id: 5,
                     replies: 1,
-                    open: false
+                    open: false,
+                    unseen: 0
                 },
             ]
         );
@@ -1473,7 +1583,8 @@ mod tests {
                 ThreadRow::Message {
                     id: 1,
                     replies: 2,
-                    open: true
+                    open: true,
+                    unseen: 0
                 },
                 ThreadRow::Reply { id: 2 },
                 ThreadRow::Reply { id: 4 },
@@ -1498,12 +1609,13 @@ mod tests {
         );
         let rows = state.channel.as_ref().unwrap().thread_rows();
         assert_eq!(
-            rows,
+            *rows,
             vec![
                 ThreadRow::Message {
                     id: 1,
                     replies: 2,
-                    open: true
+                    open: true,
+                    unseen: 0
                 },
                 ThreadRow::Reply { id: 2 },
                 ThreadRow::Reply { id: 7 },
@@ -1548,5 +1660,81 @@ mod tests {
             message: None,
         });
         assert!(state.channel.as_ref().unwrap().parents.is_empty());
+    }
+
+    fn reply_from(id: u64, to: u64, username: &str) -> Value {
+        json!({"id": id, "text": "re", "replyTo": to, "username": username})
+    }
+
+    #[test]
+    fn a_reply_that_lands_in_a_folded_thread_is_unseen_until_its_thread_opens() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let history = vec![msg(1, "root"), reply_from(2, 1, "bob")];
+        synced(&mut state, history.clone(), 2, 0);
+        // The first load is not news.
+        assert!(state.channel.as_ref().unwrap().unseen.is_empty());
+        let mut later = history.clone();
+        later.extend([
+            msg(3, "other"),
+            reply_from(4, 2, "bob"),
+            reply_from(5, 1, "alice"),
+        ]);
+        synced(&mut state, later, 5, 0);
+        let channel = state.channel.as_ref().unwrap();
+        // 4 is bob's, in 1's folded thread; 5 is your own and never unseen.
+        assert_eq!(channel.unseen.iter().copied().collect::<Vec<_>>(), vec![4]);
+        assert_eq!(channel.first_unseen(), Some((1, 4)));
+        assert_eq!(
+            channel.thread_rows()[0],
+            ThreadRow::Message {
+                id: 1,
+                replies: 3,
+                open: false,
+                unseen: 1
+            }
+        );
+        // The pointer opens the thread that holds it.
+        state.open_thread_of(4);
+        let channel = state.channel.as_ref().unwrap();
+        assert!(channel.expanded.contains(&1));
+        assert_eq!(channel.first_unseen(), None);
+    }
+
+    #[test]
+    fn sending_a_reply_opens_the_thread_it_joins() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(
+            &mut state,
+            vec![msg(1, "root"), reply_from(2, 1, "bob")],
+            2,
+            0,
+        );
+        // Replying to the reply 2 joins root 1's thread.
+        state.open_thread_of(2);
+        assert!(state.channel.as_ref().unwrap().expanded.contains(&1));
+        // A parent that is not loaded opens nothing: the reply will stand in the log.
+        state.open_thread_of(99);
+        assert_eq!(state.channel.as_ref().unwrap().expanded.len(), 1);
+    }
+
+    #[test]
+    fn thread_rows_are_cached_until_something_they_show_changes() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(
+            &mut state,
+            vec![msg(1, "root"), reply_from(2, 1, "bob")],
+            2,
+            0,
+        );
+        let channel = state.channel.as_ref().unwrap();
+        let first = channel.thread_rows();
+        assert!(Rc::ptr_eq(&first, &channel.thread_rows()));
+        state.toggle_thread(1);
+        let channel = state.channel.as_ref().unwrap();
+        assert!(!Rc::ptr_eq(&first, &channel.thread_rows()));
+        assert_eq!(channel.thread_rows().len(), 2);
     }
 }

@@ -26,6 +26,8 @@ pub struct MsnDesktopApp {
     new_channel_name: String,
     active_tab: Tab,
     search_input: String,
+    /// A reply the chat should scroll to on its next frame (the "New reply in thread" pointer).
+    scroll_to: Option<u64>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
 }
@@ -67,6 +69,7 @@ enum Action {
     Search,
     SearchOlder,
     ToggleThread(u64),
+    ShowReply(u64),
     LoadParent(u64),
     Send,
     RetrySend(String),
@@ -100,6 +103,7 @@ impl MsnDesktopApp {
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
             search_input: String::new(),
+            scroll_to: None,
             profile_store,
         }
     }
@@ -607,6 +611,22 @@ impl MsnDesktopApp {
             .as_ref()
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
+        let scroll_to = self.scroll_to.take();
+        // A reply that landed in a folded thread: point at it, since the log does not show it.
+        if let Some((root, id)) = self.state.channel.as_ref().and_then(|s| s.first_unseen()) {
+            egui::Panel::bottom("thread-pointer")
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)))
+                .show(ui, |ui| {
+                    let label =
+                        egui::RichText::new(format!("New reply in thread #{root} \u{b7} Show"))
+                            .small()
+                            .color(theme::ACCENT);
+                    if ui.button(label).clicked() {
+                        actions.push(Action::ShowReply(id));
+                    }
+                });
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 bottom: 8,
@@ -636,9 +656,15 @@ impl MsnDesktopApp {
                                 });
                             }
                             let mut day = "";
-                            for row in state.thread_rows() {
-                                match row {
-                                    ThreadRow::Message { id, replies, open } => {
+                            let rows = state.thread_rows();
+                            for row in rows.iter() {
+                                match *row {
+                                    ThreadRow::Message {
+                                        id,
+                                        replies,
+                                        open,
+                                        unseen,
+                                    } => {
                                         let message = &state.messages[&id];
                                         let created = message["createdAt"].as_str().unwrap_or("");
                                         let date = created.get(..10).unwrap_or("");
@@ -656,14 +682,26 @@ impl MsnDesktopApp {
                                         render_parent(ui, state, message, actions);
                                         if replies > 0 {
                                             render_thread_toggle(
-                                                ui, message, &me, id, replies, open, actions,
+                                                ui,
+                                                message,
+                                                &me,
+                                                ThreadToggle {
+                                                    id,
+                                                    replies,
+                                                    open,
+                                                    unseen,
+                                                },
+                                                actions,
                                             );
                                         }
                                     }
                                     ThreadRow::Reply { id } => {
-                                        ui.indent(("thread-reply", id), |ui| {
+                                        let shown = ui.indent(("thread-reply", id), |ui| {
                                             render_message(ui, &state.messages[&id], &me);
                                         });
+                                        if scroll_to == Some(id) {
+                                            shown.response.scroll_to_me(Some(egui::Align::Center));
+                                        }
                                     }
                                 }
                                 ui.add_space(4.0);
@@ -902,6 +940,10 @@ impl MsnDesktopApp {
                 self.dispatch_all(commands);
             }
             Action::ToggleThread(root) => self.state.toggle_thread(root),
+            Action::ShowReply(id) => {
+                self.state.open_thread_of(id);
+                self.scroll_to = Some(id);
+            }
             Action::LoadParent(id) => {
                 let commands = self.state.load_parent(id);
                 self.dispatch_all(commands);
@@ -953,6 +995,10 @@ impl MsnDesktopApp {
         };
         self.composer.error = None;
         self.composer.text.clear();
+        // Your reply folds into its thread; open it so the reply does not seem to vanish.
+        if let Some(parent) = reply_to {
+            self.state.open_thread_of(parent);
+        }
         let key = Uuid::new_v4().to_string();
         let channel_generation = self.state.channel_generation;
         self.state.pending_sends.insert(
@@ -1159,21 +1205,36 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
     }
 }
 
-/// Under a thread root: "Show 3 replies" or "Hide 3 replies", on the root's side (ADR 0041).
+struct ThreadToggle {
+    id: u64,
+    replies: usize,
+    open: bool,
+    unseen: usize,
+}
+
+/// Under a thread root: "Show 3 replies · 1 new" or "Hide 3 replies", on the root's side
+/// (ADR 0041).
 fn render_thread_toggle(
     ui: &mut egui::Ui,
     message: &Value,
     me: &str,
-    id: u64,
-    replies: usize,
-    open: bool,
+    toggle: ThreadToggle,
     actions: &mut Vec<Action>,
 ) {
-    let label = format!(
+    let ThreadToggle {
+        id,
+        replies,
+        open,
+        unseen,
+    } = toggle;
+    let mut label = format!(
         "{} {replies} repl{}",
         if open { "Hide" } else { "Show" },
         if replies == 1 { "y" } else { "ies" },
     );
+    if unseen > 0 {
+        label.push_str(&format!(" \u{b7} {unseen} new"));
+    }
     let own = message["username"].as_str() == Some(me);
     let align = if own {
         egui::Align::Max
@@ -1457,6 +1518,7 @@ mod layout_tests {
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
             search_input: String::new(),
+            scroll_to: None,
             profile_store: None,
         }
     }
