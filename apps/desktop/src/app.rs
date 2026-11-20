@@ -1944,9 +1944,9 @@ impl MsnDesktopApp {
         self.drafts_reader = connection.username.clone();
         self.drafts_path = Some((connection.generation, path));
         self.drafts_dirty = false;
-        // The board that opens next shows its own kept draft.
+        // The board that opens next shows its own kept draft. The composer is already empty:
+        // Disconnect resets it, and a session that ended put its draft away.
         self.drafts_board = None;
-        self.composer = Composer::default();
     }
 
     /// Keeps the composer and the board it belongs to in step: on a board change the composer's
@@ -1977,6 +1977,16 @@ impl MsnDesktopApp {
             }
         }
         if self.drafts_board == current {
+            return;
+        }
+        // Text already in the composer before any board owned it belongs to the board now
+        // shown, unless that board has a kept draft of its own.
+        if self.drafts_board.is_none()
+            && current
+                .as_deref()
+                .is_some_and(|board| self.drafts.get(board).is_none())
+        {
+            self.drafts_board = current;
             return;
         }
         let draft = current
