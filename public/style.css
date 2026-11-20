@@ -1606,3 +1606,69 @@ nav button.has-unread .channel-name {
   border-radius: 4px;
   padding: 1px 6px;
 }
+/* Mention someone with @ (ADR 0055): the To field says who a message goes to before it is sent,
+   and the suggestions open above the message field so an on-screen keyboard never covers them. */
+.to-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.to-field label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.to-field input {
+  flex: 1;
+  min-width: 0;
+}
+.to-field:has(#recipient:not(:placeholder-shown)) label {
+  color: var(--accent);
+  font-weight: 600;
+}
+.message-field {
+  position: relative;
+  display: grid;
+}
+.mention-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 5;
+  margin: 0;
+  padding: 4px;
+  max-height: min(240px, calc(var(--app-height) * 0.4));
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 8px 24px #0004;
+}
+.mention-list[hidden] {
+  display: none;
+}
+.mention-list [role="option"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.mention-list [role="option"][aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.mention-list small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+@media (pointer: coarse) {
+  .mention-list [role="option"] {
+    min-height: 44px;
+  }
+}

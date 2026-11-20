@@ -141,10 +141,16 @@
         <form id="send-form" class="compose">
           <div class="compose-fields">
             <p id="reply-note" class="reply-note" hidden><span id="reply-note-text" role="status"></span><button type="button" id="reply-cancel" class="quiet" aria-label="Cancel reply" title="Cancel reply (Esc)">✕</button></p>
-            <label for="recipient" class="sr-only">To</label>
-            <input id="recipient" placeholder="To (optional)" maxlength="128" autocomplete="off" spellcheck="false" disabled>
+            <div class="to-field">
+              <label for="recipient">To</label>
+              <input id="recipient" placeholder="everyone · or type @ in the message" maxlength="128" autocomplete="off" spellcheck="false" disabled>
+            </div>
             <label for="message" class="sr-only">Message</label>
-            <textarea id="message" rows="1" placeholder="Message" enterkeyhint="send" required disabled></textarea>
+            <div class="message-field">
+              <textarea id="message" rows="1" placeholder="Message" enterkeyhint="send" required disabled role="combobox" aria-autocomplete="list" aria-controls="mention-list" aria-expanded="false" aria-describedby="mention-hint"></textarea>
+              <div id="mention-list" class="mention-list" role="listbox" aria-label="People to mention" tabindex="-1" hidden></div>
+            </div>
+            <span id="mention-hint" class="sr-only">Type @ to mention someone. The first person you pick becomes the recipient.</span>
             <ul id="attach-list" class="attach-list" aria-label="Files to send" hidden></ul>
           </div>
           <input type="file" id="attach-input" multiple hidden>

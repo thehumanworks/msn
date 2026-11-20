@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod markdown;
+mod mention;
 pub mod net;
 pub mod profile;
 pub mod read_marks;

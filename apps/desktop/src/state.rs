@@ -144,6 +144,9 @@ pub struct ChannelState {
     /// Explicit commit positions (ADR 0040); empty until loaded or on a server without them.
     pub receipts: Vec<msn_cli::receipts::Receipt>,
     pub receipts_flight: Flight,
+    /// The board's personas for @ suggestions (ADR 0055): `None` until asked for once.
+    pub personas: Option<Vec<(String, bool)>>,
+    pub personas_requested: bool,
     /// Reactions (ADR 0047) send no event, so they are re-read on the receipts timer.
     pub reactions_flight: Flight,
     /// Thread roots the person opened (ADR 0041). Display only; kept across syncs.
@@ -444,6 +447,23 @@ impl AppState {
                 channel_generation,
                 channel,
             })
+    }
+
+    /// Asks for the open board's personas once per visit, the first time @ is typed (ADR 0055).
+    pub fn personas_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        if state.personas_requested {
+            return None;
+        }
+        state.personas_requested = true;
+        Some(Command::LoadPersonas {
+            generation,
+            channel_generation,
+            channel,
+        })
     }
 
     fn snapshots_command(&mut self) -> Option<Command> {
@@ -994,6 +1014,19 @@ impl AppState {
                 } else {
                     Vec::new()
                 }
+            }
+            UiEvent::Personas {
+                generation,
+                channel_generation,
+                channel,
+                personas,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.personas = Some(personas);
+                }
+                Vec::new()
             }
             UiEvent::Reactions {
                 generation,
