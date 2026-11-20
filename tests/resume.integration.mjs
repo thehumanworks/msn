@@ -120,29 +120,16 @@ try {
   );
   console.log("PASS: first agent claims the reader and commits on the server");
 
-  // Receipts (ADR 0040) come only from that explicit commit: task 1 is processed, task 2 was
-  // fetched but not committed, so it is "not yet" however long the agent has held it.
-  const covered = await ok("old", ["receipts", "general", String(first.nextCursor)]);
-  assert.deepEqual(
-    covered.processed.map((r) => [r.reader, r.committedThrough]),
-    [["human", first.nextCursor]],
-  );
-  assert.deepEqual(covered.notYet, []);
-  const fetchedOnly = await ok("old", ["receipts", "general", String(inFlight.nextCursor)]);
-  assert.deepEqual(fetchedOnly.processed, []);
-  assert.deepEqual(
-    fetchedOnly.notYet.map((r) => r.reader),
-    ["human"],
-  );
+  // Receipts (ADR 0040): human sent every task, so its own commits are never listed on them,
+  // and an unknown message is an error.
+  const own = await ok("old", ["receipts", "general", String(first.nextCursor)]);
+  assert.deepEqual([own.processed, own.notYet, own.noServerCommit], [[], [], []]);
   const toolReceipts = await mcpTool("old", "receipts", { id: inFlight.nextCursor });
   assert.equal(toolReceipts.isError, false, JSON.stringify(toolReceipts));
-  assert.deepEqual(
-    toolReceipts.structuredContent.notYet.map((r) => r.reader),
-    ["human"],
-  );
+  assert.deepEqual(toolReceipts.structuredContent.processed, []);
   const missing = await run("old", ["receipts", "general", "999"]);
   assert.notEqual(missing.code, 0);
-  console.log("PASS: receipts show only explicitly committed messages as processed");
+  console.log("PASS: receipts leave the sender out and refuse unknown messages");
 
   // A replacement never takes over silently.
   const held = await run("new", ["peek", "general"]);

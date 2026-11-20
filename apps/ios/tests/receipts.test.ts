@@ -12,12 +12,21 @@ const receipt = (name: string, committedThrough: number | null): Receipt => ({
   updatedAt: null,
 });
 
-test("receiptLine counts only explicit commits at or past the message", () => {
-  const all = [receipt("reviewer", 3), receipt("worker-2", null), receipt("lead", 0)];
-  assert.equal(receiptLine(all, 2), "Processed by reviewer · not yet: worker-2, lead");
-  assert.equal(receiptLine(all, 4), "Not yet processed by reviewer, worker-2, lead");
-  assert.equal(receiptLine([receipt("reviewer", 3)], 3), "Processed by reviewer");
-  assert.equal(receiptLine([], 1), null);
+const msg = (id: number, username = "human", personaId?: string) => ({ id, username, personaId });
+
+test("receiptLine names only readers with a server commit, never the sender", () => {
+  const all = [receipt("reviewer", 3), receipt("worker-2", 0), receipt("silent", null)];
+  assert.equal(receiptLine(all, msg(2)), "Processed by reviewer · not yet: worker-2");
+  assert.equal(receiptLine(all, msg(4)), "Not yet processed by reviewer, worker-2");
+  assert.equal(receiptLine(all, msg(2, "reviewer")), "Not yet processed by worker-2");
+  assert.equal(receiptLine([{ ...receipt("reviewer/w1", 3), personaId: "p1" }], msg(2, "renamed", "p1")), null);
+  assert.equal(receiptLine([receipt("silent", null)], msg(1)), null);
+  assert.equal(receiptLine([], msg(1)), null);
+});
+
+test("receiptLine folds long lists into +N more", () => {
+  const many = Array.from({ length: 12 }, (_, i) => receipt(`r${i}`, 5));
+  assert.equal(receiptLine(many, msg(1)), `Processed by ${many.slice(0, 10).map((r) => r.name).join(", ")} +2 more`);
 });
 
 test("decodeReceipts checks the channel and every field", () => {
@@ -46,5 +55,5 @@ test("loadReceipts asks for the channel's receipts and decodes them", async () =
   };
   const loaded = await loadReceipts(api as unknown as ApiClient, "work");
   assert.deepEqual(asked, ["work"]);
-  assert.equal(receiptLine(loaded, 1), "Processed by reviewer");
+  assert.equal(receiptLine(loaded, msg(1)), "Processed by reviewer");
 });

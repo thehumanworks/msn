@@ -15,7 +15,10 @@ export type Receipt = {
 };
 
 export const RECEIPTS_MEANING =
-  "Processed means the reader explicitly committed past this message (msn commit --resumable). Not yet means no such commit covers it; it does not mean the reader has not seen it. Local-only commits are not shown.";
+  "From explicit resumable commits (msn commit --resumable) only. Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
+
+/** Names listed per side before the rest fold into "+N more". */
+export const RECEIPTS_MAX_NAMES = 10;
 
 /** How often an open channel reloads receipts; a commit is not a channel event. */
 export const RECEIPTS_EVERY_MS = 15_000;
@@ -55,14 +58,38 @@ export function processed(receipt: Receipt, id: number): boolean {
   return receipt.committedThrough !== null && receipt.committedThrough >= id;
 }
 
-/** "Processed by lead · not yet: worker", or null when the channel has no readers to name. */
-export function receiptLine(receipts: readonly Receipt[], id: number): string | null {
-  if (!receipts.length) return null;
-  const done = receipts.filter((r) => processed(r, id)).map((r) => r.name);
-  const waiting = receipts.filter((r) => !processed(r, id)).map((r) => r.name);
-  if (!waiting.length) return `Processed by ${done.join(", ")}`;
-  if (!done.length) return `Not yet processed by ${waiting.join(", ")}`;
-  return `Processed by ${done.join(", ")} · not yet: ${waiting.join(", ")}`;
+/** The message's own sender, by persona id or by name (with any `/worker` suffix). */
+export function fromSender(receipt: Receipt, username: string, personaId?: string | null): boolean {
+  return (
+    (personaId != null && receipt.personaId === personaId) ||
+    receipt.name === username ||
+    receipt.name.startsWith(`${username}/`)
+  );
+}
+
+function names(list: string[]): string {
+  const shown = list.slice(0, RECEIPTS_MAX_NAMES).join(", ");
+  return list.length > RECEIPTS_MAX_NAMES ? `${shown} +${list.length - RECEIPTS_MAX_NAMES} more` : shown;
+}
+
+/**
+ * "Processed by lead · not yet: worker", naming only readers with a server cursor and never the
+ * sender; null when there is nobody to name. A persona that never committed is not listed: its
+ * progress is unknown, not behind.
+ */
+export function receiptLine(
+  receipts: readonly Receipt[],
+  message: { id: number; username: string; personaId?: string | null },
+): string | null {
+  const relevant = receipts.filter(
+    (r) => r.committedThrough !== null && !fromSender(r, message.username, message.personaId),
+  );
+  const done = relevant.filter((r) => processed(r, message.id)).map((r) => r.name);
+  const waiting = relevant.filter((r) => !processed(r, message.id)).map((r) => r.name);
+  if (!done.length && !waiting.length) return null;
+  if (!waiting.length) return `Processed by ${names(done)}`;
+  if (!done.length) return `Not yet processed by ${names(waiting)}`;
+  return `Processed by ${names(done)} · not yet: ${names(waiting)}`;
 }
 
 export async function loadReceipts(api: ApiClient, channel: string, signal?: AbortSignal): Promise<Receipt[]> {

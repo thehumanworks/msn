@@ -1144,10 +1144,13 @@ fn render_receipts(
     let Some(id) = message["id"].as_u64() else {
         return;
     };
-    let Some(line) = msn_cli::receipts::summary(receipts, id) else {
+    let sender = message["username"].as_str().unwrap_or("");
+    let Some(line) =
+        msn_cli::receipts::summary(receipts, id, sender, message["personaId"].as_str())
+    else {
         return;
     };
-    let own = message["username"].as_str() == Some(me);
+    let own = sender == me;
     let label = egui::Label::new(egui::RichText::new(line).small().color(theme::MUTED));
     let draw = |ui: &mut egui::Ui| {
         ui.add(label).on_hover_text(msn_cli::receipts::MEANING);

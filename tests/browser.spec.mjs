@@ -1968,6 +1968,7 @@ test("each message shows which personas committed past it, from explicit commits
   for (const [id, displayName] of [
     ["p1", "reviewer"],
     ["p2", "worker-2"],
+    ["p3", "silent"],
   ])
     await request.put(`${t.path}/channels/work/personas/${id}`, { headers: board, data: { displayName } });
   for (const text of ["first task", "second task"])
@@ -1979,6 +1980,15 @@ test("each message shows which personas committed past it, from explicit commits
         })
       ).status(),
     ).toBe(201);
+  // The reviewer's own reply never lists the reviewer.
+  expect(
+    (
+      await request.post(`${t.path}/channels/work/messages`, {
+        headers: board,
+        data: { username: "reviewer", personaId: "p1", text: "looking" },
+      })
+    ).status(),
+  ).toBe(201);
   const reader = `${t.path}/channels/work/processing/p1`;
   const claim = await request.post(`${reader}/claim`, { headers: board, data: { expectGeneration: 0 } });
   expect(claim.status()).toBe(201);
@@ -1987,6 +1997,15 @@ test("each message shows which personas committed past it, from explicit commits
       await request.post(`${reader}/commit`, { headers: board, data: { generation: 1, through: 1 } })
     ).status(),
   ).toBe(200);
+  // worker-2 has a server cursor at 0; silent never committed, so it is never listed.
+  expect(
+    (
+      await request.post(`${t.path}/channels/work/processing/p2/claim`, {
+        headers: board,
+        data: { expectGeneration: 0 },
+      })
+    ).status(),
+  ).toBe(201);
 
   await connect(page, t, "human", { live: false });
   await openChannel(page, "work");
@@ -1994,10 +2013,11 @@ test("each message shows which personas committed past it, from explicit commits
   await expect(receipts).toHaveText([
     "Processed by reviewer · not yet: worker-2",
     "Not yet processed by reviewer, worker-2",
+    "Not yet processed by worker-2",
   ]);
   await expect(receipts.first()).toHaveAttribute(
     "title",
-    /explicitly committed.*does not mean the reader has not seen it/,
+    /resumable commits.*never commit to the server are not listed/,
   );
   await page.screenshot({ path: testInfo.outputPath("receipts.png") });
 
@@ -2011,6 +2031,7 @@ test("each message shows which personas committed past it, from explicit commits
   await expect(receipts).toHaveText([
     "Processed by reviewer · not yet: worker-2",
     "Processed by reviewer · not yet: worker-2",
+    "Not yet processed by worker-2",
   ]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

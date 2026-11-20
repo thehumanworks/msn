@@ -169,7 +169,7 @@ function ChannelBody({
               quoted={item.replyTo !== undefined ? byId.get(item.replyTo) : undefined}
               selected={replyTo?.id === item.id}
               onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
-              receipts={receiptLine(receipts, item.id)}
+              receipts={receiptLine(receipts, item)}
             />
           )}
         />
@@ -203,6 +203,8 @@ function useReceipts(session: SessionController, channel: string, newest: number
       controller.abort();
     };
   }, [session, channel, newest]);
+  // Another channel's receipts must never label this one's messages.
+  useEffect(() => setReceipts([]), [channel]);
   return receipts;
 }
 

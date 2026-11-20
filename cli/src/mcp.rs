@@ -878,7 +878,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "receipts",
             "See who processed a message",
-            "List which readers have explicitly committed past one message (processed) and which have not (notYet). Processed means a resumable commit (MSN_RESUMABLE=1) covers the message; notYet means no such commit does, which does not mean the reader has not seen it. Local-only commits are not visible. Board personas that never committed appear in notYet with committedThrough null.",
+            "List which readers have committed past one message on the server. processed: a resumable commit (MSN_RESUMABLE=1) covers it. notYet: the reader has committed, but not this far; it may still have seen it. noServerCommit: board personas that never committed to the server, so their progress is unknown. The sender's own readers are left out.",
             json!({"id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Message id."}}),
             &["id"],
             (true, true),

@@ -204,6 +204,14 @@ type ProcessingRow = {
 };
 const PROCESSING_COLUMNS = "reader, committedThrough, generation, holder, claimedAt, updatedAt";
 type ProcessingFence = { reader: string; generation: number };
+/** The message's own sender, by persona id or by name (with any `/worker` suffix). */
+function receiptFromSender(r: Receipt, username: string, personaId: string | null): boolean {
+  return (
+    (personaId !== null && r.personaId === personaId) ||
+    r.name === username ||
+    r.name.startsWith(`${username}/`)
+  );
+}
 /** One reader's explicit commit position (ADR 0040); committedThrough null means never committed. */
 type Receipt = {
   name: string;
@@ -2157,19 +2165,31 @@ export class MsnDurableObject extends DurableObject<Env> {
     return [...result, ...others];
   }
 
+  /**
+   * One message's split. `processed` and `notYet` hold only readers with a server cursor, so
+   * "not yet" always means "has committed, but not this far". Personas that never committed are
+   * listed apart in `noServerCommit`: their progress is unknown, not behind (ADR 0040). The
+   * sender's own readers are left out of all three.
+   */
   private messageReceipts(channel: string, id: number): Response {
     const row = this.ctx.storage.sql
-      .exec<{ deleted: number }>("SELECT deleted FROM messages WHERE channel = ? AND id = ?", channel, id)
+      .exec<{ deleted: number; username: string; personaId: string | null }>(
+        "SELECT deleted, username, personaId FROM messages WHERE channel = ? AND id = ?",
+        channel,
+        id,
+      )
       .toArray()[0];
     if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
     if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
-    const receipts = this.receipts(channel);
-    const done = (r: Receipt) => r.committedThrough !== null && r.committedThrough >= id;
+    const receipts = this.receipts(channel).filter((r) => !receiptFromSender(r, row.username, row.personaId));
+    const committed = receipts.filter((r) => r.committedThrough !== null);
+    const done = (r: Receipt) => (r.committedThrough ?? -1) >= id;
     return json({
       channel,
       messageId: id,
-      processed: receipts.filter(done),
-      notYet: receipts.filter((r) => !done(r)),
+      processed: committed.filter(done),
+      notYet: committed.filter((r) => !done(r)),
+      noServerCommit: receipts.filter((r) => r.committedThrough === null),
     });
   }
 
