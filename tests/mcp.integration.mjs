@@ -141,6 +141,7 @@ try {
       "board",
       "label",
       "react",
+      "edit_message",
       "reactions",
       "find",
       "search",
@@ -362,6 +363,54 @@ try {
   await cli(["--profile", "reviewer", "unreact", "work", String(task.message.id), "yes"]);
   const badKind = await labeler.tool("react", { id: task.message.id, kind: "heart" });
   assert.equal(badKind.isError, true);
+  // Edits (ADR 0052): the sender fixes its message over MCP and the CLI; another name cannot.
+  const editStart = await labeler.ok("catch_up", { after: task.message.id, editsAfter: 0 });
+  assert.deepEqual(editStart.edited, []);
+  const edited = await labeler.ok("edit_message", { id: task.message.id, text: "fix the parser (urgent)" });
+  assert.equal(edited.changed, true);
+  assert.equal(edited.message.text, "fix the parser (urgent)");
+  assert.equal(typeof edited.message.editedAt, "string");
+  const notMine = child(binary, [
+    "--profile",
+    "reviewer",
+    "edit",
+    "work",
+    String(task.message.id),
+    "--text",
+    "x",
+  ]);
+  const [notMineCode] = await notMine.done;
+  assert.notEqual(notMineCode, 0);
+  assert.match(notMine.errors, /sender/i);
+  const seenEdit = await labeler.ok("catch_up", { after: task.message.id, editsAfter: editStart.editCursor });
+  assert.deepEqual(
+    seenEdit.edited.map((m) => [m.id, m.text]),
+    [[task.message.id, "fix the parser (urgent)"]],
+  );
+  const byCliEdit = await cli([
+    "--profile",
+    "lead",
+    "edit",
+    "work",
+    String(task.message.id),
+    "--text",
+    "fix the parser",
+  ]);
+  assert.equal(byCliEdit.message.text, "fix the parser");
+  const cliCatchup = await cli([
+    "--profile",
+    "lead",
+    "catchup",
+    "work",
+    "--after",
+    String(task.message.id),
+    "--edits-after",
+    String(seenEdit.editCursor),
+  ]);
+  assert.deepEqual(
+    cliCatchup.edited.map((m) => m.text),
+    ["fix the parser"],
+  );
   const filtered = await cli(["--profile", "lead", "poll", "work", "--label", "owner=lead"]);
   assert.deepEqual(
     filtered.messages.map((m) => m.text),

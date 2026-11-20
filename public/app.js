@@ -410,6 +410,7 @@ function appendMessage(message, target = $("messages")) {
   label.textContent = `#${message.id}`;
   label.title = `#${message.channel} · message ${message.id}`;
   meta.append(name, time);
+  if (message.editedAt) meta.append(editedMark(message));
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
   let boardUpdate = null;
   if (message.contentType === "application/json") {
@@ -441,6 +442,17 @@ function appendMessage(message, target = $("messages")) {
     toggle.addEventListener("click", () => setPin(message.id, !isPinned(message.id)));
     meta.append(toggle);
   }
+  // Only the sender edits (ADR 0052); the server checks it too.
+  if (target === $("messages") && canEdit(message)) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "quiet message-edit";
+    edit.textContent = "Edit";
+    edit.title = `Edit message #${message.id}`;
+    edit.setAttribute("aria-label", `Edit message #${message.id}`);
+    edit.addEventListener("click", () => startEdit(article, message.id));
+    meta.append(edit);
+  }
   // A link to this one message (ADR 0042). It carries no credential: the reader needs their own access.
   if (session) {
     const link = document.createElement("button");
@@ -457,14 +469,7 @@ function appendMessage(message, target = $("messages")) {
     );
     meta.append(link);
   }
-  // Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043).
-  let content;
-  if (boardUpdate || structured) {
-    content = document.createElement(structured ? "pre" : "p");
-    content.textContent = boardUpdate
-      ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
-      : pretty(message.text);
-  } else content = renderMarkdown(message.text);
+  const content = messageContent(message, boardUpdate, structured);
   article.append(meta);
   for (const [field, label] of [
     ["to", "To"],
@@ -734,6 +739,168 @@ async function loadReceipts(connection, name, state, force = false) {
     const message = byId.get(Number(article.dataset.id));
     if (element && message) showReceipt(element, message, state.receipts);
   }
+}
+
+/** Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043). */
+function messageContent(message, boardUpdate, structured) {
+  if (!boardUpdate && !structured) return renderMarkdown(message.text);
+  const content = document.createElement(structured ? "pre" : "p");
+  content.textContent = boardUpdate
+    ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
+    : pretty(message.text);
+  return content;
+}
+
+/*
+ * Edit a message you sent (ADR 0052). The id, place, replies and read marks stay; only the text
+ * changes. Other people's edits arrive from GET …/edits, re-read like reactions.
+ */
+const EDIT_REFRESH_MS = 15_000;
+
+function canEdit(message) {
+  return (
+    Boolean(session) &&
+    !session.watchOnly &&
+    message.username === session.username &&
+    message.username !== "github" &&
+    !archivedBoards.has(message.channel)
+  );
+}
+
+function editedMark(message) {
+  const mark = document.createElement("span");
+  mark.className = "message-edited";
+  mark.textContent = "edited";
+  mark.title = `Edited ${message.editedAt}`;
+  return mark;
+}
+
+function startEdit(article, id) {
+  const state = session?.channels.get(channel);
+  const message = state?.messages.find((item) => item.id === id);
+  if (!message || article.querySelector(":scope > .edit-form")) return;
+  const body = article.querySelector(":scope > .message-body");
+  const toggle = article.querySelector(":scope > .fold-toggle");
+  const form = document.createElement("form");
+  form.className = "edit-form";
+  const input = document.createElement("textarea");
+  input.value = message.text;
+  input.rows = Math.min(12, Math.max(2, message.text.split("\n").length));
+  input.setAttribute("aria-label", `New text for message #${id}`);
+  const actions = document.createElement("div");
+  actions.className = "edit-actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "quiet";
+  cancel.textContent = "Cancel";
+  actions.append(save, cancel);
+  form.append(input, actions);
+  const close = () => {
+    form.remove();
+    if (body) body.hidden = false;
+    if (toggle) toggle.classList.remove("editing");
+  };
+  cancel.addEventListener("click", close);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = input.value;
+    if (!text.trim()) return status("A message cannot be empty.", true);
+    if (text === message.text) return close();
+    save.disabled = true;
+    const ok = await saveEdit(message, text);
+    save.disabled = false;
+    if (ok) close();
+  });
+  if (body) body.hidden = true;
+  if (toggle) toggle.classList.add("editing");
+  (body ?? article.querySelector(":scope > .message-meta")).after(form);
+  input.focus();
+}
+
+async function saveEdit(message, text) {
+  if (!session || !channel) return false;
+  const connection = session;
+  const name = channel;
+  try {
+    const data = await api(
+      `/channels/${name}/messages/${message.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: connection.username, text }),
+      },
+      connection,
+    );
+    const state = connection.channels.get(name);
+    if (state && session === connection && channel === name) showEdit(state, data.message);
+    status(`Message #${message.id} edited.`);
+    return true;
+  } catch (error) {
+    if (error.name !== "AbortError") status(error.message, true);
+    return false;
+  }
+}
+
+/** Applies an edited message's text to the cached copy and every row that shows it. */
+function showEdit(state, edited) {
+  const message = state.messages.find((item) => item.id === edited.id);
+  if (!message || (message.text === edited.text && message.editedAt === edited.editedAt)) return;
+  message.text = edited.text;
+  message.editedAt = edited.editedAt;
+  let boardUpdate = null;
+  if (message.contentType === "application/json")
+    try {
+      const data = JSON.parse(message.text);
+      if (
+        data.schema === "msn.board.v1" &&
+        typeof data.goal === "string" &&
+        ["active", "paused", "complete", "blocked"].includes(data.status)
+      )
+        boardUpdate = data;
+    } catch {}
+  const structured = message.contentType === "application/json" && !boardUpdate;
+  for (const article of $("messages").querySelectorAll(`article[data-id="${edited.id}"]`)) {
+    const body = article.querySelector(":scope > .message-body");
+    if (body) {
+      for (const old of body.children) foldObserver?.unobserve(old);
+      const content = messageContent(message, boardUpdate, structured);
+      body.replaceChildren(content);
+      foldObserver?.observe(content);
+    }
+    const meta = article.querySelector(":scope > .message-meta");
+    const mark = meta?.querySelector(".message-edited");
+    if (mark) mark.title = `Edited ${message.editedAt}`;
+    else meta?.querySelector("time")?.after(editedMark(message));
+  }
+}
+
+/**
+ * Re-reads edits since the board's edit cursor. The first read starts at 0, so an edit made
+ * while the log was loading is not missed; applying an edit twice changes nothing.
+ */
+async function loadEdits(connection, name, state) {
+  state.editsAt = Date.now();
+  try {
+    for (let page = 0; page < 5; page++) {
+      const data = await api(`/channels/${name}/edits?after=${state.editCursor ?? 0}`, {}, connection);
+      if (session !== connection || channel !== name) return;
+      for (const message of data.edits) showEdit(state, message);
+      state.editCursor = data.editCursor;
+      if (!data.hasMore) break;
+    }
+  } catch {}
 }
 
 /*
@@ -1541,6 +1708,8 @@ async function poll(live = false) {
       // Reactions send no message either (ADR 0047).
       if (Date.now() - (state.reactionsAt ?? 0) > REACTION_REFRESH_MS)
         void loadReactions(connection, selected, state);
+      // Edits send no new message either (ADR 0052).
+      if (Date.now() - (state.editsAt ?? 0) > EDIT_REFRESH_MS) void loadEdits(connection, selected, state);
       if (Date.now() - (connection.unreadAt ?? 0) > UNREAD_REFRESH_MS) void loadUnread(connection);
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
@@ -1642,6 +1811,7 @@ function selectChannel(name, { reset = false } = {}) {
   showPins(state);
   void loadPins(session, name);
   void loadReactions(session, name, state);
+  void loadEdits(session, name, state);
   // Capture where the reader stopped before this visit's own reading moves the mark.
   const mark = state.since?.mark ?? readMark(name);
   showSince(state);

@@ -1533,3 +1533,48 @@ nav button.has-unread .channel-name {
   min-height: 36px;
   padding: 6px 10px;
 }
+
+/* Edit a message you sent (ADR 0052). */
+.message-meta .message-edited {
+  margin-left: 0;
+  font-family: inherit;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+.message-meta .message-edit {
+  font: inherit;
+  font-size: 11px;
+  flex-shrink: 0;
+  padding: 0 4px;
+  min-height: 0;
+}
+.watching .message-edit,
+.archived .message-edit {
+  display: none;
+}
+.fold-toggle.editing {
+  display: none;
+}
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.edit-form textarea {
+  width: 100%;
+  min-height: 3em;
+  resize: vertical;
+}
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+@media (pointer: coarse) {
+  .message-meta .message-edit {
+    min-height: 32px;
+    padding: 0 8px;
+  }
+}

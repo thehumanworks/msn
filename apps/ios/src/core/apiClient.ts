@@ -5,6 +5,7 @@ import {
   decodeIdentity,
   decodeMessage,
   decodeMessagePage,
+  decodeEditPage,
   decodePins,
   decodeReactionPage,
   decodeSearchPage,
@@ -237,6 +238,47 @@ export class ApiClient {
     if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
       throw new ProtocolError("Reaction response named a different message.");
     return message;
+  }
+
+  /** PATCH …/messages/{id} (ADR 0052): replaces the text of a message `username` sent. */
+  async editMessage(
+    channel: string,
+    id: number,
+    input: { username: string; text: string },
+    signal?: AbortSignal,
+  ): Promise<Message> {
+    const r = await this.http.request<{ message: unknown }>(
+      `/channels/${encodeURIComponent(channel)}/messages/${id}`,
+      { method: "PATCH", body: { username: input.username, text: input.text }, signal },
+    );
+    const message = decodeMessage(r?.message);
+    if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
+      throw new ProtocolError("Edit response named a different message.");
+    return message;
+  }
+
+  /** GET …/edits (ADR 0052): messages edited after edit cursor `after`, a few pages at most. */
+  async listEdits(
+    channel: string,
+    after: number,
+    signal?: AbortSignal,
+  ): Promise<{ edits: Message[]; editCursor: number }> {
+    const edits: Message[] = [];
+    let cursor = after;
+    for (let page = 0; page < 5; page++) {
+      const r = await this.http.request<unknown>(
+        `/channels/${encodeURIComponent(channel)}/edits?after=${cursor}`,
+        { signal },
+      );
+      const next = decodeEditPage(r);
+      for (const message of next.edits)
+        if (message.channel !== channel || message.tenant !== this.tenant)
+          throw new ProtocolError("Edits response named a different board.");
+      edits.push(...next.edits);
+      cursor = Math.max(cursor, next.editCursor);
+      if (!next.hasMore) break;
+    }
+    return { edits, editCursor: cursor };
   }
 
   /** GET …/reactions (ADR 0047): current reactions for messages after `after`, a few pages at most. */

@@ -2460,6 +2460,93 @@ test("people react to a message with a fixed set; reactions toggle and never add
   for (const add of await page.locator("#messages .reaction-add").all()) await expect(add).toBeHidden();
 });
 
+test("people edit their own messages in place; others see the edit and nothing moves", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: shared,
+    data: { displayName: "lead" },
+  });
+  await request.put(`${t.path}/channels/other`, { headers: t.headers });
+  const send = async (headers, username, text) =>
+    (
+      await (
+        await request.post(`${t.path}/channels/work/messages`, { headers, data: { username, text } })
+      ).json()
+    ).message.id;
+  const mine = await send(t.headers, "human", "Ship it on **mondya**");
+  const theirs = await send(shared, "lead", "I will take the <b>deploy</b>");
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const article = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  // Only your own messages offer Edit.
+  await expect(article(theirs).locator(".message-edit")).toHaveCount(0);
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  const box = article(mine).getByRole("textbox", { name: `New text for message #${mine}` });
+  await expect(box).toHaveValue("Ship it on **mondya**");
+  // Escape cancels without a change.
+  await box.press("Escape");
+  await expect(box).toHaveCount(0);
+  await expect(article(mine).locator(".message-body strong")).toHaveText("mondya");
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  await box.fill("Ship it on **monday**");
+  await page.screenshot({ path: testInfo.outputPath("edit-form.png") });
+  await box.press("Control+Enter");
+  await expect(article(mine).locator(".message-body strong")).toHaveText("monday");
+  await expect(article(mine).locator(".message-edited")).toHaveText("edited");
+  await expect(page.locator("#messages > article")).toHaveCount(2);
+
+  // Another participant's edit shows when the board is read again; text stays plain.
+  expect(
+    (
+      await request.patch(`${t.path}/channels/work/messages/${theirs}`, {
+        headers: shared,
+        data: { username: "lead", text: "I will take the <i>deploy</i> and the rollback" },
+      })
+    ).status(),
+  ).toBe(200);
+  await openChannel(page, "other");
+  await openChannel(page, "work");
+  await expect(article(theirs).locator(".message-body")).toHaveText(
+    "I will take the <i>deploy</i> and the rollback",
+  );
+  await expect(article(theirs).locator(".message-edited")).toBeVisible();
+  await expect(article(theirs).locator("i")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("edited.png") });
+
+  // Nothing moved: same ids, same order, no new message.
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.map((m) => [m.id, m.text])).toEqual([
+    [mine, "Ship it on **monday**"],
+    [theirs, "I will take the <i>deploy</i> and the rollback"],
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // An archived board offers no Edit.
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await expect(article(mine).locator(".message-edit")).toBeHidden();
+});
+
 test("a watch-only invitation lets someone read a board live without posting", async ({
   page,
   request,

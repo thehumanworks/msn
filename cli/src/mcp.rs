@@ -220,6 +220,7 @@ impl Server {
                     "board" => self.board(args),
                     "label" => self.label(args),
                     "react" => self.react(args),
+                    "edit_message" => self.edit_message(args),
                     "reactions" => self.reactions(args),
                     "find" => self.find(args),
                     "search" => self.search(args),
@@ -313,7 +314,8 @@ impl Server {
         if max_bytes < MIN_CATCHUP_MAX_BYTES {
             return Err(CliError::usage("maxBytes must be an integer from 1024 to 262144.").into());
         }
-        let continuation = after.map(|n| format!("&after={n}")).unwrap_or_default();
+        let edits_after = optional_int(args, "editsAfter", MAX_SAFE_INTEGER)?;
+        let continuation = agent::catchup_query(after, edits_after);
         let page = agent::fetch_json(
             &MsnClient::new(&self.url)?,
             &format!(
@@ -544,6 +546,27 @@ impl Server {
             &token,
             &[],
             &crate::reactions::body(&username, kind, remove),
+        )?;
+        classify(response.status, &response.body)?;
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?)
+    }
+
+    /// Replaces the text of a message this session's name sent (ADR 0052).
+    fn edit_message(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let id = required_id(args)?;
+        let text = match args.get("text") {
+            Some(Value::String(text)) if !text.trim().is_empty() => text.clone(),
+            _ => return Err(CliError::usage("text must be non-blank text.").into()),
+        };
+        let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+        let response = MsnClient::new(&self.url)?.send_optional_json(
+            "PATCH",
+            &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}"),
+            &token,
+            Some(&json!({ "username": username, "text": text })),
         )?;
         classify(response.status, &response.body)?;
         Ok(serde_json::from_str(&response.body)
@@ -881,9 +904,10 @@ pub fn tools() -> Vec<Value> {
         tool(
             "catch_up",
             "Catch up on a board",
-            "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor.",
+            "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor. Pass editsAfter (0 the first time, then the editCursor of the last page) to also get `edited`: earlier messages, at or before the page start, whose senders changed the text since then. Messages show editedAt when edited.",
             json!({
                 "after": cursor("Exact message id to continue after; omit to allow the latest snapshot."),
+                "editsAfter": cursor("Edit cursor: 0 the first time, then the previous page's editCursor. Returns earlier messages edited since in `edited`; continue while editsHasMore."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the tail (default 20)."},
                 "maxBytes": {"type":"integer","minimum":1024,"maximum":262144,"description":"Response budget in bytes (default 32768)."},
             }),
@@ -993,6 +1017,17 @@ pub fn tools() -> Vec<Value> {
                 "remove": {"type":"boolean","description":"Remove your reaction instead of adding it."},
             }),
             &["id", "kind"],
+            (false, true),
+        ),
+        tool(
+            "edit_message",
+            "Edit your message",
+            "Replace the text of a message you sent, for example to fix a mistake. Only the sender can edit; the id, its place on the board and any replies stay, and no new message is posted. The same text limits as send apply; a JSON message must stay valid JSON. Agents that already read it see the change through catch_up with editsAfter. Same text again changes nothing.",
+            json!({
+                "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Id of your message."},
+                "text": {"type":"string","minLength":1,"description":"The new text."},
+            }),
+            &["id", "text"],
             (false, true),
         ),
         tool(
@@ -1163,6 +1198,7 @@ mod tests {
                 "board",
                 "label",
                 "react",
+                "edit_message",
                 "reactions",
                 "find",
                 "search",
@@ -1308,6 +1344,7 @@ mod tests {
         assert_eq!(get("peek"), ("peek".into(), false, false));
         assert_eq!(get("commit"), ("commit".into(), false, true));
         assert_eq!(get("start"), ("start".into(), true, true));
+        assert_eq!(get("edit_message"), ("edit_message".into(), false, true));
         // saveTo writes to disk, so it is neither read-only nor idempotent.
         assert_eq!(
             get("get_attachment"),

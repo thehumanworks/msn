@@ -545,3 +545,14 @@ export function reactionChange(input: Record<string, unknown>): ReactionChange {
     remove: input.remove === true,
   };
 }
+
+/** `PATCH …/messages/:id` body (ADR 0052): the sender's name and the new text, nothing else. */
+export type MessageEdit = { username: string; text: string };
+
+export function messageEdit(input: Record<string, unknown>): MessageEdit {
+  for (const field of Object.keys(input))
+    if (!["username", "text"].includes(field))
+      throw new HttpError(400, "invalid_edit", `Unknown field ${field}; use username and text.`);
+  // The same limits as a send: non-blank, at most 16384 UTF-8 bytes.
+  return { username: text(input.username, "username", 128), text: text(input.text, "text", 16384) };
+}

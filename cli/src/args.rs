@@ -535,6 +535,10 @@ pub enum Command {
         /// Maximum complete response size in bytes, 1024–262144 (default 32768)
         #[arg(long = "max-bytes")]
         max_bytes: Option<String>,
+        /// Also list earlier messages edited since this edit cursor (0 at first; then the
+        /// editCursor of the previous page); they come back in `edited`
+        #[arg(long = "edits-after")]
+        edits_after: Option<String>,
     },
     /// Write a portable one-way archive of a channel's readable history, or a Markdown transcript
     Export {
@@ -688,6 +692,14 @@ pub enum Command {
         message_id: String,
         /// done, seen, yes or no (aliases: check, eyes, +1, x)
         kind: String,
+    },
+    /// Replace the text of a message you sent; its id, place and replies stay. Sends no message
+    Edit {
+        channel: String,
+        message_id: String,
+        /// The new text (same limits as send); pass - to read stdin
+        #[arg(long)]
+        text: String,
     },
     /// Remove your reaction; succeeds when you had not reacted
     Unreact {

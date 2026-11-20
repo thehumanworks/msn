@@ -206,6 +206,15 @@ pub fn start_page(
     Ok(page)
 }
 
+/// The `&after=…&editsAfter=…` tail of a catch-up query; either part only when given.
+pub(crate) fn catchup_query(after: Option<u64>, edits_after: Option<u64>) -> String {
+    let mut query = after.map(|n| format!("&after={n}")).unwrap_or_default();
+    if let Some(edits) = edits_after {
+        query.push_str(&format!("&editsAfter={edits}"));
+    }
+    query
+}
+
 pub(crate) fn validate_catchup(
     page: &Value,
     tenant: &str,
@@ -247,6 +256,19 @@ pub(crate) fn validate_catchup(
             })
         {
             return Err(invalid());
+        }
+    }
+    // Edited earlier messages (ADR 0052) are at or before the page's start and in this stream.
+    if let Some(edited) = page.get("edited").filter(|value| !value.is_null()) {
+        let edited = edited.as_array().ok_or_else(invalid)?;
+        number(page, "editCursor")?;
+        for row in edited {
+            if number(row, "id")? > previous
+                || row["tenant"].as_str() != Some(tenant)
+                || row["channel"].as_str() != Some(channel)
+            {
+                return Err(invalid());
+            }
         }
     }
     let rows = page["messages"].as_array().ok_or_else(invalid)?;

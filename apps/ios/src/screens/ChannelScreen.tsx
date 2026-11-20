@@ -34,7 +34,7 @@ import { SearchView } from "../components/SearchView.tsx";
 import { SnapshotView } from "../components/SnapshotView.tsx";
 import { TaskActivityView } from "../components/TaskActivityView.tsx";
 import { colors, spacing } from "../components/theme.ts";
-import { Banner, Button, EmptyState, Segmented, Text } from "../components/ui.tsx";
+import { Banner, Button, EmptyState, Field, Segmented, Text } from "../components/ui.tsx";
 import { useChannel } from "../hooks/useChannelController.ts";
 import { useStore } from "../hooks/useStore.ts";
 
@@ -238,6 +238,13 @@ function ChannelBody({
     },
     [controller],
   );
+  // Edits (ADR 0052): one message at a time, in a panel where the composer was.
+  const [editing, setEditing] = useState<Message | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const onEditMessage = useCallback((message: Message) => {
+    setEditError(null);
+    setEditing(message);
+  }, []);
   const onShareLink = useCallback(
     (message: Message) => {
       const { origin, tenant } = session.session;
@@ -268,6 +275,10 @@ function ChannelBody({
     state.stale && state.error ? (
       <Banner tone="warning" action={{ label: "Retry", onPress: () => controller.refresh() }}>
         Showing what was loaded earlier. {state.error}
+      </Banner>
+    ) : editError ? (
+      <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setEditError(null) }}>
+        Message not edited: {editError}
       </Banner>
     ) : reactError ? (
       <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setReactError(null) }}>
@@ -359,6 +370,7 @@ function ChannelBody({
                 unfolded={unfolded.has(item.id)}
                 me={me}
                 onReact={archived ? undefined : onReact}
+                onEditMessage={!archived && item.username === me && me !== "github" ? onEditMessage : undefined}
               />
             );
           }}
@@ -382,6 +394,18 @@ function ChannelBody({
         <View style={[styles.archived, { paddingBottom: bottomInset + spacing.md }]}>
           <Text style={styles.archivedText}>Archived · this board is read only. Unarchive it to post again.</Text>
         </View>
+      ) : editing ? (
+        <EditPanel
+          key={editing.id}
+          message={editing}
+          bottomInset={bottomInset}
+          onCancel={() => setEditing(null)}
+          onSave={async (text) => {
+            const error = await controller.editMessage(editing.id, text);
+            setEditError(error);
+            if (!error) setEditing(null);
+          }}
+        />
       ) : (
         <Composer
           channel={controller}
@@ -392,6 +416,49 @@ function ChannelBody({
           restored={restored}
         />
       )}
+    </View>
+  );
+}
+
+/** Edits one of your messages (ADR 0052): the text, then Save or Cancel. */
+function EditPanel({
+  message,
+  bottomInset,
+  onCancel,
+  onSave,
+}: {
+  message: Message;
+  bottomInset: number;
+  onCancel: () => void;
+  onSave: (text: string) => Promise<void>;
+}) {
+  const [text, setText] = useState(message.text);
+  const [busy, setBusy] = useState(false);
+  return (
+    <View style={[styles.editPanel, { paddingBottom: bottomInset + spacing.md }]}>
+      <Field
+        label={`Edit message #${message.id}`}
+        value={text}
+        onChangeText={setText}
+        multiline
+        autoFocus
+        autoCapitalize="sentences"
+        autoCorrect
+        style={styles.editInput}
+      />
+      <View style={styles.editActions}>
+        <Button label="Cancel" variant="ghost" onPress={onCancel} disabled={busy} />
+        <Button
+          label="Save"
+          variant="primary"
+          busy={busy}
+          disabled={!text.trim()}
+          onPress={() => {
+            setBusy(true);
+            void onSave(text).finally(() => setBusy(false));
+          }}
+        />
+      </View>
     </View>
   );
 }
@@ -446,4 +513,13 @@ const styles = StyleSheet.create({
     borderTopColor: colors.border,
   },
   archivedText: { color: colors.muted, fontSize: 14 },
+  editPanel: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    gap: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  editInput: { minHeight: 80, maxHeight: 200, textAlignVertical: "top" },
+  editActions: { flexDirection: "row", justifyContent: "flex-end", gap: spacing.sm },
 });

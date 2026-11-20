@@ -417,3 +417,44 @@ test("reactions toggle your own and refresh on a later sync without moving messa
     await server.close();
   }
 });
+
+test("edits change your own message in place and others' edits arrive on a later sync (ADR 0052)", async () => {
+  const server = await startMockServer();
+  try {
+    server.createChannel("general");
+    server.post("general", "tomas", "Ship it on mondya");
+    server.post("general", "asha", "I take the deploy");
+    const ctl = track(
+      new SessionController(
+        { origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", usernamePrefix: null },
+        { ...fast, fetchImpl: nodeFetch },
+      ),
+    );
+    await ctl.start();
+    const channelCtl = track(new ChannelController(ctl, "general", { baseMs: 5, maxMs: 20 }, 0));
+    channelCtl.start();
+    await waitFor(() => channelCtl.state.get().phase === "ready", "channel ready");
+    const byId = (id: number) => channelCtl.state.get().messages.find((m) => m.id === id);
+
+    assert.equal(await channelCtl.editMessage(1, "Ship it on monday"), null);
+    assert.equal(byId(1)?.text, "Ship it on monday");
+    assert.equal(typeof byId(1)?.editedAt, "string");
+    assert.equal(server.requests.filter((r) => r.method === "PATCH").length, 1);
+    // Someone else's message, blank text and unknown ids are refused before any request.
+    assert.equal(await channelCtl.editMessage(2, "mine now"), "Only the sender can edit a message.");
+    assert.equal(await channelCtl.editMessage(1, "  "), "A message cannot be empty.");
+    assert.equal(await channelCtl.editMessage(99, "x"), "That message is no longer loaded.");
+    assert.equal(server.requests.filter((r) => r.method === "PATCH").length, 1);
+
+    // asha edits hers; the next sync re-reads edits without moving messages.
+    server.editText(2, "I take the deploy and the rollback");
+    server.post("general", "asha", "later");
+    await waitFor(() => byId(2)?.text === "I take the deploy and the rollback", "edit refreshed");
+    assert.equal(typeof byId(2)?.editedAt, "string");
+    assert.deepEqual(ids(channelCtl), [1, 2, 3]);
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});
