@@ -40,6 +40,8 @@ pub struct Palette {
     pub backdrop: Color32,
     tints: [[u8; 3]; 2],
     pub names: [Color32; 6],
+    /// How strongly an avatar's disc takes its name colour.
+    avatar_tint: f32,
 }
 
 pub const DARK: Palette = Palette {
@@ -73,6 +75,7 @@ pub const DARK: Palette = Palette {
         Color32::from_rgb(110, 196, 232),
         Color32::from_rgb(232, 208, 96),
     ],
+    avatar_tint: 0.15,
 };
 
 pub const LIGHT: Palette = Palette {
@@ -106,6 +109,7 @@ pub const LIGHT: Palette = Palette {
         Color32::from_rgb(0, 104, 150),
         Color32::from_rgb(104, 88, 0),
     ],
+    avatar_tint: 0.12,
 };
 
 thread_local! {
@@ -250,7 +254,12 @@ pub fn save_preference(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, format!("{value}\n"))
+    // Written beside the file and renamed into place, so a crash never leaves half a file.
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, format!("{value}\n"))?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        std::fs::remove_file(&tmp).ok();
+    })
 }
 
 /// The main content surface.
@@ -340,12 +349,17 @@ pub fn name_color(name: &str) -> Color32 {
     names[hash as usize % names.len()]
 }
 
+/// The disc behind an avatar's initial: the name colour, faint.
+fn avatar_fill(p: &Palette, name: Color32) -> Color32 {
+    name.gamma_multiply(p.avatar_tint)
+}
+
 /// A round avatar with the user's initial and, optionally, a Messenger-style presence dot.
 pub fn avatar(ui: &mut egui::Ui, name: &str, size: f32, presence: Option<Color32>) {
     let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
     let painter = ui.painter();
     let color = name_color(name);
-    painter.circle_filled(rect.center(), size / 2.0, color.gamma_multiply(0.35));
+    painter.circle_filled(rect.center(), size / 2.0, avatar_fill(palette(), color));
     let initial: String = name
         .chars()
         .next()
@@ -503,6 +517,37 @@ mod palette_tests {
         out
     }
 
+    /// An avatar's initial is its name colour on a faint disc of the same colour, on glass.
+    fn avatar_failures(p: &Palette, desktops: &[[f32; 3]]) -> Vec<String> {
+        let mut out = Vec::new();
+        for desktop in desktops {
+            let glass = over(p.glass, over(p.backdrop, *desktop));
+            for name in p.names {
+                let [r, g, b, _] = name.to_array();
+                let ratio = contrast(
+                    [r as f32, g as f32, b as f32],
+                    over(avatar_fill(p, name), glass),
+                );
+                if ratio < 4.5 {
+                    out.push(format!("initial {name:?} over {desktop:?}: {ratio:.2}"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn avatar_initials_meet_aa() {
+        assert_eq!(
+            avatar_failures(&LIGHT, &[[0.0; 3], [255.0; 3]]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            avatar_failures(&DARK, &[[0.0; 3], [40.0; 3]]),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn light_text_meets_aa_over_any_desktop() {
         // The window is translucent: check a black and a white desktop behind it.
@@ -548,6 +593,13 @@ mod palette_tests {
         save_preference(&path, egui::ThemePreference::System).unwrap();
         assert!(!path.exists());
         save_preference(&path, egui::ThemePreference::System).unwrap();
+        // Only the preference file is left behind: the temporary file was renamed into place.
+        save_preference(&path, egui::ThemePreference::Light).unwrap();
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("desktop-theme")]);
         std::fs::write(&path, "purple").unwrap();
         assert_eq!(load_preference(&path), egui::ThemePreference::System);
         std::fs::remove_dir_all(dir).unwrap();

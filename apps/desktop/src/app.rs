@@ -1797,7 +1797,8 @@ fn message_header(
     if let Some(reply_to) = message["replyTo"].as_u64() {
         meta.push_str(&format!(" · re #{reply_to}"));
     }
-    job.append(&meta, 10.0, format(theme::muted().gamma_multiply(0.7)));
+    // Full muted, not dimmed: the time and id must meet AA in both themes (ADR 0049).
+    job.append(&meta, 10.0, format(theme::muted()));
     job
 }
 

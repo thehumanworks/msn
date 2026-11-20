@@ -22,9 +22,9 @@ Web and desktop were dark only. People who work in a light system theme, or in d
 - `tests/theme.test.mjs` checks that both light blocks are identical and redefine every dark colour token, that no rule outside the token blocks hard-codes a colour, and that text, muted, accent and error meet 4.5:1 on every surface (and white-on-accent for primary buttons) in both themes.
 - A Playwright test renders a board with a pin, labels, receipts, inline code, a code block, a quote and a link, and measures every text element against the background it is painted on, in both themes, on desktop and phone viewports.
 - A desktop unit test composites each surface over the backdrop over a black and a white desktop (light) or a dark desktop (dark), and checks every text colour on it.
-- To pass, two dark desktop colours changed slightly: the user's own bubble is less opaque (its muted and link text was 3.6:1 and 3.2:1), links use the accent colour, and the send/Connect blue is darker so its white text reaches 5:1.
+- To pass, some dark desktop colours changed slightly: the message time and id use the full muted colour (it was dimmed to about 3:1), avatar discs are fainter so the initial stands out, the user's own bubble is less opaque (its muted and link text was 3.6:1 and 3.2:1), links use the accent colour, and the send/Connect blue is darker so its white text reaches 5:1.
 
-**New UI must use tokens.** The CSS test fails on any raw colour outside the token blocks, so new web elements (for example reactions or the transcript download) get both themes by using `var(--…)`.
+**New UI must use tokens.** The CSS test fails on any raw colour outside the token blocks (hex, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`/`color()`, and named colours such as `red` in colour properties), so new web elements (for example reactions or the transcript download) get both themes by using `var(--…)`.
 
 ## Rejected
 
@@ -35,4 +35,5 @@ Web and desktop were dark only. People who work in a light system theme, or in d
 ## Limits
 
 - The desktop window is translucent; contrast for the dark theme is checked over a dark desktop only, as before this change. The light theme is checked over black and white.
+- The web app manifest's `theme_color` and `background_color` stay dark: a manifest has one value, so an installed app's splash screen is dark on a light system. The page itself switches as soon as it loads.
 - Placeholder text in empty fields keeps the platform's faint style in both themes.

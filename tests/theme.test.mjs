@@ -7,11 +7,12 @@ import { test } from "node:test";
 
 const css = readFileSync(new URL("../public/style.css", import.meta.url), "utf8");
 
-function block(selector) {
-  const start = css.indexOf(`${selector} {`);
-  assert.notEqual(start, -1, `missing ${selector}`);
-  const open = css.indexOf("{", start);
-  return { start, end: css.indexOf("}", open) + 1, body: css.slice(open + 1, css.indexOf("}", open)) };
+function block(pattern) {
+  const match = pattern.exec(css);
+  assert.ok(match, `missing ${pattern}`);
+  const open = match.index + match[0].length - 1;
+  const close = css.indexOf("}", open);
+  return { start: match.index, end: close + 1, body: css.slice(open + 1, close) };
 }
 
 function tokens(body) {
@@ -21,10 +22,10 @@ function tokens(body) {
   return out;
 }
 
-const COLOUR = /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(|\b(?:white|black)\b(?!-)/gi;
-const dark = block(":root");
-const lightSystem = block('  :root:not([data-theme="dark"])');
-const lightForced = block(':root[data-theme="light"]');
+const COLOUR = /#[0-9a-f]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(/gi;
+const dark = block(/^:root\s*\{/m);
+const lightSystem = block(/:root:not\(\[data-theme="dark"\]\)\s*\{/);
+const lightForced = block(/^:root\[data-theme="light"\]\s*\{/m);
 const darkTokens = new Map(
   [...tokens(dark.body)].filter(([, value]) => value.match(COLOUR) || value === "dark"),
 );
@@ -37,7 +38,43 @@ test("both light blocks are identical and redefine every dark colour token", () 
   assert.equal(darkTokens.get("color-scheme"), "dark");
 });
 
-test("no rule outside the token blocks hard-codes a colour", () => {
+// Words a colour property may hold besides tokens: anything else (red, gray, white…) is a
+// named colour and must become a token.
+const COLOUR_PROPERTY =
+  /^(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left|block|inline))?(?:-color)?|outline(?:-color)?|box-shadow|text-shadow|accent-color|caret-color|fill|stroke|text-decoration(?:-color)?|column-rule(?:-color)?)$/;
+const NOT_A_COLOUR = new Set([
+  "transparent",
+  "currentcolor",
+  "inherit",
+  "initial",
+  "unset",
+  "revert",
+  "none",
+  "solid",
+  "dashed",
+  "dotted",
+  "double",
+  "inset",
+  "auto",
+  "underline",
+]);
+
+/** Raw colours in CSS text: hex, colour functions, and named colours in colour properties. */
+function rawColours(text) {
+  const found = text.match(COLOUR) ?? [];
+  for (const [, property, value] of text.matchAll(/([a-z-]+)\s*:\s*([^;{}]+);/g)) {
+    if (!COLOUR_PROPERTY.test(property)) continue;
+    // Hex and colour functions are counted above; strip them, tokens and numbers with units.
+    const bare = value
+      .replace(/var\([^)]*\)|[a-z-]+\([^)]*\)|#[0-9a-f]+/gi, " ")
+      .replace(/-?[\d.]+[a-z%]*/gi, " ");
+    for (const word of bare.match(/[a-z][a-z-]*/gi) ?? [])
+      if (!NOT_A_COLOUR.has(word.toLowerCase())) found.push(`${property}: ${word}`);
+  }
+  return found;
+}
+
+function outsideTokens() {
   const spans = [dark, lightSystem, lightForced].sort((a, b) => a.start - b.start);
   let rest = "";
   let at = 0;
@@ -45,14 +82,18 @@ test("no rule outside the token blocks hard-codes a colour", () => {
     rest += css.slice(at, span.start);
     at = span.end;
   }
-  rest += css.slice(at);
-  const found = (
-    rest
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/white-space/g, "")
-      .match(COLOUR) ?? []
-  ).join(", ");
+  return (rest + css.slice(at)).replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+test("no rule outside the token blocks hard-codes a colour", () => {
+  const found = rawColours(outsideTokens()).join(", ");
   assert.equal(found, "", `use a var(--token) instead of: ${found}`);
+});
+
+test("the raw-colour check catches hex, colour functions and named colours", () => {
+  const sample =
+    "a { color: red; background: oklch(0.7 0.1 200); border: 1px solid gray; fill: #fff; outline: 2px solid var(--accent); }";
+  assert.deepEqual(rawColours(sample), ["oklch(", "#fff", "color: red", "border: gray"]);
 });
 
 function rgba(hex) {
