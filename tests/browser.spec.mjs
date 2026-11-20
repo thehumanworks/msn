@@ -2264,3 +2264,181 @@ test("each message shows which personas committed past it, from explicit commits
   ]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("a message link opens its board on that message, opens its thread, and says when the message is gone", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (channel, text, replyTo, labels) => {
+    const response = await request.post(`${t.path}/channels/${channel}/messages`, {
+      headers: t.headers,
+      data: { username: "planner", text, ...(replyTo ? { replyTo } : {}), ...(labels ? { labels } : {}) },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message;
+  };
+  const root = await send("general", "Plan the release");
+  const decision = await send("general", "Decision: ship on Friday", root.id, { kind: "decision" });
+  await send("general", "Unrelated status");
+  const gone = await send("general", "Typo, ignore");
+  await request.delete(`/api/admin/tenants/${t.tenant}/channels/general/messages/${gone.id}`, {
+    headers: { Authorization: `Bearer ${ADMIN}` },
+  });
+  await send("other", "Another board");
+  const link = (channel, id) => `/#board=${t.tenant}/${channel}&msg=${id}`;
+  // Record copies instead of touching the real clipboard.
+  await page.addInitScript(() => {
+    window.copied = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: async (text) => window.copied.push(text) },
+    });
+  });
+  await connect(page, t);
+  await openChannel(page, "other");
+  // Following a link while connected switches board, opens the folded thread and highlights.
+  await page.goto(link("general", decision.id));
+  await expect(page.locator("#channel-title")).toHaveText("# general");
+  const target = page.locator(`article[data-id="${decision.id}"]`);
+  await expect(target).toBeVisible();
+  await expect(target).toHaveClass(/linked/);
+  await expect(page.locator(`article[data-id="${root.id}"] > .thread-toggle`)).toHaveText("Hide 1 reply");
+  await expect(page.locator("#status")).toHaveText(`Showing message #${decision.id} in #general.`);
+  expect(new URL(page.url()).hash).toBe("");
+  await page.screenshot({ path: testInfo.outputPath("message-link.png") });
+  // The Link button copies the same link; it names the message, never a credential.
+  await target.getByRole("button", { name: `Copy link to message #${decision.id}` }).click();
+  await expect(page.locator("#status")).toHaveText(`Link to message #${decision.id} copied.`);
+  const copied = await page.evaluate(() => window.copied);
+  expect(copied).toEqual([`${new URL(page.url()).origin}${link("general", decision.id)}`]);
+  expect(copied[0]).not.toContain(t.token);
+  // Search and label results offer the same Link.
+  await page.getByLabel("Search this board").getByRole("searchbox").fill("Friday");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page
+    .locator("#search-results")
+    .getByRole("button", { name: `Copy link to message #${decision.id}` })
+    .click();
+  await page.getByRole("button", { name: "Clear" }).first().click();
+  await target.getByRole("button", { name: "kind=decision" }).click();
+  await page
+    .locator("#label-results")
+    .getByRole("button", { name: `Copy link to message #${decision.id}` })
+    .click();
+  expect(await page.evaluate(() => window.copied)).toEqual([copied[0], copied[0], copied[0]]);
+  await page.locator("#label-filter-clear").click();
+  // Deleted (410) and missing (404) messages leave a clear note.
+  await page.goto(link("general", gone.id));
+  await expect(page.locator("#link-note-text")).toHaveText(`Message #${gone.id} was deleted from #general.`);
+  await page.goto(link("general", 999999));
+  await expect(page.locator("#link-note-text")).toHaveText(
+    "Message #999999 is not on #general. Check the link.",
+  );
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.locator("#link-note")).toBeHidden();
+  await page.goto(link("missing-board", 1));
+  await expect(page.locator("#status")).toHaveText(
+    "Board #missing-board is not in this workspace, or your access key cannot read it.",
+  );
+  // Opened in a new tab, a remembered connection reconnects and then shows the message.
+  await page.goto("about:blank");
+  await page.goto(link("general", decision.id));
+  await expect(page.locator(`article[data-id="${decision.id}"]`)).toHaveClass(/linked/);
+  await expect(page.locator(`article[data-id="${decision.id}"]`)).toBeVisible();
+  // Not connected at all: the form names the workspace, and connecting opens the message.
+  await disconnect(page);
+  await page.goto("about:blank");
+  await page.goto(link("general", decision.id));
+  await expect(page.locator("#status")).toHaveText(
+    `Connect to workspace “${t.tenant}” to open message #${decision.id}.`,
+  );
+  await expect(page.getByLabel("Workspace", { exact: true })).toHaveValue(t.tenant);
+  await page.getByLabel("Access key").fill(t.token);
+  await page.getByLabel("Your display name").fill("Tomas");
+  await page.getByRole("button", { name: "Connect", exact: false }).click();
+  await expect(page.locator(`article[data-id="${decision.id}"]`)).toHaveClass(/linked/);
+  await page.goto("/#board=not a link&msg=1");
+  await expect(page.locator("#status")).toHaveText("Invalid message link.");
+});
+
+test("a link to a message outside the loaded log reads forward, or shows the board from that message", async ({
+  page,
+  request,
+}) => {
+  const t = await populatedWorkspace(request);
+  const rows = { alpha: messageRows("alpha", 1000), beta: [] };
+  rows.alpha[899].replyTo = 20;
+  const requests = [];
+  await mockHistory(page, t, rows, requests);
+  await page.route(new RegExp(`${t.path}/channels/alpha/messages/(\\d+)$`), (route) => {
+    const id = Number(new URL(route.request().url()).pathname.split("/").at(-1));
+    return route.fulfill({ json: { message: rows.alpha[id - 1], historyRevision: 0 } });
+  });
+  await connect(page, t, "Tomas", { live: false });
+  await expect(page.locator("#channel-title")).toHaveText("# alpha");
+  await expect(page.locator("#cursor")).toHaveText("Cursor 100");
+  const readMark = () =>
+    page.evaluate(
+      (tenant) => Object.values(JSON.parse(localStorage.getItem(`msn.read.${tenant}`) ?? "{}")),
+      t.tenant,
+    );
+  await expect.poll(readMark).toEqual([100]);
+  // Just ahead of the log: read forward page by page, as "Load next page" would.
+  await page.goto(`/#board=${t.tenant}/alpha&msg=250`);
+  await expect(page.locator('article[data-id="250"]')).toHaveClass(/linked/);
+  await expect(page.locator("#cursor")).toHaveText("Cursor 300");
+  await expect(page.locator('article[data-id="1"]')).toHaveCount(1);
+  await expect(page.locator("#link-note")).toBeHidden();
+  // Far ahead: after three pages the board is shown from the message onward instead.
+  await page.goto(`/#board=${t.tenant}/alpha&msg=900`);
+  await expect(page.locator('article[data-id="900"]')).toHaveClass(/linked/);
+  await expect(page.locator("#link-note-text")).toHaveText(
+    "Showing #alpha from message #900. Earlier messages are not loaded.",
+  );
+  await expect(page.locator("#messages > article").first()).toHaveAttribute("data-id", "900");
+  expect(requests.at(-1)).toEqual({ name: "alpha", after: 899 });
+  // Following links is not reading what they skip: the read mark has not moved.
+  expect(await readMark()).toEqual([100]);
+  // Its parent is not loaded, so the reply quotes it.
+  await expect(page.locator('article[data-id="900"] > .reply-parent')).toHaveText(/^agent: alpha row 20/);
+  // Older than the log: the same.
+  await page.goto(`/#board=${t.tenant}/alpha&msg=5`);
+  await expect(page.locator("#messages > article").first()).toHaveAttribute("data-id", "5");
+  await expect(page.locator('article[data-id="5"]')).toHaveClass(/linked/);
+  expect(await readMark()).toEqual([100]);
+  const sent = requests.length;
+  await page.getByRole("button", { name: "Load from the start" }).click();
+  await expect(page.locator("#link-note")).toBeHidden();
+  await expect(page.locator("#messages > article").first()).toHaveAttribute("data-id", "1");
+  expect(requests.slice(sent)).toContainEqual({ name: "alpha", after: 0 });
+  // The skipped messages are still news: the summary starts after the held mark.
+  await expect.poll(() => requests.slice(sent)).toContainEqual({ name: "alpha", after: 100 });
+  await expect(page.locator("#since")).toBeVisible();
+});
+
+test("a link for another workspace waits through Disconnect and opens after connecting there", async ({
+  page,
+  request,
+}) => {
+  const first = await provision(request);
+  const second = await provision(request);
+  const response = await request.post(`${second.path}/channels/release/messages`, {
+    headers: second.headers,
+    data: { username: "planner", text: "Release on Friday" },
+  });
+  const { message } = await response.json();
+  await connect(page, first);
+  await page.goto(`/#board=${second.tenant}/release&msg=${message.id}`);
+  await expect(page.locator("#status")).toHaveText(
+    `This link is for workspace “${second.tenant}”. Disconnect, then connect to it to open message #${message.id}.`,
+  );
+  await disconnect(page);
+  await page.getByLabel("Workspace", { exact: true }).fill(second.tenant);
+  await page.getByLabel("Access key").fill(second.token);
+  await page.getByLabel("Your display name").fill("Tomas");
+  await page.getByRole("button", { name: "Connect", exact: false }).click();
+  await expect(page.locator(`article[data-id="${message.id}"]`)).toHaveClass(/linked/);
+  await expect(page.locator("#channel-title")).toHaveText("# release");
+  await page.goto("/#invite=abc&msg=1");
+  await expect(page.locator("#status")).toHaveText("Invalid message link.");
+});

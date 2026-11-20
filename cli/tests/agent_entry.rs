@@ -346,3 +346,60 @@ fn start_tells_a_watch_only_key_that_writes_are_refused() {
     assert_eq!(value["identity"]["watchOnly"], true);
     assert!(value["warnings"].to_string().contains("403 watch_only"));
 }
+
+#[test]
+fn link_prints_one_message_link_after_checking_it_exists() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"message":{"id":7,"channel":"general","tenant":"team"},"historyRevision":0}"#,
+    )]);
+    let out = bin(&server)
+        .args(["link", "general", "7"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8(out.stdout).unwrap();
+    let origin = server.url().trim_end_matches('/').to_string();
+    assert_eq!(printed, format!("{origin}/#board=team/general&msg=7\n"));
+    assert!(!printed.contains("token"));
+    assert_eq!(
+        server.recorded()[0].path,
+        "/api/tenants/team/channels/general/messages/7"
+    );
+
+    let server = MockServer::spawn(vec![Scripted::json(
+        200,
+        r#"{"message":{"id":7,"channel":"general","tenant":"team"},"historyRevision":0}"#,
+    )]);
+    let out = bin(&server)
+        .args(["link", "general", "7", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["id"], 7);
+    assert_eq!(value["channel"], "general");
+    assert!(
+        value["link"]
+            .as_str()
+            .unwrap()
+            .ends_with("/#board=team/general&msg=7")
+    );
+
+    // Missing (404) and deleted (410) messages keep `msn show`'s exit codes and print no link.
+    for (status, code) in [(404, 4), (410, 5)] {
+        let server = MockServer::spawn(vec![Scripted::json(
+            status,
+            r#"{"error":{"message":"Gone."}}"#,
+        )]);
+        let out = bin(&server)
+            .args(["link", "general", "7"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code));
+        assert!(out.stdout.is_empty());
+    }
+}

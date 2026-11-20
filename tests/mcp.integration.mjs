@@ -135,6 +135,7 @@ try {
       "peek",
       "commit",
       "show_message",
+      "message_link",
       "receipts",
       "get_attachment",
       "board",
@@ -178,6 +179,10 @@ try {
   assert.equal(committed.committedThrough, page.nextCursor);
   const evidence = await reviewer.ok("show_message", { id: sent.message.id });
   assert.equal(evidence.message.text, "please review");
+  const cited = await reviewer.ok("message_link", { id: sent.message.id });
+  assert.equal(cited.id, sent.message.id);
+  assert.match(cited.link, new RegExp(`/#board=[a-z0-9_-]+/[a-z0-9_-]+&msg=${sent.message.id}$`));
+  assert.equal((await reviewer.tool("message_link", { id: 99999999 })).isError, true);
   await reviewer.ok("send", { text: "approved", replyTo: sent.message.id, to: "lead" });
   const empty = await reviewer.ok("peek", { wait: 0 });
   assert.deepEqual(
