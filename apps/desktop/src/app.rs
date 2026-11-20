@@ -16,9 +16,6 @@ use crate::state::{
 };
 use crate::theme;
 
-const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 80, 80);
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 140, 40);
-
 pub struct MsnDesktopApp {
     worker: Worker,
     events_rx: Receiver<UiEvent>,
@@ -48,6 +45,9 @@ pub struct MsnDesktopApp {
     marks_saved_at: Option<std::time::Instant>,
     /// The "also mute messages addressed to me" box in the mute menu (ADR 0044).
     mute_everything: bool,
+    /// Where this computer keeps its theme choice (ADR 0049); `None` keeps it in memory only.
+    theme_file: Option<std::path::PathBuf>,
+    theme_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -106,7 +106,12 @@ enum Action {
 
 impl MsnDesktopApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::install(&cc.egui_ctx);
+        let theme_file = theme::preference_file();
+        let preference = theme_file
+            .as_deref()
+            .map(theme::load_preference)
+            .unwrap_or_default();
+        theme::install_with(&cc.egui_ctx, preference);
         let (events_tx, events_rx) = sync_channel(EVENT_QUEUE_CAPACITY);
         let ctx = cc.egui_ctx.clone();
         let worker = Worker::spawn(events_tx, move || ctx.request_repaint());
@@ -137,6 +142,8 @@ impl MsnDesktopApp {
             marks_saved_at: None,
             profile_store,
             mute_everything: false,
+            theme_file,
+            theme_error: None,
         }
     }
 
@@ -214,9 +221,9 @@ impl MsnDesktopApp {
             egui::RichText::new("msn")
                 .size(30.0)
                 .strong()
-                .color(theme::ACCENT),
+                .color(theme::accent()),
         );
-        ui.label(egui::RichText::new("Sign in to your workspace").color(theme::MUTED));
+        ui.label(egui::RichText::new("Sign in to your workspace").color(theme::muted()));
         ui.add_space(10.0);
         ui.collapsing("Import account or channel connection", |ui| {
             ui.label("Paste an exported MSN connection to access the same boards on this device.");
@@ -252,7 +259,7 @@ impl MsnDesktopApp {
 
         if !self.connect_form.profiles.is_empty() {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Saved profile").color(theme::MUTED));
+                ui.label(egui::RichText::new("Saved profile").color(theme::muted()));
                 let mut chosen = None;
                 egui::ComboBox::from_id_salt("profile-picker")
                     .selected_text(if self.connect_form.profile_name.is_empty() {
@@ -312,7 +319,7 @@ impl MsnDesktopApp {
                 false,
             ),
         ] {
-            ui.label(egui::RichText::new(label).small().color(theme::MUTED));
+            ui.label(egui::RichText::new(label).small().color(theme::muted()));
             ui.add(
                 theme::field(value)
                     .password(password)
@@ -323,7 +330,7 @@ impl MsnDesktopApp {
         }
 
         if let Some(error) = &self.connect_form.profiles_error {
-            ui.colored_label(WARN_COLOR, error);
+            ui.colored_label(theme::warn(), error);
         }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.connect_form.save_profile, "Save as profile");
@@ -361,7 +368,7 @@ impl MsnDesktopApp {
             });
         }
         if let Some(error) = &self.state.connect_error {
-            ui.colored_label(ERROR_COLOR, error);
+            ui.colored_label(theme::error(), error);
         }
         ui.add_space(8.0);
         ui.label(
@@ -371,7 +378,7 @@ impl MsnDesktopApp {
                  msn CLI and readable only by your user.",
             )
             .small()
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
     }
 
@@ -451,7 +458,7 @@ impl MsnDesktopApp {
             egui::RichText::new("msn")
                 .size(28.0)
                 .strong()
-                .color(theme::ACCENT),
+                .color(theme::accent()),
         );
         ui.add_space(6.0);
         if let Some(connection) = &self.state.connection {
@@ -475,7 +482,7 @@ impl MsnDesktopApp {
                         egui::Label::new(
                             egui::RichText::new(&connection.tenant)
                                 .small()
-                                .color(theme::MUTED),
+                                .color(theme::muted()),
                         )
                         .truncate(),
                     );
@@ -485,22 +492,23 @@ impl MsnDesktopApp {
         let disconnect = egui::Button::new(
             egui::RichText::new("Disconnect")
                 .small()
-                .color(theme::MUTED),
+                .color(theme::muted()),
         )
         .frame(false);
         if ui.add(disconnect).clicked() {
             actions.push(Action::Disconnect);
         }
+        self.theme_switch(ui);
         if let Some(outcome) = &self.state.profile_save {
             let (color, text) = match outcome {
                 profile::SaveOutcome::Saved(name) => {
-                    (theme::MUTED, format!("Saved as profile \"{name}\"."))
+                    (theme::muted(), format!("Saved as profile \"{name}\"."))
                 }
                 profile::SaveOutcome::AlreadySaved(name) => {
-                    (theme::MUTED, format!("Already saved as \"{name}\"."))
+                    (theme::muted(), format!("Already saved as \"{name}\"."))
                 }
                 profile::SaveOutcome::Failed(error) => {
-                    (WARN_COLOR, format!("Profile not saved: {error}"))
+                    (theme::warn(), format!("Profile not saved: {error}"))
                 }
             };
             ui.label(egui::RichText::new(text).small().color(color));
@@ -509,7 +517,7 @@ impl MsnDesktopApp {
         ui.label(
             egui::RichText::new("CHANNELS")
                 .size(10.0)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
         // The button is placed first, from the right, and the field takes exactly what is
         // left. A guessed button width would make the row wider than the panel and the panel,
@@ -534,12 +542,12 @@ impl MsnDesktopApp {
             },
         );
         if let Some(error) = &self.state.channels_error {
-            ui.colored_label(ERROR_COLOR, error);
+            ui.colored_label(theme::error(), error);
         }
         ui.add_space(4.0);
         if self.state.events_stopped && !self.state.events_ready {
             ui.colored_label(
-                ERROR_COLOR,
+                theme::error(),
                 "Synchronisation stopped. Disconnect and reconnect after resolving the error.",
             );
         } else if !self.state.events_ready {
@@ -563,7 +571,7 @@ impl MsnDesktopApp {
                     let unread = self.state.unread_for(name);
                     let label = if self.state.is_archived(name) {
                         egui::RichText::new(format!("{name} · archived"))
-                            .color(theme::MUTED)
+                            .color(theme::muted())
                             .into()
                     } else {
                         channel_label(name, unread)
@@ -578,6 +586,40 @@ impl MsnDesktopApp {
                     }
                 }
             });
+        });
+    }
+
+    /// System, Light or Dark for this computer (ADR 0049). The choice applies at once and is
+    /// saved beside the CLI's profiles; the server never learns it.
+    fn theme_switch(&mut self, ui: &mut egui::Ui) {
+        let current = ui.ctx().options(|options| options.theme_preference);
+        let mut chosen = current;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.label(egui::RichText::new("Theme").small().color(theme::muted()));
+            for (preference, label) in [
+                (egui::ThemePreference::System, "System"),
+                (egui::ThemePreference::Light, "Light"),
+                (egui::ThemePreference::Dark, "Dark"),
+            ] {
+                ui.selectable_value(&mut chosen, preference, egui::RichText::new(label).small());
+            }
+        });
+        if chosen != current {
+            self.choose_theme(ui.ctx(), chosen);
+        }
+        if let Some(error) = &self.theme_error {
+            ui.label(egui::RichText::new(error).small().color(theme::warn()));
+        }
+    }
+
+    fn choose_theme(&mut self, ctx: &egui::Context, chosen: egui::ThemePreference) {
+        ctx.set_theme(chosen);
+        theme::sync(ctx);
+        self.theme_error = self.theme_file.as_deref().and_then(|path| {
+            theme::save_preference(path, chosen)
+                .err()
+                .map(|error| format!("Theme not saved: {error}"))
         });
     }
 
@@ -604,9 +646,9 @@ impl MsnDesktopApp {
     fn main_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if let Some(notice) = &self.state.events_notice {
             let color = if self.state.events_stopped {
-                ERROR_COLOR
+                theme::error()
             } else {
-                WARN_COLOR
+                theme::warn()
             };
             ui.colored_label(color, notice);
         }
@@ -625,7 +667,7 @@ impl MsnDesktopApp {
             // Reload is placed first, from the right, so the channel name truncates into
             // whatever width remains instead of pushing it out of the card.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let reload = egui::Button::new(egui::RichText::new("Reload").color(theme::MUTED))
+                let reload = egui::Button::new(egui::RichText::new("Reload").color(theme::muted()))
                     .frame(false);
                 if ui.add(reload).clicked() {
                     actions.push(Action::Reload);
@@ -635,8 +677,9 @@ impl MsnDesktopApp {
                     // Archiving is owner only (ADR 0046).
                     let archived = self.state.is_archived(&channel);
                     let label = if archived { "Unarchive" } else { "Archive" };
-                    let archive = egui::Button::new(egui::RichText::new(label).color(theme::MUTED))
-                        .frame(false);
+                    let archive =
+                        egui::Button::new(egui::RichText::new(label).color(theme::muted()))
+                            .frame(false);
                     if ui
                         .add(archive)
                         .on_hover_text(if archived {
@@ -675,9 +718,9 @@ impl MsnDesktopApp {
         let current = self.state.current_mute().cloned();
         let label = mute_label(current.as_ref());
         let color = if current.is_some() {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::MUTED
+            theme::muted()
         };
         ui.add_enabled_ui(!self.state.mutes_inflight, |ui| {
             ui.menu_button(egui::RichText::new(label).color(color), |ui| {
@@ -708,7 +751,7 @@ impl MsnDesktopApp {
     /// Segmented control for the channel views.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::new()
-            .fill(egui::Color32::from_white_alpha(9))
+            .fill(theme::palette().card)
             .corner_radius(12)
             .inner_margin(3)
             .show(ui, |ui| {
@@ -758,7 +801,7 @@ impl MsnDesktopApp {
                     let label =
                         egui::RichText::new(format!("New reply in thread #{root} \u{b7} Show"))
                             .small()
-                            .color(theme::ACCENT);
+                            .color(theme::accent());
                     if ui.button(label).clicked() {
                         actions.push(Action::ShowReply(id));
                     }
@@ -786,7 +829,7 @@ impl MsnDesktopApp {
                                 });
                             }
                             if let Some(error) = &state.error {
-                                ui.colored_label(ERROR_COLOR, error);
+                                ui.colored_label(theme::error(), error);
                             }
                             if state.loaded && state.messages.is_empty() {
                                 ui.vertical_centered(|ui| {
@@ -813,7 +856,7 @@ impl MsnDesktopApp {
                                                 ui.label(
                                                     egui::RichText::new(format_day(date))
                                                         .small()
-                                                        .color(theme::MUTED),
+                                                        .color(theme::muted()),
                                                 );
                                             });
                                         }
@@ -907,7 +950,7 @@ impl MsnDesktopApp {
             // Addressing: compact fields whose widths adapt instead of wrapping.
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let label = |text: &str| egui::RichText::new(text).small().color(theme::MUTED);
+                let label = |text: &str| egui::RichText::new(text).small().color(theme::muted());
                 ui.add_space(6.0);
                 ui.label(label("To"));
                 let to_width = (ui.available_width() - 130.0).clamp(56.0, 150.0);
@@ -928,7 +971,7 @@ impl MsnDesktopApp {
                 );
             });
             if let Some(error) = &self.composer.error {
-                ui.colored_label(ERROR_COLOR, error);
+                ui.colored_label(theme::error(), error);
             }
         });
     }
@@ -952,7 +995,7 @@ impl MsnDesktopApp {
         ui.add_space(4.0);
         let search = &state.search;
         if let Some(error) = &search.error {
-            ui.colored_label(ERROR_COLOR, error);
+            ui.colored_label(theme::error(), error);
         }
         if !search.active {
             ui.weak("Find earlier messages on this board by words or sender.");
@@ -965,7 +1008,7 @@ impl MsnDesktopApp {
             ui.label(
                 egui::RichText::new(search_summary(search))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             );
         });
         let me = self
@@ -993,7 +1036,7 @@ impl MsnDesktopApp {
             return;
         };
         if let Some(error) = &state.snapshots_error {
-            ui.colored_label(ERROR_COLOR, error);
+            ui.colored_label(theme::error(), error);
         }
         if state.snapshots_flight.inflight && state.snapshots.entries.is_empty() {
             ui.spinner();
@@ -1017,7 +1060,7 @@ impl MsnDesktopApp {
                 ui.horizontal(|ui| {
                     ui.label(format!("v{version} by {author}, covers through #{covers}"));
                     if invalidated {
-                        ui.colored_label(WARN_COLOR, "invalidated by deletion");
+                        ui.colored_label(theme::warn(), "invalidated by deletion");
                     }
                 });
             }
@@ -1033,7 +1076,7 @@ impl MsnDesktopApp {
              Delivery of a message never implies task completion.",
         );
         if let Some(error) = &state.task_board_error {
-            ui.colored_label(ERROR_COLOR, error);
+            ui.colored_label(theme::error(), error);
         }
         let Some(board) = state.task_board.as_ref() else {
             if state.error.is_none() && state.task_board_error.is_none() {
@@ -1054,7 +1097,7 @@ impl MsnDesktopApp {
         }
         if warnings > 0 {
             ui.colored_label(
-                WARN_COLOR,
+                theme::warn(),
                 format!("{warnings} projection warning(s) in history"),
             );
         }
@@ -1066,7 +1109,7 @@ impl MsnDesktopApp {
         for (key, pending) in &self.state.pending_task_events {
             if let Some(error) = &pending.error {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(ERROR_COLOR, format!("{}: {error}", pending.request.task));
+                    ui.colored_label(theme::error(), format!("{}: {error}", pending.request.task));
                     if pending.retryable && ui.button("Retry").clicked() {
                         actions.push(Action::RetryTask(key.clone()));
                     }
@@ -1357,6 +1400,7 @@ impl MsnDesktopApp {
 
 impl MsnDesktopApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
+        theme::sync(ui.ctx());
         self.drain_events(ui.ctx());
         if let Some(link) = self.copied_link.take() {
             ui.ctx().copy_text(link);
@@ -1447,7 +1491,7 @@ fn render_pins(ui: &mut egui::Ui, pins: &[Value]) {
     theme::card().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         egui::CollapsingHeader::new(
-            egui::RichText::new(format!("Pinned · {}", pins.len())).color(theme::ACCENT),
+            egui::RichText::new(format!("Pinned · {}", pins.len())).color(theme::accent()),
         )
         .id_salt("pinned-header")
         .default_open(true)
@@ -1481,10 +1525,10 @@ fn channel_label(name: &str, unread: Option<&read_marks::Unread>) -> egui::Widge
     job.append(
         &count,
         10.0,
-        egui::TextFormat::simple(small.clone(), theme::MUTED),
+        egui::TextFormat::simple(small.clone(), theme::muted()),
     );
     if let Some(mine) = mine {
-        job.append(&mine, 6.0, egui::TextFormat::simple(small, theme::ACCENT));
+        job.append(&mine, 6.0, egui::TextFormat::simple(small, theme::accent()));
     }
     job.into()
 }
@@ -1549,7 +1593,7 @@ fn render_receipts(
         return;
     };
     let own = sender == me;
-    let label = egui::Label::new(egui::RichText::new(line).small().color(theme::MUTED));
+    let label = egui::Label::new(egui::RichText::new(line).small().color(theme::muted()));
     let draw = |ui: &mut egui::Ui| {
         ui.add(label).on_hover_text(msn_cli::receipts::MEANING);
     };
@@ -1566,7 +1610,7 @@ fn render_receipts(
 /// "Link" beside the header, and the same in the bubble's right-click menu (ADR 0042).
 fn link_controls(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     if ui
-        .link(egui::RichText::new("Link").small().color(theme::MUTED))
+        .link(egui::RichText::new("Link").small().color(theme::muted()))
         .on_hover_text(format!("Copy a link to message #{id}"))
         .clicked()
     {
@@ -1582,7 +1626,7 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Ve
     let body = if message["contentType"].as_str() == Some("application/json") {
         Body::Rich(
             egui::RichText::new(format!("[structured] {}", summarize_json(text)))
-                .color(theme::MUTED),
+                .color(theme::muted()),
         )
     } else {
         // Formatted text (ADR 0043), parsed once per text; plain text keeps the single wrapped
@@ -1658,7 +1702,7 @@ fn render_thread_toggle(
         egui::Align::Min
     };
     ui.with_layout(egui::Layout::top_down(align), |ui| {
-        let button = egui::Button::new(egui::RichText::new(label).small().color(theme::ACCENT));
+        let button = egui::Button::new(egui::RichText::new(label).small().color(theme::accent()));
         if ui
             .add(button)
             .on_hover_text(format!("Replies to #{id}"))
@@ -1694,14 +1738,14 @@ fn render_parent(
                         truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 140)
                     ))
                     .small()
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 );
             }
             Some(None) => {
                 ui.label(
                     egui::RichText::new(format!("Message #{parent} is no longer available."))
                         .small()
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                 );
             }
             None if state.parents_inflight.contains(&parent) => {
@@ -1734,7 +1778,7 @@ fn message_header(
         ..Default::default()
     };
     let name_color = if own {
-        theme::ACCENT
+        theme::accent()
     } else {
         theme::name_color(username)
     };
@@ -1744,7 +1788,7 @@ fn message_header(
         Some(to) => format!(" says to {to}"),
         None => " says".to_string(),
     };
-    job.append(&says, 0.0, format(theme::MUTED));
+    job.append(&says, 0.0, format(theme::muted()));
     let mut meta = String::new();
     if let Some(time) = message["createdAt"].as_str().and_then(|c| c.get(11..16)) {
         meta.push_str(&format!("{time} · "));
@@ -1753,7 +1797,7 @@ fn message_header(
     if let Some(reply_to) = message["replyTo"].as_u64() {
         meta.push_str(&format!(" · re #{reply_to}"));
     }
-    job.append(&meta, 10.0, format(theme::MUTED.gamma_multiply(0.7)));
+    job.append(&meta, 10.0, format(theme::muted().gamma_multiply(0.7)));
     job
 }
 
@@ -1835,7 +1879,7 @@ fn render_pending(ui: &mut egui::Ui, key: &str, pending: &PendingSend, actions: 
             0.0,
             egui::TextFormat {
                 font_id: small,
-                color: theme::MUTED,
+                color: theme::muted(),
                 ..Default::default()
             },
         );
@@ -1846,7 +1890,7 @@ fn render_pending(ui: &mut egui::Ui, key: &str, pending: &PendingSend, actions: 
     });
     if let Some(error) = &pending.error {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            ui.colored_label(ERROR_COLOR, error);
+            ui.colored_label(theme::error(), error);
         });
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
@@ -1927,11 +1971,11 @@ fn render_task(ui: &mut egui::Ui, task: &Value, actions: &mut Vec<Action>) {
         });
         if let Some(blocked) = task["blockedOn"].as_array().filter(|b| !b.is_empty()) {
             let names: Vec<&str> = blocked.iter().filter_map(Value::as_str).collect();
-            ui.colored_label(WARN_COLOR, format!("blocked on: {}", names.join(", ")));
+            ui.colored_label(theme::warn(), format!("blocked on: {}", names.join(", ")));
         }
         if let Some(conflicts) = task["conflicts"].as_array().filter(|c| !c.is_empty()) {
             let names: Vec<&str> = conflicts.iter().filter_map(Value::as_str).collect();
-            ui.colored_label(WARN_COLOR, format!("conflicts: {}", names.join(", ")));
+            ui.colored_label(theme::warn(), format!("conflicts: {}", names.join(", ")));
         }
         if let Some(evidence) = task["evidence"].as_array().filter(|e| !e.is_empty()) {
             let ids: Vec<String> = evidence
@@ -2009,6 +2053,8 @@ mod layout_tests {
             marks_saved_at: None,
             profile_store: None,
             mute_everything: false,
+            theme_file: None,
+            theme_error: None,
         }
     }
 
@@ -2196,6 +2242,48 @@ mod layout_tests {
         frame(vec![button(false)], &mut app);
         frame(vec![], &mut app);
         assert!(ctx.any_popup_open(), "the right-click menu opens");
+    }
+
+    /// ADR 0049: the board draws in the light palette when this computer chooses it, the
+    /// choice is saved, and System removes the saved file again.
+    #[test]
+    fn the_theme_switch_draws_light_or_dark_and_saves_the_choice() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let dir = std::env::temp_dir().join(format!("msn-app-theme-{}", Uuid::new_v4()));
+        let mut app = fixture(3);
+        app.theme_file = Some(dir.join("desktop-theme"));
+        let draw = |app: &mut MsnDesktopApp| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(980.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        };
+        draw(&mut app);
+        app.choose_theme(&ctx, egui::ThemePreference::Light);
+        draw(&mut app);
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert_eq!(theme::accent(), theme::LIGHT.accent);
+        assert_eq!(ctx.global_style().visuals.text_color(), theme::LIGHT.text);
+        assert_eq!(
+            theme::load_preference(app.theme_file.as_deref().unwrap()),
+            egui::ThemePreference::Light
+        );
+        app.choose_theme(&ctx, egui::ThemePreference::Dark);
+        draw(&mut app);
+        assert_eq!(theme::accent(), theme::DARK.accent);
+        assert_eq!(ctx.global_style().visuals.text_color(), theme::DARK.text);
+        app.choose_theme(&ctx, egui::ThemePreference::System);
+        assert!(!app.theme_file.as_deref().unwrap().exists());
+        assert!(app.theme_error.is_none());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
