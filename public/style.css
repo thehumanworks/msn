@@ -1017,3 +1017,56 @@ body > footer {
 .watching .watch-note {
   display: block;
 }
+
+/* Reply threads (ADR 0041): replies fold under the message they answer, one level deep. */
+.thread-toggle {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  min-height: 0;
+  font-size: 12px;
+  color: var(--accent);
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: transparent;
+  cursor: pointer;
+}
+.thread-toggle.fresh {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.thread {
+  margin: 6px 0 0 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.thread[hidden] {
+  display: none;
+}
+.reply-link {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.reply-parent {
+  margin: 4px 0 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (pointer: coarse) {
+  .thread-toggle {
+    min-height: 32px;
+  }
+}

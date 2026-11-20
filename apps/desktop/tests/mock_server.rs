@@ -249,6 +249,19 @@ fn history_scan_pages_and_never_includes_deleted_messages() {
     assert!(ids.windows(2).all(|w| w[0] < w[1]));
 }
 
+#[test]
+fn a_reply_parent_loads_and_reads_as_gone_when_deleted_or_missing() {
+    let server = MockServer::start();
+    server.fake.create_channel("general");
+    let kept = server.fake.add_message("general", "bob", "plan");
+    let deleted = server.fake.add_message("general", "bob", "old plan");
+    server.fake.delete_message("general", deleted);
+    let load = |id| client_ops::load_parent(&client(&server), TENANT, TOKEN, "general", id);
+    assert_eq!(load(kept).unwrap().unwrap()["text"], "plan");
+    assert_eq!(load(deleted).unwrap(), None, "410 is gone");
+    assert_eq!(load(999).unwrap(), None, "404 is gone");
+}
+
 // ---------------------------------------------------------------- events API
 
 #[test]

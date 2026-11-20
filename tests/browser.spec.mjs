@@ -878,6 +878,70 @@ test("channels resume cached messages, cursor and scroll; reread resets only the
   expect(disk).not.toContain("row 1");
 });
 
+test("pruning a thread root returns its replies to the log in id order", async ({ page, request }) => {
+  const t = await populatedWorkspace(request);
+  const rows = { alpha: messageRows("alpha", 1000), beta: [] };
+  const replyTo = (id, parent) => Object.assign(rows.alpha[id - 1], { replyTo: parent });
+  replyTo(150, 50);
+  replyTo(160, 50);
+  replyTo(170, 150);
+  await mockHistory(page, t, rows, []);
+  await connect(page, t, "Tomas", { live: false });
+  for (let cursor = 100; cursor <= 1000; cursor += 100) {
+    await expect(page.locator("#cursor")).toHaveText(`Cursor ${cursor}`);
+    if (cursor < 1000) await page.getByRole("button", { name: "Load next page" }).click();
+  }
+  const log = page.locator("#messages");
+  const top = (id) => log.locator(`:scope > article[data-id="${id}"]`);
+  await expect(log.locator('article[data-id="50"] > .thread-toggle')).toHaveText(/^Show 3 replies/);
+  await expect(log.locator(":scope > article")).toHaveCount(997);
+  // Fifty new rows trim rows 1 to 50, root 50 among them.
+  rows.alpha.push(...messageRows("alpha", 50, 1001));
+  await page.getByRole("button", { name: "Poll once" }).click();
+  await expect(page.locator("#cursor")).toHaveText("Cursor 1050");
+  await expect(page.locator(".message")).toHaveCount(1000);
+  await expect(page.locator('.message[data-id="50"]')).toHaveCount(0);
+  // 150 and 160 lost their parent and stand in the log at their own place; 170 still folds under 150.
+  await expect(top(150)).toHaveCount(1);
+  await expect(top(160)).toHaveCount(1);
+  await expect(top(170)).toHaveCount(0);
+  await expect(log.locator('article[data-id="150"] > .thread-toggle')).toHaveText("Show 1 reply");
+  await expect(log.locator('article[data-id="160"] > .thread-toggle')).toHaveCount(0);
+  const order = await log.evaluate((box) => [...box.children].map((node) => Number(node.dataset.id)));
+  expect(order).toEqual([...order].sort((x, y) => x - y));
+  expect(order).toHaveLength(999);
+});
+
+test("a reply whose parent was deleted (410) or never existed (404) says the parent is gone", async ({
+  page,
+  request,
+}) => {
+  const t = await populatedWorkspace(request);
+  const rows = { alpha: messageRows("alpha", 2, 10), beta: [] };
+  rows.alpha[0].replyTo = 3;
+  rows.alpha[1].replyTo = 4;
+  await mockHistory(page, t, rows, []);
+  for (const [id, status, code] of [
+    [3, 410, "message_deleted"],
+    [4, 404, "message_not_found"],
+  ])
+    await page.route(`**${t.path}/channels/alpha/messages/${id}`, (route) =>
+      route.fulfill({ status, json: { error: { code, message: "Gone." } } }),
+    );
+  await connect(page, t, "Tomas", { live: false });
+  await openChannel(page, "alpha");
+  for (const [id, parent] of [
+    [10, 3],
+    [11, 4],
+  ]) {
+    await page.locator(`article[data-id="${id}"] .reply-link`).click();
+    await expect(page.locator(`article[data-id="${id}"] > .reply-parent`)).toHaveText(
+      `Message #${parent} is no longer available.`,
+    );
+  }
+  await expect(page.locator("#status")).not.toHaveClass(/error/);
+});
+
 test("channel history is bounded to 1000 rows and pruning preserves the visible message", async ({
   page,
   request,
@@ -935,7 +999,7 @@ test("channel history is bounded to 1000 rows and pruning preserves the visible 
   expect(Math.abs(afterHiddenPoll.y - resumed.y)).toBeLessThan(2);
 });
 
-test("reply and correlation annotations are plain text, not threads or read receipts", async ({
+test("reply and correlation annotations are plain text and never read receipts", async ({
   page,
   request,
 }) => {
@@ -970,6 +1034,104 @@ test("reply and correlation annotations are plain text, not threads or read rece
   await expect(page.locator("#channel-note")).toContainText("not a read acknowledgment");
   await expect(page.locator(".message")).toHaveCount(2);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("replies fold under the message they answer, and a reply to an unloaded message fetches it", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (username, text, replyTo) => {
+    const response = await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username, text, ...(replyTo ? { replyTo } : {}) },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message;
+  };
+  const root = await send("planner", "Plan the release");
+  const snapshot = await request.post(`${t.path}/channels/general/snapshots`, {
+    headers: { ...t.headers, "Idempotency-Key": "threads-checkpoint" },
+    data: {
+      username: "planner",
+      text: "Plan agreed",
+      coversThrough: root.id,
+      baseVersion: 0,
+      historyRevision: 0,
+    },
+  });
+  expect(snapshot.status()).toBe(201);
+  const first = await send("reviewer", "Tests first", root.id);
+  const nested = await send("planner", "Agreed, tests first", first.id);
+  const other = await send("agent", "Unrelated status");
+  await connect(page, t);
+  const log = page.locator("#messages");
+  // Two rows in the log, in id order; both replies live in the root's folded thread.
+  await expect(log.locator(":scope > article")).toHaveCount(2);
+  await expect(log.locator(":scope > article").nth(0)).toHaveAttribute("data-id", String(root.id));
+  await expect(log.locator(":scope > article").nth(1)).toHaveAttribute("data-id", String(other.id));
+  await expect(page.locator(".message")).toHaveCount(4);
+  const toggle = log.locator(`article[data-id="${root.id}"] > .thread-toggle`);
+  await expect(toggle).toHaveText("Show 2 replies");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(`[data-id="${first.id}"]`)).toBeHidden();
+  // A reply that arrives while the thread is folded counts as new on the toggle.
+  const late = await send("reviewer", "Release notes drafted", root.id);
+  await expect(toggle).toHaveText("Show 3 replies · 1 new");
+  await expect(log.locator(":scope > article")).toHaveCount(2);
+  await expect(page.locator("#thread-jump")).toHaveText(`New reply in thread #${root.id} · Show`);
+  await expect(page.locator("#jump")).toBeHidden();
+  // A newer row in the log is seen, but the read mark waits below the folded reply.
+  const after = await send("agent", "Status after the reply");
+  await expect(log.locator(":scope > article")).toHaveCount(3);
+  const readMark = () =>
+    page.evaluate(
+      (tenant) => Object.values(JSON.parse(localStorage.getItem(`msn.read.${tenant}`) ?? "{}")),
+      t.tenant,
+    );
+  await expect.poll(readMark).toEqual([late.id - 1]);
+  // The pointer opens the thread and shows the reply; then the mark can pass it.
+  await page.locator("#thread-jump").click();
+  await expect(page.locator("#thread-jump")).toBeHidden();
+  await expect(toggle).toHaveText("Hide 3 replies");
+  await expect(log.locator(`article[data-id="${late.id}"]`)).toBeVisible();
+  await page.locator("#messages").evaluate((box) => {
+    box.scrollTop = box.scrollHeight;
+  });
+  await page.locator("#messages").dispatchEvent("scroll");
+  await expect.poll(readMark).toEqual([after.id]);
+  await toggle.click();
+  await expect(toggle).toHaveText("Show 3 replies");
+  await toggle.click();
+  await expect(toggle).toHaveText("Hide 3 replies");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(log.locator(`article[data-id="${root.id}"] > .thread > article`)).toHaveText([
+    /Tests first/,
+    /Agreed, tests first/,
+    /Release notes drafted/,
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("threads-open.png") });
+  // The parent link in a folded reply jumps to the parent in the log.
+  await log.locator(`article[data-id="${late.id}"] .reply-link`).click();
+  await expect(log.locator(`article[data-id="${root.id}"]`)).toHaveClass(/flash/);
+  // Catch-up starts after the snapshot, so the first reply's parent is not loaded: it stays in
+  // the log at its own place, keeps the reply under it, and its link fetches the parent.
+  await page.getByRole("button", { name: "Catch up", exact: true }).click();
+  await expect(page.locator("#checkpoint")).toBeVisible();
+  await expect(log.locator(":scope > article")).toHaveCount(4);
+  await expect(log.locator(":scope > article").nth(0)).toHaveAttribute("data-id", String(first.id));
+  await expect(log.locator(`article[data-id="${first.id}"] > .thread-toggle`)).toHaveText("Show 1 reply");
+  await expect(log.locator(`article[data-id="${first.id}"] > .thread > article`)).toHaveAttribute(
+    "data-id",
+    String(nested.id),
+  );
+  await expect(page.locator(".reply-parent")).toHaveCount(0);
+  await log.locator(`article[data-id="${first.id}"] > .message-annotation .reply-link`).click();
+  await expect(log.locator(`article[data-id="${first.id}"] > .reply-parent`)).toHaveText(
+    "planner: Plan the release",
+  );
+  await expect(page.locator(".message")).toHaveCount(5);
 });
 
 test("label chips are plain text and list the channel's messages with that label now", async ({

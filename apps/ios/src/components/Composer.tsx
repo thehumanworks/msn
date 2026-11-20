@@ -13,10 +13,12 @@ type Props = {
   bottomInset: number;
   /** A rejected message returned for editing; `n` changes each time so the same text can be restored twice. */
   restored: { draft: Draft; n: number } | null;
+  /** Called with each draft the controller accepted for sending. */
+  onSent?: (draft: Draft) => void;
 };
 
 /** Multiline composer. Return sends by default (toggleable to a newline); Send is always visible. */
-export function Composer({ channel, replyTo, onClearReply, bottomInset, restored }: Props) {
+export function Composer({ channel, replyTo, onClearReply, bottomInset, restored, onSent }: Props) {
   const keyboardVisible = useKeyboardVisible();
   const [text, setText] = useState("");
   const [to, setTo] = useState("");
@@ -38,6 +40,7 @@ export function Composer({ channel, replyTo, onClearReply, bottomInset, restored
     if (!result.ok) return setError(result.error);
     setError(null);
     setText("");
+    onSent?.(draft);
     onClearReply();
   }
 
