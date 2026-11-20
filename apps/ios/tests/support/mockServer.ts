@@ -282,6 +282,24 @@ export async function startMockServer(): Promise<MockServerHandle> {
           });
         }
       }
+      if (rest[2] === "search" && rest.length === 3 && method === "GET") {
+        // A plain substring match is enough to exercise the client; the Worker tests cover FTS5.
+        const q = (url.searchParams.get("q") ?? "").toLowerCase();
+        const from = url.searchParams.get("from");
+        const before = Number(url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
+        const limit = Number(url.searchParams.get("limit") ?? "20");
+        const rows = live(channel, 0)
+          .filter((m) => m.id < before && (!q || m.text.toLowerCase().includes(q)) && (!from || m.username === from))
+          .reverse();
+        const shown = rows.slice(0, limit);
+        const hasMore = rows.length > limit;
+        return json(res, 200, {
+          messages: shown.map(toMessage),
+          hasMore,
+          ...(hasMore ? { nextBefore: shown.at(-1)!.id } : {}),
+          complete: true,
+        });
+      }
       if (rest[2] === "catchup" && method === "GET") {
         const latest = snapshots.filter((s) => s.channel === channel && !s.invalidated).at(-1) ?? null;
         const explicitAfter = url.searchParams.get("after");

@@ -24,6 +24,16 @@ export type Message = {
   to?: string;
 };
 
+/** One page of message search (ADR 0037), newest first. */
+export type SearchPage = {
+  messages: Message[];
+  hasMore: boolean;
+  /** Pass as `before` for older matches; present only when hasMore is true. */
+  nextBefore?: number;
+  /** False while the server is still indexing messages older than search. */
+  complete: boolean;
+};
+
 export type MessagePage = {
   messages: Message[];
   nextCursor: number;

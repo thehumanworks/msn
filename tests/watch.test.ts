@@ -215,6 +215,7 @@ describe("watch-only invitations", () => {
     expect((await read("/channels/work/personas")).status).toBe(200);
     expect((await read("/channels/work/processing/lead")).status).toBe(200);
     expect((await read("/channels")).status).toBe(200);
+    expect((await read("/channels/work/search?q=Started")).status).toBe(200);
     expect((await read("/events")).status).toBe(200);
 
     // Live: a long poll and an event poll wake on a new message.

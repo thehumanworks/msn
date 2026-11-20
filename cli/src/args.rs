@@ -75,6 +75,8 @@ EXAMPLES:
   msn provision agents --username-prefix agent-    # token may only send as agent-*
   msn rotate new-tenant                            # keeps the current bind
   msn rotate new-tenant --unbind                   # clears it
+  msn search general 'deploy friday'          # newest matches first
+  msn search general --from reviewer --label state=open
   msn delete general 42
 
 HTTPS is required except localhost. MSN_URL must be a bare origin (no path, query,
@@ -625,6 +627,27 @@ pub enum Command {
         /// Give up after this many seconds (exit 1); waits until interrupted when omitted
         #[arg(long)]
         timeout: Option<String>,
+    },
+    /// Search a channel's messages by words, sender, kind or label; newest first, as JSON
+    Search {
+        channel: String,
+        /// Words to find (words of 3+ letters also match word starts); "quoted text" matches a phrase
+        text: Option<String>,
+        /// Only messages from this display name
+        #[arg(long)]
+        from: Option<String>,
+        /// Only text or json messages
+        #[arg(long, value_name = "text|json")]
+        kind: Option<String>,
+        /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
+        #[arg(long = "label", value_name = "FILTER")]
+        labels: Vec<String>,
+        /// Only messages older than this id; pass the previous page's nextBefore
+        #[arg(long)]
+        before: Option<String>,
+        /// Page size, 1–100 (default 20)
+        #[arg(long)]
+        limit: Option<String>,
     },
     /// Admin DELETE …/channels/{channel}/messages/{id}
     Delete { channel: String, message_id: String },
