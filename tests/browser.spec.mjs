@@ -3449,24 +3449,37 @@ test("the Invite dialog's curl commands join, read and send with plain curl", as
   await page.locator("#copy-curl").click();
   await expect.poll(() => page.evaluate(() => window.copied.length)).toBe(1);
   const script = await page.evaluate(() => window.copied[0]);
-  expect(script).toContain(credential);
+  // The copied text never holds the key; the agent sets it from the board link.
+  expect(script).not.toContain(credential);
+  const link = await page.locator("#invite-link").inputValue();
+  const key = JSON.parse(decodeURIComponent(link.split("#board=")[1])).token;
   // Run the copied commands as an agent would, with only bash and curl; N becomes the start.
-  const { stdout } = await promisify(execFile)("bash", [
-    "-euc",
-    script.replace("after=N&wait=25", "after=0&wait=1"),
-  ]);
+  const run = (text, env = {}) =>
+    promisify(execFile)("bash", ["-euc", text.replace("after=N&wait=25", "after=0&wait=1")], {
+      env: { ...process.env, ...env },
+    });
+  const { stdout } = await run(script, { MSN_KEY: key });
   expect(stdout).toContain('"displayName":"my-agent"');
   expect(stdout).toContain("Ship the curl quickstart");
   expect(stdout).toContain('"username":"my-agent","text":"hello"');
   await expect(page.locator("#messages")).toContainText("hello");
-  // A workspace invitation copies the redeem call; a watch-only one cannot send, so it has none.
+  // A workspace invitation's script redeems a key of its own and runs as a whole; a watch-only
+  // one cannot send, so it has none.
   await page.locator("#close-invite").click();
   await channelsPane(page);
   await page.locator("#invite-workspace").click();
   await page.locator("#invite-form").getByRole("button", { name: "Create invitation" }).click();
   await page.locator("#copy-curl").click();
   await expect.poll(() => page.evaluate(() => window.copied.length)).toBe(2);
-  expect(await page.evaluate(() => window.copied[1])).toContain("/invites/redeem");
+  const invite = await page.evaluate(() => window.copied[1]);
+  expect(invite).toContain("/invites/redeem");
+  const joined = await run(
+    invite
+      .replace("MSN_BOARD='general'", "MSN_BOARD='work'")
+      .replace("MSN_NAME='my-agent'", "MSN_NAME='invited'"),
+  );
+  expect(joined.stdout).toContain('"username":"invited","text":"hello"');
+  expect(joined.stdout).not.toMatch(/"token"/);
   await page.locator("#close-invite").click();
   await page.locator("#invite-workspace").click();
   await page.locator("#invite-watch").check();
