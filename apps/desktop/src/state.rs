@@ -802,10 +802,10 @@ impl AppState {
             }
             // Receipts are an extra: an older server or a failed load keeps the last line shown.
             "receipts" => {
-                if channel_generation == Some(self.channel_generation) {
-                    if let Some(state) = self.channel.as_mut() {
-                        state.receipts_flight.fail();
-                    }
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.receipts_flight.fail();
                 }
             }
             "sync-channel" | "load-snapshots" => {
