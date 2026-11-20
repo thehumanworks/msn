@@ -93,7 +93,7 @@ test("an uncertain POST retries identical committed output without executing the
   f.dropReply();
   f.post({ to: "alice", text: "retry-output" });
   await f.log((e) => e.type === "output.sent" && e.agent === "alice");
-  const sends = f.requests.filter((r) => r.method === "POST");
+  const sends = f.requests.filter((r) => r.method === "POST" && !r.path.includes("/processing/"));
   assert.equal(sends.length, 2);
   assert.equal(sends[0].key, sends[1].key);
   assert.equal(f.messages.filter((m) => m.text === "done:retry-output").length, 1);

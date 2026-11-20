@@ -84,6 +84,7 @@ export function validateConfig(raw, base) {
       "permissionMode",
       "timeoutMs",
       "attempts",
+      "serverCommits",
     ]);
     requireValue(slug(item.id) && !ids.has(item.id), "invalid_agent_id");
     ids.add(item.id);
@@ -126,6 +127,8 @@ export function validateConfig(raw, base) {
       // `null` is an explicit no-deadline turn; an absent field keeps the finite default.
       timeoutMs: item.timeoutMs === undefined ? 300000 : item.timeoutMs,
       attempts: item.attempts ?? 3,
+      // Processing commits go to the server so receipts name this agent (ADR 0053); false keeps them local.
+      serverCommits: item.serverCommits ?? true,
     };
     requireValue(
       Array.isArray(agent.allowedChannels) &&
@@ -148,6 +151,7 @@ export function validateConfig(raw, base) {
       (agent.timeoutMs === null || integer(agent.timeoutMs, 10, 3600000)) && integer(agent.attempts, 1, 10),
       "invalid_agent_limits",
     );
+    requireValue(typeof agent.serverCommits === "boolean", "invalid_server_commits");
     return agent;
   });
   return config;

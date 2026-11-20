@@ -49,6 +49,9 @@ export class HostStore {
           channel TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
           attempts INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 0, error TEXT);
         CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(agent, status, available, id);
+        CREATE TABLE IF NOT EXISTS server_commits (
+          agent TEXT NOT NULL, channel TEXT NOT NULL, generation INTEGER NOT NULL,
+          PRIMARY KEY(agent, channel));
         CREATE TABLE IF NOT EXISTS budgets (
           root TEXT PRIMARY KEY, turns INTEGER NOT NULL, agent_turns INTEGER NOT NULL DEFAULT 0,
           last_human_event_id INTEGER NOT NULL DEFAULT 0, next_warning INTEGER NOT NULL DEFAULT 0);
@@ -273,6 +276,42 @@ export class HostStore {
     this.db
       .prepare("UPDATE jobs SET status='queued', available=0 WHERE agent=? AND channel=? AND status='paused'")
       .run(agent, channel);
+  }
+  /** The server fence for this agent's receipts on a channel (ADR 0053); 0 when never claimed. */
+  serverGeneration(agent, channel) {
+    return (
+      this.db.prepare("SELECT generation FROM server_commits WHERE agent=? AND channel=?").get(agent, channel)
+        ?.generation ?? 0
+    );
+  }
+  saveServerGeneration(agent, channel, generation) {
+    this.db
+      .prepare(
+        "INSERT INTO server_commits(agent,channel,generation) VALUES (?,?,?) ON CONFLICT(agent,channel) DO UPDATE SET generation=excluded.generation",
+      )
+      .run(agent, channel, generation);
+  }
+  /**
+   * The highest message id on `channel` that this agent is finished with, such that every message
+   * job before it is finished too (ADR 0053). Finished: done, ignored, or failed for good (the host
+   * posts that failure to the board and never retries it). Queued, running and paused jobs hold the
+   * watermark below them. Messages from before this agent bootstrapped are covered, as any
+   * watermark covers what it skipped.
+   */
+  processedThrough(agent, channel) {
+    const id = "CAST(json_extract(event,'$.resourceId') AS INTEGER)";
+    const open = this.db
+      .prepare(
+        `SELECT MIN(${id}) AS id FROM jobs WHERE agent=? AND channel=? AND event IS NOT NULL AND status IN ('queued','running','paused')`,
+      )
+      .get(agent, channel).id;
+    return (
+      this.db
+        .prepare(
+          `SELECT MAX(${id}) AS id FROM jobs WHERE agent=? AND channel=? AND event IS NOT NULL AND status IN ('done','ignored','failed')${open === null ? "" : ` AND ${id} < ?`}`,
+        )
+        .get(...(open === null ? [agent, channel] : [agent, channel, open])).id ?? 0
+    );
   }
   ignore(job) {
     this.db.prepare("UPDATE jobs SET status='ignored', error=NULL WHERE id=?").run(job.id);

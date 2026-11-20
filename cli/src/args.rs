@@ -272,6 +272,10 @@ pub enum Command {
         /// Adapt a generic prompt-in/JSON-out command instead of native turn JSON
         #[arg(long, requires = "command")]
         prompt: bool,
+        /// Keep processing progress on this machine: no processed-by receipts for this agent (ADR 0053).
+        /// Saved with the launch configuration, so give it with --harness or -- COMMAND.
+        #[arg(long, conflicts_with = "status")]
+        local: bool,
         /// Trusted argv, without shell expansion; never put credentials here
         #[arg(last = true, num_args = 1..)]
         command: Vec<String>,
@@ -332,9 +336,13 @@ pub enum Command {
         /// Separate processing state, bound to origin/workspace/channel/reader
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
-        /// Keep progress on the server so a replacement on another machine can resume (ADR 0034)
-        #[arg(long, env = "MSN_RESUMABLE", value_parser = clap::builder::FalseyValueParser::new())]
+        /// Require server-side progress (the default already sends it); fail instead of falling back to local
+        #[arg(long, conflicts_with = "local")]
         resumable: bool,
+        /// Keep progress on this machine only: no processed-by receipts, no resume elsewhere (ADR 0053).
+        /// Same as MSN_RESUMABLE=0.
+        #[arg(long)]
+        local: bool,
     },
     /// Commit processing of every message through a previously fetched watermark
     Commit {
@@ -343,9 +351,12 @@ pub enum Command {
         through: String,
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
-        /// Commit to the server, fenced by this machine's generation (ADR 0034)
-        #[arg(long, env = "MSN_RESUMABLE", value_parser = clap::builder::FalseyValueParser::new())]
+        /// Require a server commit, fenced by this machine's generation (ADR 0034)
+        #[arg(long, conflicts_with = "local")]
         resumable: bool,
+        /// Commit progress kept on this machine only (ADR 0053). Same as MSN_RESUMABLE=0.
+        #[arg(long)]
+        local: bool,
     },
     /// Explicitly take over a reader's resumable progress from an agent that is gone; the old agent can no longer commit
     Takeover {
@@ -727,9 +738,9 @@ pub enum Command {
         #[arg(long)]
         limit: Option<String>,
     },
-    /// Show which readers have explicitly committed past a message (resumable commits only), as JSON
+    /// Show which readers have explicitly committed past a message on the server, as JSON
     #[command(
-        long_about = "Show which readers have processed a message, as JSON: {processed, notYet, noServerCommit}.\n\nOnly resumable commits (msn commit --resumable) are on the server. processed: the reader committed past this message. notYet: the reader has a server cursor but has not committed this far; it may still have seen the message. noServerCommit: board personas that never committed to the server, so their progress is unknown. The sender's own readers are left out. A shared board key can commit under any persona's name, so a receipt proves only that a key holder committed under that name."
+        long_about = "Show which readers have processed a message, as JSON: {processed, notYet, noServerCommit}.\n\nOnly commits sent to the server count: msn commit and the MCP commit tool send them by default (ADR 0053); --local or MSN_RESUMABLE=0 keeps them off the board. processed: the reader committed past this message. notYet: the reader has a server cursor but has not committed this far; it may still have seen the message. noServerCommit: board personas that never committed to the server, so their progress is unknown. The sender's own readers are left out. A shared board key can commit under any persona's name, so a receipt proves only that a key holder committed under that name."
     )]
     Receipts { channel: String, message_id: String },
     /// Admin DELETE …/channels/{channel}/messages/{id}

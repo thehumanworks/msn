@@ -47,6 +47,19 @@ pub struct ProcessingState {
     /// resumable peek and commit. Absent for local-only progress, so older files stay valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// Why default mode keeps this reader's progress local (ADR 0053): the server refused the
+    /// claim with this code (`processing_held`, `watch_only`, `username_bound`, `route_not_found`).
+    /// Remembered so later default-mode peeks do not ask again; `--resumable` claims and clears it.
+    #[serde(default, rename = "keptLocal", skip_serializing_if = "Option::is_none")]
+    pub kept_local: Option<String>,
+    /// When `kept_local` was recorded, in Unix seconds. Every reason except `processing_held` is
+    /// retried a day later, so an upgraded server or a changed key starts sending receipts again.
+    #[serde(
+        default,
+        rename = "keptLocalAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub kept_local_at: Option<u64>,
 }
 
 impl ProcessingState {
@@ -59,6 +72,8 @@ impl ProcessingState {
             committed_through: 0,
             highest_fetched: 0,
             generation: None,
+            kept_local: None,
+            kept_local_at: None,
         }
     }
 
@@ -248,7 +263,7 @@ pub(crate) fn commit_to(
 fn refuse_resumable(state: &ProcessingState) -> Result<(), CliError> {
     if state.generation.is_some() {
         return Err(CliError::usage(
-            "This reader's progress is resumable (kept on the server). Pass --resumable or set MSN_RESUMABLE=1.",
+            "This reader's progress is resumable (kept on the server). Leave out --local and unset MSN_RESUMABLE=0 to keep using it.",
         ));
     }
     Ok(())
@@ -317,6 +332,16 @@ pub(crate) fn load_processing(
         None | Some(Value::Null) => None,
         Some(value) => Some(parse_watermark(value, "generation")?),
     };
+    // A reason this CLI does not know is kept as is; only its presence matters.
+    let kept_local = match &saved.kept_local {
+        Some(Value::String(code)) if !code.is_empty() && code.len() <= 64 => Some(code.clone()),
+        None | Some(Value::Null) => None,
+        Some(_) => return Err(corrupt_state()),
+    };
+    let kept_local_at = match &saved.kept_local_at {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_watermark(value, "keptLocalAt")?),
+    };
     Ok(ProcessingState {
         server: saved.server,
         tenant: saved.tenant,
@@ -325,6 +350,8 @@ pub(crate) fn load_processing(
         committed_through,
         highest_fetched,
         generation,
+        kept_local,
+        kept_local_at,
     })
 }
 
@@ -370,6 +397,10 @@ struct ProcessingFile {
     highest_fetched: Value,
     #[serde(default)]
     generation: Option<Value>,
+    #[serde(default, rename = "keptLocal")]
+    kept_local: Option<Value>,
+    #[serde(default, rename = "keptLocalAt")]
+    kept_local_at: Option<Value>,
 }
 
 fn parse_watermark(value: &Value, name: &str) -> Result<u64, CliError> {

@@ -7,6 +7,7 @@ import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { Fenced, ServerCommits, serverCommitsEnabled, unavailableHint } from "./host/server-commits.mjs";
 import { loadProfile, normalizeOrigin } from "./onboarding-check.mjs";
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -16,7 +17,12 @@ const HELP = `Usage: node scripts/event-runner.mjs --channel CHANNEL --state-fil
 
 Connection: --profile NAME, or MSN_URL + MSN_WORKSPACE_TENANT + MSN_WORKSPACE_TOKEN.
 Options: --username NAME, --once (one page), --include-broadcast, --attempts 1..10,
-         --wait 0..25 (default 25), --handler-timeout-ms 1..3600000 (default 300000).
+         --wait 0..25 (default 25), --handler-timeout-ms 1..3600000 (default 300000),
+         --local (keep processing progress on this machine; same as MSN_RESUMABLE=0).
+
+After each acknowledged message, the dispatcher commits that message id to the server for its
+reader (ADR 0053), so processed-by receipts name it. A reader held by another machine is left
+alone (no receipts); a takeover (msn takeover) stops this dispatcher with exit 5.
 
 Only messages addressed to the selected identity are dispatched by default; self messages are ignored.
 The handler receives one msn.dispatch.v1 JSON envelope on stdin. It must finish synchronously.
@@ -59,6 +65,7 @@ export function parseArgs(argv, env = process.env) {
     attempts: 3,
     wait: 25,
     handlerTimeoutMs: 300000,
+    local: false,
     command: split === -1 ? [] : argv.slice(split + 1),
     help: false,
   };
@@ -77,6 +84,7 @@ export function parseArgs(argv, env = process.env) {
     if (flag === "--help" || flag === "-h") result.help = true;
     else if (flag === "--once") result.once = true;
     else if (flag === "--include-broadcast") result.includeBroadcast = true;
+    else if (flag === "--local") result.local = true;
     else if (valued.has(flag) && flags[i + 1] && !flags[i + 1].startsWith("--")) {
       result[valued.get(flag)] = flags[++i];
       if (flag === "--username") explicitUsername = true;
@@ -159,6 +167,7 @@ export async function acquireCheckpoint(file, binding) {
     await lock.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
     await lock.sync();
     let after = 0;
+    let generation = 0;
     let handle;
     try {
       handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -173,42 +182,60 @@ export async function acquireCheckpoint(file, binding) {
         throw new RunnerError("Event checkpoint belongs to another reader/stream or is invalid.");
       }
       after = saved.after;
+      // The server fence for processing commits (ADR 0053); absent in older checkpoints.
+      if (saved.generation !== undefined) {
+        if (!validInteger(saved.generation)) throw new RunnerError("Invalid checkpoint file.");
+        generation = saved.generation;
+      }
     } catch (error) {
       if (error.code !== "ENOENT")
         throw new RunnerError("Event checkpoint is invalid or bound to a different stream; not reset.");
     } finally {
       await handle?.close();
     }
+    const write = async (next, nextGeneration) => {
+      const temp = `${file}.${randomUUID()}.tmp`;
+      try {
+        const output = await open(temp, "wx", 0o600);
+        try {
+          await output.writeFile(
+            `${JSON.stringify({ version: 1, ...binding, after: next, ...(nextGeneration ? { generation: nextGeneration } : {}) })}\n`,
+          );
+          await output.sync();
+        } finally {
+          await output.close();
+        }
+        await rename(temp, file);
+        const dir = await open(dirname(file), constants.O_RDONLY);
+        try {
+          await dir.sync();
+        } finally {
+          await dir.close();
+        }
+        after = next;
+        generation = nextGeneration;
+      } finally {
+        await unlink(temp).catch((error) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+    };
     return {
       get after() {
         return after;
+      },
+      get generation() {
+        return generation;
       },
       close,
       async commit(next) {
         if (!validInteger(next) || next < after)
           throw new RunnerError("Refusing invalid checkpoint advance.");
-        const temp = `${file}.${randomUUID()}.tmp`;
-        try {
-          const output = await open(temp, "wx", 0o600);
-          try {
-            await output.writeFile(`${JSON.stringify({ version: 1, ...binding, after: next })}\n`);
-            await output.sync();
-          } finally {
-            await output.close();
-          }
-          await rename(temp, file);
-          const dir = await open(dirname(file), constants.O_RDONLY);
-          try {
-            await dir.sync();
-          } finally {
-            await dir.close();
-          }
-          after = next;
-        } finally {
-          await unlink(temp).catch((error) => {
-            if (error.code !== "ENOENT") throw error;
-          });
-        }
+        await write(next, generation);
+      },
+      async saveGeneration(next) {
+        if (!validInteger(next) || next < 1) throw new RunnerError("Refusing invalid generation.");
+        await write(after, next);
       },
     };
   } catch (error) {
@@ -242,7 +269,8 @@ export async function request(connection, path, signal, options = {}) {
   if (response.status < 200 || response.status >= 300) {
     // Keep only the error code (a slug), never the message text, from a small error body.
     let code = null;
-    if (response.status === 409) {
+    // 400/403/404/409 bodies carry the codes that processing commits (ADR 0053) branch on.
+    if ([400, 403, 404, 409].includes(response.status)) {
       const text = await response.text().catch(() => "");
       try {
         const parsed = text.length <= 4096 ? JSON.parse(text)?.error?.code : null;
@@ -430,6 +458,18 @@ export async function run(options, signal = new AbortController().signal, env = 
     reader: connection.username,
   };
   const checkpoint = await acquireCheckpoint(options.stateFile, binding);
+  const commits = serverCommitsEnabled(!options.local, env)
+    ? new ServerCommits({
+        request,
+        connection,
+        channel: binding.channel,
+        reader: binding.reader,
+        generation: checkpoint.generation,
+        save: (generation) => checkpoint.saveGeneration(generation),
+        role: "msn dispatcher",
+      })
+    : null;
+  let reported = false;
   let reconnect = 500;
   try {
     do {
@@ -467,6 +507,24 @@ export async function run(options, signal = new AbortController().signal, env = 
           process.stdout.write(
             `${JSON.stringify({ eventId: event.id, dispatched: acted, acknowledgedThrough: checkpoint.after })}\n`,
           );
+          // Acknowledged means finished with this message, so commit it on the server (ADR 0053).
+          if (commits && event.type === "message.created") {
+            let result;
+            try {
+              result = await commits.commit(event.resourceId, signal);
+            } catch (error) {
+              if (!(error instanceof Fenced)) throw error;
+              const stopped = new RunnerError(`${error.message} Stopping this dispatcher.`);
+              stopped.code = "processing_fenced";
+              throw stopped;
+            }
+            if (result.status === "unavailable" && !reported) {
+              reported = true;
+              process.stderr.write(
+                `No processed-by receipts for ${binding.reader}: ${result.reason}. ${unavailableHint(result.reason)}\n`,
+              );
+            }
+          }
         }
         reconnect = 500;
         if (options.once) break;
@@ -496,7 +554,12 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     process.stderr.write(
       `${error instanceof RunnerError ? error.message : "Event dispatcher stopped; checkpoint was not reset."}\n`,
     );
-    // Exit 5 (conflict), like msn wait: a supervisor should not restart a listener on an archived board.
-    process.exitCode = controller.signal.aborted ? 130 : error?.code === "board_archived" ? 5 : 1;
+    // Exit 5 (conflict), like msn wait: a supervisor should not restart a listener on an archived
+    // board, or one that another machine took over (ADR 0034).
+    process.exitCode = controller.signal.aborted
+      ? 130
+      : ["board_archived", "processing_fenced"].includes(error?.code)
+        ? 5
+        : 1;
   }
 }

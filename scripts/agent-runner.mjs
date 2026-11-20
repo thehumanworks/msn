@@ -24,7 +24,7 @@ export function parseArgs(args) {
   const result = { channel: args[0], command: [], status: false, installService: false, prompt: false };
   need(
     slug(result.channel),
-    "Usage: msn run CHANNEL [--status | --install-service] [--harness codex|claude|tny | --prompt -- COMMAND...]",
+    "Usage: msn run CHANNEL [--status | --install-service] [--local] [--harness codex|claude|tny | --prompt -- COMMAND...]",
   );
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--") {
@@ -35,6 +35,7 @@ export function parseArgs(args) {
     if (args[i] === "--status") result.status = true;
     else if (args[i] === "--install-service") result.installService = true;
     else if (args[i] === "--prompt") result.prompt = true;
+    else if (args[i] === "--local") result.local = true;
     else if (args[i] === "--state-dir") {
       const value = args[++i];
       need(
@@ -56,6 +57,10 @@ export function parseArgs(args) {
     "Choose --harness or an explicit command, not both.",
   );
   need(!result.prompt || result.command.length, "--prompt requires -- COMMAND...");
+  need(
+    !result.local || result.harness || result.command.length,
+    "--local is saved with the launch configuration; give it with --harness or -- COMMAND.",
+  );
   return result;
 }
 export function configPath(options, env = process.env) {
@@ -222,6 +227,8 @@ export async function buildConfig(options, path, env = process.env, cwd = proces
           allowedChannels: [options.channel],
           permissionMode: "yolo",
           timeoutMs: null,
+          // ADR 0053: processing commits go to the server unless --local was given.
+          ...(options.local ? { serverCommits: false } : {}),
         },
       ],
     },
