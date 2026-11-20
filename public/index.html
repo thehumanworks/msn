@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#0b0b0e">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/icon-192.png">
   <title>msn</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/theme.js"></script>
   <script type="module" src="/app.js"></script>
 </head>
 <body class="app">
@@ -38,6 +39,7 @@
         </header>
         <nav id="channels" aria-label="Channels"></nav>
         <label class="show-archived"><input type="checkbox" id="show-archived">Show archived</label>
+        <label class="theme-pick">Theme on this device<select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         <button type="button" id="invite-workspace" class="quiet">Invite to workspace</button>
         <button type="button" id="notify" class="quiet" aria-pressed="false" hidden>Notify me when agents need me</button>
         <details class="access-details"><summary>Your access details</summary>

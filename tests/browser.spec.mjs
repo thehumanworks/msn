@@ -2692,6 +2692,175 @@ test("the owner archives a finished board: it leaves the list, reads but takes n
   await expect(page.getByRole("button", { name: "# work", exact: true })).toBeVisible();
 });
 
+// Every text element the board shows, with the background it is painted on, must meet WCAG AA.
+async function lowContrast(page) {
+  return page.evaluate(() => {
+    const parse = (value) => {
+      const n = value.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0, 0];
+      return [n[0], n[1], n[2], n.length > 3 ? n[3] : 1];
+    };
+    const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
+    const lum = ([r, g, b]) => {
+      const ch = (c) => (c / 255 <= 0.03928 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+    };
+    const backdrop = (element) => {
+      const layers = [];
+      for (let node = element; node; node = node.parentElement) {
+        const fill = parse(getComputedStyle(node).backgroundColor);
+        if (fill[3] > 0) layers.push(fill);
+        if (fill[3] === 1) break;
+      }
+      let colour = [255, 255, 255, 1];
+      if (!layers.length || layers.at(-1)[3] < 1)
+        colour = parse(getComputedStyle(document.documentElement).backgroundColor);
+      for (const layer of layers.reverse()) colour = over(layer, colour);
+      return colour;
+    };
+    const selectors = [
+      "#channel-title",
+      "nav button",
+      ".theme-pick",
+      ".toolbar button:not(:disabled)",
+      ".message-meta strong",
+      ".message-meta span",
+      ".message p",
+      ".message .md",
+      ".message code",
+      ".message pre",
+      ".message a[href]",
+      ".message .md blockquote",
+      ".label-chip",
+      ".message-receipts",
+      ".pins summary",
+      ".pins .pin-text",
+      ".pins .pin-remove",
+      ".unread-count",
+      "#status",
+    ];
+    const failures = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+      for (const element of document.querySelectorAll(selector)) {
+        if (!element.getClientRects().length || !element.textContent.trim()) continue;
+        seen.add(selector);
+        const under = backdrop(element);
+        const text = over(parse(getComputedStyle(element).color), under);
+        const [hi, lo] = [lum(text), lum(under)].sort((a, b) => b - a);
+        const ratio = (hi + 0.05) / (lo + 0.05);
+        if (ratio < 4.5)
+          failures.push(`${selector} "${element.textContent.trim().slice(0, 20)}": ${ratio.toFixed(2)}`);
+      }
+    }
+    return { failures, seen: [...seen] };
+  });
+}
+
+test("the board follows the system light or dark setting, and this device can force either", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const shared = "e".repeat(64);
+  const board = { Authorization: `Bearer ${shared}` };
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential: shared, goal: "Ship the light theme" },
+      })
+    ).status(),
+  ).toBe(201);
+  await request.put(`${t.path}/channels/work/personas/p1`, {
+    headers: board,
+    data: { displayName: "reviewer" },
+  });
+  const post = async (headers, data) => {
+    const response = await request.post(`${t.path}/channels/work/messages`, { headers, data });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message.id;
+  };
+  const decision = await post(t.headers, {
+    username: "human",
+    text: "Decision: tokens only, no server change",
+  });
+  await post(board, {
+    username: "reviewer",
+    personaId: "p1",
+    text: "Checked `style.css` in **both** themes:\n\n```\nbun run check\n```\n\n> contrast is AA\n\nSee [ADR 0049](https://example.com/adr).",
+  });
+  await post(t.headers, { username: "human", text: "Ship it", labels: { state: "open", area: "web" } });
+  const reader = `${t.path}/channels/work/processing/p1`;
+  expect(
+    (await request.post(`${reader}/claim`, { headers: board, data: { expectGeneration: 0 } })).status(),
+  ).toBe(201);
+  expect(
+    (
+      await request.post(`${reader}/commit`, { headers: board, data: { generation: 1, through: 1 } })
+    ).status(),
+  ).toBe(200);
+
+  const background = () => page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
+  const audit = async () => {
+    const { failures, seen } = await lowContrast(page);
+    expect(failures).toEqual([]);
+    for (const required of [
+      ".message-meta strong",
+      ".message code",
+      ".message pre",
+      ".label-chip",
+      ".message-receipts",
+      ".pins summary",
+      ".pins .pin-text",
+    ])
+      expect(seen).toContain(required);
+  };
+
+  // No choice saved: the page follows the system setting, live.
+  await page.emulateMedia({ colorScheme: "light" });
+  await connect(page, t, "human", { live: false });
+  await openChannel(page, "work");
+  await page.locator(`#messages [data-id="${decision}"]`).getByRole("button", { name: "Pin" }).click();
+  await expect(page.locator("#pins-title")).toHaveText("Pinned · 1");
+  await expect(page.locator("#messages .message-receipts").first()).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+  expect(await background()).toBe("rgb(247, 247, 249)");
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#f7f7f9");
+  await audit();
+  await page.screenshot({ path: testInfo.outputPath("theme-light.png") });
+  await page.emulateMedia({ colorScheme: "dark" });
+  expect(await background()).toBe("rgb(11, 11, 14)");
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#0b0b0e");
+  await audit();
+  await page.screenshot({ path: testInfo.outputPath("theme-dark.png") });
+
+  // Forcing light on a dark system holds across a reload and a disconnect; Match system undoes it.
+  await channelsPane(page);
+  await expect(page.getByLabel("Theme on this device")).toHaveValue("");
+  await page.getByLabel("Theme on this device").selectOption("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await background()).toBe("rgb(247, 247, 249)");
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# work");
+  expect(await background()).toBe("rgb(247, 247, 249)");
+  await channelsPane(page);
+  await expect(page.getByLabel("Theme on this device")).toHaveValue("light");
+  await page.getByLabel("Theme on this device").selectOption("dark");
+  await page.emulateMedia({ colorScheme: "light" });
+  expect(await background()).toBe("rgb(11, 11, 14)");
+  await disconnect(page);
+  expect(await background()).toBe("rgb(11, 11, 14)");
+  expect(await page.evaluate(() => localStorage.getItem("msn.theme"))).toBe("dark");
+  await page.goto("/guide.html");
+  expect(await background()).toBe("rgb(11, 11, 14)");
+  await connect(page, t, "human", { live: false });
+  await channelsPane(page);
+  await page.getByLabel("Theme on this device").selectOption("");
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+  expect(await background()).toBe("rgb(247, 247, 249)");
+  expect(await page.evaluate(() => localStorage.getItem("msn.theme"))).toBeNull();
+});
+
 test("Download saves the board as a Markdown transcript with escaped, fenced message text", async ({
   page,
   request,
