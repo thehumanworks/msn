@@ -985,8 +985,14 @@ impl MsnDesktopApp {
                                             seen = seen.max(id);
                                         }
                                         let fold = Fold::new(&channel_name, id, &state.unfolded);
-                                        let shown =
-                                            render_message(ui, message, &me, Some(fold), actions);
+                                        let shown = render_message(
+                                            ui,
+                                            message,
+                                            &me,
+                                            can_react,
+                                            Some(fold),
+                                            actions,
+                                        );
                                         mark_selected(ui, &shown, selected == Some(id), reveal);
                                         render_reactions(ui, message, &me, can_react, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
@@ -1014,8 +1020,14 @@ impl MsnDesktopApp {
                                             let reply = &state.messages[&id];
                                             let fold =
                                                 Fold::new(&channel_name, id, &state.unfolded);
-                                            let shown =
-                                                render_message(ui, reply, &me, Some(fold), actions);
+                                            let shown = render_message(
+                                                ui,
+                                                reply,
+                                                &me,
+                                                can_react,
+                                                Some(fold),
+                                                actions,
+                                            );
                                             mark_selected(ui, &shown, selected == Some(id), reveal);
                                             render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
@@ -1156,13 +1168,19 @@ impl MsnDesktopApp {
             .as_ref()
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
+        // Archived boards (ADR 0046) take no posts, so their results offer no Reply.
+        let can_post = self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| !self.state.is_archived(channel));
         egui::ScrollArea::vertical()
             .id_salt("search-results")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 // Search hits show in full: the match may be below the fold (ADR 0050).
                 for message in &search.results {
-                    render_message(ui, message, &me, None, actions);
+                    render_message(ui, message, &me, can_post, None, actions);
                     ui.add_space(4.0);
                 }
                 if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
@@ -1980,11 +1998,12 @@ fn render_reactions(
 }
 
 /// "Link" beside the header, and the same in the bubble's right-click menu (ADR 0042).
-fn link_controls(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
-    if ui
-        .link(egui::RichText::new("Reply").small().color(theme::muted()))
-        .on_hover_text(format!("Reply to message #{id} (r)"))
-        .clicked()
+fn link_controls(ui: &mut egui::Ui, id: u64, can_post: bool, actions: &mut Vec<Action>) {
+    if can_post
+        && ui
+            .link(egui::RichText::new("Reply").small().color(theme::muted()))
+            .on_hover_text(format!("Reply to message #{id} (r)"))
+            .clicked()
     {
         actions.push(Action::Reply(id));
     }
@@ -2059,6 +2078,7 @@ fn render_message(
     ui: &mut egui::Ui,
     message: &Value,
     me: &str,
+    can_post: bool,
     mut fold: Option<Fold>,
     actions: &mut Vec<Action>,
 ) -> egui::Response {
@@ -2084,7 +2104,7 @@ fn render_message(
     let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             bubble(ui, header, body, true, fold.as_mut(), |ui| {
-                link_controls(ui, id, actions)
+                link_controls(ui, id, can_post, actions)
             })
         })
         .inner
@@ -2093,7 +2113,7 @@ fn render_message(
             theme::avatar(ui, username, 30.0, None);
             ui.vertical(|ui| {
                 bubble(ui, header, body, false, fold.as_mut(), |ui| {
-                    link_controls(ui, id, actions)
+                    link_controls(ui, id, can_post, actions)
                 })
             })
             .inner
@@ -2110,7 +2130,7 @@ fn render_message(
         egui::Sense::click(),
     );
     shown.context_menu(|ui| {
-        if ui.button("Reply").clicked() {
+        if can_post && ui.button("Reply").clicked() {
             actions.push(Action::Reply(id));
             ui.close();
         }
@@ -2857,6 +2877,34 @@ mod layout_tests {
         press(&ctx, &mut app, text("r"));
         assert_eq!(app.composer.reply_to, "");
         assert_eq!(app.focus, None);
+        // Nor does it offer a Reply link (ADR 0046): no widget is labelled Reply.
+        let shown_reply = |app: &mut MsnDesktopApp| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut found = false;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(980.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+            for shape in output.shapes {
+                if let egui::epaint::Shape::Text(text) = shape.shape
+                    && text.galley.text() == "Reply"
+                {
+                    found = true;
+                }
+            }
+            found
+        };
+        assert!(!shown_reply(&mut app));
+        app.state.archived.clear();
+        assert!(shown_reply(&mut app));
     }
 
     #[test]

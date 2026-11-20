@@ -409,7 +409,11 @@ function appendMessage(message, target = $("messages")) {
   article.className = message.username === session?.username ? "message mine" : "message";
   article.dataset.id = message.id;
   // Log rows take focus from j and k (ADR 0054); Tab still moves only between controls.
-  if (target === $("messages")) article.tabIndex = -1;
+  if (target === $("messages")) {
+    article.tabIndex = -1;
+    // A focused row is announced by who wrote it, not only as "article".
+    article.setAttribute("aria-label", `Message #${message.id} from ${message.username}`);
+  }
   const meta = document.createElement("div");
   meta.className = "message-meta";
   const name = document.createElement("strong");
@@ -1657,12 +1661,13 @@ function selectChannel(name, { reset = false } = {}) {
   $("message").value = selectedDraft.content;
   $("recipient").value = selectedDraft.recipient;
   showFiles(selectedDraft);
-  showReplyTo(selectedDraft);
   clearLabel();
   clearSearch();
   $("search").value = "";
   $("messages").replaceChildren();
   for (const message of state.messages) appendMessage(message);
+  // After the log is rebuilt, so the chip can name the author of the message replied to.
+  showReplyTo(selectedDraft);
   showCheckpoint(state);
   showPins(state);
   void loadPins(session, name);
@@ -3132,12 +3137,13 @@ function goToBoards() {
 
 /** Escape: the nearest thing to undo, one per press. */
 function closeSomething(target) {
-  if (cancelReply()) return true;
+  // In the search field, Escape is about the search; a pending reply waits for the next press.
   if (target === $("search") && ($("search").value || !$("search-panel").hidden)) {
     $("search").value = "";
     clearSearch();
     return true;
   }
+  if (cancelReply()) return true;
   if (!$("search-panel").hidden) {
     clearSearch();
     return true;
@@ -3186,9 +3192,9 @@ document.addEventListener("keydown", (event) => {
     view("chat");
     moveSelection(action);
   } else if (action === "reply") {
+    if (!canPost()) return;
     const message = selectedMessage();
     if (!message) return status("Choose a message with j or k first, then press r to reply.");
-    if (!canPost()) return;
     event.preventDefault();
     replyTo(message);
   }

@@ -2512,6 +2512,20 @@ test("a watch-only invitation lets someone read a board live without posting", a
       await expect(watcher.locator(control), control).toBeHidden();
     await say("Tests green, deploying");
     await expect(watcher.locator("#messages")).toContainText("Tests green, deploying");
+    // Shortcuts (ADR 0054): j and k still move, but a watcher has no Reply and r starts nothing.
+    await watcher.evaluate(() => document.activeElement?.blur());
+    await watcher.keyboard.press("k");
+    await expect(watcher.locator("#messages > article").last()).toBeFocused();
+    await expect(watcher.locator("#messages > article").last()).toHaveAttribute(
+      "aria-label",
+      /^Message #\d+ from lead$/,
+    );
+    for (const reply of await watcher.locator("#messages .reply-button").all())
+      await expect(reply).toBeHidden();
+    await watcher.keyboard.press("r");
+    await expect(watcher.locator("#reply-note")).toBeHidden();
+    await expect(watcher.locator("#message")).not.toBeFocused();
+    await expect(watcher.locator("#status")).not.toContainText("Choose a message");
     await watcher.screenshot({ path: testInfo.outputPath("watch-only.png") });
   } finally {
     await guest.close();
@@ -3333,9 +3347,29 @@ test("keyboard shortcuts move between messages, reply, search, open the board li
   await page.keyboard.type("release");
   await page.keyboard.press("Enter");
   await expect(page.locator("#search-panel")).toBeVisible();
+  // With a reply pending, Escape in the search field clears the search first; the next one
+  // cancels the reply.
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("k");
+  await page.keyboard.press("r");
+  await expect(page.locator("#reply-note")).toBeVisible();
+  await page.locator("#search").focus();
   await page.keyboard.press("Escape");
   await expect(page.locator("#search-panel")).toBeHidden();
   await expect(page.locator("#search")).toHaveValue("");
+  await expect(page.locator("#reply-note")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#reply-note")).toBeHidden();
+
+  // A reply survives switching boards, and the chip still names the author.
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("k");
+  await page.keyboard.press("r");
+  await openChannel(page, "notes");
+  await openChannel(page, "work");
+  await expect(page.locator("#reply-note-text")).toHaveText(/^Replying to #\d+ · (lead|human)$/);
+  await page.locator("#reply-cancel").click();
+  await expect(page.locator("#reply-note")).toBeHidden();
 
   // g then b goes to the board list and focuses the open board.
   await blur();
