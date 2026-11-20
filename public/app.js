@@ -484,7 +484,8 @@ function appendMessage(message, target = $("messages")) {
     } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
   }
-  article.append(content);
+  // Search hits show in full: the match may be below the fold (ADR 0050).
+  article.append(...(target === $("search-results") ? [content] : foldable(content)));
   if (Array.isArray(message.attachments) && message.attachments.length)
     article.append(attachmentList(message));
   // key=value labels (ADR 0032). Each chip lists the channel's messages with that label now.
@@ -918,6 +919,75 @@ function showSince(state) {
   revealInThread(first);
 }
 
+/*
+ * Long messages fold (ADR 0050). Display only: the page holds the whole text, so search, copy,
+ * links, exports and agents see it unchanged. A body taller than FOLD_LINES rendered lines is
+ * clipped by CSS to its first lines, with Show more under it. Folding by rendered height never
+ * cuts Markdown in its source, so a code block or table is clipped, not broken.
+ */
+const FOLD_LINES = 15;
+const foldObserver =
+  typeof ResizeObserver === "function"
+    ? new ResizeObserver((entries) => {
+        for (const entry of entries) measureFold(entry.target.parentElement);
+      })
+    : null;
+
+/** [body, toggle]: the content in a box that folds when it is long, and its Show more button. */
+function foldable(content) {
+  const box = document.createElement("div");
+  box.className = "message-body";
+  box.append(content);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "fold-toggle";
+  toggle.hidden = true;
+  toggle.addEventListener("click", () => {
+    setFold(box, !box.classList.contains("folded"));
+    // Folding a long message the reader scrolled through keeps its button in view.
+    if (box.classList.contains("folded")) toggle.scrollIntoView({ block: "nearest" });
+  });
+  // Tabbing to a link hidden by the fold opens it, so the focused link is visible.
+  box.addEventListener("focusin", () => {
+    if (box.classList.contains("folded")) setFold(box, false);
+  });
+  foldObserver?.observe(content);
+  return [box, toggle];
+}
+
+/** Fold the box when its content is taller than FOLD_LINES lines, unless the reader opened it. */
+function measureFold(box) {
+  const content = box?.firstElementChild;
+  const toggle = box?.nextElementSibling;
+  if (!content || !toggle?.classList.contains("fold-toggle")) return;
+  const line = Number.parseFloat(getComputedStyle(content).lineHeight) || 22;
+  // A hidden thread or panel measures 0; it is measured again when it shows.
+  const long = content.offsetHeight > FOLD_LINES * line;
+  toggle.hidden = !long;
+  if (!long) box.classList.remove("folded");
+  else if (box.dataset.open !== "true") box.classList.add("folded");
+  showFoldToggle(box, toggle);
+}
+
+function setFold(box, folded) {
+  box.dataset.open = String(!folded);
+  box.classList.toggle("folded", folded);
+  const toggle = box.nextElementSibling;
+  if (toggle?.classList.contains("fold-toggle")) showFoldToggle(box, toggle);
+}
+
+function showFoldToggle(box, toggle) {
+  const folded = box.classList.contains("folded");
+  toggle.textContent = folded ? "Show more" : "Show less";
+  toggle.setAttribute("aria-expanded", String(!folded));
+}
+
+/** Open a folded message: a link, a jump or a pin shows the whole message. */
+function unfold(article) {
+  const box = article.querySelector(":scope > .message-body");
+  if (box) setFold(box, false);
+}
+
 function showMessage(id, block = "center") {
   const node = $("messages").querySelector(`[data-id="${id}"]`);
   if (!node) {
@@ -925,6 +995,7 @@ function showMessage(id, block = "center") {
     return;
   }
   revealInThread(node);
+  unfold(node);
   node.scrollIntoView({ block });
   node.classList.remove("flash");
   void node.offsetWidth;

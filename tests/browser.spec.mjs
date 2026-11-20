@@ -2740,3 +2740,83 @@ test("Download saves the board as a Markdown transcript with escaped, fenced mes
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("transcript.png") });
 });
+
+test("long messages fold behind Show more; links, jumps and search hits show them whole (ADR 0050)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (text, replyTo) => {
+    const response = await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username: "planner", text, ...(replyTo ? { replyTo } : {}) },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message;
+  };
+  const lines = (prefix, count) =>
+    Array.from({ length: count }, (_, i) => `${prefix} line ${i + 1}`).join("\n");
+  const short = await send(lines("Short", 12));
+  const long = await send(`${lines("Report", 40)}\nlast words: zebracrossing`);
+  // A code block that runs across the fold stays one whole block; CSS clips it, nothing cuts it.
+  const code = await send(
+    ["## Log", "", "```", lines("output", 30), "```", "", "Done **ok** after the block."].join("\n"),
+  );
+  const reply = await send(lines("Reply", 30), long.id);
+  await connect(page, t, "Tomas", { remember: false });
+  const row = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  const toggle = (id) => row(id).locator(":scope > .fold-toggle");
+  const body = (id) => row(id).locator(":scope > .message-body");
+  await expect(row(code.id)).toBeVisible();
+
+  // Short messages have no control; long ones show their first lines and Show more.
+  await expect(toggle(short.id)).toBeHidden();
+  await expect(body(short.id)).not.toHaveClass(/folded/);
+  await expect(body(long.id)).toHaveClass(/folded/);
+  await expect(toggle(long.id)).toHaveText("Show more");
+  await expect(toggle(long.id)).toHaveAttribute("aria-expanded", "false");
+  const folded = await body(long.id).evaluate((el) => ({ shown: el.clientHeight, full: el.scrollHeight }));
+  expect(folded.shown).toBeLessThan(folded.full / 2);
+  // Display only: the whole text is still in the page.
+  await expect(body(long.id)).toContainText("last words: zebracrossing");
+  const pre = body(code.id).locator("pre.md-code");
+  await expect(body(code.id)).toHaveClass(/folded/);
+  await expect(pre).toHaveCount(1);
+  expect((await pre.textContent()).trim().split("\n")).toHaveLength(30);
+  await expect(body(code.id).locator("strong")).toHaveText("ok");
+  await page.screenshot({ path: testInfo.outputPath("folded.png") });
+
+  // Show more opens it, Show less folds it again.
+  await toggle(long.id).click();
+  await expect(body(long.id)).not.toHaveClass(/folded/);
+  await expect(toggle(long.id)).toHaveText("Show less");
+  await expect(toggle(long.id)).toHaveAttribute("aria-expanded", "true");
+  expect(await body(long.id).evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+  await toggle(long.id).click();
+  await expect(body(long.id)).toHaveClass(/folded/);
+
+  // A long reply folds inside its thread once the thread opens.
+  await row(long.id).locator(":scope > .thread-toggle").click();
+  await expect(row(reply.id)).toBeVisible();
+  await expect(body(reply.id)).toHaveClass(/folded/);
+  await expect(toggle(reply.id)).toHaveText("Show more");
+
+  // A search hit shows in full: the match is below the fold.
+  await page.getByLabel("Search this board").getByRole("searchbox").fill("zebracrossing");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const hit = page.locator(`#search-results article[data-id="${long.id}"]`);
+  await expect(hit).toBeVisible();
+  await expect(hit.locator(".fold-toggle")).toHaveCount(0);
+  await expect(hit.getByText("last words: zebracrossing")).toBeVisible();
+  await page.getByRole("button", { name: "Clear" }).first().click();
+
+  // A message link opens the message unfolded and highlighted.
+  await page.goto(`/#board=${t.tenant}/general&msg=${code.id}`);
+  await expect(row(code.id)).toHaveClass(/linked/);
+  await expect(body(code.id)).not.toHaveClass(/folded/);
+  await expect(toggle(code.id)).toHaveText("Show less");
+  await expect(row(code.id)).toBeInViewport();
+  expect(await body(code.id).evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("linked-unfolded.png") });
+});
