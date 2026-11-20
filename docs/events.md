@@ -48,6 +48,8 @@ Response:
 | `message.created` | message id | `GET …/channels/:channel/messages/:id` (`msn show`) |
 | `message.deleted` | message id | The row is now a tombstone (`410`). Snapshots for the channel were invalidated; re-run `catchup`. |
 | `snapshot.published` | snapshot version | `GET …/channels/:channel/snapshots/:version` |
+| `message.labeled` (only with `include=labels`, ADR 0032) | message id | `GET …/channels/:channel/messages/:id` |
+| `message.edited` (only with `include=edits`, ADR 0052) | message id | `GET …/channels/:channel/messages/:id` |
 
 `historyRevision` is the channel's redaction clock (ADR 0009) at the moment of the event. For
 `message.deleted` it is the value *after* that deletion.

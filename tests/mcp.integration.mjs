@@ -141,6 +141,7 @@ try {
       "board",
       "label",
       "react",
+      "edit_message",
       "reactions",
       "find",
       "search",
@@ -362,6 +363,85 @@ try {
   await cli(["--profile", "reviewer", "unreact", "work", String(task.message.id), "yes"]);
   const badKind = await labeler.tool("react", { id: task.message.id, kind: "heart" });
   assert.equal(badKind.isError, true);
+  // Edits (ADR 0052): the sender fixes its message over MCP and the CLI; another name cannot.
+  // A reviewer processes everything first, so the edit lands on a message it already handled.
+  const editReader = mcp("reviewer");
+  await editReader.request("initialize", { protocolVersion: "2025-03-26", capabilities: {} });
+  let processed;
+  do {
+    processed = await editReader.ok("peek", { wait: 0, limit: 100 });
+    await editReader.ok("commit", { through: processed.nextCursor });
+  } while (processed.hasMore);
+  assert.ok(processed.nextCursor >= task.message.id);
+  const editStart = await labeler.ok("catch_up", { after: task.message.id, editsAfter: 0 });
+  assert.deepEqual(editStart.edited, []);
+  const edited = await labeler.ok("edit_message", { id: task.message.id, text: "fix the parser (urgent)" });
+  assert.equal(edited.changed, true);
+  assert.equal(edited.message.text, "fix the parser (urgent)");
+  assert.equal(typeof edited.message.editedAt, "string");
+  const notMine = child(binary, [
+    "--profile",
+    "reviewer",
+    "edit",
+    "work",
+    String(task.message.id),
+    "--text",
+    "x",
+  ]);
+  const [notMineCode] = await notMine.done;
+  assert.notEqual(notMineCode, 0);
+  assert.match(notMine.errors, /sender/i);
+  const seenEdit = await labeler.ok("catch_up", { after: task.message.id, editsAfter: editStart.editCursor });
+  assert.deepEqual(
+    seenEdit.edited.map((m) => [m.id, m.text]),
+    [[task.message.id, "fix the parser (urgent)"]],
+  );
+  const byCliEdit = await cli([
+    "--profile",
+    "lead",
+    "edit",
+    "work",
+    String(task.message.id),
+    "--text",
+    "fix the parser",
+  ]);
+  assert.equal(byCliEdit.message.text, "fix the parser");
+  // Agents hear of it by default. catch_up without editsAfter uses this session's edit cursor.
+  const byDefault = await labeler.ok("catch_up", { after: task.message.id });
+  assert.deepEqual(
+    byDefault.edited.map((m) => [m.id, m.text]),
+    [[task.message.id, "fix the parser"]],
+  );
+  assert.deepEqual((await labeler.ok("catch_up", { after: task.message.id })).edited, []);
+  // The reviewer's peek reports both edits to the message it processed, moves no cursor, and
+  // after a commit does not report them again.
+  const told = await editReader.ok("peek", { wait: 0 });
+  assert.deepEqual(told.messages, []);
+  assert.equal(told.committedThrough, processed.nextCursor);
+  assert.deepEqual(
+    told.edited.map((m) => [m.id, m.text]),
+    [[task.message.id, "fix the parser"]],
+  );
+  // A page with only edits has nothing to commit: the next peek, without a commit, waits.
+  const waitStart = Date.now();
+  const settled = await editReader.ok("peek", { wait: 2 });
+  assert.ok(Date.now() - waitStart >= 1500, "a peek after an edits-only page waits");
+  assert.deepEqual([settled.edited, settled.committedThrough], [[], processed.nextCursor]);
+  await editReader.close();
+  const cliCatchup = await cli([
+    "--profile",
+    "lead",
+    "catchup",
+    "work",
+    "--after",
+    String(task.message.id),
+    "--edits-after",
+    String(seenEdit.editCursor),
+  ]);
+  assert.deepEqual(
+    cliCatchup.edited.map((m) => m.text),
+    ["fix the parser"],
+  );
   const filtered = await cli(["--profile", "lead", "poll", "work", "--label", "owner=lead"]);
   assert.deepEqual(
     filtered.messages.map((m) => m.text),

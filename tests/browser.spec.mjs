@@ -2631,6 +2631,114 @@ test("people react to a message with a fixed set; reactions toggle and never add
   for (const add of await page.locator("#messages .reaction-add").all()) await expect(add).toBeHidden();
 });
 
+test("people edit their own messages in place; others see the edit and nothing moves", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: shared,
+    data: { displayName: "lead" },
+  });
+  await request.put(`${t.path}/channels/other`, { headers: t.headers });
+  const send = async (headers, username, text) =>
+    (
+      await (
+        await request.post(`${t.path}/channels/work/messages`, { headers, data: { username, text } })
+      ).json()
+    ).message.id;
+  const mine = await send(t.headers, "human", "Ship it on **mondya**");
+  const theirs = await send(shared, "lead", "I will take the <b>deploy</b>");
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const article = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  // Only your own messages offer Edit.
+  await expect(article(theirs).locator(".message-edit")).toHaveCount(0);
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  const box = article(mine).getByRole("textbox", { name: `New text for message #${mine}` });
+  await expect(box).toHaveValue("Ship it on **mondya**");
+  // Escape cancels without a change.
+  await box.press("Escape");
+  await expect(box).toHaveCount(0);
+  await expect(article(mine).locator(".message-body strong")).toHaveText("mondya");
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  await box.fill("Ship it on **monday**");
+  await page.screenshot({ path: testInfo.outputPath("edit-form.png") });
+  await box.press("Control+Enter");
+  await expect(article(mine).locator(".message-body strong")).toHaveText("monday");
+  await expect(article(mine).locator(".message-edited")).toHaveText("edited");
+  await expect(page.locator("#messages > article")).toHaveCount(2);
+
+  // Another participant's edit shows when the board is read again; text stays plain.
+  expect(
+    (
+      await request.patch(`${t.path}/channels/work/messages/${theirs}`, {
+        headers: shared,
+        data: { username: "lead", text: "I will take the <i>deploy</i> and the rollback" },
+      })
+    ).status(),
+  ).toBe(200);
+  await openChannel(page, "other");
+  await openChannel(page, "work");
+  await expect(article(theirs).locator(".message-body")).toHaveText(
+    "I will take the <i>deploy</i> and the rollback",
+  );
+  await expect(article(theirs).locator(".message-edited")).toBeVisible();
+  await expect(article(theirs).locator("i")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("edited.png") });
+
+  // Nothing moved: same ids, same order, no new message.
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.map((m) => [m.id, m.text])).toEqual([
+    [mine, "Ship it on **monday**"],
+    [theirs, "I will take the <i>deploy</i> and the rollback"],
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Two editors: a save that started before another device's edit is refused, the editor stays
+  // open with the user's text, and a second Save replaces the newer version on purpose.
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  expect(
+    (
+      await request.patch(`${t.path}/channels/work/messages/${mine}`, {
+        headers: t.headers,
+        data: { username: "human", text: "Ship it on monday, from my phone" },
+      })
+    ).status(),
+  ).toBe(200);
+  await box.fill("Ship it on **tuesday**");
+  await box.press("Control+Enter");
+  await expect(page.locator("#status")).toContainText("changed while you were editing");
+  await expect(box).toHaveValue("Ship it on **tuesday**");
+  await box.press("Control+Enter");
+  await expect(box).toHaveCount(0);
+  await expect(article(mine).locator(".message-body strong")).toHaveText("tuesday");
+
+  // An archived board offers no Edit.
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await expect(article(mine).locator(".message-edit")).toBeHidden();
+});
+
 test("a watch-only invitation lets someone read a board live without posting", async ({
   page,
   request,
@@ -3743,4 +3851,81 @@ test("a failed persona load is not retried on every key after @ (ADR 0055)", asy
   await page.waitForTimeout(300);
   expect(asked).toBe(1);
   await expect(page.locator("#status")).not.toHaveClass(/error/);
+});
+
+test("the Invite dialog's curl commands join, read and send with plain curl", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship the curl quickstart" },
+      })
+    ).status(),
+  ).toBe(201);
+  // Record copies instead of touching the real clipboard.
+  await page.addInitScript(() => {
+    window.copied = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: async (text) => window.copied.push(text) },
+    });
+  });
+  await page.goto("/");
+  await page.locator("#connection-file").setInputFiles({
+    name: "account.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(
+      JSON.stringify({
+        url: new URL(page.url()).origin,
+        tenant: t.tenant,
+        token: t.token,
+        username: "human",
+      }),
+    ),
+  });
+  await expect(page.locator("#workspace")).toBeVisible();
+  await openChannel(page, "work");
+  await page.locator("#invite-channel").click();
+  await expect(page.locator("#invite-title")).toHaveText("Shared access to # work");
+  await page.locator("#copy-curl").click();
+  await expect.poll(() => page.evaluate(() => window.copied.length)).toBe(1);
+  const script = await page.evaluate(() => window.copied[0]);
+  // The copied text never holds the key; the agent sets it from the board link.
+  expect(script).not.toContain(credential);
+  const link = await page.locator("#invite-link").inputValue();
+  const key = JSON.parse(decodeURIComponent(link.split("#board=")[1])).token;
+  // Run the copied commands as an agent would, with only bash and curl; N becomes the start.
+  const run = (text, env = {}) =>
+    promisify(execFile)("bash", ["-euc", text.replace("after=N&wait=25", "after=0&wait=1")], {
+      env: { ...process.env, ...env },
+    });
+  const { stdout } = await run(script, { MSN_KEY: key });
+  expect(stdout).toContain('"displayName":"my-agent"');
+  expect(stdout).toContain("Ship the curl quickstart");
+  expect(stdout).toContain('"username":"my-agent","text":"hello"');
+  await expect(page.locator("#messages")).toContainText("hello");
+  // A workspace invitation's script redeems a key of its own and runs as a whole; a watch-only
+  // one cannot send, so it has none.
+  await page.locator("#close-invite").click();
+  await channelsPane(page);
+  await page.locator("#invite-workspace").click();
+  await page.locator("#invite-form").getByRole("button", { name: "Create invitation" }).click();
+  await page.locator("#copy-curl").click();
+  await expect.poll(() => page.evaluate(() => window.copied.length)).toBe(2);
+  const invite = await page.evaluate(() => window.copied[1]);
+  expect(invite).toContain("/invites/redeem");
+  const joined = await run(
+    invite
+      .replace("MSN_BOARD='general'", "MSN_BOARD='work'")
+      .replace("MSN_NAME='my-agent'", "MSN_NAME='invited'"),
+  );
+  expect(joined.stdout).toContain('"username":"invited","text":"hello"');
+  expect(joined.stdout).not.toMatch(/"token"/);
+  await page.locator("#close-invite").click();
+  await page.locator("#invite-workspace").click();
+  await page.locator("#invite-watch").check();
+  await page.locator("#invite-form").getByRole("button", { name: "Create invitation" }).click();
+  await expect(page.locator("#invite-link")).not.toHaveValue("");
+  await expect(page.locator("#copy-curl")).toBeHidden();
 });

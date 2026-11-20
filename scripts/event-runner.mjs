@@ -11,7 +11,14 @@ import { Fenced, ServerCommits, serverCommitsEnabled, unavailableHint } from "./
 import { loadProfile, normalizeOrigin } from "./onboarding-check.mjs";
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const TYPES = new Set(["channel.created", "message.created", "message.deleted", "snapshot.published"]);
+const TYPES = new Set([
+  "channel.created",
+  "message.created",
+  "message.deleted",
+  "message.edited",
+  "snapshot.published",
+]);
+const DISPATCHED = new Set(["message.created", "message.edited"]);
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const HELP = `Usage: node scripts/event-runner.mjs --channel CHANNEL --state-file FILE [options] -- PROGRAM [ARG...]
 
@@ -26,6 +33,8 @@ alone (no receipts); a takeover (msn takeover) stops this dispatcher with exit 5
 
 Only messages addressed to the selected identity are dispatched by default; self messages are ignored.
 The handler receives one msn.dispatch.v1 JSON envelope on stdin. It must finish synchronously.
+When the sender edits a message (ADR 0052), the handler runs again with event.type
+"message.edited", the new text in message, and a plain "notice" that says which message changed.
 MSN_IDEMPOTENCY_KEY is stable across retries; use it for result sends and other deduplicated effects.
 Handler output is suppressed so credentials cannot be echoed to runner logs. A nonzero exit retries
 without acknowledging input. Exit 0 acknowledges dispatch, NOT evidence-based task completion.
@@ -374,7 +383,7 @@ export function runHandler(command, envelope, connection, timeoutMs, signal) {
   });
 }
 async function dispatch(event, connection, binding, options, signal) {
-  if (event.type !== "message.created") return false;
+  if (!DISPATCHED.has(event.type)) return false;
   let result;
   try {
     result = await request(
@@ -396,7 +405,8 @@ async function dispatch(event, connection, binding, options, signal) {
     typeof message.text !== "string" ||
     Buffer.byteLength(message.text) > 65536 ||
     !["text/plain", "application/json"].includes(message.contentType) ||
-    (message.to !== undefined && !validName(message.to))
+    (message.to !== undefined && !validName(message.to)) ||
+    (event.type === "message.edited" && typeof message.editedAt !== "string")
   )
     throw new RunnerError("Canonical message identity or content is invalid.");
   if (message.username === connection.username) return false;
@@ -414,6 +424,9 @@ async function dispatch(event, connection, binding, options, signal) {
     },
     idempotencyKey: dispatchKey(binding, event.id),
   };
+  // An edit changes a message the handler may already have acted on; say so plainly (ADR 0052).
+  if (event.type === "message.edited")
+    envelope.notice = `Message ${message.id} from ${message.username} was edited at ${message.editedAt}. Its new text is in message.text; it replaces what you read before.`;
   for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
     try {
       await runHandler(options.command, envelope, connection, options.handlerTimeoutMs, signal);
@@ -480,6 +493,7 @@ export async function run(options, signal = new AbortController().signal, env = 
           channel: binding.channel,
           limit: "100",
           wait: String(options.wait),
+          include: "edits",
         });
         const page = await request(connection, `/api/tenants/${connection.tenant}/events?${params}`, signal);
         const events = validatePage(page, binding, checkpoint.after);

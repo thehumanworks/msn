@@ -115,6 +115,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         Command::Start {
             channel,
             after,
+            edits_after,
             limit,
             max_bytes,
         } => {
@@ -122,6 +123,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             let after = after
+                .as_deref()
+                .map(|v| parse_int(v, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let edits_after = edits_after
                 .as_deref()
                 .map(|v| parse_int(v, MAX_SAFE_INTEGER))
                 .transpose()?;
@@ -140,6 +145,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 cli.username.as_deref(),
                 cli.reader.as_deref(),
                 after,
+                edits_after,
                 limit,
                 budget,
             )
@@ -608,6 +614,21 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             &kind,
             false,
         ),
+        Command::Edit {
+            channel,
+            message_id,
+            text,
+        } => edit(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &channel,
+            &message_id,
+            &text,
+        ),
         Command::Unreact {
             channel,
             message_id,
@@ -757,11 +778,16 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             after,
             limit,
             max_bytes,
+            edits_after,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             let after = after
+                .as_deref()
+                .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let edits_after = edits_after
                 .as_deref()
                 .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
                 .transpose()?;
@@ -777,7 +803,16 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                     "max-bytes must be an integer from 1024 to 262144.",
                 ));
             }
-            catchup(&url, &tenant, &token, channel, after, limit, max_bytes)
+            catchup(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                after,
+                edits_after,
+                limit,
+                max_bytes,
+            )
         }
         Command::Export {
             channel,
@@ -1310,6 +1345,30 @@ fn label(
     finish(&response)
 }
 
+/// Replaces the text of a message the caller sent (ADR 0052). Prints `{message, changed}`.
+/// `who` is the global `--tenant`, `--token` and `--username` options.
+fn edit(
+    who: [Option<&str>; 3],
+    url: &Url,
+    channel: &str,
+    message_id: &str,
+    text: &str,
+) -> Result<(), CliError> {
+    let id = parse_message_id(message_id)?;
+    let text = read_text(text)?;
+    let [tenant, token, username] = who;
+    let tenant = require_tenant(tenant)?;
+    let token = require_token(token, "MSN_WORKSPACE_TOKEN")?;
+    let channel = slug(channel)?;
+    let username = identity::resolve_username(url, &tenant, &token, username)?;
+    finish(&MsnClient::new(url)?.send_optional_json(
+        "PATCH",
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}"),
+        &token,
+        Some(&json!({ "username": username, "text": text })),
+    )?)
+}
+
 /// Adds or removes one reaction (ADR 0047) as this key's name, or `--username` when unbound.
 /// Both directions are idempotent; the result says whether anything `changed`.
 /// `who` is the global `--tenant`, `--token` and `--username` options.
@@ -1575,18 +1634,18 @@ fn show_snapshot(
     )?)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn catchup(
     url: &Url,
     tenant: &str,
     token: &str,
     channel: &str,
     after: Option<u64>,
+    edits_after: Option<u64>,
     limit: u64,
     max_bytes: u64,
 ) -> Result<(), CliError> {
-    let continuation = after
-        .map(|value| format!("&after={value}"))
-        .unwrap_or_default();
+    let continuation = agent::catchup_query(after, edits_after.map(Some));
     finish(&MsnClient::new(url)?.get(
         &format!(
             "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}"

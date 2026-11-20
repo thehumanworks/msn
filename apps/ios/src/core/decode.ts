@@ -123,6 +123,10 @@ export function decodeMessage(raw: unknown): Message {
     const reactions = decodeReactions(m.reactions);
     if (Object.keys(reactions).length) message.reactions = reactions;
   }
+  if (m.editedAt !== undefined) {
+    if (typeof m.editedAt !== "string") bad("message");
+    message.editedAt = m.editedAt;
+  }
   return message;
 }
 
@@ -154,6 +158,18 @@ export function decodeReactionPage(raw: unknown): {
   }
   if (page.hasMore && !safeInt(page.nextAfter, 1)) bad("reaction page");
   return { reactions, nextAfter: page.hasMore ? (page.nextAfter as number) : null };
+}
+
+/** GET …/edits (ADR 0052): edited messages, oldest edit first, and the cursor to ask from next. */
+export function decodeEditPage(raw: unknown): { edits: Message[]; editCursor: number; hasMore: boolean } {
+  const page = obj(raw, "edit page");
+  if (!Array.isArray(page.edits) || !safeInt(page.editCursor, 0) || typeof page.hasMore !== "boolean")
+    bad("edit page");
+  return {
+    edits: (page.edits as unknown[]).map(decodeMessage),
+    editCursor: page.editCursor as number,
+    hasMore: page.hasMore as boolean,
+  };
 }
 
 /** Messages must be strictly increasing and strictly after `after`, matching the cursor rules. */

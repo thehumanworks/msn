@@ -39,6 +39,8 @@ import {
   labelFilters,
   MAX_ATTACHMENT_BYTES,
   MAX_LABELS,
+  type MessageEdit,
+  messageEdit,
   newToken,
   optionalBody,
   labels as parseLabels,
@@ -84,6 +86,8 @@ export type Message = {
   attachments?: Attachment[];
   /** Who reacted, by kind (ADR 0047); absent from JSON when nobody has. */
   reactions?: Reactions;
+  /** When the sender last edited the text (ADR 0052); absent from JSON when never edited. */
+  editedAt?: string;
 };
 /** Attachment metadata on a message; the bytes come from the per-message download route. */
 export type Attachment = { index: number; id: string; name: string; mediaType: string; bytes: number };
@@ -100,9 +104,10 @@ type MessageRow = {
   correlationId: string | null;
   recipient: string | null;
   personaId: string | null;
+  editedAt: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -170,7 +175,11 @@ type InviteRow = {
 const MAX_SNAPSHOTS = 1000;
 // Exact upper bound: every message can be created and later deleted, every channel and every
 // snapshot emits one event. Fail-closed capacity, never reached while other quotas hold.
-const MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES;
+/** Lifetime message edits per workspace (ADR 0052); each writes one `message.edited` event. */
+export const MAX_EDITS = 100000;
+/** Edited earlier messages returned by one catch-up page (ADR 0052). */
+const CATCHUP_EDITS = 20;
+const MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES + MAX_EDITS;
 const SNAPSHOT_COLUMNS =
   "channel, version, username, text, coversThrough, historyRevision, createdAt, invalidated";
 type SnapshotRow = {
@@ -193,6 +202,7 @@ export type EventType =
   | "message.created"
   | "message.deleted"
   | "message.labeled"
+  | "message.edited"
   | "snapshot.published";
 export type CoordinationEvent = {
   id: number;
@@ -212,6 +222,9 @@ type EventRow = {
   createdAt: string;
 };
 const EVENT_COLUMNS = "id, channel, type, resourceId, historyRevision, createdAt";
+/** Event types a client opted in to; older decoders reject types they do not know. */
+type EventInclude = { labels: boolean; edits: boolean };
+const NO_EXTRA_EVENTS: EventInclude = { labels: false, edits: false };
 function toEvent(row: EventRow, tenant: string): CoordinationEvent {
   return { ...row, tenant };
 }
@@ -274,7 +287,7 @@ function processingFence(url: URL): ProcessingFence | null {
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
-  const { replyTo, correlationId, recipient, personaId, ...rest } = row;
+  const { replyTo, correlationId, recipient, personaId, editedAt, ...rest } = row;
   return {
     ...rest,
     tenant,
@@ -282,6 +295,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(correlationId === null ? {} : { correlationId }),
     ...(recipient === null ? {} : { to: recipient }),
     ...(personaId == null ? {} : { personaId }),
+    ...(editedAt == null ? {} : { editedAt }),
   };
 }
 
@@ -465,6 +479,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Stored reactions (ADR 0047), for the workspace cap. The table is new with it, so 0 is
         // exact for every existing database. Additive, so no schema_version step.
         ["usage", "reactions", "INTEGER NOT NULL DEFAULT 0"],
+        // Message edits (ADR 0052): NULL means never edited. editSeq orders edits across the
+        // workspace for catch-up; usage.edits counts them for the cap. Additive, so no
+        // schema_version step: every existing message reads back unedited.
+        ["messages", "editedAt", "TEXT"],
+        ["messages", "editSeq", "INTEGER"],
+        ["usage", "edits", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
         if (
           !ctx.storage.sql
@@ -476,6 +496,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       }
       // After the column loop: restored databases gain messages.personaId first. Serves lastActedAt.
       ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS persona_messages ON messages(channel, personaId, id)");
+      // After the column loop too. Only edited messages are indexed; serves catch-up's edits.
+      ctx.storage.sql.exec(
+        "CREATE INDEX IF NOT EXISTS message_edits ON messages(channel, editSeq) WHERE editSeq IS NOT NULL",
+      );
       if (version === null) {
         for (let applied = 1; applied <= SCHEMA_VERSION; applied++)
           ctx.storage.sql.exec("INSERT INTO schema_version VALUES (?)", applied);
@@ -1669,11 +1693,21 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * `labels` opts in to `message.labeled` events. Clients built before ADR 0032 reject unknown
-   * event types, so they never receive one unless they ask.
+   * `include` opts in to `message.labeled` (ADR 0032) and `message.edited` (ADR 0052) events.
+   * Clients built before them reject unknown event types, so they never receive one unless they ask.
    */
-  private eventsPage(tenant: string, channel: string | null, after: number, limit: number, labels = false) {
-    const types = labels ? "" : " AND type != 'message.labeled'";
+  private eventsPage(
+    tenant: string,
+    channel: string | null,
+    after: number,
+    limit: number,
+    include: EventInclude = NO_EXTRA_EVENTS,
+  ) {
+    const hidden = [
+      ...(include.labels ? [] : ["'message.labeled'"]),
+      ...(include.edits ? [] : ["'message.edited'"]),
+    ];
+    const types = hidden.length ? ` AND type NOT IN (${hidden.join(", ")})` : "";
     const rows = (
       channel === null
         ? this.ctx.storage.sql.exec<EventRow>(
@@ -1706,9 +1740,9 @@ export class MsnDurableObject extends DurableObject<Env> {
     limit: number,
     wait: number,
     listener: string | null = null,
-    labels = false,
+    include: EventInclude = NO_EXTRA_EVENTS,
   ): Promise<Response> | Response {
-    const page = this.eventsPage(tenant, channel, after, limit, labels);
+    const page = this.eventsPage(tenant, channel, after, limit, include);
     // A catch-up read (wait=0) is not listening; a long poll that returns at once still is.
     const key = listener && channel && wait ? JSON.stringify([channel, listener]) : null;
     if (key && channel && listener && page.events.length) this.touchListener(key, channel, listener, 0);
@@ -1732,7 +1766,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (finished) return;
         try {
           this.authorize(hash); // Rotation and revocation abort already-pending polls, too.
-          const next = this.eventsPage(tenant, channel, after, limit, labels);
+          const next = this.eventsPage(tenant, channel, after, limit, include);
           finished = true;
           cleanup();
           resolve(
@@ -1755,7 +1789,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             finish();
             return;
           }
-          if (this.eventsPage(tenant, channel, after, limit, labels).events.length) finish();
+          if (this.eventsPage(tenant, channel, after, limit, include).events.length) finish();
         },
       };
       const abort = () => finish(true);
@@ -1976,6 +2010,182 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
+   * Replaces a message's text (ADR 0052). Only its sender may: the name must be the message's
+   * author, a bound key edits only as its name, and a board's shared credential only as the persona
+   * that sent it. The id, createdAt and everything keyed by id stay, so order, read and processing
+   * cursors, receipts, unread counts and since-you-left never move. Writes one `message.edited`
+   * event, which the events feed returns only to clients that ask for it.
+   */
+  private editMessage(
+    tenant: string,
+    channel: string,
+    id: number,
+    edit: MessageEdit,
+    capability: TenantRow,
+  ): Response {
+    this.requireBoundName(capability, edit.username);
+    const result = this.ctx.storage.transactionSync(() => {
+      // Rechecked inside the write: an archive that lands while the body was read still wins.
+      this.requireActive(channel);
+      const row = this.ctx.storage.sql
+        .exec<MessageRow & { deleted: number; bytes: number }>(
+          `SELECT ${MESSAGE_COLUMNS}, deleted, bytes FROM messages WHERE channel = ? AND id = ?`,
+          channel,
+          id,
+        )
+        .toArray()[0];
+      if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+      if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+      // GitHub notices (ADR 0036) mirror GitHub; nobody here wrote them.
+      if (row.username === GITHUB_SENDER)
+        throw new HttpError(403, "github_message", "Messages from GitHub cannot be edited.");
+      if (row.username !== edit.username)
+        throw new HttpError(403, "not_sender", "Only the sender can edit a message.");
+      if (capability.shared_channel) {
+        const persona = this.ctx.storage.sql
+          .exec<{ id: string }>(
+            "SELECT id FROM personas WHERE channel = ? AND displayName = ?",
+            channel,
+            edit.username,
+          )
+          .toArray()[0];
+        if (!persona)
+          throw new HttpError(
+            400,
+            "persona_required",
+            "Register your persona with msn persona add before editing.",
+          );
+        if (row.personaId !== null && row.personaId !== persona.id)
+          throw new HttpError(403, "not_sender", "Only the sender can edit a message.");
+      }
+      // JSON payloads stay JSON (ADR 0004); the content type never changes on an edit.
+      contentType(row.contentType, edit.text);
+      // Two editors on one message: the later save names the version it started from.
+      if (edit.ifEditedAt !== undefined && edit.ifEditedAt !== row.editedAt)
+        throw new HttpError(
+          409,
+          "edit_conflict",
+          "This message changed since you started editing. Reload it and edit again.",
+        );
+      const { deleted: _deleted, bytes: oldBytes, ...current } = row;
+      if (row.text === edit.text)
+        return { message: this.withLabels(channel, [toMessage(current, tenant)])[0], changed: false };
+      const usage = this.ctx.storage.sql
+        .exec<{ bytes: number; edits: number }>("SELECT bytes, edits FROM usage")
+        .one();
+      if (usage.edits >= MAX_EDITS)
+        throw new HttpError(
+          409,
+          "edit_quota",
+          "Edit limit reached (100,000 lifetime edits). Contact the administrator.",
+        );
+      const bytes = new TextEncoder().encode(row.username + edit.text).length;
+      if (usage.bytes - oldBytes + bytes > MAX_CONTENT_BYTES)
+        throw new HttpError(
+          409,
+          "storage_quota",
+          "Tenant quota reached (100,000 lifetime messages or 128 MiB active content). Contact the administrator.",
+        );
+      const seq = usage.edits + 1;
+      const updated = this.ctx.storage.sql
+        .exec<MessageRow>(
+          `UPDATE messages SET text = ?, bytes = ?, editedAt = ?, editSeq = ? WHERE id = ? RETURNING ${MESSAGE_COLUMNS}`,
+          edit.text,
+          bytes,
+          new Date().toISOString(),
+          seq,
+          id,
+        )
+        .one();
+      this.ctx.storage.sql.exec(
+        "UPDATE usage SET bytes = bytes - ? + ?, edits = ? WHERE singleton = 1",
+        oldBytes,
+        bytes,
+        seq,
+      );
+      // Search finds the new words and stops finding the old ones (ADR 0037).
+      this.ctx.storage.sql.exec("DELETE FROM message_search WHERE rowid = ?", id);
+      this.ctx.storage.sql.exec("INSERT INTO message_search(rowid, text) VALUES (?, ?)", id, edit.text);
+      this.insertEvent(channel, "message.edited", id);
+      return { message: this.withLabels(channel, [toMessage(updated, tenant)])[0], changed: true };
+    });
+    // An edit adds nothing after anyone's cursor. Message polls recheck, and only those that asked
+    // for edits (editsAfter) answer; the rest keep waiting.
+    if (result.changed) {
+      this.wakeEvents(channel);
+      for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
+    }
+    return json(result);
+  }
+
+  /**
+   * `GET …/edits?after=N` (ADR 0052): messages edited after edit cursor N, oldest edit first, 100
+   * per page, so a client refreshes the messages it shows. Without `after` it only returns the
+   * board's current editCursor to start from.
+   */
+  private editPage(tenant: string, channel: string, params: URLSearchParams): Response {
+    for (const name of params.keys())
+      if (name !== "after") throw new HttpError(400, "invalid_query", `Unknown parameter ${name}.`);
+    if (!params.has("after"))
+      return json({ edits: [], editCursor: this.editCursor(channel), hasMore: false });
+    const after = integer(params.get("after"), 0, Number.MAX_SAFE_INTEGER);
+    const page = this.editedSince(tenant, channel, after, Number.MAX_SAFE_INTEGER, 100);
+    return json({
+      edits: page.messages,
+      editCursor: page.hasMore ? (page.seqs.at(-1) ?? after) : Math.max(this.editCursor(channel), after),
+      hasMore: page.hasMore,
+    });
+  }
+
+  /** Board-wide edit cursor: the newest edit sequence among this board's messages (ADR 0052). */
+  private editCursor(channel: string): number {
+    return (
+      this.ctx.storage.sql
+        .exec<{ seq: number | null }>(
+          "SELECT MAX(editSeq) AS seq FROM messages WHERE channel = ? AND editSeq IS NOT NULL",
+          channel,
+        )
+        .one().seq ?? 0
+    );
+  }
+
+  /**
+   * `editsAfter` on a catch-up or message page (ADR 0052): the reader's edit cursor, `latest` for
+   * the board's current one (a new reader starts there and gets no old edits), or null when not
+   * asked.
+   */
+  private editsAfterParam(url: URL, channel: string): number | null {
+    if (!url.searchParams.has("editsAfter")) return null;
+    const raw = url.searchParams.get("editsAfter");
+    if (raw === "latest") return this.editCursor(channel);
+    return integer(raw, 0, Number.MAX_SAFE_INTEGER);
+  }
+
+  /** Earlier messages (id ≤ through) edited after `editsAfter`, oldest edit first (ADR 0052). */
+  private editedSince(tenant: string, channel: string, editsAfter: number, through: number, limit: number) {
+    const rows = this.ctx.storage.sql
+      .exec<MessageRow & { editSeq: number }>(
+        `SELECT ${MESSAGE_COLUMNS}, editSeq FROM messages INDEXED BY message_edits
+         WHERE channel = ? AND editSeq IS NOT NULL AND editSeq > ? AND id <= ? AND deleted = 0
+         ORDER BY editSeq LIMIT ?`,
+        channel,
+        editsAfter,
+        through,
+        limit + 1,
+      )
+      .toArray();
+    const page = rows.slice(0, limit);
+    return {
+      messages: this.withSparse(
+        channel,
+        page.map(({ editSeq: _seq, ...row }) => toMessage(row, tenant)),
+      ),
+      seqs: page.map((row) => row.editSeq),
+      hasMore: rows.length > limit,
+    };
+  }
+
+  /**
    * `GET …/reactions?after=&before=`: current reactions for messages in that id range, so a client
    * can refresh the messages it shows without re-reading them. At most 500 messages per page.
    */
@@ -1990,6 +2200,29 @@ export class MsnDurableObject extends DurableObject<Env> {
       hasMore: found.size > limit,
       ...(found.size > limit ? { nextAfter: entries.at(-1)?.id } : {}),
     });
+  }
+
+  /**
+   * withLabels for messages that can be far apart in any order (search matches, catch-up edits):
+   * labels and reactions by id; attachments (ADR 0035) by id range, which works in any order.
+   */
+  private withSparse(channel: string, messages: Message[]): Message[] {
+    if (messages.length) {
+      const byId = new Map(messages.map((message) => [message.id, message]));
+      for (const row of this.ctx.storage.sql
+        .exec<{ messageId: number; key: string; value: string }>(
+          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${messages
+            .map(() => "?")
+            .join(", ")}) ORDER BY messageId, key`,
+          channel,
+          ...byId.keys(),
+        )
+        .toArray()) {
+        const message = byId.get(row.messageId);
+        if (message) message.labels = { ...message.labels, [row.key]: row.value };
+      }
+    }
+    return this.withReactions(channel, this.withAttachments(channel, messages), true);
   }
 
   private labelsOnly(channel: string, messages: Message[]): Message[] {
@@ -2110,18 +2343,41 @@ export class MsnDurableObject extends DurableObject<Env> {
     filters: LabelFilter[] = [],
     before = Number.MAX_SAFE_INTEGER,
     fence: ProcessingFence | null = null,
+    editsAfter: number | null = null,
   ): Promise<Response> | Response {
-    const respond = (page: ReturnType<typeof this.page>) => {
+    // Edits to messages at or before `after` since the reader's edit cursor (ADR 0052). Opt-in,
+    // so older clients keep today's page shape. They end a wait like a new message does.
+    const edits = () => {
+      if (editsAfter === null) return null;
+      const found = this.editedSince(tenant, channel, editsAfter, after, CATCHUP_EDITS);
+      return {
+        edited: found.messages,
+        editCursor: found.hasMore
+          ? (found.seqs.at(-1) ?? editsAfter)
+          : Math.max(this.editCursor(channel), editsAfter),
+        editsHasMore: found.hasMore,
+      };
+    };
+    const ready = (page: ReturnType<typeof this.page>, edited: ReturnType<typeof edits>) =>
+      page.messages.length > 0 || (edited?.edited.length ?? 0) > 0;
+    const respond = (page: ReturnType<typeof this.page>, edited: ReturnType<typeof edits>) => {
       // Archived boards say so on every page, so a waiting client can stop instead of polling
       // forever for messages that cannot arrive (ADR 0046). Absent on active boards.
       const archived = this.archivedAt(channel) ? { archived: true } : {};
-      if (!fence) return json({ ...page, ...archived });
+      if (!fence) return json({ ...page, ...archived, ...(edited ?? {}) });
       // Recheck at reply time: a takeover during a long poll fences this reply, too.
       this.requireGeneration(channel, fence.reader, fence.generation);
-      return json({ ...page, ...archived, committedThrough: after, generation: fence.generation });
+      return json({
+        ...page,
+        ...archived,
+        ...(edited ?? {}),
+        committedThrough: after,
+        generation: fence.generation,
+      });
     };
     const page = this.page(tenant, channel, after, limit, filters, before);
-    if (page.messages.length || !wait) return respond(page);
+    const edited = edits();
+    if (ready(page, edited) || !wait) return respond(page, edited);
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
     // No await between SELECT and registration: sends cannot fall into a lost-wakeup gap.
@@ -2137,12 +2393,13 @@ export class MsnDurableObject extends DurableObject<Env> {
         try {
           this.authorize(hash); // Rotation revokes already-pending polls, too.
           const next = this.page(tenant, channel, after, limit, filters, before);
+          const nextEdits = edits();
           finished = true;
           cleanup();
           resolve(
             aborted
               ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499)
-              : respond(next),
+              : respond(next, nextEdits),
           );
         } catch (error) {
           finished = true;
@@ -2161,7 +2418,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             finish();
             return;
           }
-          if (this.page(tenant, channel, after, limit, filters, before).messages.length) finish();
+          if (ready(this.page(tenant, channel, after, limit, filters, before), edits())) finish();
         },
       };
       const abort = () => finish(true);
@@ -2616,25 +2873,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           )
           .toArray();
     const messages = rows.slice(0, limit).map((row) => toMessage(row, tenant));
-    if (messages.length) {
-      // Matches can be far apart, so read labels by id rather than by range as withLabels does.
-      const byId = new Map(messages.map((message) => [message.id, message]));
-      for (const row of this.ctx.storage.sql
-        .exec<{ messageId: number; key: string; value: string }>(
-          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${messages
-            .map(() => "?")
-            .join(", ")}) ORDER BY messageId, key`,
-          channel,
-          ...byId.keys(),
-        )
-        .toArray()) {
-        const message = byId.get(row.messageId);
-        if (message) message.labels = { ...message.labels, [row.key]: row.value };
-      }
-    }
     return json({
-      // Attachments (ADR 0035) read by id range, which works in any order.
-      messages: this.withReactions(channel, this.withAttachments(channel, messages), true),
+      messages: this.withSparse(channel, messages),
       hasMore: rows.length > limit,
       ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
       complete: this.searchIndexed(),
@@ -2903,8 +3143,36 @@ export class MsnDurableObject extends DurableObject<Env> {
     // Pinned messages lead the first page only (ADR 0038), like the snapshot; a continuation
     // already had them. They never move nextCursor.
     const pinned = url.searchParams.has("after") ? null : this.pinned(tenant, channel);
-    const result = {
+    // Edits to messages the reader already has (ADR 0052), opt-in with the edit cursor from the
+    // previous page so older clients keep today's shape. Messages after the cursor carry their
+    // current text anyway.
+    const editsAfter = this.editsAfterParam(url, channel);
+    const edits =
+      editsAfter === null ? null : this.editedSince(tenant, channel, editsAfter, after, CATCHUP_EDITS);
+    const boardEdits = editsAfter === null ? 0 : this.editCursor(channel);
+    const editFields = (shown: number) =>
+      edits
+        ? {
+            edited: edits.messages.slice(0, shown),
+            editCursor:
+              shown < edits.messages.length || edits.hasMore
+                ? (edits.seqs[shown - 1] ?? editsAfter ?? 0)
+                : Math.max(boardEdits, editsAfter ?? 0),
+            editsHasMore: shown < edits.messages.length || edits.hasMore,
+          }
+        : {};
+    const result: Record<string, unknown> & {
+      messages: Message[];
+      nextCursor: number;
+      hasMore: boolean;
+      incomplete: boolean;
+      byteLimitReached: boolean;
+      pinned?: Message[];
+      pinnedOmitted?: number;
+      edited?: Message[];
+    } = {
       ...(pinned ? { pinned, pinnedOmitted: 0 } : {}),
+      ...editFields(edits?.messages.length ?? 0),
       snapshot: snapshot ? toSnapshot(snapshot, tenant) : null,
       snapshotVersion: latest?.version ?? 0,
       historyRevision: this.historyRevision(channel),
@@ -2926,6 +3194,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     const minimum = {
       ...result,
       ...(pinned ? { pinned: [], pinnedOmitted: pinned.length } : {}),
+      ...editFields(0),
       messages: messages.slice(0, 1),
       nextCursor: messages[0]?.id ?? after,
       hasMore: pendingMessages > 1,
@@ -2939,21 +3208,40 @@ export class MsnDurableObject extends DurableObject<Env> {
     let contentBytes = messageSizes.reduce((sum, bytes) => sum + bytes, 0);
     const pinSizes = (pinned ?? []).map((message) => encoder.encode(JSON.stringify(message)).length);
     let pinBytes = pinSizes.reduce((sum, bytes) => sum + bytes, 0);
+    const editSizes = (edits?.messages ?? []).map(
+      (message) => encoder.encode(JSON.stringify(message)).length,
+    );
+    let editBytes = editSizes.reduce((sum, bytes) => sum + bytes, 0);
     const size = () =>
-      encoder.encode(JSON.stringify({ ...result, ...(pinned ? { pinned: [] } : {}), messages: [] })).length +
+      encoder.encode(
+        JSON.stringify({
+          ...result,
+          ...(pinned ? { pinned: [] } : {}),
+          ...(edits ? { edited: [] } : {}),
+          messages: [],
+        }),
+      ).length +
       contentBytes +
       Math.max(0, result.messages.length - 1) +
       pinBytes +
-      Math.max(0, (result.pinned?.length ?? 0) - 1);
+      Math.max(0, (result.pinned?.length ?? 0) - 1) +
+      editBytes +
+      Math.max(0, (result.edited?.length ?? 0) - 1);
     const dropMessage = () => {
       result.messages.pop();
       contentBytes -= messageSizes.pop() ?? 0;
       result.nextCursor = result.messages.at(-1)?.id ?? after;
       result.hasMore = result.incomplete = result.byteLimitReached = true;
     };
-    // Shed tail messages first (they stay readable with after=nextCursor), down to one; then
-    // the newest pins; then the last message.
+    // Shed tail messages first (they stay readable with after=nextCursor), down to one; then the
+    // newest edits (they stay readable with editsAfter=editCursor); then the newest pins; then the
+    // last message.
     while (size() > maxBytes && result.messages.length > 1) dropMessage();
+    while (size() > maxBytes && result.edited?.length) {
+      editBytes -= editSizes[result.edited.length - 1] ?? 0;
+      Object.assign(result, editFields(result.edited.length - 1));
+      result.byteLimitReached = true;
+    }
     while (size() > maxBytes && result.pinned?.length) {
       result.pinned.pop();
       pinBytes -= pinSizes.pop() ?? 0;
@@ -3584,6 +3872,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "reactions"
             ? reactionChange(await body(request))
             : null;
+        const edit =
+          request.method === "PATCH" && rest.length === 4 && rest[0] === "channels" && rest[2] === "messages"
+            ? messageEdit(await body(request))
+            : null;
         const snapshotInput =
           request.method === "POST" && rest.length === 3 && rest[2] === "snapshots"
             ? await body(request)
@@ -3614,7 +3906,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             throw new HttpError(
               400,
               "persona_required",
-              "Register your persona with msn persona add before sending.",
+              `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${rest[1]}/personas/ID with {"displayName":${JSON.stringify(username)}} (CLI: msn persona add). Steps: GET /api.`,
             );
           personaId = persona.id;
         }
@@ -3642,7 +3934,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             throw new HttpError(
               400,
               "persona_required",
-              "Register your persona with msn persona add before reacting.",
+              `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${rest[1]}/personas/ID with {"displayName":${JSON.stringify(reaction.username)}} (CLI: msn persona add). Steps: GET /api.`,
             );
         }
         // Only signed GitHub deliveries post as `github` (ADR 0036).
@@ -3700,20 +3992,17 @@ export class MsnDurableObject extends DurableObject<Env> {
           const wait = integer(url.searchParams.get("wait"), 0, 25);
           if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
           const listener = this.listenerPersona(capability, url.searchParams.get("listener"));
-          const include = url.searchParams.get("include");
-          if (include !== null && include !== "labels")
-            throw new HttpError(400, "invalid_query", "include accepts only labels.");
-          return await this.eventPoll(
-            request,
-            hash,
-            tenant,
-            effectiveChannel,
-            after,
-            limit,
-            wait,
-            listener,
-            include === "labels",
-          );
+          // `include=labels,edits` (comma-separated or repeated) opts in to the newer event types.
+          const include = url.searchParams
+            .getAll("include")
+            .flatMap((value) => value.split(","))
+            .filter(Boolean);
+          if (include.some((value) => value !== "labels" && value !== "edits"))
+            throw new HttpError(400, "invalid_query", "include accepts labels and edits.");
+          return await this.eventPoll(request, hash, tenant, effectiveChannel, after, limit, wait, listener, {
+            labels: include.includes("labels"),
+            edits: include.includes("edits"),
+          });
         }
         if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")
           return json(this.unreadCounts(url, capability));
@@ -3843,6 +4132,14 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.requireChannel(channel);
             return this.react(tenant, channel, messageId(rest[3]), reaction);
           }
+          if (edit) {
+            this.requireChannel(channel);
+            return this.editMessage(tenant, channel, messageId(rest[3]), edit, capability);
+          }
+          if (rest.length === 3 && rest[2] === "edits" && request.method === "GET") {
+            this.requireChannel(channel);
+            return this.editPage(tenant, channel, url.searchParams);
+          }
           if (rest.length === 3 && rest[2] === "reactions" && request.method === "GET") {
             this.requireChannel(channel);
             return this.reactionPage(channel, url.searchParams);
@@ -3927,6 +4224,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                   [],
                   Number.MAX_SAFE_INTEGER,
                   fence,
+                  this.editsAfterParam(url, channel),
                 );
               }
               const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
@@ -3935,7 +4233,19 @@ export class MsnDurableObject extends DurableObject<Env> {
               const before = url.searchParams.has("before")
                 ? integer(url.searchParams.get("before"), 0, Number.MAX_SAFE_INTEGER)
                 : Number.MAX_SAFE_INTEGER;
-              return await this.poll(request, hash, tenant, channel, after, limit, wait, filters, before);
+              return await this.poll(
+                request,
+                hash,
+                tenant,
+                channel,
+                after,
+                limit,
+                wait,
+                filters,
+                before,
+                null,
+                this.editsAfterParam(url, channel),
+              );
             }
           }
         }

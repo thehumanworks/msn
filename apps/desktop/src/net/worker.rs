@@ -102,6 +102,24 @@ pub enum Command {
         channel: String,
         after: u64,
     },
+    /// Messages edited after `after` on the open channel (ADR 0052); `None` learns the cursor.
+    LoadEdits {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        after: Option<u64>,
+    },
+    /// Replaces the text of one of `username`'s messages (ADR 0052).
+    EditMessage {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        id: u64,
+        text: String,
+        /// The `editedAt` the editor started from; None for a never-edited message.
+        base: Option<String>,
+    },
     /// Adds (`remove: false`) or removes one reaction as `username` (ADR 0047).
     React {
         generation: u64,
@@ -181,6 +199,8 @@ impl Command {
             | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
+            | Command::LoadEdits { generation, .. }
+            | Command::EditMessage { generation, .. }
             | Command::SendMessage { generation, .. }
             | Command::SendTaskEvent { generation, .. }
             | Command::Search { generation, .. }
@@ -290,6 +310,21 @@ pub enum UiEvent {
         channel: String,
         after: u64,
         reactions: Vec<(u64, Value)>,
+    },
+    /// Messages edited since the last edit cursor, and the cursor to ask from next (ADR 0052).
+    Edits {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        messages: Vec<Value>,
+        edit_cursor: u64,
+    },
+    /// The user's own message after their edit (ADR 0052).
+    Edited {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        message: Value,
     },
     /// One message's reactions after the user's own change (`Null` when none are left).
     Reacted {
@@ -750,6 +785,73 @@ fn handle_command(
                 ),
             }
         }
+        Command::LoadEdits {
+            channel_generation,
+            channel,
+            after,
+            ..
+        } => match client_ops::fetch_edits(&cc.client, &cc.tenant, &cc.token, &channel, after) {
+            Ok((messages, edit_cursor)) => emit(
+                tx,
+                wake,
+                UiEvent::Edits {
+                    generation,
+                    channel_generation,
+                    channel,
+                    messages,
+                    edit_cursor,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "edits",
+                err,
+                false,
+                None,
+            ),
+        },
+        Command::EditMessage {
+            channel_generation,
+            channel,
+            username,
+            id,
+            text,
+            base,
+            ..
+        } => match client_ops::edit_message(
+            &cc.client,
+            &cc.tenant,
+            &cc.token,
+            &channel,
+            &username,
+            id,
+            &text,
+            base.as_deref(),
+        ) {
+            Ok(message) => emit(
+                tx,
+                wake,
+                UiEvent::Edited {
+                    generation,
+                    channel_generation,
+                    channel,
+                    message,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "edit",
+                err,
+                true,
+                None,
+            ),
+        },
         Command::React {
             channel_generation,
             channel,
