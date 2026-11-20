@@ -2,6 +2,7 @@ import { acquire, invitation, savePassword } from "./access.js";
 import { renderMarkdown } from "./markdown.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
+import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1310,6 +1311,7 @@ async function poll(live = false) {
       state.hasMore = data.hasMore;
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
       if (Date.now() - (state.pinsAt ?? 0) > PIN_REFRESH_MS) void loadPins(connection, selected);
+      if (Date.now() - (connection.unreadAt ?? 0) > UNREAD_REFRESH_MS) void loadUnread(connection);
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
       $("more").hidden = !data.hasMore;
@@ -1424,6 +1426,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("send").disabled = draft().sending;
   for (const button of $("channels").children)
     button.setAttribute("aria-current", String(button.dataset.channel === name));
+  if (session.unread) showUnread(session, session.unread);
   if (session.remember) storage.set(CHANNEL_KEY(session.tenant), name);
   view("chat");
   autosize();
@@ -1447,7 +1450,14 @@ async function refreshChannels(connection = session) {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.channel = item.name;
-    button.textContent = item.archivedAt ? `# ${item.name} · archived` : `# ${item.name}`;
+    const label = document.createElement("span");
+    label.className = "channel-name";
+    label.textContent = item.archivedAt ? `# ${item.name} · archived` : `# ${item.name}`;
+    const counts = document.createElement("span");
+    counts.className = "unread";
+    counts.hidden = true;
+    counts.setAttribute("aria-hidden", "true");
+    button.append(label, counts);
     button.classList.toggle("archived-board", Boolean(item.archivedAt));
     if (item.archivedAt) archivedBoards.add(item.name);
     else archivedBoards.delete(item.name);
@@ -1466,7 +1476,69 @@ async function refreshChannels(connection = session) {
       : "No channels yet. Create the first one below.";
     $("channels").append(empty);
   }
+  connection.listed = channels.map((item) => item.name);
+  void loadUnread(connection);
   return channels;
+}
+
+/**
+ * Unread counts on the board list (ADR 0045), from the read marks this device already keeps.
+ * Runs when the list loads, when the page becomes visible, and at most every UNREAD_REFRESH_MS
+ * while a board is polling; nothing runs while the page is hidden.
+ */
+async function loadUnread(connection = session) {
+  if (!connection || document.visibilityState !== "visible") return;
+  const query = unreadQuery(connection.marks, connection.username, connection.listed ?? []);
+  connection.unreadAt = Date.now();
+  if (!query) return showUnread(connection, new Map());
+  try {
+    const data = await api(`/unread?${query}`, {}, connection);
+    if (session !== connection) return;
+    showUnread(connection, unreadByBoard(data, connection.marks, connection.username));
+  } catch {
+    // Counts are a hint; the list still works without them and the next refresh tries again.
+  }
+}
+
+function showUnread(connection, counts) {
+  connection.unread = counts;
+  for (const button of $("channels").querySelectorAll("button[data-channel]")) {
+    const name = button.dataset.channel;
+    // The open board is being read right now; its count would only lag behind the screen.
+    const entry =
+      name === channel && chatVisible()
+        ? null
+        : currentEntry(counts, connection.marks, connection.username, name);
+    const shown = badge(entry);
+    const box = button.querySelector(".unread");
+    if (!box) continue;
+    box.replaceChildren();
+    box.hidden = !shown;
+    button.classList.toggle("has-unread", Boolean(shown));
+    // The board's name stays the button's accessible name; the count is its description.
+    if (!shown) {
+      button.removeAttribute("aria-describedby");
+      box.removeAttribute("title");
+      continue;
+    }
+    const total = document.createElement("span");
+    total.className = "unread-count";
+    total.textContent = shown.count;
+    box.append(total);
+    if (shown.toYou) {
+      const mine = document.createElement("span");
+      mine.className = "unread-mine";
+      mine.textContent = `@${shown.toYou}`;
+      box.append(mine);
+    }
+    const spoken = document.createElement("span");
+    spoken.className = "sr-only";
+    spoken.id = `unread-${name}`;
+    spoken.textContent = shown.label;
+    box.append(spoken);
+    button.setAttribute("aria-describedby", spoken.id);
+    box.title = shown.label;
+  }
 }
 
 async function connect(connection, { initial = "", offerSave = false } = {}) {
@@ -2052,7 +2124,11 @@ $("live").addEventListener("change", () => {
     status("Live paused. Poll once when ready.");
   }
 });
-$("back").addEventListener("click", () => view("channels"));
+$("back").addEventListener("click", () => {
+  advanceMark();
+  view("channels");
+  if (session?.listed) void loadUnread(session);
+});
 $("refresh").addEventListener("click", async () => {
   const connection = session;
   try {
@@ -2112,6 +2188,11 @@ document.addEventListener("visibilitychange", () => {
   // Capture the mark first; then what is on screen now counts as seen (up to any ceiling).
   if (mark !== undefined) void loadSince(session, channel, state, mark);
   advanceMark();
+});
+// Coming back to the page refreshes the board list's counts (throttled like the poll refresh).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && session?.listed)
+    if (Date.now() - (session.unreadAt ?? 0) > UNREAD_REFRESH_MS / 4) void loadUnread(session);
 });
 // Closing or navigating away records the last position while the page is still visible.
 addEventListener("pagehide", () => advanceMark());

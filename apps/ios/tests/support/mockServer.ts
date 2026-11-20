@@ -365,6 +365,29 @@ export async function startMockServer(): Promise<MockServerHandle> {
       }
     }
 
+    // Unread counts (ADR 0045): the reader's own marks in, bounded counts out, nothing stored.
+    if (rest[0] === "unread" && rest.length === 1 && method === "GET") {
+      const me = url.searchParams.get("me") ?? "";
+      const unread = url.searchParams.getAll("mark").map((value) => {
+        const split = value.lastIndexOf(":");
+        const channel = value.slice(0, split);
+        const after = Number(value.slice(split + 1));
+        const rows = live(channel, after).slice(0, 100);
+        const others = rows.slice(0, 99).filter((m) => m.username !== me);
+        const self = me.trim().toLowerCase();
+        return {
+          channel,
+          after,
+          count: others.length,
+          toYou: others.filter((m) => m.to?.trim().toLowerCase() === self).length,
+          ...(rows.length > 99 ? { capped: true } : {}),
+        };
+      });
+      if (unread.some((u) => forbidden(u.channel)))
+        return json(res, 403, { error: { code: "channel_forbidden", message: "Not granted." } });
+      return json(res, 200, { unread, cap: 99 });
+    }
+
     if (rest[0] === "events" && rest.length === 1 && method === "GET") {
       const filter = url.searchParams.get("channel");
       if (scope && filter && filter !== scope) return json(res, 403, { error: { code: "channel_forbidden", message: "Conflicting filter." } });

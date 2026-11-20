@@ -57,6 +57,12 @@ pub enum Command {
     ListChannels {
         generation: u64,
     },
+    /// Unread counts above this computer's read marks (ADR 0045).
+    LoadUnread {
+        generation: u64,
+        me: String,
+        marks: Vec<(String, u64)>,
+    },
     CreateChannel {
         generation: u64,
         name: String,
@@ -143,6 +149,7 @@ impl Command {
         match self {
             Command::Connect { generation, .. }
             | Command::ListChannels { generation }
+            | Command::LoadUnread { generation, .. }
             | Command::CreateChannel { generation, .. }
             | Command::SetArchived { generation, .. }
             | Command::SyncChannel { generation, .. }
@@ -193,6 +200,11 @@ pub enum UiEvent {
         generation: u64,
         channel: String,
         archived: bool,
+    },
+    /// Counts are a hint: a failure only ends the request, it is not shown as an error.
+    Unread {
+        generation: u64,
+        counts: Option<Vec<crate::read_marks::Unread>>,
     },
     ChannelCreated {
         generation: u64,
@@ -532,6 +544,11 @@ fn handle_command(
                 ),
                 Err(err) => emit_error(tx, wake, generation, None, "archive", err, true, None),
             }
+        }
+        Command::LoadUnread { me, marks, .. } => {
+            let counts =
+                client_ops::fetch_unread(&cc.client, &cc.tenant, &cc.token, &me, &marks).ok();
+            emit(tx, wake, UiEvent::Unread { generation, counts })
         }
         Command::CreateChannel { name, .. } => {
             match client_ops::create_channel(&cc.client, &cc.tenant, &cc.token, &name) {
