@@ -1,7 +1,9 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import type { Message } from "../core/types.ts";
+import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
+import { threadLabel, type ParentState } from "../core/threads.ts";
 import { formatTime } from "./format.ts";
 import { colors, mono, radius, spacing } from "./theme.ts";
 import { Text } from "./ui.tsx";
@@ -12,6 +14,16 @@ type Props = {
   quoted: Message | undefined;
   selected: boolean;
   onReply: (message: Message) => void;
+  /** A reply shown inside an open thread (ADR 0041). */
+  nested?: boolean;
+  /** A thread root's folded replies. */
+  thread?: { replies: number; open: boolean; unseen: number };
+  onToggleThread?: (root: number) => void;
+  /** The parent of a reply whose parent is not loaded, once asked for. */
+  parent?: ParentState;
+  onLoadParent?: (id: number) => void;
+  /** Processed-by line from explicit commits only (ADR 0040), or null. */
+  receipts?: string | null;
 };
 
 function preview(text: string): string {
@@ -19,19 +31,59 @@ function preview(text: string): string {
   return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
 }
 
-function MessageRowImpl({ message, own, quoted, selected, onReply }: Props) {
+function quoteText(message: Message, quoted: Message | undefined, parent: ParentState | undefined): string {
+  if (quoted) return `${quoted.username}: ${preview(quoted.text)}`;
+  if (parent?.status === "loading") return `Loading message #${message.replyTo}…`;
+  if (parent?.status === "loaded") return `Message #${message.replyTo} is no longer available.`;
+  if (parent?.status === "error") return `Could not load #${message.replyTo}: ${parent.error} Tap to retry.`;
+  return `Reply to message #${message.replyTo}`;
+}
+
+function MessageRowImpl({
+  message,
+  own,
+  quoted,
+  selected,
+  onReply,
+  nested,
+  thread,
+  onToggleThread,
+  parent,
+  onLoadParent,
+  receipts = null,
+}: Props) {
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
   const who = own ? "You" : message.username;
+  const canLoadParent =
+    message.replyTo !== undefined &&
+    onLoadParent !== undefined &&
+    !quoted &&
+    parent?.status !== "loading" &&
+    parent?.status !== "loaded";
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(message.text)
       }`}
-      accessibilityHint="Double tap to reply"
+      accessibilityHint="Double tap to reply. Swipe up or down for more actions."
+      // VoiceOver reads the row as one element, so its inner controls are offered as actions.
+      accessibilityActions={[
+        { name: "activate", label: "Reply" },
+        ...(thread && onToggleThread
+          ? [{ name: "toggleThread", label: threadLabel(thread.replies, thread.open, thread.unseen) }]
+          : []),
+        ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
+      ]}
+      onAccessibilityAction={({ nativeEvent }) => {
+        if (nativeEvent.actionName === "activate") onReply(message);
+        else if (nativeEvent.actionName === "toggleThread") onToggleThread?.(message.id);
+        else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
+          onLoadParent?.(message.replyTo);
+      }}
       onPress={() => onReply(message)}
-      style={[styles.row, own ? styles.own : styles.other, selected && styles.selected]}
+      style={[styles.row, own ? styles.own : styles.other, nested && styles.nested, selected && styles.selected]}
     >
       <View style={styles.head}>
         <Text style={[styles.author, own && { color: colors.accent }]} numberOfLines={1}>
@@ -45,11 +97,25 @@ function MessageRowImpl({ message, own, quoted, selected, onReply }: Props) {
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
       </View>
       {message.replyTo !== undefined ? (
-        <View style={styles.quote}>
-          <Text style={styles.quoteText} numberOfLines={2}>
-            {quoted ? `${quoted.username}: ${preview(quoted.text)}` : `Reply to message #${message.replyTo}`}
-          </Text>
-        </View>
+        canLoadParent && onLoadParent ? (
+          <Pressable
+            accessibilityRole="link"
+            accessibilityHint="Loads the message this replies to"
+            onPress={() => onLoadParent(message.replyTo as number)}
+            style={styles.quote}
+            hitSlop={8}
+          >
+            <Text style={[styles.quoteText, styles.link]} numberOfLines={2}>
+              {quoteText(message, quoted, parent)}
+            </Text>
+          </Pressable>
+        ) : (
+          <View style={styles.quote}>
+            <Text style={styles.quoteText} numberOfLines={2}>
+              {quoteText(message, quoted, parent)}
+            </Text>
+          </View>
+        )
       ) : null}
       {task ? (
         <Text style={styles.body}>
@@ -65,6 +131,25 @@ function MessageRowImpl({ message, own, quoted, selected, onReply }: Props) {
           {message.text}
         </Text>
       )}
+      {receipts ? (
+        <Text
+          style={styles.receipts}
+          accessibilityLabel={`${receipts}. ${RECEIPTS_MEANING}`}
+        >
+          {receipts}
+        </Text>
+      ) : null}
+      {thread && onToggleThread ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: thread.open }}
+          onPress={() => onToggleThread(message.id)}
+          style={styles.toggle}
+          hitSlop={8}
+        >
+          <Text style={styles.toggleText}>{threadLabel(thread.replies, thread.open, thread.unseen)}</Text>
+        </Pressable>
+      ) : null}
     </Pressable>
   );
 }
@@ -89,4 +174,17 @@ const styles = StyleSheet.create({
   quote: { borderLeftWidth: 3, borderLeftColor: colors.border, paddingLeft: spacing.sm },
   quoteText: { color: colors.muted, fontSize: 13 },
   body: { fontSize: 16 },
+  nested: { marginLeft: spacing.lg, borderLeftWidth: 2, borderLeftColor: colors.border },
+  link: { color: colors.accent, textDecorationLine: "underline" },
+  toggle: {
+    alignSelf: "flex-start",
+    minHeight: 32,
+    justifyContent: "center",
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  toggleText: { color: colors.accent, fontSize: 13, fontWeight: "600" },
+  receipts: { color: colors.muted, fontSize: 12 },
 });

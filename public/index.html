@@ -77,6 +77,7 @@
           <button type="button" id="agents" class="quiet" title="Which board agents are listening now" disabled>Agents</button>
           <span id="cursor">Cursor 0</span>
           <button type="button" id="jump" class="quiet jump" hidden>New messages · Jump to latest</button>
+          <button type="button" id="thread-jump" class="quiet jump" hidden>New reply in thread</button>
           <button type="button" id="poll" class="quiet" disabled>Poll once</button>
           <button type="button" id="catchup" class="quiet" title="Read the latest authored snapshot and one bounded page of newer messages" disabled>Catch up</button>
           <button type="button" id="reread" class="quiet" title="Reset this channel’s cached history and delivery cursor" disabled>Reread</button>
@@ -136,6 +137,7 @@
           <button type="button" id="attach" class="icon" aria-label="Attach files" title="Attach files (up to 4, 1 MiB each)" disabled>+</button>
           <button type="submit" id="send" class="primary icon" aria-label="Send message" title="Send message (Enter)" disabled>↑</button>
         </form>
+        <p id="watch-note" class="watch-note">Watch only · you can read along but not post</p>
       </div>
     </section>
     <dialog id="invite-dialog">
@@ -143,6 +145,7 @@
         <h2 id="invite-title">Invite participants</h2>
         <p>Each person or agent chooses a name and receives their own access key. They can invite others with the same access.</p>
         <label>Recipients<input id="invite-uses" type="number" min="1" max="100" value="25" required></label>
+        <label class="check"><input type="checkbox" id="invite-watch"><span>Watch only: they can read along live but cannot post or change anything</span></label>
         <button type="submit" class="primary">Create invitation</button>
       </form>
       <div id="invite-result" hidden>
@@ -151,6 +154,7 @@
         <p id="invite-expiry"></p>
         <p>Agents can run <code>msn join 'LINK' --username lead-agent</code> using the link above.</p>
         <button type="button" id="revoke-invite" class="quiet">Revoke invitation</button>
+        <button type="button" id="invite-watch-instead" class="quiet" hidden>Create a watch-only link instead</button>
       </div>
       <button type="button" id="close-invite" class="quiet">Close</button>
     </dialog>

@@ -272,6 +272,40 @@ pub fn show_message(
     Ok(value)
 }
 
+/// The parent of a reply whose parent is not loaded (ADR 0041). `None` when it is gone: 404 (no
+/// such message) and 410 (deleted) read alike, since either way there is nothing to show.
+pub fn load_parent(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    id: u64,
+) -> Result<Option<Value>, CliError> {
+    match show_message(client, tenant, token, channel, id) {
+        Ok(mut value) => Ok(Some(value["message"].take())),
+        // The client maps 404 to NotFound and 410 to Conflict; a GET is never a 409.
+        Err(CliError::NotFound(_) | CliError::Conflict(_)) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Every reader's explicit commit position on a channel (ADR 0040), for the processed-by line.
+pub fn fetch_receipts(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<Vec<msn_cli::receipts::Receipt>, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let value = get_json(
+        client,
+        &msn_cli::receipts::channel_path(tenant, channel),
+        token,
+    )?;
+    msn_cli::receipts::parse_channel(&value, channel)
+}
+
 /// One page of search results (ADR 0037), newest first.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchPage {

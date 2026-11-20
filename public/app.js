@@ -75,8 +75,17 @@ function advanceMark() {
       break;
     }
   }
-  const ceiling = session.channels.get(channel)?.markCeiling;
+  // An open thread shows replies newer than the rows below it; a folded reply has no box.
+  for (const reply of box.querySelectorAll(".thread:not([hidden]) > article")) {
+    const rect = reply.getClientRects()[0];
+    if (rect && rect.top < bottom) seen = Math.max(seen ?? 0, Number(reply.dataset.id));
+  }
+  const state = session.channels.get(channel);
+  const ceiling = state?.markCeiling;
   if (seen !== null && ceiling !== undefined && ceiling !== null) seen = Math.min(seen, ceiling);
+  // A reply still folded away has not been read; the mark waits just below it.
+  const unseen = firstUnseenReply(state);
+  if (seen !== null && unseen !== null) seen = Math.min(seen, unseen.id - 1);
   const next = advance(session.marks ?? {}, markId(session.username, channel), seen);
   if (!next) return;
   session.marks = next;
@@ -201,6 +210,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("cursor").textContent = "Cursor 0";
   $("more").hidden = true;
   $("jump").hidden = true;
+  $("thread-jump").hidden = true;
   for (const id of [
     "poll",
     "catchup",
@@ -431,7 +441,16 @@ function appendMessage(message, target = $("messages")) {
     if (message[field] === undefined || message[field] === null) continue;
     const annotation = document.createElement("div");
     annotation.className = "message-annotation";
-    annotation.textContent = `${label}: ${field === "replyTo" ? "#" : ""}${message[field]}`;
+    if (field === "replyTo") {
+      // The target is a link: it shows a loaded parent, or fetches one that is not loaded (ADR 0041).
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "reply-link";
+      link.textContent = `#${message.replyTo}`;
+      link.title = `Show message #${message.replyTo}, the one this replies to`;
+      link.addEventListener("click", () => showParent(message, article));
+      annotation.append(`${label}: `, link);
+    } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
   }
   article.append(content);
@@ -453,9 +472,227 @@ function appendMessage(message, target = $("messages")) {
     }
     article.append(row);
   }
-  if (target === $("messages") && session?.channels.get(channel)?.since?.firstId === message.id)
+  if (target === $("messages")) {
+    const receipts = document.createElement("div");
+    receipts.className = "message-receipts";
+    receipts.title = RECEIPTS_MEANING;
+    showReceipt(receipts, message, session?.channels.get(channel)?.receipts);
+    article.append(receipts);
+  }
+  if (target !== $("messages")) {
+    target.append(article);
+    return article;
+  }
+  placeInLog(article, message);
+  if (session?.channels.get(channel)?.since?.firstId === message.id) {
     article.classList.add("since-start");
-  target.append(article);
+    revealInThread(article);
+  }
+  return article;
+}
+
+/*
+ * Reply threads (ADR 0041). Display only: the log, cursors and read marks still follow message
+ * ids. A reply whose parent is loaded folds into the parent's thread; a reply to a reply joins the
+ * same thread, so threads are one level deep. A reply whose parent is not loaded stays in the log
+ * at its own place, and its "Reply to" link fetches the parent with an ordinary message read.
+ */
+const topLevel = (node) => node.closest("#messages > article");
+const logArticle = (id) => $("messages").querySelector(`article[data-id="${id}"]`);
+
+function placeInLog(article, message) {
+  const parent =
+    message.replyTo === undefined || message.replyTo === null ? null : logArticle(message.replyTo);
+  if (!parent) return insertById($("messages"), article);
+  const root = topLevel(parent);
+  article.classList.add("reply");
+  insertById(threadOf(root), article);
+  showThread(root);
+}
+
+/** Insert in id order. New messages are the newest, so the scan from the end usually stops at once. */
+function insertById(container, article) {
+  const id = Number(article.dataset.id);
+  let next = null;
+  for (
+    let node = container.lastElementChild;
+    node && Number(node.dataset.id) > id;
+    node = node.previousElementSibling
+  )
+    next = node;
+  container.insertBefore(article, next);
+}
+
+function threadOf(root) {
+  let thread = root.querySelector(":scope > .thread");
+  if (thread) return thread;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "thread-toggle";
+  toggle.addEventListener("click", () => {
+    const state = session?.channels.get(channel);
+    const id = Number(root.dataset.id);
+    if (!state) return;
+    state.expanded ??= new Set();
+    if (state.expanded.has(id)) state.expanded.delete(id);
+    else state.expanded.add(id);
+    state.unseen?.delete(id);
+    showThread(root);
+    savePosition();
+    showJump(state);
+  });
+  thread = document.createElement("div");
+  thread.className = "thread";
+  thread.id = `thread-${root.dataset.id}`;
+  toggle.setAttribute("aria-controls", thread.id);
+  root.append(toggle, thread);
+  return thread;
+}
+
+/** The toggle reads "3 replies", plus "· 1 new" for replies that arrived while it was folded. */
+function showThread(root) {
+  const thread = root.querySelector(":scope > .thread");
+  const toggle = root.querySelector(":scope > .thread-toggle");
+  if (!thread || !toggle) return;
+  const state = session?.channels.get(channel);
+  const id = Number(root.dataset.id);
+  const count = thread.children.length;
+  if (!count) {
+    thread.remove();
+    toggle.remove();
+    return;
+  }
+  const open = Boolean(state?.expanded?.has(id));
+  const fresh = open ? 0 : (state?.unseen?.get(id)?.size ?? 0);
+  thread.hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.textContent = `${open ? "Hide" : "Show"} ${count} repl${count === 1 ? "y" : "ies"}${fresh ? ` · ${fresh} new` : ""}`;
+  toggle.classList.toggle("fresh", fresh > 0);
+}
+
+/** Open the folded thread holding this article, so a marker or a jump target can be seen. */
+function revealInThread(article) {
+  if (!article.classList.contains("reply")) return;
+  const root = topLevel(article);
+  const state = session?.channels.get(channel);
+  if (!root || !state) return;
+  state.expanded ??= new Set();
+  state.expanded.add(Number(root.dataset.id));
+  state.unseen?.delete(Number(root.dataset.id));
+  showThread(root);
+  showJump(state);
+}
+
+/** Remove one message from the log. Replies folded under it go back to the log on their own. */
+function removeFromLog(id, state) {
+  const node = logArticle(id);
+  if (!node) return;
+  const root = topLevel(node);
+  const orphans = [...node.querySelectorAll(":scope > .thread > article")].map((reply) =>
+    Number(reply.dataset.id),
+  );
+  node.remove();
+  if (root !== node) {
+    state.unseen?.get(Number(root.dataset.id))?.delete(id);
+    return showThread(root);
+  }
+  state.expanded?.delete(id);
+  state.unseen?.delete(id);
+  if (!orphans.length) return;
+  const byId = new Map(state.messages.map((message) => [message.id, message]));
+  for (const reply of orphans) if (byId.has(reply)) appendMessage(byId.get(reply));
+}
+
+/** "Reply to #N": show the loaded parent, else fetch it once and quote it in the reply. */
+async function showParent(message, article) {
+  const id = message.replyTo;
+  if (logArticle(id)) {
+    if (article.closest("#messages")) return showMessage(id);
+    clearSearch();
+    clearLabel();
+    return showMessage(id);
+  }
+  if (article.querySelector(":scope > .reply-parent")) return;
+  const state = session?.channels.get(channel);
+  if (!state) return;
+  state.parents ??= new Map();
+  let parent = state.parents.get(id);
+  if (parent === undefined) {
+    try {
+      parent = (await api(`/channels/${message.channel}/messages/${id}`)).message;
+    } catch (error) {
+      // 404: no such message; 410: it was deleted. Either way it is gone.
+      if (error.status !== 404 && error.status !== 410) {
+        status(error.message, true);
+        return;
+      }
+      parent = null;
+    }
+    state.parents.set(id, parent);
+  }
+  if (article.querySelector(":scope > .reply-parent")) return;
+  const quote = document.createElement("blockquote");
+  quote.className = "reply-parent";
+  quote.textContent = parent
+    ? `${parent.username}: ${parent.text.length > 280 ? `${parent.text.slice(0, 280)}…` : parent.text}`
+    : `Message #${id} is no longer available.`;
+  article.querySelector(":scope > .message-annotation")?.after(quote);
+}
+
+/**
+ * Processed-by receipts (ADR 0040). They come only from explicit resumable commits, so the line
+ * names only readers that have committed on the server: who committed past this message and who
+ * committed but not this far. A persona that never committed is not listed at all (its progress
+ * is unknown), and the sender is left out of its own message.
+ */
+const RECEIPTS_MEANING =
+  "From explicit resumable commits (msn commit --resumable) only. Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
+const RECEIPTS_EVERY_MS = 10000;
+const RECEIPTS_MAX_NAMES = 10;
+function receiptNames(list) {
+  const shown = list.slice(0, RECEIPTS_MAX_NAMES).join(", ");
+  return list.length > RECEIPTS_MAX_NAMES ? `${shown} +${list.length - RECEIPTS_MAX_NAMES} more` : shown;
+}
+function receiptLine(receipts, message) {
+  if (!Array.isArray(receipts)) return null;
+  const relevant = receipts.filter(
+    (r) =>
+      r.committedThrough !== null &&
+      !(message.personaId != null && r.personaId === message.personaId) &&
+      r.name !== message.username &&
+      !r.name.startsWith(`${message.username}/`),
+  );
+  const done = relevant.filter((r) => r.committedThrough >= message.id).map((r) => r.name);
+  const waiting = relevant.filter((r) => r.committedThrough < message.id).map((r) => r.name);
+  if (!done.length && !waiting.length) return null;
+  if (!waiting.length) return `Processed by ${receiptNames(done)}`;
+  if (!done.length) return `Not yet processed by ${receiptNames(waiting)}`;
+  return `Processed by ${receiptNames(done)} · not yet: ${receiptNames(waiting)}`;
+}
+function showReceipt(element, message, receipts) {
+  const line = receiptLine(receipts, message);
+  element.textContent = line ?? "";
+  element.hidden = line === null;
+}
+async function loadReceipts(connection, name, state, force = false) {
+  if (!force && state.receiptsAt && Date.now() - state.receiptsAt < RECEIPTS_EVERY_MS) return;
+  state.receiptsAt = Date.now();
+  try {
+    const data = await api(`/channels/${name}/receipts`, {}, connection);
+    if (data.channel !== name || !Array.isArray(data.receipts)) return;
+    state.receipts = data.receipts;
+  } catch {
+    // Receipts are an extra; an older server or a failed request just leaves them as they were.
+    return;
+  }
+  if (session !== connection || channel !== name) return;
+  const byId = new Map(state.messages.map((message) => [message.id, message]));
+  // Replies folded into a thread (ADR 0041) are articles inside their root's article.
+  for (const article of $("messages").querySelectorAll("article")) {
+    const element = article.querySelector(":scope > .message-receipts");
+    const message = byId.get(Number(article.dataset.id));
+    if (element && message) showReceipt(element, message, state.receipts);
+  }
 }
 
 /** Pinned messages (ADR 0038): owner-chosen rules, decisions or plans shown above the log. */
@@ -644,7 +881,10 @@ function showSince(state) {
     more.textContent = `and ${since.hidden} more on the board`;
     $("since-list").append(more);
   }
-  $("messages").querySelector(`[data-id="${since.firstId}"]`)?.classList.add("since-start");
+  const first = logArticle(since.firstId);
+  if (!first) return;
+  first.classList.add("since-start");
+  revealInThread(first);
 }
 
 function showMessage(id, block = "center") {
@@ -653,6 +893,7 @@ function showMessage(id, block = "center") {
     status("That message is not loaded yet. Turn on Live or load the next page.", true);
     return;
   }
+  revealInThread(node);
   node.scrollIntoView({ block });
   node.classList.remove("flash");
   void node.offsetWidth;
@@ -700,6 +941,17 @@ async function loadSince(connection, name, state, mark) {
 
 function showJump(state) {
   $("jump").hidden = !state.newMessages;
+  const next = firstUnseenReply(state);
+  $("thread-jump").hidden = next === null;
+  if (next !== null) $("thread-jump").textContent = `New reply in thread #${next.root} · Show`;
+}
+
+/** The oldest reply that arrived in a folded thread and has not been shown yet. */
+function firstUnseenReply(state) {
+  let next = null;
+  for (const [root, ids] of state?.unseen ?? [])
+    for (const id of ids) if (next === null || id < next.id) next = { root, id };
+  return next;
 }
 
 function showCheckpoint(state) {
@@ -786,22 +1038,42 @@ async function catchup(continuation = false) {
 
 function render(messages, state) {
   savePosition();
-  const box = $("messages");
   const visible = chatVisible();
   const follow = state.atBottom;
   let added = false;
+  let addedRow = false;
   for (const message of messages) {
     if (state.seen.has(message.id)) continue;
     added = true;
     state.seen.add(message.id);
     state.messages.push(message);
-    appendMessage(message);
+    const article = appendMessage(message);
+    if (article.classList.contains("reply")) {
+      // Someone else's reply after your read mark, in a folded thread, is unseen until the
+      // thread is opened: the toggle and the thread pointer say so, and the read mark waits
+      // below it. On a board you have never read, nothing is new yet.
+      const id = Number(topLevel(article).dataset.id);
+      const mark = readMark(channel);
+      if (
+        message.username !== session?.username &&
+        mark !== undefined &&
+        message.id > mark &&
+        !state.expanded?.has(id)
+      ) {
+        state.unseen ??= new Map();
+        if (!state.unseen.has(id)) state.unseen.set(id, new Set());
+        state.unseen.get(id).add(message.id);
+        showThread(topLevel(article));
+      }
+    } else addedRow = true;
     if (state.messages.length > MAX_MESSAGES) {
-      state.seen.delete(state.messages.shift().id);
-      box.firstElementChild.remove();
+      const oldest = state.messages.shift().id;
+      state.seen.delete(oldest);
+      removeFromLog(oldest, state);
     }
   }
-  if (added && !follow) state.newMessages = true;
+  // "Jump to latest" is for rows in the log; a folded reply has its own pointer.
+  if (addedRow && !follow) state.newMessages = true;
   if (visible) restorePosition(state);
   if (added) advanceMark();
   showJump(state);
@@ -831,6 +1103,7 @@ async function poll(live = false) {
       );
       if (generation !== epoch) return;
       render(data.messages, state);
+      void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
@@ -976,6 +1249,10 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
       note = `Display name · your access key requires the prefix “${identity.usernamePrefix}”`;
     }
     connection.sharedChannel = identity.sharedChannel === true;
+    // Watch-only keys (ADR 0039) read live; the server refuses every write, so hide the controls.
+    connection.watchOnly = identity.watchOnly === true;
+    $("workspace").classList.toggle("watching", connection.watchOnly);
+    if (connection.watchOnly) note = "Watch only · you can read along but not post";
     connection.owner = identity.owner === true;
     connection.marks = connection.remember ? parseMarks(storage.get(MARKS_KEY(connection.tenant))) : {};
     if (identity.sharedChannel) {
@@ -1124,6 +1401,8 @@ let inviteChannel = null;
 let activeInvite = null;
 async function openInvite(scope) {
   $("revoke-invite").hidden = false;
+  $("invite-watch-instead").hidden = true;
+  $("invite-watch").checked = false;
   if (scope) {
     try {
       const shared = await api(`/channels/${scope}/board/connection`);
@@ -1131,6 +1410,8 @@ async function openInvite(scope) {
       $("invite-form").hidden = true;
       $("invite-result").hidden = false;
       $("revoke-invite").hidden = true;
+      // Only the owner may invite; the board's shared credential gets 400 shared_channel_invitation.
+      $("invite-watch-instead").hidden = !session?.owner;
       $("invite-link").value = `${location.origin}/#board=${encodeURIComponent(JSON.stringify(shared))}`;
       $("invite-expiry").textContent =
         "All personas share this channel credential. Access lasts until the owner rotates it.";
@@ -1143,14 +1424,23 @@ async function openInvite(scope) {
       }
     }
   }
+  showInviteForm(scope);
+  $("invite-dialog").showModal();
+}
+function showInviteForm(scope, { watch = false } = {}) {
   inviteChannel = scope;
   activeInvite = null;
   $("invite-title").textContent = scope ? `Invite to # ${scope}` : "Invite to workspace";
+  $("invite-watch").checked = watch;
+  $("invite-watch-instead").hidden = true;
   $("invite-form").hidden = false;
   $("invite-result").hidden = true;
   $("invite-link").value = "";
-  $("invite-dialog").showModal();
 }
+// A board's owner sees the shared agent link first; a watcher gets their own read-only invitation.
+$("invite-watch-instead").addEventListener("click", () => {
+  showInviteForm(channel, { watch: true });
+});
 $("invite-channel").addEventListener("click", () => openInvite(channel));
 $("invite-workspace").addEventListener("click", () => openInvite(null));
 $("close-invite").addEventListener("click", () => $("invite-dialog").close());
@@ -1165,7 +1455,11 @@ $("invite-form").addEventListener("submit", async (event) => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel: inviteChannel, maxUses: Number($("invite-uses").value) }),
+        body: JSON.stringify({
+          channel: inviteChannel,
+          maxUses: Number($("invite-uses").value),
+          ...($("invite-watch").checked ? { watch: true } : {}),
+        }),
       },
       connection,
     );
@@ -1173,7 +1467,7 @@ $("invite-form").addEventListener("submit", async (event) => {
     activeInvite = result.id;
     $("invite-link").value = result.url;
     $("invite-expiry").textContent =
-      `Up to ${result.maxUses} recipients · Expires ${new Date(result.expiresAt).toLocaleString()}`;
+      `${result.watch ? "Watch only · " : ""}Up to ${result.maxUses} recipients · Expires ${new Date(result.expiresAt).toLocaleString()}`;
     $("invite-form").hidden = true;
     $("invite-result").hidden = false;
   } catch (error) {
@@ -1572,6 +1866,10 @@ document.addEventListener("visibilitychange", () => {
 });
 // Closing or navigating away records the last position while the page is still visible.
 addEventListener("pagehide", () => advanceMark());
+$("thread-jump").addEventListener("click", () => {
+  const next = firstUnseenReply(session?.channels.get(channel));
+  if (next) showMessage(next.id);
+});
 $("jump").addEventListener("click", () => {
   $("messages").scrollTop = $("messages").scrollHeight;
   savePosition();

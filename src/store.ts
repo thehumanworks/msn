@@ -103,6 +103,8 @@ type TenantRow = {
   channel_scope?: string | null;
   owner_access?: number;
   shared_channel?: number;
+  /** Watch-only key (ADR 0039): every request but a read is refused. Never cleared. */
+  read_only?: number;
 };
 type AccessKeyRow = TenantRow & { id: string; createdAt: string };
 const KEY_METADATA = "id, bound_username AS username, bound_prefix AS usernamePrefix, createdAt";
@@ -141,6 +143,8 @@ type InviteRow = {
   channel: string | null;
   expiresAt: number;
   remaining: number;
+  /** Redeeming issues a watch-only key (ADR 0039). */
+  watch: number;
 };
 const MAX_SNAPSHOTS = 1000;
 // Exact upper bound: every message can be created and later deleted, every channel and every
@@ -202,6 +206,22 @@ type ProcessingRow = {
 };
 const PROCESSING_COLUMNS = "reader, committedThrough, generation, holder, claimedAt, updatedAt";
 type ProcessingFence = { reader: string; generation: number };
+/** The message's own sender, by persona id or by name (with any `/worker` suffix). */
+function receiptFromSender(r: Receipt, username: string, personaId: string | null): boolean {
+  return (
+    (personaId !== null && r.personaId === personaId) ||
+    r.name === username ||
+    r.name.startsWith(`${username}/`)
+  );
+}
+/** One reader's explicit commit position (ADR 0040); committedThrough null means never committed. */
+type Receipt = {
+  name: string;
+  reader: string | null;
+  personaId: string | null;
+  committedThrough: number | null;
+  updatedAt: string | null;
+};
 function toProcessing(row: ProcessingRow) {
   return { ...row };
 }
@@ -398,6 +418,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       for (const [table, column, definition] of [
         ["access_keys", "owner_access", "INTEGER NOT NULL DEFAULT 0"],
         ["access_keys", "shared_channel", "INTEGER NOT NULL DEFAULT 0"],
+        // Watch-only invitations and keys (ADR 0039). Additive with a safe default, so this needs
+        // no schema_version step: older keys and invitations stay full participants.
+        ["access_keys", "read_only", "INTEGER NOT NULL DEFAULT 0"],
+        ["invites", "watch", "INTEGER NOT NULL DEFAULT 0"],
         ["messages", "personaId", "TEXT"],
         ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
@@ -1253,6 +1277,15 @@ export class MsnDurableObject extends DurableObject<Env> {
     throw new HttpError(401, "unauthorized", "Unknown tenant or invalid access key.");
   }
 
+  /** Never throws: unknown keys fall through to the route's own authorization. */
+  private watchOnly(hash: string): boolean {
+    return Boolean(
+      this.ctx.storage.sql
+        .exec<{ read_only: number }>("SELECT read_only FROM access_keys WHERE token_hash = ?", hash)
+        .toArray()[0]?.read_only,
+    );
+  }
+
   /** A bound capability may only send as its bound name (or under its bound prefix). */
   private requireBoundName(row: TenantRow, username: string): void {
     if (row.bound_username !== null && username !== row.bound_username) {
@@ -1276,6 +1309,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       ...(row.channel_scope ? { channel: row.channel_scope } : {}),
       ...(row.owner_access ? { owner: true } : {}),
       ...(row.shared_channel ? { sharedChannel: true } : {}),
+      ...(row.read_only ? { watchOnly: true } : {}),
     };
   }
 
@@ -2161,6 +2195,92 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Processed-by receipts (ADR 0040), read only from explicit resumable commits in
+   * `processing_cursors` (ADR 0034). A reader has processed message N when its committedThrough
+   * is at least N. A board persona with no committed reader is listed with committedThrough null.
+   * Nothing here is inferred from presence, polling or silence.
+   */
+  private receipts(channel: string): Receipt[] {
+    const personas = this.ctx.storage.sql
+      .exec<{ id: string; displayName: string }>(
+        "SELECT id, displayName FROM personas WHERE channel = ? ORDER BY createdAt, id",
+        channel,
+      )
+      .toArray();
+    const cursors = this.ctx.storage.sql
+      .exec<{ reader: string; committedThrough: number; updatedAt: string }>(
+        "SELECT reader, committedThrough, updatedAt FROM processing_cursors WHERE channel = ? ORDER BY reader",
+        channel,
+      )
+      .toArray();
+    // A persona owns its id or display name as a reader, and `<that>/<worker>` for concurrent
+    // consumers (ADR 0034). The worker suffix stays in the shown name.
+    const owner = (reader: string) => {
+      for (const persona of personas)
+        for (const prefix of [persona.id, persona.displayName])
+          if (reader === prefix || reader.startsWith(`${prefix}/`))
+            return { persona, suffix: reader.slice(prefix.length) };
+      return null;
+    };
+    const byPersona = new Map<string, Receipt[]>();
+    const others: Receipt[] = [];
+    for (const cursor of cursors) {
+      const match = owner(cursor.reader);
+      const receipt: Receipt = {
+        name: match ? match.persona.displayName + match.suffix : cursor.reader,
+        reader: cursor.reader,
+        personaId: match?.persona.id ?? null,
+        committedThrough: cursor.committedThrough,
+        updatedAt: cursor.updatedAt,
+      };
+      if (!match) others.push(receipt);
+      else byPersona.set(match.persona.id, [...(byPersona.get(match.persona.id) ?? []), receipt]);
+    }
+    const result: Receipt[] = [];
+    for (const persona of personas)
+      result.push(
+        ...(byPersona.get(persona.id) ?? [
+          {
+            name: persona.displayName,
+            reader: null,
+            personaId: persona.id,
+            committedThrough: null,
+            updatedAt: null,
+          },
+        ]),
+      );
+    return [...result, ...others];
+  }
+
+  /**
+   * One message's split. `processed` and `notYet` hold only readers with a server cursor, so
+   * "not yet" always means "has committed, but not this far". Personas that never committed are
+   * listed apart in `noServerCommit`: their progress is unknown, not behind (ADR 0040). The
+   * sender's own readers are left out of all three.
+   */
+  private messageReceipts(channel: string, id: number): Response {
+    const row = this.ctx.storage.sql
+      .exec<{ deleted: number; username: string; personaId: string | null }>(
+        "SELECT deleted, username, personaId FROM messages WHERE channel = ? AND id = ?",
+        channel,
+        id,
+      )
+      .toArray()[0];
+    if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+    if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+    const receipts = this.receipts(channel).filter((r) => !receiptFromSender(r, row.username, row.personaId));
+    const committed = receipts.filter((r) => r.committedThrough !== null);
+    const done = (r: Receipt) => (r.committedThrough ?? -1) >= id;
+    return json({
+      channel,
+      messageId: id,
+      processed: committed.filter(done),
+      notYet: committed.filter((r) => !done(r)),
+      noServerCommit: receipts.filter((r) => r.committedThrough === null),
+    });
+  }
+
   private latestSnapshot(channel: string): SnapshotRow | undefined {
     return this.ctx.storage.sql
       .exec<SnapshotRow>(
@@ -2598,6 +2718,9 @@ export class MsnDurableObject extends DurableObject<Env> {
       );
     const maxUses = input.maxUses === undefined ? 25 : snapshotInteger(input.maxUses, "maxUses");
     const expiresIn = input.expiresIn === undefined ? 86400 : snapshotInteger(input.expiresIn, "expiresIn");
+    if (input.watch !== undefined && typeof input.watch !== "boolean")
+      throw new HttpError(400, "invalid_invite", "watch must be true or false.");
+    const watch = input.watch === true;
     if (maxUses < 1 || maxUses > 100 || expiresIn < 60 || expiresIn > 604800)
       throw new HttpError(400, "invalid_invite", "Use 1–100 recipients and an expiry of 60–604800 seconds.");
     const code = newToken();
@@ -2615,13 +2738,14 @@ export class MsnDurableObject extends DurableObject<Env> {
     const id = crypto.randomUUID();
     const expiresAt = now + expiresIn * 1000;
     this.ctx.storage.sql.exec(
-      "INSERT INTO invites VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO invites (id, code_hash, creator_hash, channel, expiresAt, remaining, watch) VALUES (?, ?, ?, ?, ?, ?, ?)",
       id,
       codeHash,
       hash,
       channel,
       expiresAt,
       maxUses,
+      watch ? 1 : 0,
     );
     const accessCode = `${tenant}.${code}`;
     return json(
@@ -2633,6 +2757,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         url: `${new URL(request.url).origin}/#invite=${accessCode}`,
         expiresAt: new Date(expiresAt).toISOString(),
         maxUses,
+        ...(watch ? { watch: true } : {}),
       },
       201,
     );
@@ -2669,19 +2794,25 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.requireKeyCapacity();
       const id = crypto.randomUUID();
       this.ctx.storage.sql.exec(
-        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope) VALUES (?, ?, ?, NULL, ?, ?)",
+        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope, read_only) VALUES (?, ?, ?, NULL, ?, ?, ?)",
         id,
         hash,
         username,
         new Date().toISOString(),
         invite.channel,
+        invite.watch ? 1 : 0,
       );
       this.ctx.storage.sql.exec("UPDATE invites SET remaining = remaining - 1 WHERE id = ?", invite.id);
       return json(
         {
           ...this.identity(
             tenant,
-            { bound_username: username, bound_prefix: null, channel_scope: invite.channel },
+            {
+              bound_username: username,
+              bound_prefix: null,
+              channel_scope: invite.channel,
+              read_only: invite.watch,
+            },
             token,
           ),
           keyId: id,
@@ -2755,11 +2886,12 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 1 && request.method === "GET") {
             return json({
               keys: this.ctx.storage.sql
-                .exec(`SELECT ${KEY_METADATA}, channel_scope FROM access_keys ORDER BY id`)
+                .exec(`SELECT ${KEY_METADATA}, channel_scope, read_only FROM access_keys ORDER BY id`)
                 .toArray()
-                .map(({ channel_scope, ...key }) => ({
+                .map(({ channel_scope, read_only, ...key }) => ({
                   ...key,
                   ...(channel_scope ? { channel: channel_scope } : {}),
+                  ...(read_only ? { watchOnly: true } : {}),
                 })),
             });
           }
@@ -2864,6 +2996,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
       } else {
         const hash = await digest(bearer(request));
+        // Watch-only keys (ADR 0039) read and never write. One gate in front of every route, so a
+        // write route added later is refused by default. GET routes never change board content.
+        if (request.method !== "GET" && this.watchOnly(hash))
+          throw new HttpError(
+            403,
+            "watch_only",
+            "This access key can watch the board but not post or change anything.",
+          );
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
@@ -3124,6 +3264,19 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);
             return this.showMessage(tenant, channel, messageId(rest[3]));
+          }
+          if (rest.length === 3 && rest[2] === "receipts" && request.method === "GET") {
+            this.requireChannel(channel);
+            return json({ channel, receipts: this.receipts(channel) });
+          }
+          if (
+            rest.length === 5 &&
+            rest[2] === "messages" &&
+            rest[4] === "receipts" &&
+            request.method === "GET"
+          ) {
+            this.requireChannel(channel);
+            return this.messageReceipts(channel, messageId(rest[3]));
           }
           if (rest.length === 3 && rest[2] === "messages") {
             if (request.method === "POST") {

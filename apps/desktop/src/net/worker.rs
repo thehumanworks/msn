@@ -71,6 +71,12 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// Processed-by receipts (ADR 0040) for the open channel.
+    LoadReceipts {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
     SendMessage {
         generation: u64,
         channel_generation: u64,
@@ -101,6 +107,13 @@ pub enum Command {
         from: Option<String>,
         before: Option<u64>,
     },
+    /// Point-read of one message: the parent of a reply whose parent is not loaded (ADR 0041).
+    LoadMessage {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        id: u64,
+    },
 }
 
 impl Command {
@@ -111,9 +124,11 @@ impl Command {
             | Command::CreateChannel { generation, .. }
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
+            | Command::LoadReceipts { generation, .. }
             | Command::SendMessage { generation, .. }
             | Command::SendTaskEvent { generation, .. }
-            | Command::Search { generation, .. } => Some(*generation),
+            | Command::Search { generation, .. }
+            | Command::LoadMessage { generation, .. } => Some(*generation),
             Command::Disconnect => None,
         }
     }
@@ -182,12 +197,26 @@ pub enum UiEvent {
         generation: u64,
         events: Vec<CoordinationEvent>,
     },
+    Receipts {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        receipts: Vec<msn_cli::receipts::Receipt>,
+    },
     SearchResults {
         generation: u64,
         channel_generation: u64,
         channel: String,
         query: u64,
         page: SearchPage,
+    },
+    /// A point-read answered; `message` is `None` when the message no longer exists.
+    MessageLoaded {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        id: u64,
+        message: Option<Value>,
     },
     Error {
         generation: u64,
@@ -487,6 +516,32 @@ fn handle_command(
                 ),
             }
         }
+        Command::LoadReceipts {
+            channel_generation,
+            channel,
+            ..
+        } => match client_ops::fetch_receipts(&cc.client, &cc.tenant, &cc.token, &channel) {
+            Ok(receipts) => emit(
+                tx,
+                wake,
+                UiEvent::Receipts {
+                    generation,
+                    channel_generation,
+                    channel,
+                    receipts,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "receipts",
+                err,
+                false,
+                None,
+            ),
+        },
         Command::Search {
             channel_generation,
             channel,
@@ -526,6 +581,40 @@ fn handle_command(
                 None,
             ),
         },
+        Command::LoadMessage {
+            channel_generation,
+            channel,
+            id,
+            ..
+        } => {
+            let message =
+                match client_ops::load_parent(&cc.client, &cc.tenant, &cc.token, &channel, id) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        return emit_error(
+                            tx,
+                            wake,
+                            generation,
+                            Some(channel_generation),
+                            "load-message",
+                            err,
+                            false,
+                            None,
+                        );
+                    }
+                };
+            emit(
+                tx,
+                wake,
+                UiEvent::MessageLoaded {
+                    generation,
+                    channel_generation,
+                    channel,
+                    id,
+                    message,
+                },
+            );
+        }
         Command::LoadSnapshots {
             channel_generation,
             channel,

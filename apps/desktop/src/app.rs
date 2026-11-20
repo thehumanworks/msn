@@ -9,7 +9,9 @@ use msn_cli::identity::validate_username;
 
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
-use crate::state::{AppState, PendingSend, PendingTaskEvent, Screen, SearchState};
+use crate::state::{
+    AppState, ChannelState, PendingSend, PendingTaskEvent, Screen, SearchState, ThreadRow,
+};
 use crate::theme;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 80, 80);
@@ -24,6 +26,11 @@ pub struct MsnDesktopApp {
     new_channel_name: String,
     active_tab: Tab,
     search_input: String,
+    /// A reply the chat should scroll to on its next frame (the "New reply in thread" pointer).
+    scroll_to: Option<u64>,
+    /// When processed-by receipts were last asked for; commits are not channel events, so the
+    /// open channel's receipts are reloaded on a timer (ADR 0040).
+    receipts_at: Option<std::time::Instant>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
 }
@@ -64,6 +71,9 @@ enum Action {
     Reload,
     Search,
     SearchOlder,
+    ToggleThread(u64),
+    ShowReply(u64),
+    LoadParent(u64),
     Send,
     RetrySend(String),
     DiscardSend(String),
@@ -96,6 +106,8 @@ impl MsnDesktopApp {
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
             search_input: String::new(),
+            scroll_to: None,
+            receipts_at: None,
             profile_store,
         }
     }
@@ -139,6 +151,15 @@ impl MsnDesktopApp {
         }
         let deferred = self.state.take_deferred();
         self.dispatch_all(deferred);
+        if self.state.channel.is_some()
+            && self
+                .receipts_at
+                .is_none_or(|at| at.elapsed() >= RECEIPTS_EVERY)
+        {
+            self.receipts_at = Some(std::time::Instant::now());
+            let command = self.state.receipts_command();
+            self.dispatch_all(command.into_iter().collect());
+        }
     }
 
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
@@ -609,6 +630,22 @@ impl MsnDesktopApp {
             .as_ref()
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
+        let scroll_to = self.scroll_to.take();
+        // A reply that landed in a folded thread: point at it, since the log does not show it.
+        if let Some((root, id)) = self.state.channel.as_ref().and_then(|s| s.first_unseen()) {
+            egui::Panel::bottom("thread-pointer")
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)))
+                .show(ui, |ui| {
+                    let label =
+                        egui::RichText::new(format!("New reply in thread #{root} \u{b7} Show"))
+                            .small()
+                            .color(theme::ACCENT);
+                    if ui.button(label).clicked() {
+                        actions.push(Action::ShowReply(id));
+                    }
+                });
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 bottom: 8,
@@ -638,20 +675,57 @@ impl MsnDesktopApp {
                                 });
                             }
                             let mut day = "";
-                            for message in state.messages.values() {
-                                let created = message["createdAt"].as_str().unwrap_or("");
-                                let date = created.get(..10).unwrap_or("");
-                                if date != day {
-                                    day = date;
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format_day(date))
-                                                .small()
-                                                .color(theme::MUTED),
-                                        );
-                                    });
+                            let rows = state.thread_rows();
+                            for row in rows.iter() {
+                                match *row {
+                                    ThreadRow::Message {
+                                        id,
+                                        replies,
+                                        open,
+                                        unseen,
+                                    } => {
+                                        let message = &state.messages[&id];
+                                        let created = message["createdAt"].as_str().unwrap_or("");
+                                        let date = created.get(..10).unwrap_or("");
+                                        if date != day {
+                                            day = date;
+                                            ui.vertical_centered(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format_day(date))
+                                                        .small()
+                                                        .color(theme::MUTED),
+                                                );
+                                            });
+                                        }
+                                        render_message(ui, message, &me);
+                                        render_receipts(ui, message, &me, &state.receipts);
+                                        render_parent(ui, state, message, actions);
+                                        if replies > 0 {
+                                            render_thread_toggle(
+                                                ui,
+                                                message,
+                                                &me,
+                                                ThreadToggle {
+                                                    id,
+                                                    replies,
+                                                    open,
+                                                    unseen,
+                                                },
+                                                actions,
+                                            );
+                                        }
+                                    }
+                                    ThreadRow::Reply { id } => {
+                                        let shown = ui.indent(("thread-reply", id), |ui| {
+                                            let reply = &state.messages[&id];
+                                            render_message(ui, reply, &me);
+                                            render_receipts(ui, reply, &me, &state.receipts);
+                                        });
+                                        if scroll_to == Some(id) {
+                                            shown.response.scroll_to_me(Some(egui::Align::Center));
+                                        }
+                                    }
                                 }
-                                render_message(ui, message, &me);
                                 ui.add_space(4.0);
                             }
                         }
@@ -887,6 +961,15 @@ impl MsnDesktopApp {
                 let commands = self.state.search_older();
                 self.dispatch_all(commands);
             }
+            Action::ToggleThread(root) => self.state.toggle_thread(root),
+            Action::ShowReply(id) => {
+                self.state.open_thread_of(id);
+                self.scroll_to = Some(id);
+            }
+            Action::LoadParent(id) => {
+                let commands = self.state.load_parent(id);
+                self.dispatch_all(commands);
+            }
             Action::Send => self.send_composer_message(),
             Action::RetrySend(key) => self.retry_send(&key),
             Action::DiscardSend(key) => {
@@ -934,6 +1017,10 @@ impl MsnDesktopApp {
         };
         self.composer.error = None;
         self.composer.text.clear();
+        // Your reply folds into its thread; open it so the reply does not seem to vanish.
+        if let Some(parent) = reply_to {
+            self.state.open_thread_of(parent);
+        }
         let key = Uuid::new_v4().to_string();
         let channel_generation = self.state.channel_generation;
         self.state.pending_sends.insert(
@@ -1043,6 +1130,10 @@ impl MsnDesktopApp {
 impl MsnDesktopApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
+        if self.state.channel.is_some() {
+            // Wakes an idle window so the receipts timer in drain_events can fire.
+            ui.ctx().request_repaint_after(RECEIPTS_EVERY);
+        }
         theme::backdrop(ui);
         egui::CentralPanel::default()
             .frame(theme::outer())
@@ -1155,6 +1246,41 @@ fn search_summary(search: &SearchState) -> String {
     summary
 }
 
+/// How often the open channel's processed-by receipts are reloaded.
+const RECEIPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// "Processed by lead · not yet: worker" under a message, from explicit commits only (ADR 0040).
+/// Hovering shows exactly what a receipt proves.
+fn render_receipts(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    receipts: &[msn_cli::receipts::Receipt],
+) {
+    let Some(id) = message["id"].as_u64() else {
+        return;
+    };
+    let sender = message["username"].as_str().unwrap_or("");
+    let Some(line) =
+        msn_cli::receipts::summary(receipts, id, sender, message["personaId"].as_str())
+    else {
+        return;
+    };
+    let own = sender == me;
+    let label = egui::Label::new(egui::RichText::new(line).small().color(theme::MUTED));
+    let draw = |ui: &mut egui::Ui| {
+        ui.add(label).on_hover_text(msn_cli::receipts::MEANING);
+    };
+    if own {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), draw);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.add_space(30.0 + ui.spacing().item_spacing.x);
+            draw(ui);
+        });
+    }
+}
+
 fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
@@ -1175,6 +1301,105 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
             ui.vertical(|ui| bubble(ui, header, body, false));
         });
     }
+}
+
+struct ThreadToggle {
+    id: u64,
+    replies: usize,
+    open: bool,
+    unseen: usize,
+}
+
+/// Under a thread root: "Show 3 replies · 1 new" or "Hide 3 replies", on the root's side
+/// (ADR 0041).
+fn render_thread_toggle(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    toggle: ThreadToggle,
+    actions: &mut Vec<Action>,
+) {
+    let ThreadToggle {
+        id,
+        replies,
+        open,
+        unseen,
+    } = toggle;
+    let mut label = format!(
+        "{} {replies} repl{}",
+        if open { "Hide" } else { "Show" },
+        if replies == 1 { "y" } else { "ies" },
+    );
+    if unseen > 0 {
+        label.push_str(&format!(" \u{b7} {unseen} new"));
+    }
+    let own = message["username"].as_str() == Some(me);
+    let align = if own {
+        egui::Align::Max
+    } else {
+        egui::Align::Min
+    };
+    ui.with_layout(egui::Layout::top_down(align), |ui| {
+        let button = egui::Button::new(egui::RichText::new(label).small().color(theme::ACCENT));
+        if ui
+            .add(button)
+            .on_hover_text(format!("Replies to #{id}"))
+            .clicked()
+        {
+            actions.push(Action::ToggleThread(id));
+        }
+    });
+}
+
+/// A reply whose parent is not loaded: a link that fetches the parent, then a short quote of it.
+fn render_parent(
+    ui: &mut egui::Ui,
+    state: &ChannelState,
+    message: &Value,
+    actions: &mut Vec<Action>,
+) {
+    let Some(parent) = message["replyTo"].as_u64() else {
+        return;
+    };
+    if state.messages.contains_key(&parent) {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(38.0);
+        match state.parents.get(&parent) {
+            Some(Some(found)) => {
+                let text = found["text"].as_str().unwrap_or("");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "\u{21aa} {}: {}",
+                        found["username"].as_str().unwrap_or("?"),
+                        truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 140)
+                    ))
+                    .small()
+                    .color(theme::MUTED),
+                );
+            }
+            Some(None) => {
+                ui.label(
+                    egui::RichText::new(format!("Message #{parent} is no longer available."))
+                        .small()
+                        .color(theme::MUTED),
+                );
+            }
+            None if state.parents_inflight.contains(&parent) => {
+                ui.spinner();
+            }
+            None => {
+                if ui
+                    .link(egui::RichText::new(format!("Reply to #{parent}")).small())
+                    .on_hover_text("Load the message this replies to")
+                    .clicked()
+                {
+                    actions.push(Action::LoadParent(parent));
+                }
+            }
+        }
+    });
 }
 
 /// "name says" in the Messenger tradition, then the quieter metadata: time, id, reply target.
@@ -1378,7 +1603,6 @@ mod pin_tests {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
-    use crate::state::ChannelState;
 
     fn fixture(message_count: u64) -> MsnDesktopApp {
         let (tx, rx) = sync_channel(EVENT_QUEUE_CAPACITY);
@@ -1408,6 +1632,8 @@ mod layout_tests {
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
             search_input: String::new(),
+            scroll_to: None,
+            receipts_at: None,
             profile_store: None,
         }
     }
