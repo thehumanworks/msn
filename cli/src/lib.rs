@@ -16,6 +16,7 @@ pub mod labels;
 pub mod mcp;
 pub mod processing;
 pub mod profile;
+pub mod receipts;
 pub mod resumable;
 pub mod runner;
 pub mod search;
@@ -439,6 +440,17 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             }
             labels::filter_query(&filters)?;
             poll(&url, &tenant, &token, channel, after, wait, limit, &filters)
+        }
+        Command::Receipts {
+            channel,
+            message_id,
+        } => {
+            let id = parse_message_id(&message_id)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let path = receipts::message_path(&tenant, channel, id);
+            finish(&MsnClient::new(&url)?.get(&path, Some(&token))?)
         }
         Command::Search {
             channel,

@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import type { Message } from "../core/types.ts";
+import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
 import { formatTime } from "./format.ts";
@@ -21,6 +22,8 @@ type Props = {
   /** The parent of a reply whose parent is not loaded, once asked for. */
   parent?: ParentState;
   onLoadParent?: (id: number) => void;
+  /** Processed-by line from explicit commits only (ADR 0040), or null. */
+  receipts?: string | null;
 };
 
 function preview(text: string): string {
@@ -47,6 +50,7 @@ function MessageRowImpl({
   onToggleThread,
   parent,
   onLoadParent,
+  receipts = null,
 }: Props) {
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
@@ -127,6 +131,14 @@ function MessageRowImpl({
           {message.text}
         </Text>
       )}
+      {receipts ? (
+        <Text
+          style={styles.receipts}
+          accessibilityLabel={`${receipts}. ${RECEIPTS_MEANING}`}
+        >
+          {receipts}
+        </Text>
+      ) : null}
       {thread && onToggleThread ? (
         <Pressable
           accessibilityRole="button"
@@ -174,4 +186,5 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   toggleText: { color: colors.accent, fontSize: 13, fontWeight: "600" },
+  receipts: { color: colors.muted, fontSize: 12 },
 });

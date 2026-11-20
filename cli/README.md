@@ -123,6 +123,7 @@ msn label general 42 owner=ana --if-unset owner   # labels on message 42; a fail
 msn poll general --label state=open --label area  # only messages whose labels match every filter
 msn wait-label general state=done --message 42 --timeout 600   # prints the message once it matches
 msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
+msn receipts general 42                          # which readers committed past 42 (resumable commits only)
 msn github hook                                  # owner: webhook URL and secret for GitHub (ADR 0036)
 msn github link general thehumanworks/msn#34     # post that pull request's reviews and checks to the board
 msn events --channel general --after 0 --wait 25   # one page of the durable event feed (metadata only)

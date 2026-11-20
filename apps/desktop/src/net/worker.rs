@@ -71,6 +71,12 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// Processed-by receipts (ADR 0040) for the open channel.
+    LoadReceipts {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
     SendMessage {
         generation: u64,
         channel_generation: u64,
@@ -118,6 +124,7 @@ impl Command {
             | Command::CreateChannel { generation, .. }
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
+            | Command::LoadReceipts { generation, .. }
             | Command::SendMessage { generation, .. }
             | Command::SendTaskEvent { generation, .. }
             | Command::Search { generation, .. }
@@ -187,6 +194,12 @@ pub enum UiEvent {
     CoordinationEvents {
         generation: u64,
         events: Vec<CoordinationEvent>,
+    },
+    Receipts {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        receipts: Vec<msn_cli::receipts::Receipt>,
     },
     SearchResults {
         generation: u64,
@@ -496,6 +509,32 @@ fn handle_command(
                 ),
             }
         }
+        Command::LoadReceipts {
+            channel_generation,
+            channel,
+            ..
+        } => match client_ops::fetch_receipts(&cc.client, &cc.tenant, &cc.token, &channel) {
+            Ok(receipts) => emit(
+                tx,
+                wake,
+                UiEvent::Receipts {
+                    generation,
+                    channel_generation,
+                    channel,
+                    receipts,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "receipts",
+                err,
+                false,
+                None,
+            ),
+        },
         Command::Search {
             channel_generation,
             channel,

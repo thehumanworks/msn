@@ -461,6 +461,13 @@ function appendMessage(message, target = $("messages")) {
     }
     article.append(row);
   }
+  if (target === $("messages")) {
+    const receipts = document.createElement("div");
+    receipts.className = "message-receipts";
+    receipts.title = RECEIPTS_MEANING;
+    showReceipt(receipts, message, session?.channels.get(channel)?.receipts);
+    article.append(receipts);
+  }
   if (target !== $("messages")) {
     target.append(article);
     return article;
@@ -619,6 +626,62 @@ async function showParent(message, article) {
     ? `${parent.username}: ${parent.text.length > 280 ? `${parent.text.slice(0, 280)}…` : parent.text}`
     : `Message #${id} is no longer available.`;
   article.querySelector(":scope > .message-annotation")?.after(quote);
+}
+
+/**
+ * Processed-by receipts (ADR 0040). They come only from explicit resumable commits, so the line
+ * names only readers that have committed on the server: who committed past this message and who
+ * committed but not this far. A persona that never committed is not listed at all (its progress
+ * is unknown), and the sender is left out of its own message.
+ */
+const RECEIPTS_MEANING =
+  "From explicit resumable commits (msn commit --resumable) only. Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
+const RECEIPTS_EVERY_MS = 10000;
+const RECEIPTS_MAX_NAMES = 10;
+function receiptNames(list) {
+  const shown = list.slice(0, RECEIPTS_MAX_NAMES).join(", ");
+  return list.length > RECEIPTS_MAX_NAMES ? `${shown} +${list.length - RECEIPTS_MAX_NAMES} more` : shown;
+}
+function receiptLine(receipts, message) {
+  if (!Array.isArray(receipts)) return null;
+  const relevant = receipts.filter(
+    (r) =>
+      r.committedThrough !== null &&
+      !(message.personaId != null && r.personaId === message.personaId) &&
+      r.name !== message.username &&
+      !r.name.startsWith(`${message.username}/`),
+  );
+  const done = relevant.filter((r) => r.committedThrough >= message.id).map((r) => r.name);
+  const waiting = relevant.filter((r) => r.committedThrough < message.id).map((r) => r.name);
+  if (!done.length && !waiting.length) return null;
+  if (!waiting.length) return `Processed by ${receiptNames(done)}`;
+  if (!done.length) return `Not yet processed by ${receiptNames(waiting)}`;
+  return `Processed by ${receiptNames(done)} · not yet: ${receiptNames(waiting)}`;
+}
+function showReceipt(element, message, receipts) {
+  const line = receiptLine(receipts, message);
+  element.textContent = line ?? "";
+  element.hidden = line === null;
+}
+async function loadReceipts(connection, name, state, force = false) {
+  if (!force && state.receiptsAt && Date.now() - state.receiptsAt < RECEIPTS_EVERY_MS) return;
+  state.receiptsAt = Date.now();
+  try {
+    const data = await api(`/channels/${name}/receipts`, {}, connection);
+    if (data.channel !== name || !Array.isArray(data.receipts)) return;
+    state.receipts = data.receipts;
+  } catch {
+    // Receipts are an extra; an older server or a failed request just leaves them as they were.
+    return;
+  }
+  if (session !== connection || channel !== name) return;
+  const byId = new Map(state.messages.map((message) => [message.id, message]));
+  // Replies folded into a thread (ADR 0041) are articles inside their root's article.
+  for (const article of $("messages").querySelectorAll("article")) {
+    const element = article.querySelector(":scope > .message-receipts");
+    const message = byId.get(Number(article.dataset.id));
+    if (element && message) showReceipt(element, message, state.receipts);
+  }
 }
 
 /**
@@ -948,6 +1011,7 @@ async function poll(live = false) {
       );
       if (generation !== epoch) return;
       render(data.messages, state);
+      void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
       if (state.context) showCheckpoint(state);

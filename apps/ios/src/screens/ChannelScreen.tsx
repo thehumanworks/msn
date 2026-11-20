@@ -11,6 +11,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
+import { loadReceipts, type Receipt, RECEIPTS_EVERY_MS, receiptLine } from "../core/receipts.ts";
 import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
@@ -94,6 +95,7 @@ function ChannelBody({
   const [restored, setRestored] = useState<{ draft: Draft; n: number } | null>(null);
   const me = session.session.username;
 
+  const receipts = useReceipts(session, controller.channel, state.messages.at(-1)?.id ?? 0);
   const byId = useMemo(() => new Map(state.messages.map((m) => [m.id, m])), [state.messages]);
   // Reply threads (ADR 0041): folded by default; the list is inverted, so newest row first.
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
@@ -251,6 +253,7 @@ function ChannelBody({
                 onToggleThread={toggle}
                 selected={replyTo?.id === item.id}
                 onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
+                receipts={receiptLine(receipts, item)}
               />
             );
           }}
@@ -279,6 +282,29 @@ function ChannelBody({
       />
     </View>
   );
+}
+
+/**
+ * Processed-by receipts for the open channel (ADR 0040): loaded when a new message arrives and on
+ * a timer, because a commit is not a channel event. A failed load keeps the last answer.
+ */
+function useReceipts(session: SessionController, channel: string, newest: number): Receipt[] {
+  const [receipts, setReceipts] = useState<Receipt[]>([]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: newest only triggers a reload.
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = () =>
+      loadReceipts(session.api, channel, controller.signal).then(setReceipts, () => {});
+    void load();
+    const timer = setInterval(load, RECEIPTS_EVERY_MS);
+    return () => {
+      clearInterval(timer);
+      controller.abort();
+    };
+  }, [session, channel, newest]);
+  // Another channel's receipts must never label this one's messages.
+  useEffect(() => setReceipts([]), [channel]);
+  return receipts;
 }
 
 const styles = StyleSheet.create({

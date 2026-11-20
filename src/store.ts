@@ -204,6 +204,22 @@ type ProcessingRow = {
 };
 const PROCESSING_COLUMNS = "reader, committedThrough, generation, holder, claimedAt, updatedAt";
 type ProcessingFence = { reader: string; generation: number };
+/** The message's own sender, by persona id or by name (with any `/worker` suffix). */
+function receiptFromSender(r: Receipt, username: string, personaId: string | null): boolean {
+  return (
+    (personaId !== null && r.personaId === personaId) ||
+    r.name === username ||
+    r.name.startsWith(`${username}/`)
+  );
+}
+/** One reader's explicit commit position (ADR 0040); committedThrough null means never committed. */
+type Receipt = {
+  name: string;
+  reader: string | null;
+  personaId: string | null;
+  committedThrough: number | null;
+  updatedAt: string | null;
+};
 function toProcessing(row: ProcessingRow) {
   return { ...row };
 }
@@ -2091,6 +2107,92 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Processed-by receipts (ADR 0040), read only from explicit resumable commits in
+   * `processing_cursors` (ADR 0034). A reader has processed message N when its committedThrough
+   * is at least N. A board persona with no committed reader is listed with committedThrough null.
+   * Nothing here is inferred from presence, polling or silence.
+   */
+  private receipts(channel: string): Receipt[] {
+    const personas = this.ctx.storage.sql
+      .exec<{ id: string; displayName: string }>(
+        "SELECT id, displayName FROM personas WHERE channel = ? ORDER BY createdAt, id",
+        channel,
+      )
+      .toArray();
+    const cursors = this.ctx.storage.sql
+      .exec<{ reader: string; committedThrough: number; updatedAt: string }>(
+        "SELECT reader, committedThrough, updatedAt FROM processing_cursors WHERE channel = ? ORDER BY reader",
+        channel,
+      )
+      .toArray();
+    // A persona owns its id or display name as a reader, and `<that>/<worker>` for concurrent
+    // consumers (ADR 0034). The worker suffix stays in the shown name.
+    const owner = (reader: string) => {
+      for (const persona of personas)
+        for (const prefix of [persona.id, persona.displayName])
+          if (reader === prefix || reader.startsWith(`${prefix}/`))
+            return { persona, suffix: reader.slice(prefix.length) };
+      return null;
+    };
+    const byPersona = new Map<string, Receipt[]>();
+    const others: Receipt[] = [];
+    for (const cursor of cursors) {
+      const match = owner(cursor.reader);
+      const receipt: Receipt = {
+        name: match ? match.persona.displayName + match.suffix : cursor.reader,
+        reader: cursor.reader,
+        personaId: match?.persona.id ?? null,
+        committedThrough: cursor.committedThrough,
+        updatedAt: cursor.updatedAt,
+      };
+      if (!match) others.push(receipt);
+      else byPersona.set(match.persona.id, [...(byPersona.get(match.persona.id) ?? []), receipt]);
+    }
+    const result: Receipt[] = [];
+    for (const persona of personas)
+      result.push(
+        ...(byPersona.get(persona.id) ?? [
+          {
+            name: persona.displayName,
+            reader: null,
+            personaId: persona.id,
+            committedThrough: null,
+            updatedAt: null,
+          },
+        ]),
+      );
+    return [...result, ...others];
+  }
+
+  /**
+   * One message's split. `processed` and `notYet` hold only readers with a server cursor, so
+   * "not yet" always means "has committed, but not this far". Personas that never committed are
+   * listed apart in `noServerCommit`: their progress is unknown, not behind (ADR 0040). The
+   * sender's own readers are left out of all three.
+   */
+  private messageReceipts(channel: string, id: number): Response {
+    const row = this.ctx.storage.sql
+      .exec<{ deleted: number; username: string; personaId: string | null }>(
+        "SELECT deleted, username, personaId FROM messages WHERE channel = ? AND id = ?",
+        channel,
+        id,
+      )
+      .toArray()[0];
+    if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+    if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+    const receipts = this.receipts(channel).filter((r) => !receiptFromSender(r, row.username, row.personaId));
+    const committed = receipts.filter((r) => r.committedThrough !== null);
+    const done = (r: Receipt) => (r.committedThrough ?? -1) >= id;
+    return json({
+      channel,
+      messageId: id,
+      processed: committed.filter(done),
+      notYet: committed.filter((r) => !done(r)),
+      noServerCommit: receipts.filter((r) => r.committedThrough === null),
+    });
+  }
+
   private latestSnapshot(channel: string): SnapshotRow | undefined {
     return this.ctx.storage.sql
       .exec<SnapshotRow>(
@@ -3052,6 +3154,19 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);
             return this.showMessage(tenant, channel, messageId(rest[3]));
+          }
+          if (rest.length === 3 && rest[2] === "receipts" && request.method === "GET") {
+            this.requireChannel(channel);
+            return json({ channel, receipts: this.receipts(channel) });
+          }
+          if (
+            rest.length === 5 &&
+            rest[2] === "messages" &&
+            rest[4] === "receipts" &&
+            request.method === "GET"
+          ) {
+            this.requireChannel(channel);
+            return this.messageReceipts(channel, messageId(rest[3]));
           }
           if (rest.length === 3 && rest[2] === "messages") {
             if (request.method === "POST") {

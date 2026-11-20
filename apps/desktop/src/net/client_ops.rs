@@ -289,6 +289,23 @@ pub fn load_parent(
     }
 }
 
+/// Every reader's explicit commit position on a channel (ADR 0040), for the processed-by line.
+pub fn fetch_receipts(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<Vec<msn_cli::receipts::Receipt>, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let value = get_json(
+        client,
+        &msn_cli::receipts::channel_path(tenant, channel),
+        token,
+    )?;
+    msn_cli::receipts::parse_channel(&value, channel)
+}
+
 /// One page of search results (ADR 0037), newest first.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchPage {

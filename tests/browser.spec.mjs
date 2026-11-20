@@ -2111,3 +2111,89 @@ test("the search box finds a board's messages by words and sender, newest first,
   expect(await page.evaluate(() => window.pwned)).toBeUndefined();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("each message shows which personas committed past it, from explicit commits only", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = "d".repeat(64);
+  const board = { Authorization: `Bearer ${credential}` };
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Review the release" },
+      })
+    ).status(),
+  ).toBe(201);
+  for (const [id, displayName] of [
+    ["p1", "reviewer"],
+    ["p2", "worker-2"],
+    ["p3", "silent"],
+  ])
+    await request.put(`${t.path}/channels/work/personas/${id}`, { headers: board, data: { displayName } });
+  for (const text of ["first task", "second task"])
+    expect(
+      (
+        await request.post(`${t.path}/channels/work/messages`, {
+          headers: t.headers,
+          data: { username: "human", text },
+        })
+      ).status(),
+    ).toBe(201);
+  // The reviewer's own reply never lists the reviewer.
+  expect(
+    (
+      await request.post(`${t.path}/channels/work/messages`, {
+        headers: board,
+        data: { username: "reviewer", personaId: "p1", text: "looking" },
+      })
+    ).status(),
+  ).toBe(201);
+  const reader = `${t.path}/channels/work/processing/p1`;
+  const claim = await request.post(`${reader}/claim`, { headers: board, data: { expectGeneration: 0 } });
+  expect(claim.status()).toBe(201);
+  expect(
+    (
+      await request.post(`${reader}/commit`, { headers: board, data: { generation: 1, through: 1 } })
+    ).status(),
+  ).toBe(200);
+  // worker-2 has a server cursor at 0; silent never committed, so it is never listed.
+  expect(
+    (
+      await request.post(`${t.path}/channels/work/processing/p2/claim`, {
+        headers: board,
+        data: { expectGeneration: 0 },
+      })
+    ).status(),
+  ).toBe(201);
+
+  await connect(page, t, "human", { live: false });
+  await openChannel(page, "work");
+  const receipts = page.locator("#messages .message-receipts");
+  await expect(receipts).toHaveText([
+    "Processed by reviewer · not yet: worker-2",
+    "Not yet processed by reviewer, worker-2",
+    "Not yet processed by worker-2",
+  ]);
+  await expect(receipts.first()).toHaveAttribute(
+    "title",
+    /resumable commits.*never commit to the server are not listed/,
+  );
+  await page.screenshot({ path: testInfo.outputPath("receipts.png") });
+
+  // A later commit shows on the next poll; nothing changes from silence or presence.
+  expect(
+    (
+      await request.post(`${reader}/commit`, { headers: board, data: { generation: 1, through: 2 } })
+    ).status(),
+  ).toBe(200);
+  await page.locator("#poll").click();
+  await expect(receipts).toHaveText([
+    "Processed by reviewer · not yet: worker-2",
+    "Processed by reviewer · not yet: worker-2",
+    "Not yet processed by worker-2",
+  ]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

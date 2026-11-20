@@ -28,6 +28,9 @@ pub struct MsnDesktopApp {
     search_input: String,
     /// A reply the chat should scroll to on its next frame (the "New reply in thread" pointer).
     scroll_to: Option<u64>,
+    /// When processed-by receipts were last asked for; commits are not channel events, so the
+    /// open channel's receipts are reloaded on a timer (ADR 0040).
+    receipts_at: Option<std::time::Instant>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
 }
@@ -104,6 +107,7 @@ impl MsnDesktopApp {
             active_tab: Tab::Chat,
             search_input: String::new(),
             scroll_to: None,
+            receipts_at: None,
             profile_store,
         }
     }
@@ -147,6 +151,15 @@ impl MsnDesktopApp {
         }
         let deferred = self.state.take_deferred();
         self.dispatch_all(deferred);
+        if self.state.channel.is_some()
+            && self
+                .receipts_at
+                .is_none_or(|at| at.elapsed() >= RECEIPTS_EVERY)
+        {
+            self.receipts_at = Some(std::time::Instant::now());
+            let command = self.state.receipts_command();
+            self.dispatch_all(command.into_iter().collect());
+        }
     }
 
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
@@ -679,6 +692,7 @@ impl MsnDesktopApp {
                                             });
                                         }
                                         render_message(ui, message, &me);
+                                        render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
                                         if replies > 0 {
                                             render_thread_toggle(
@@ -697,7 +711,9 @@ impl MsnDesktopApp {
                                     }
                                     ThreadRow::Reply { id } => {
                                         let shown = ui.indent(("thread-reply", id), |ui| {
-                                            render_message(ui, &state.messages[&id], &me);
+                                            let reply = &state.messages[&id];
+                                            render_message(ui, reply, &me);
+                                            render_receipts(ui, reply, &me, &state.receipts);
                                         });
                                         if scroll_to == Some(id) {
                                             shown.response.scroll_to_me(Some(egui::Align::Center));
@@ -1108,6 +1124,10 @@ impl MsnDesktopApp {
 impl MsnDesktopApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
+        if self.state.channel.is_some() {
+            // Wakes an idle window so the receipts timer in drain_events can fire.
+            ui.ctx().request_repaint_after(RECEIPTS_EVERY);
+        }
         theme::backdrop(ui);
         egui::CentralPanel::default()
             .frame(theme::outer())
@@ -1181,6 +1201,41 @@ fn search_summary(search: &SearchState) -> String {
         summary.push_str(" \u{b7} older messages are still being indexed");
     }
     summary
+}
+
+/// How often the open channel's processed-by receipts are reloaded.
+const RECEIPTS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// "Processed by lead · not yet: worker" under a message, from explicit commits only (ADR 0040).
+/// Hovering shows exactly what a receipt proves.
+fn render_receipts(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    receipts: &[msn_cli::receipts::Receipt],
+) {
+    let Some(id) = message["id"].as_u64() else {
+        return;
+    };
+    let sender = message["username"].as_str().unwrap_or("");
+    let Some(line) =
+        msn_cli::receipts::summary(receipts, id, sender, message["personaId"].as_str())
+    else {
+        return;
+    };
+    let own = sender == me;
+    let label = egui::Label::new(egui::RichText::new(line).small().color(theme::MUTED));
+    let draw = |ui: &mut egui::Ui| {
+        ui.add(label).on_hover_text(msn_cli::receipts::MEANING);
+    };
+    if own {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), draw);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.add_space(30.0 + ui.spacing().item_spacing.x);
+            draw(ui);
+        });
+    }
 }
 
 fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
@@ -1519,6 +1574,7 @@ mod layout_tests {
             active_tab: Tab::Chat,
             search_input: String::new(),
             scroll_to: None,
+            receipts_at: None,
             profile_store: None,
         }
     }
