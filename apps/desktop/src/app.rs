@@ -7,6 +7,7 @@ use uuid::Uuid;
 use msn_cli::config::{MAX_SAFE_INTEGER, is_slug, parse_int, parse_origin, slug};
 use msn_cli::identity::validate_username;
 
+use crate::drafts;
 use crate::markdown;
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
@@ -43,6 +44,15 @@ pub struct MsnDesktopApp {
     /// Marks waiting to be written: (file, reader, marks).
     pending_marks: Option<(std::path::PathBuf, String, read_marks::Marks)>,
     marks_saved_at: Option<std::time::Instant>,
+    /// Unsent drafts per board (ADR 0056). The composer shows `drafts_board`'s draft; the
+    /// others wait here, and on disk once `drafts_path` is known.
+    drafts: drafts::Drafts,
+    drafts_board: Option<String>,
+    drafts_path: Option<(u64, Option<std::path::PathBuf>)>,
+    drafts_dirty: bool,
+    /// Whose drafts these are, so a write after the session ended still names the reader.
+    drafts_reader: String,
+    drafts_saved_at: Option<std::time::Instant>,
     /// The "also mute messages addressed to me" box in the mute menu (ADR 0044).
     mute_everything: bool,
     /// Where this computer keeps its theme choice (ADR 0049); `None` keeps it in memory only.
@@ -226,6 +236,12 @@ impl MsnDesktopApp {
             unread_at: None,
             pending_marks: None,
             marks_saved_at: None,
+            drafts: drafts::Drafts::default(),
+            drafts_board: None,
+            drafts_path: None,
+            drafts_dirty: false,
+            drafts_reader: String::new(),
+            drafts_saved_at: None,
             profile_store,
             mute_everything: false,
             theme_file,
@@ -249,6 +265,9 @@ impl MsnDesktopApp {
             Command::Disconnect => {
                 self.worker.next_generation();
                 self.save_read_marks(true);
+                // The session ended without a Disconnect: drafts stay for the next connection.
+                self.sync_composer();
+                self.save_drafts(true);
             }
             command => {
                 if let Err(rejected) = self.worker.send(command) {
@@ -280,6 +299,9 @@ impl MsnDesktopApp {
         self.dispatch_all(deferred);
         self.load_read_marks();
         self.save_read_marks(false);
+        self.load_drafts();
+        self.sync_composer();
+        self.save_drafts(false);
         // Counts are asked only while the window has focus, at most once per UNREAD_EVERY and
         // only for boards that changed; a background window asks nothing until focus returns.
         if self.state.unread_pending() && ctx.input(|input| input.focused) {
@@ -1420,6 +1442,13 @@ impl MsnDesktopApp {
         match action {
             Action::Disconnect => {
                 self.worker.next_generation();
+                // Disconnect forgets this reader's drafts on this computer (ADR 0056).
+                if let Some((_, Some(path))) = self.drafts_path.take() {
+                    let _ = drafts::remove(&path);
+                }
+                self.drafts = drafts::Drafts::default();
+                self.drafts_board = None;
+                self.drafts_dirty = false;
                 self.state = AppState::default();
                 self.composer = Composer::default();
                 self.refresh_profiles();
@@ -1675,6 +1704,87 @@ impl MsnDesktopApp {
         }
     }
 
+    /// Reads this connection's drafts from disk once, after the server confirmed the name. A new
+    /// connection first writes what the previous one still had pending.
+    fn load_drafts(&mut self) {
+        let Some(connection) = self.state.connection.as_ref() else {
+            return;
+        };
+        if self
+            .drafts_path
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation == connection.generation)
+        {
+            return;
+        }
+        self.sync_composer();
+        self.save_drafts(true);
+        let connection = self.state.connection.as_ref().expect("checked above");
+        let path = self.link_origin.as_ref().and_then(|origin| {
+            drafts::default_path(origin, &connection.tenant, &connection.username)
+        });
+        self.drafts = path
+            .as_deref()
+            .map(|path| drafts::load(path, &connection.username))
+            .unwrap_or_default();
+        self.drafts_reader = connection.username.clone();
+        self.drafts_path = Some((connection.generation, path));
+        self.drafts_dirty = false;
+        // The board that opens next shows its own kept draft.
+        self.drafts_board = None;
+        self.composer = Composer::default();
+    }
+
+    /// Keeps the composer and the board it belongs to in step: on a board change the composer's
+    /// draft is put away and the new board's draft comes back; otherwise edits are recorded.
+    fn sync_composer(&mut self) {
+        let current = self.state.selected_channel.clone();
+        if let Some(board) = self.drafts_board.as_deref() {
+            let draft = drafts::Draft {
+                text: self.composer.text.clone(),
+                to: self.composer.to.clone(),
+                reply_to: self.composer.reply_to.clone(),
+            };
+            self.drafts_dirty |= self.drafts.set(board, &draft);
+        }
+        if self.drafts_board == current {
+            return;
+        }
+        let draft = current
+            .as_deref()
+            .and_then(|board| self.drafts.get(board))
+            .cloned()
+            .unwrap_or_default();
+        self.composer = Composer {
+            text: draft.text,
+            to: draft.to,
+            reply_to: draft.reply_to,
+            error: None,
+        };
+        self.drafts_board = current;
+    }
+
+    /// Writes changed drafts at most once per SAVE_MARKS_EVERY, or now when `force`
+    /// (connection change, exit). A failed write only costs drafts after a restart.
+    fn save_drafts(&mut self, force: bool) {
+        if !self.drafts_dirty
+            || (!force
+                && self
+                    .drafts_saved_at
+                    .is_some_and(|at| at.elapsed() < SAVE_MARKS_EVERY))
+        {
+            return;
+        }
+        let Some((_, Some(path))) = &self.drafts_path else {
+            // No file for this connection: drafts live for this run only.
+            self.drafts_dirty = false;
+            return;
+        };
+        let _ = drafts::save(path, &self.drafts_reader, &self.drafts);
+        self.drafts_dirty = false;
+        self.drafts_saved_at = Some(std::time::Instant::now());
+    }
+
     /// The web link to message `id` of the open channel (ADR 0042). It carries no credential.
     fn message_link(&self, id: u64) -> Option<String> {
         let origin = self.link_origin.as_ref()?;
@@ -1753,7 +1863,7 @@ impl eframe::App for MsnDesktopApp {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
-        if self.pending_marks.is_some() {
+        if self.pending_marks.is_some() || self.drafts_dirty {
             // Wakes an idle window so a throttled write still happens.
             ui.ctx().request_repaint_after(SAVE_MARKS_EVERY);
         }
@@ -1761,6 +1871,8 @@ impl eframe::App for MsnDesktopApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_read_marks(true);
+        self.sync_composer();
+        self.save_drafts(true);
     }
 }
 
@@ -2545,7 +2657,7 @@ mod pin_tests {
 mod layout_tests {
     use super::*;
 
-    fn fixture(message_count: u64) -> MsnDesktopApp {
+    pub(super) fn fixture(message_count: u64) -> MsnDesktopApp {
         let (tx, rx) = sync_channel(EVENT_QUEUE_CAPACITY);
         let mut state = AppState::default();
         state.begin_connect(1, "design-studio".into());
@@ -2582,6 +2694,12 @@ mod layout_tests {
             unread_at: None,
             pending_marks: None,
             marks_saved_at: None,
+            drafts: drafts::Drafts::default(),
+            drafts_board: None,
+            drafts_path: None,
+            drafts_dirty: false,
+            drafts_reader: String::new(),
+            drafts_saved_at: None,
             profile_store: None,
             mute_everything: false,
             theme_file: None,
@@ -3221,5 +3339,81 @@ mod layout_tests {
                 "composer must fit: {input:?}, {size:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::layout_tests::fixture;
+    use super::*;
+
+    /// Drafts (ADR 0056): each board keeps its own composer, sending clears only that board's,
+    /// the file is written once the throttle allows, a new run reads it back, and Disconnect
+    /// forgets it.
+    #[test]
+    fn each_board_keeps_its_draft_on_disk_until_sent_or_disconnected() {
+        let dir = std::env::temp_dir().join(format!("msn-draft-app-{}", Uuid::new_v4()));
+        let path = dir.join("drafts.json");
+        let mut app = fixture(3);
+        // As load_drafts would set them, with a file this test owns.
+        app.drafts_path = Some((1, Some(path.clone())));
+        app.drafts_reader = "Alex".into();
+        app.sync_composer();
+        assert_eq!(app.drafts_board.as_deref(), Some("general"));
+        app.composer.text = "general draft".into();
+        app.composer.to = "Jamie".into();
+        app.reply_to(2);
+        assert_eq!(app.composer.reply_to, "2");
+
+        app.state.selected_channel = Some("design".into());
+        app.sync_composer();
+        assert_eq!(app.composer.text, "", "a new board starts empty");
+        assert_eq!(app.composer.reply_to, "");
+        app.composer.text = "design draft".into();
+        app.sync_composer();
+        app.save_drafts(true);
+        let stored = drafts::load(&path, "Alex");
+        assert_eq!(stored.get("general").unwrap().text, "general draft");
+        assert_eq!(stored.get("general").unwrap().to, "Jamie");
+        assert_eq!(stored.get("general").unwrap().reply_to, "2");
+        assert_eq!(stored.get("design").unwrap().text, "design draft");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("token"), "{text}");
+
+        app.state.selected_channel = Some("general".into());
+        app.sync_composer();
+        assert_eq!(app.composer.text, "general draft");
+        assert_eq!(app.composer.to, "Jamie");
+        assert_eq!(app.composer.reply_to, "2");
+
+        // Sending clears the board's draft; the message itself lives in the pending list only.
+        app.perform(Action::Send);
+        assert_eq!(app.composer.text, "");
+        assert_eq!(app.state.pending_sends.len(), 1);
+        app.sync_composer();
+        // A throttled write waits; a forced one (exit, connection change) does not.
+        app.drafts_saved_at = Some(std::time::Instant::now());
+        app.save_drafts(false);
+        assert!(drafts::load(&path, "Alex").get("general").is_some());
+        app.save_drafts(true);
+        let stored = drafts::load(&path, "Alex");
+        assert_eq!(stored.get("general").map(|d| d.text.as_str()), Some(""));
+        assert_eq!(
+            stored.get("general").unwrap().to,
+            "Jamie",
+            "To stays for the next message"
+        );
+        assert!(stored.get("design").is_some());
+
+        // A later run of the app reads the drafts back for the same reader.
+        let mut next = fixture(3);
+        next.drafts = drafts::load(&path, "Alex");
+        next.sync_composer();
+        assert_eq!(next.composer.to, "Jamie");
+
+        app.perform(Action::Disconnect);
+        assert!(!path.exists(), "Disconnect forgets the drafts");
+        assert_eq!(app.composer.text, "");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

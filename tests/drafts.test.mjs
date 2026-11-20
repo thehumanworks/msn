@@ -1,0 +1,110 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  draftsFor,
+  hasContent,
+  MAX_DRAFT_BYTES,
+  MAX_DRAFTS,
+  parseDrafts,
+  putDraft,
+  restoreDraft,
+} from "../public/drafts.js";
+import { markId } from "../public/since.js";
+
+const memory = (fields = {}) => ({
+  content: "",
+  recipient: "",
+  replyTo: null,
+  files: [],
+  missingFiles: 0,
+  retry: null,
+  sending: false,
+  ...fields,
+});
+
+test("a draft round-trips with its recipient, reply target and retry key, never its files", () => {
+  const key = markId("Tomas", "general");
+  const file = { name: "a.txt", size: 3 };
+  const retry = { payload: '{"username":"Tomas","text":"hi"}', key: "4b1d0c2e-1f7a-4c1b-9b9a-0e0f6e0d1c2b" };
+  const stored = putDraft(
+    {},
+    key,
+    memory({ content: "hi", recipient: "worker", replyTo: 7, files: [file], retry }),
+    123,
+  );
+  const text = JSON.stringify(stored);
+  assert.ok(!text.includes("a.txt"), "file names and contents are not stored");
+  const parsed = parseDrafts(text);
+  assert.deepEqual(parsed[key], { content: "hi", recipient: "worker", replyTo: 7, files: 1, retry, at: 123 });
+  assert.deepEqual(
+    restoreDraft(parsed[key]),
+    memory({ content: "hi", recipient: "worker", replyTo: 7, missingFiles: 1, retry }),
+  );
+});
+
+test("an emptied draft is removed; a lone retry key or reply target keeps it", () => {
+  const key = markId("Tomas", "general");
+  let stored = putDraft({}, key, memory({ content: "draft" }));
+  stored = putDraft(stored, key, memory());
+  assert.deepEqual(stored, {});
+  stored = putDraft({}, key, memory({ retry: { payload: "{}", key: "k1" } }));
+  assert.ok(stored[key]);
+  stored = putDraft({}, key, memory({ replyTo: 3 }));
+  assert.equal(stored[key].replyTo, 3);
+  // Files lost on a reload still mark the draft until they are attached again or sent.
+  stored = putDraft({}, key, memory({ missingFiles: 2 }));
+  assert.equal(stored[key].files, 2);
+});
+
+test("a draft too long to send is kept in memory only", () => {
+  const key = markId("Tomas", "general");
+  const before = putDraft({}, key, memory({ content: "short" }));
+  const after = putDraft(before, key, memory({ content: "x".repeat(MAX_DRAFT_BYTES + 1) }));
+  assert.deepEqual(after, {});
+  assert.ok(putDraft({}, key, memory({ content: "é".repeat(MAX_DRAFT_BYTES / 2) }))[key]);
+  assert.deepEqual(putDraft({}, key, memory({ content: "é".repeat(MAX_DRAFT_BYTES / 2 + 1) })), {});
+});
+
+test("the least recently changed drafts go first past the cap", () => {
+  let stored = {};
+  for (let i = 0; i < MAX_DRAFTS + 5; i++)
+    stored = putDraft(stored, markId("Tomas", `b${i}`), memory({ content: `${i}` }));
+  assert.equal(Object.keys(stored).length, MAX_DRAFTS);
+  assert.ok(!stored[markId("Tomas", "b0")]);
+  // Changing an old draft moves it to the newest end.
+  stored = putDraft(stored, markId("Tomas", "b5"), memory({ content: "again" }));
+  stored = putDraft(stored, markId("Tomas", "new"), memory({ content: "new" }));
+  assert.ok(stored[markId("Tomas", "b5")]);
+  assert.ok(!stored[markId("Tomas", "b6")]);
+  assert.equal(Object.keys(parseDrafts(JSON.stringify(stored))).length, MAX_DRAFTS);
+});
+
+test("malformed stored values are dropped entry by entry", () => {
+  assert.deepEqual(parseDrafts(null), {});
+  assert.deepEqual(parseDrafts("not json"), {});
+  assert.deepEqual(parseDrafts("[1,2]"), {});
+  const good = { content: "ok", recipient: "", replyTo: null, files: 0, retry: null, at: 1 };
+  const parsed = parseDrafts(
+    JSON.stringify({
+      "a\ngood": good,
+      "a\nbad-reply": { ...good, replyTo: 0 },
+      "a\nbad-files": { ...good, files: 11 },
+      "a\nbad-key": { ...good, retry: { payload: "{}", key: "has space" } },
+      "a\nbad-type": { ...good, content: 5 },
+      "a\nempty": { ...good, content: "" },
+      "a\ntoken": { ...good, token: "secret" },
+    }),
+  );
+  assert.deepEqual(Object.keys(parsed), ["a\ngood", "a\ntoken"]);
+  assert.ok(!("token" in parsed["a\ntoken"]), "unknown fields are not carried over");
+});
+
+test("only the connected name's drafts come back", () => {
+  let stored = putDraft({}, markId("Tomas", "general"), memory({ content: "mine" }));
+  stored = putDraft(stored, markId("Tom", "general"), memory({ content: "other name" }));
+  assert.deepEqual(
+    draftsFor(stored, "Tomas").map(([board, entry]) => [board, entry.content]),
+    [["general", "mine"]],
+  );
+  assert.equal(hasContent(memory()), false);
+});

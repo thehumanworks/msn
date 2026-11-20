@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { draftsFor, parseDrafts, putDraft, restoreDraft } from "./drafts.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
@@ -12,6 +13,9 @@ const SESSION_KEY = "msn.session";
 const CHANNEL_KEY = (tenant) => `msn.channel.${tenant}`;
 // Where this reader stopped on each board. Device-local only; the server never learns it.
 const MARKS_KEY = (tenant) => `msn.read.${tenant}`;
+// Unsent drafts per board (ADR 0056). Device-local only, and only with "Stay signed in".
+const DRAFTS_KEY = (tenant) => `msn.drafts.${tenant}`;
+const DRAFT_SAVE_MS = 400;
 let session = null;
 let channel = "";
 let generation = 0;
@@ -32,10 +36,14 @@ const storage = {
       return null;
     }
   },
+  /** False when the browser refused the write (blocked storage or a full quota). */
   set(key, value) {
     try {
       localStorage.setItem(key, value);
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   },
   remove(key) {
     try {
@@ -57,6 +65,7 @@ function forgetSession(tenant) {
   if (tenant) {
     storage.remove(CHANNEL_KEY(tenant));
     storage.remove(MARKS_KEY(tenant));
+    storage.remove(DRAFTS_KEY(tenant));
   }
 }
 
@@ -108,11 +117,51 @@ function draft(connection = session, name = channel) {
       recipient: "",
       replyTo: null,
       files: [],
+      // Files a draft had before a reload; files are never stored, so they must be attached again.
+      missingFiles: 0,
       retry: null,
       sending: false,
     });
   return connection.drafts.get(name);
 }
+
+/*
+ * Keeping drafts on this device (ADR 0056). Only with "Stay signed in"; otherwise drafts live in
+ * memory for the connection, as before. Typing is written at most every DRAFT_SAVE_MS; a send
+ * writes at once, so its retry key is on disk before the request leaves. The stored value is
+ * read again before each write, so two tabs on different boards do not erase each other.
+ */
+const draftsToSave = new Map();
+let draftTimer = null;
+
+function keepDraft(connection = session, name = channel, { now = false } = {}) {
+  if (!connection?.remember || !name) return;
+  draftsToSave.set(`${connection.tenant}\n${connection.username}\n${name}`, { connection, name });
+  if (now) flushDrafts();
+  else draftTimer ??= setTimeout(flushDrafts, DRAFT_SAVE_MS);
+}
+
+function flushDrafts() {
+  clearTimeout(draftTimer);
+  draftTimer = null;
+  const pending = [...draftsToSave.values()];
+  draftsToSave.clear();
+  for (const { connection, name } of pending) {
+    // A disconnected connection's drafts were already forgotten; never write them back.
+    if (session !== connection || !connection.remember) continue;
+    const key = DRAFTS_KEY(connection.tenant);
+    const id = markId(connection.username, name);
+    const next = putDraft(parseDrafts(storage.get(key)), id, draft(connection, name));
+    if (!Object.keys(next).length) storage.remove(key);
+    // A full quota keeps at least this board's draft; the others stay in memory.
+    else if (!storage.set(key, JSON.stringify(next)) && next[id])
+      storage.set(key, JSON.stringify({ [id]: next[id] }));
+  }
+}
+addEventListener("pagehide", flushDrafts);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushDrafts();
+});
 
 function status(message, error = false) {
   $("status").textContent = message;
@@ -185,6 +234,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
         }),
       ).catch(() => {});
     connection.token = "";
+    for (const [id, pending] of draftsToSave) if (pending.connection === connection) draftsToSave.delete(id);
     for (const state of connection.drafts.values()) {
       state.content = "";
       state.recipient = "";
@@ -397,11 +447,19 @@ function showFiles(state) {
     remove.addEventListener("click", () => {
       state.files.splice(index, 1);
       showFiles(state);
+      keepDraft();
     });
     item.append(remove);
     list.append(item);
   }
-  list.hidden = !state.files.length;
+  // Files are never kept on the device (ADR 0056): say which draft lost them on reload.
+  if (state.missingFiles > 0) {
+    const item = document.createElement("li");
+    item.className = "attach-missing";
+    item.textContent = `${state.missingFiles === 1 ? "1 file was" : `${state.missingFiles} files were`} not kept after the reload · attach again`;
+    list.append(item);
+  }
+  list.hidden = !state.files.length && !(state.missingFiles > 0);
 }
 
 function appendMessage(message, target = $("messages")) {
@@ -1534,6 +1592,9 @@ function render(messages, state) {
   if (visible) restorePosition(state);
   if (added) advanceMark();
   showJump(state);
+  // A reply target kept across a reload (ADR 0056) gets its author's name once its row loads.
+  if (added && session?.channels.get(channel) === state && session.drafts.get(channel)?.replyTo != null)
+    showReplyTo(draft());
   trimCache();
 }
 
@@ -1690,6 +1751,13 @@ function selectChannel(name, { reset = false } = {}) {
     button.setAttribute("aria-current", String(button.dataset.channel === name));
   if (session.unread) showUnread(session, session.unread);
   if (session.remember) storage.set(CHANNEL_KEY(session.tenant), name);
+  // A send that may not have gone through (kept across a reload, ADR 0056): the same text
+  // retries with the same key, so the server replays it rather than posting it twice.
+  if (selectedDraft.retry && !selectedDraft.sending)
+    status(
+      `Your last send on #${name} may not have gone through. Send retries it safely; changing it makes a new message.`,
+      true,
+    );
   view("chat");
   autosize();
   restorePosition(state);
@@ -1831,6 +1899,13 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     if (connection.watchOnly) note = "Watch only · you can read along but not post";
     connection.owner = identity.owner === true;
     connection.marks = connection.remember ? parseMarks(storage.get(MARKS_KEY(connection.tenant))) : {};
+    // Drafts kept from an earlier visit (ADR 0056), for this name only.
+    if (connection.remember)
+      for (const [name, entry] of draftsFor(
+        parseDrafts(storage.get(DRAFTS_KEY(connection.tenant))),
+        connection.username,
+      ))
+        if (!connection.drafts.has(name)) connection.drafts.set(name, restoreDraft(entry));
     if (identity.sharedChannel) {
       note = "Persona · shared channel access";
       const roster = await api(`/channels/${identity.channel}/personas`, {}, connection);
@@ -2337,6 +2412,8 @@ $("send-form").addEventListener("submit", async (event) => {
     });
     if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
     const attempt = state.retry;
+    // On disk before the request leaves: a reload during an uncertain send keeps the same key.
+    keepDraft(connection, selected, { now: true });
     await api(
       `/channels/${selected}/messages`,
       {
@@ -2353,6 +2430,8 @@ $("send-form").addEventListener("submit", async (event) => {
     }
     state.files = state.files.filter((file) => !files.includes(file));
     if (state.retry === attempt) state.retry = null;
+    state.missingFiles = 0;
+    keepDraft(connection, selected, { now: true });
     if (session !== connection || selected !== channel) return;
     $("message").value = state.content;
     $("recipient").value = state.recipient;
@@ -2388,17 +2467,25 @@ $("attach-input").addEventListener("change", () => {
       continue;
     }
     state.files.push(file);
+    state.missingFiles = 0;
   }
   $("attach-input").value = "";
   showFiles(state);
+  keepDraft();
 });
 
 $("message").addEventListener("input", () => {
-  if (session && channel) draft().content = $("message").value;
+  if (session && channel) {
+    draft().content = $("message").value;
+    keepDraft();
+  }
   autosize();
 });
 $("recipient").addEventListener("input", () => {
-  if (session && channel) draft().recipient = $("recipient").value;
+  if (session && channel) {
+    draft().recipient = $("recipient").value;
+    keepDraft();
+  }
 });
 $("message").addEventListener("keydown", (event) => {
   // Enter sends; Shift+Enter inserts a newline. Ctrl/⌘+Enter always sends.
@@ -3053,6 +3140,7 @@ function replyTo(message) {
   const state = draft();
   state.replyTo = message.id;
   showReplyTo(state);
+  keepDraft();
   view("chat");
   $("message").focus();
 }
@@ -3061,6 +3149,7 @@ function cancelReply() {
   if (!session || !channel || draft().replyTo === null) return false;
   draft().replyTo = null;
   showReplyTo(draft());
+  keepDraft();
   return true;
 }
 $("reply-cancel").addEventListener("click", () => {
