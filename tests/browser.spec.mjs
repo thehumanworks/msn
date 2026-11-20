@@ -3889,3 +3889,80 @@ test("a failed persona load is not retried on every key after @ (ADR 0055)", asy
   expect(asked).toBe(1);
   await expect(page.locator("#status")).not.toHaveClass(/error/);
 });
+
+test("the Invite dialog's curl commands join, read and send with plain curl", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship the curl quickstart" },
+      })
+    ).status(),
+  ).toBe(201);
+  // Record copies instead of touching the real clipboard.
+  await page.addInitScript(() => {
+    window.copied = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: async (text) => window.copied.push(text) },
+    });
+  });
+  await page.goto("/");
+  await page.locator("#connection-file").setInputFiles({
+    name: "account.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(
+      JSON.stringify({
+        url: new URL(page.url()).origin,
+        tenant: t.tenant,
+        token: t.token,
+        username: "human",
+      }),
+    ),
+  });
+  await expect(page.locator("#workspace")).toBeVisible();
+  await openChannel(page, "work");
+  await page.locator("#invite-channel").click();
+  await expect(page.locator("#invite-title")).toHaveText("Shared access to # work");
+  await page.locator("#copy-curl").click();
+  await expect.poll(() => page.evaluate(() => window.copied.length)).toBe(1);
+  const script = await page.evaluate(() => window.copied[0]);
+  // The copied text never holds the key; the agent sets it from the board link.
+  expect(script).not.toContain(credential);
+  const link = await page.locator("#invite-link").inputValue();
+  const key = JSON.parse(decodeURIComponent(link.split("#board=")[1])).token;
+  // Run the copied commands as an agent would, with only bash and curl; N becomes the start.
+  const run = (text, env = {}) =>
+    promisify(execFile)("bash", ["-euc", text.replace("after=N&wait=25", "after=0&wait=1")], {
+      env: { ...process.env, ...env },
+    });
+  const { stdout } = await run(script, { MSN_KEY: key });
+  expect(stdout).toContain('"displayName":"my-agent"');
+  expect(stdout).toContain("Ship the curl quickstart");
+  expect(stdout).toContain('"username":"my-agent","text":"hello"');
+  await expect(page.locator("#messages")).toContainText("hello");
+  // A workspace invitation's script redeems a key of its own and runs as a whole; a watch-only
+  // one cannot send, so it has none.
+  await page.locator("#close-invite").click();
+  await channelsPane(page);
+  await page.locator("#invite-workspace").click();
+  await page.locator("#invite-form").getByRole("button", { name: "Create invitation" }).click();
+  await page.locator("#copy-curl").click();
+  await expect.poll(() => page.evaluate(() => window.copied.length)).toBe(2);
+  const invite = await page.evaluate(() => window.copied[1]);
+  expect(invite).toContain("/invites/redeem");
+  const joined = await run(
+    invite
+      .replace("MSN_BOARD='general'", "MSN_BOARD='work'")
+      .replace("MSN_NAME='my-agent'", "MSN_NAME='invited'"),
+  );
+  expect(joined.stdout).toContain('"username":"invited","text":"hello"');
+  expect(joined.stdout).not.toMatch(/"token"/);
+  await page.locator("#close-invite").click();
+  await page.locator("#invite-workspace").click();
+  await page.locator("#invite-watch").check();
+  await page.locator("#invite-form").getByRole("button", { name: "Create invitation" }).click();
+  await expect(page.locator("#invite-link")).not.toHaveValue("");
+  await expect(page.locator("#copy-curl")).toBeHidden();
+});

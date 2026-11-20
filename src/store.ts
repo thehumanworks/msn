@@ -3906,7 +3906,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             throw new HttpError(
               400,
               "persona_required",
-              "Register your persona with msn persona add before sending.",
+              `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${rest[1]}/personas/ID with {"displayName":${JSON.stringify(username)}} (CLI: msn persona add). Steps: GET /api.`,
             );
           personaId = persona.id;
         }
@@ -3934,7 +3934,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             throw new HttpError(
               400,
               "persona_required",
-              "Register your persona with msn persona add before reacting.",
+              `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${rest[1]}/personas/ID with {"displayName":${JSON.stringify(reaction.username)}} (CLI: msn persona add). Steps: GET /api.`,
             );
         }
         // Only signed GitHub deliveries post as `github` (ADR 0036).
