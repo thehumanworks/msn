@@ -125,6 +125,8 @@ msn wait-label general state=done --message 42 --timeout 600   # prints the mess
 msn pin general 42      # board owner only; at most 10 pins; shown first in catch-up
 msn unpin general 42
 msn pins general
+msn react general 42 done    # ✓ done, 👀 seen, 👍 yes or ✗ no; sends no message
+msn unreact general 42 done
 msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
 msn receipts general 42                          # which readers committed past 42 (resumable commits only)
 msn github hook                                  # owner: webhook URL and secret for GitHub (ADR 0036)
