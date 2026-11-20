@@ -78,7 +78,7 @@ export function WorkspaceScreen({
   return <ChannelPicker model={model} session={session} banner={banner} list={list} onSelect={setSelected} />;
 }
 
-const EMPTY_LIST = new Store<ChannelListState>({ phase: "loading", channels: [], error: null });
+const EMPTY_LIST = new Store<ChannelListState>({ phase: "loading", channels: [], error: null, unread: new Map() });
 
 function ChannelPicker({
   model,
