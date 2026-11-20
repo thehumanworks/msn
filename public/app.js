@@ -2,6 +2,7 @@ import { acquire, invitation, savePassword } from "./access.js";
 import { renderMarkdown } from "./markdown.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
+import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
 
@@ -1490,6 +1491,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
   $("agents").disabled = false;
+  $("download").disabled = false;
   showMute(name);
   $("search").disabled = false;
   $("search-submit").disabled = false;
@@ -2452,6 +2454,62 @@ $("export-connection").addEventListener("click", () => {
   a.download = "msn-connection.json";
   a.click();
   URL.revokeObjectURL(url);
+});
+// Markdown transcript of the open board (ADR 0048). Built in the page from the same message
+// pages the log reads, pinned at the board's head like `msn export --format md`. Nothing is
+// downloaded when the connection or board changes, or history is redacted, while it reads.
+const TRANSCRIPT_PAGE = 100;
+$("download").addEventListener("click", async () => {
+  const connection = session;
+  const name = channel;
+  if (!connection || !name) return;
+  const button = $("download");
+  button.disabled = true;
+  const current = () => session === connection && channel === name;
+  try {
+    const pin = await api(`/channels/${name}/catchup?limit=1&maxBytes=262144`, {}, connection);
+    const messages = [];
+    let after = 0;
+    while (after < pin.headCursor) {
+      if (!current()) return;
+      status(`Reading #${name} for the transcript · ${messages.length} messages so far`);
+      const page = await api(
+        `/channels/${name}/messages?after=${after}&limit=${TRANSCRIPT_PAGE}`,
+        {},
+        connection,
+      );
+      for (const message of page.messages) if (message.id <= pin.headCursor) messages.push(message);
+      const last = page.messages.at(-1)?.id;
+      if (!page.hasMore || last === undefined || last >= pin.headCursor || page.nextCursor <= after) break;
+      after = page.nextCursor;
+    }
+    const check = await api(`/channels/${name}/catchup?limit=1&maxBytes=262144`, {}, connection);
+    if (!current()) return;
+    if (check.historyRevision !== pin.historyRevision) {
+      status(`#${name} history changed while reading it. Try Download again.`, true);
+      return;
+    }
+    const text = renderTranscript(
+      {
+        origin: location.origin,
+        tenant: connection.tenant,
+        channel: name,
+        exportedAt: new Date().toISOString(),
+      },
+      messages,
+    );
+    const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${connection.tenant}-${name}-transcript.md`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    status(`Downloaded #${name} as a transcript · ${messages.length} messages`);
+  } catch (error) {
+    if (current()) status(error.message, true);
+  } finally {
+    if (channel === name) button.disabled = !session;
+  }
 });
 fetch("/api/account/config")
   .then((r) => r.json())

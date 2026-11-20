@@ -26,6 +26,7 @@ pub mod search;
 pub mod task_client;
 pub mod tasks;
 pub mod templates;
+pub mod transcript;
 pub mod workspace;
 
 use std::fs;
@@ -40,7 +41,7 @@ use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
-use args::{Cli, Command, SnapshotCommand};
+use args::{Cli, Command, ExportFormat, SnapshotCommand};
 use client::{
     MsnClient, classify, error_message, is_retryable_status, print_success, status_error,
 };
@@ -769,16 +770,36 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         Command::Export {
             channel,
             out,
+            format,
             after,
             limit,
             force,
         } => {
+            let channel = slug(&channel)?;
+            if format == ExportFormat::Jsonl && out.is_none() {
+                return Err(CliError::usage(
+                    "--out is required for the jsonl archive; use --format md to print a transcript.",
+                ));
+            }
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
-            let channel = slug(&channel)?;
             let after = parse_optional_int(after.as_deref(), 0, MAX_SAFE_INTEGER)?;
             let limit = parse_optional_int(limit.as_deref(), 100, MAX_LIMIT)?;
             require_positive_limit(limit)?;
+            if format == ExportFormat::Md {
+                return export::export_markdown(
+                    &url,
+                    &tenant,
+                    &token,
+                    channel,
+                    out.as_deref().map(Path::new),
+                    after,
+                    limit,
+                    force,
+                    &stop,
+                );
+            }
+            let out = out.unwrap_or_default();
             export::export(
                 &url,
                 &tenant,

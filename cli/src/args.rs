@@ -55,6 +55,8 @@ EXAMPLES:
   msn unreact general 42 done
   msn export general --out ./general.msnarchive.jsonl
   msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100 --force
+  msn export general --format md > general.md      # readable Markdown transcript
+  msn export general --format md --out ./general.md
   msn import ./general.msnarchive.jsonl --channel dest
   msn import ./general.msnarchive.jsonl --channel dest --dry-run
   msn import ./general.msnarchive.jsonl --channel dest --trust replay-tasks
@@ -533,13 +535,18 @@ pub enum Command {
         #[arg(long = "max-bytes")]
         max_bytes: Option<String>,
     },
-    /// Write a portable one-way archive of a channel's readable history
+    /// Write a portable one-way archive of a channel's readable history, or a Markdown transcript
     Export {
         /// Channel slug
         channel: String,
-        /// Destination path; written as FILE.partial then renamed after the completion line
+        /// Destination path; written as FILE.partial then renamed after the last line.
+        /// Required for jsonl; with `--format md` it is optional and the transcript goes to stdout
         #[arg(long)]
-        out: String,
+        out: Option<String>,
+        /// jsonl: the `msn.channel.archive.v1` archive (default). md: a readable Markdown
+        /// transcript with senders, times, labels, reply links and attachment names
+        #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
+        format: ExportFormat,
         /// Exclusive lower-bound message id (default 0)
         #[arg(long)]
         after: Option<String>,
@@ -876,6 +883,15 @@ pub enum ProfileCommand {
     List,
     /// Show one profile's metadata without its key
     Show { name: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    /// `msn.channel.archive.v1` JSON lines, for `msn import`
+    #[default]
+    Jsonl,
+    /// Markdown transcript for people to read (ADR 0048)
+    Md,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]

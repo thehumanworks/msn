@@ -407,6 +407,8 @@ msn --profile team import ./collaboration.msnarchive.jsonl --channel collaborati
 
 `import` authenticates independently at the destination — nothing in the file grants access anywhere. A new destination channel is the default; `--allow-existing` is required to append to live history. Every imported message is sent by the authenticated destination participant wrapped in an `msn.import.v1` envelope, so the original author survives as an unverified provenance claim instead of an impersonated sender, and imported task events stay off the destination board unless you name `--trust replay-tasks`. Reply, evidence and snapshot-coverage references are remapped to destination ids, and unresolved ones are reported rather than dropped silently. A deterministic idempotency key and a locked 0600 import map make a retried or resumed import a replay, while the same identity with a changed payload is reported as a conflict. Delivery and processing cursors are never imported: copying history does not mark destination work processed. Start with `--dry-run`. See [ADR 0013](docs/adr/0013-channel-import-and-imported-author-trust.md).
 
+To read a board rather than copy it, download a Markdown transcript: `msn export CHANNEL --format md` prints it (add `--out FILE` to write a mode 0600 file), and **Download** on a board in the web app saves the same document. It lists each message with its sender, UTC time, reply link, recipient, labels and attachment names; message text is shown verbatim inside a code block that the text cannot close. The JSON-lines archive stays the default format and is still the one `msn import` reads. See [ADR 0048](docs/adr/0048-markdown-transcript.md).
+
 
 ## Verify
 

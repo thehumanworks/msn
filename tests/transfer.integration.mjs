@@ -221,6 +221,50 @@ try {
   assert.equal(exported.status, "complete");
   assert.ok(exported.messageCount >= 4);
 
+  // ADR 0048: the same pinned pages as a Markdown transcript, on stdout or into a 0600 file.
+  const printed = await exec(binary, ["export", "source", "--format", "md"], {
+    cwd,
+    env: {
+      PATH: process.env.PATH,
+      HOME: dir,
+      MSN_URL: urlA,
+      MSN_WORKSPACE_TENANT: "site-a",
+      MSN_WORKSPACE_TOKEN: aToken,
+    },
+    timeout: 20000,
+  });
+  assert.match(printed.stdout, /^# Transcript of #source\n/);
+  assert.match(printed.stdout, new RegExp(`### #${hello.message.id} · .* UTC · alice\\n`));
+  assert.ok(printed.stdout.includes(`- Reply to: [#${hello.message.id}](#msg-${hello.message.id})`));
+  assert.ok(printed.stdout.includes("```text\nhello from A\n```"));
+  const transcriptPath = join(dir, "source.md");
+  const written = (
+    await rust(urlA, "site-a", aToken, ["export", "source", "--format", "md", "--out", transcriptPath], {
+      username: "alice",
+    })
+  ).json;
+  assert.equal(written.format, "md");
+  assert.equal(written.messageCount, exported.messageCount);
+  const { readFile, stat } = await import("node:fs/promises");
+  assert.equal((await stat(transcriptPath)).mode & 0o777, 0o600);
+  assert.equal(
+    (await readFile(transcriptPath, "utf8")).replace(/- Exported: .*\n/, ""),
+    printed.stdout.replace(/- Exported: .*\n/, ""),
+  );
+  const refused = await rustFail(urlA, "site-a", aToken, [
+    "export",
+    "source",
+    "--format",
+    "md",
+    "--out",
+    transcriptPath,
+  ]);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, 2);
+  const noOut = await rustFail(urlA, "site-a", aToken, ["export", "source"]);
+  assert.equal(noOut.ok, false);
+  assert.equal(noOut.error.code, 2);
+
   const bProvision = (
     await rust(urlB, "site-b", "", ["provision", "site-b", "--username", "importer"], {
       env: { MSN_ADMIN_TOKEN: adminB },
