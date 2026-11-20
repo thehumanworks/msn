@@ -689,7 +689,10 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     command: TemplateCommand::List,
                 },
         } => {
-            println!("{}", value(client.get(&format!("{base}/templates"), Some(&p.token))?)?);
+            println!(
+                "{}",
+                value(client.get(&format!("{base}/templates"), Some(&p.token))?)?
+            );
         }
         Command::Board {
             command:

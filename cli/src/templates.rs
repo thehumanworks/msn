@@ -136,7 +136,10 @@ mod tests {
                 }],
             }])
         };
-        assert_eq!(resolve("solo", || panic!("not fetched")).unwrap().id, "solo");
+        assert_eq!(
+            resolve("solo", || panic!("not fetched")).unwrap().id,
+            "solo"
+        );
         assert_eq!(resolve("release-team", own).unwrap().goal, "Ship it");
         let error = resolve("nope", own).unwrap_err().to_string();
         assert!(error.contains("lead-workers, release-team"), "{error}");
