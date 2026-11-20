@@ -9,7 +9,9 @@ use msn_cli::identity::validate_username;
 
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
-use crate::state::{AppState, PendingSend, PendingTaskEvent, Screen, SearchState};
+use crate::state::{
+    AppState, ChannelState, PendingSend, PendingTaskEvent, Screen, SearchState, ThreadRow,
+};
 use crate::theme;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 80, 80);
@@ -64,6 +66,8 @@ enum Action {
     Reload,
     Search,
     SearchOlder,
+    ToggleThread(u64),
+    LoadParent(u64),
     Send,
     RetrySend(String),
     DiscardSend(String),
@@ -632,20 +636,36 @@ impl MsnDesktopApp {
                                 });
                             }
                             let mut day = "";
-                            for message in state.messages.values() {
-                                let created = message["createdAt"].as_str().unwrap_or("");
-                                let date = created.get(..10).unwrap_or("");
-                                if date != day {
-                                    day = date;
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format_day(date))
-                                                .small()
-                                                .color(theme::MUTED),
-                                        );
-                                    });
+                            for row in state.thread_rows() {
+                                match row {
+                                    ThreadRow::Message { id, replies, open } => {
+                                        let message = &state.messages[&id];
+                                        let created = message["createdAt"].as_str().unwrap_or("");
+                                        let date = created.get(..10).unwrap_or("");
+                                        if date != day {
+                                            day = date;
+                                            ui.vertical_centered(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format_day(date))
+                                                        .small()
+                                                        .color(theme::MUTED),
+                                                );
+                                            });
+                                        }
+                                        render_message(ui, message, &me);
+                                        render_parent(ui, state, message, actions);
+                                        if replies > 0 {
+                                            render_thread_toggle(
+                                                ui, message, &me, id, replies, open, actions,
+                                            );
+                                        }
+                                    }
+                                    ThreadRow::Reply { id } => {
+                                        ui.indent(("thread-reply", id), |ui| {
+                                            render_message(ui, &state.messages[&id], &me);
+                                        });
+                                    }
                                 }
-                                render_message(ui, message, &me);
                                 ui.add_space(4.0);
                             }
                         }
@@ -879,6 +899,11 @@ impl MsnDesktopApp {
             }
             Action::SearchOlder => {
                 let commands = self.state.search_older();
+                self.dispatch_all(commands);
+            }
+            Action::ToggleThread(root) => self.state.toggle_thread(root),
+            Action::LoadParent(id) => {
+                let commands = self.state.load_parent(id);
                 self.dispatch_all(commands);
             }
             Action::Send => self.send_composer_message(),
@@ -1134,6 +1159,90 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
     }
 }
 
+/// Under a thread root: "Show 3 replies" or "Hide 3 replies", on the root's side (ADR 0041).
+fn render_thread_toggle(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    id: u64,
+    replies: usize,
+    open: bool,
+    actions: &mut Vec<Action>,
+) {
+    let label = format!(
+        "{} {replies} repl{}",
+        if open { "Hide" } else { "Show" },
+        if replies == 1 { "y" } else { "ies" },
+    );
+    let own = message["username"].as_str() == Some(me);
+    let align = if own {
+        egui::Align::Max
+    } else {
+        egui::Align::Min
+    };
+    ui.with_layout(egui::Layout::top_down(align), |ui| {
+        let button = egui::Button::new(egui::RichText::new(label).small().color(theme::ACCENT));
+        if ui
+            .add(button)
+            .on_hover_text(format!("Replies to #{id}"))
+            .clicked()
+        {
+            actions.push(Action::ToggleThread(id));
+        }
+    });
+}
+
+/// A reply whose parent is not loaded: a link that fetches the parent, then a short quote of it.
+fn render_parent(
+    ui: &mut egui::Ui,
+    state: &ChannelState,
+    message: &Value,
+    actions: &mut Vec<Action>,
+) {
+    let Some(parent) = message["replyTo"].as_u64() else {
+        return;
+    };
+    if state.messages.contains_key(&parent) {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(38.0);
+        match state.parents.get(&parent) {
+            Some(Some(found)) => {
+                let text = found["text"].as_str().unwrap_or("");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "\u{21aa} {}: {}",
+                        found["username"].as_str().unwrap_or("?"),
+                        truncate(&text.split_whitespace().collect::<Vec<_>>().join(" "), 140)
+                    ))
+                    .small()
+                    .color(theme::MUTED),
+                );
+            }
+            Some(None) => {
+                ui.label(
+                    egui::RichText::new(format!("Message #{parent} is no longer available."))
+                        .small()
+                        .color(theme::MUTED),
+                );
+            }
+            None if state.parents_inflight.contains(&parent) => {
+                ui.spinner();
+            }
+            None => {
+                if ui
+                    .link(egui::RichText::new(format!("Reply to #{parent}")).small())
+                    .on_hover_text("Load the message this replies to")
+                    .clicked()
+                {
+                    actions.push(Action::LoadParent(parent));
+                }
+            }
+        }
+    });
+}
+
 /// "name says" in the Messenger tradition, then the quieter metadata: time, id, reply target.
 fn message_header(
     ui: &egui::Ui,
@@ -1319,7 +1428,6 @@ fn render_task(ui: &mut egui::Ui, task: &Value, actions: &mut Vec<Action>) {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
-    use crate::state::ChannelState;
 
     fn fixture(message_count: u64) -> MsnDesktopApp {
         let (tx, rx) = sync_channel(EVENT_QUEUE_CAPACITY);
