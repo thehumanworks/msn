@@ -263,6 +263,35 @@ test("an owner saves a board as a template and starts a new board from it", asyn
   await expect(page.locator("#save-template-row")).toBeHidden();
 });
 
+test("a saved template that shares a built-in name never shows a second radio", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  // The Worker reserves built-in names today; a built-in added later could still match an older save.
+  await page.route(/\/templates$/, (route) =>
+    route.fulfill({
+      json: {
+        templates: [
+          {
+            id: "solo",
+            title: "solo",
+            summary: "Saved from board old.",
+            goal: "Old",
+            personas: [],
+            own: true,
+          },
+        ],
+        max: 20,
+      },
+    }),
+  );
+  await connect(page, t, "human");
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  const dialog = page.locator("#template-dialog");
+  await expect(dialog.locator(".template-choice")).toHaveCount(3);
+  await expect(dialog.locator('input[value="solo"]')).toHaveCount(1);
+  await expect(dialog).not.toContainText("Yours");
+});
+
 test("a template board whose persona setup fails still shows how to finish it", async ({ page, request }) => {
   const t = await provision(request, { username: "human" });
   await page.goto("/");

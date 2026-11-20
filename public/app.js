@@ -1976,7 +1976,9 @@ async function loadTemplates() {
   try {
     own = (await api("/templates")).templates ?? [];
   } catch {}
-  templates = [...builtInTemplates, ...own];
+  // A built-in added later wins over a saved template of the same name: one radio per value.
+  const builtIn = new Set(builtInTemplates.map((t) => t.id));
+  templates = [...builtInTemplates, ...own.filter((t) => !builtIn.has(t.id))];
 }
 
 function renderTemplates(selected) {

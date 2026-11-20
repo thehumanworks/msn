@@ -57,7 +57,12 @@ pub fn resolve(
         return Ok(template);
     }
     let mut every = all();
-    every.extend(own()?);
+    match own() {
+        Ok(saved) => every.extend(saved),
+        // Not an owner (or watch-only): it cannot have saved templates, so name the built-ins.
+        Err(CliError::Auth(_)) => return find(id),
+        Err(error) => return Err(error),
+    }
     pick(every, id)
 }
 
@@ -143,6 +148,11 @@ mod tests {
         assert_eq!(resolve("release-team", own).unwrap().goal, "Ship it");
         let error = resolve("nope", own).unwrap_err().to_string();
         assert!(error.contains("lead-workers, release-team"), "{error}");
+        let forbidden = resolve("lead-reveiwer", || Err(CliError::auth("owner_required")))
+            .unwrap_err()
+            .to_string();
+        assert!(forbidden.contains("Unknown template"), "{forbidden}");
+        assert!(resolve("x", || Err(CliError::generic("down"))).is_err());
     }
 
     #[test]

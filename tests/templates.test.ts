@@ -203,6 +203,13 @@ describe("saved board templates", () => {
     expect((await call(`${f.api}/templates`, f.shared)).status).toBe(403);
     expect((await call(`${f.api}/templates`, f.watcher)).status).toBe(403);
     expect((await call(`${f.api}/templates`, undefined)).status).toBe(401);
+    // Another workspace's owner is a stranger here: 401, and its own list stays empty.
+    const other = await fixture();
+    expect((await call(`${f.api}/templates`, other.owner)).status).toBe(401);
+    expect((await call(`${f.api}/templates/kept`, other.owner, { method: "DELETE" })).status).toBe(401);
+    expect(
+      (await (await call(`${other.api}/templates`, other.owner)).json<{ templates: [] }>()).templates,
+    ).toEqual([]);
   });
 });
 

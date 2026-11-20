@@ -524,8 +524,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         // v17 → v18: owner-pinned messages (ADR 0038). The table is created above and starts empty.
         if (version < 18) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (18)");
         // v19 → v20: saved board templates (ADR 0051). The table is created above and starts empty.
-        // v19 (ADR 0047, reactions) belongs to another change and only records its version, so
-        // recording it here too is safe in any merge order, like v14 and v15 above.
+        // v19 (ADR 0047, reactions, #48) belongs to another change. Recording it here is safe
+        // because #48's v19 step only records its version; drop the 19 once #48 has landed.
         if (version < 20)
           for (const applied of [19, 20])
             ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
