@@ -2512,6 +2512,20 @@ test("a watch-only invitation lets someone read a board live without posting", a
       await expect(watcher.locator(control), control).toBeHidden();
     await say("Tests green, deploying");
     await expect(watcher.locator("#messages")).toContainText("Tests green, deploying");
+    // Shortcuts (ADR 0054): j and k still move, but a watcher has no Reply and r starts nothing.
+    await watcher.evaluate(() => document.activeElement?.blur());
+    await watcher.keyboard.press("k");
+    await expect(watcher.locator("#messages > article").last()).toBeFocused();
+    await expect(watcher.locator("#messages > article").last()).toHaveAttribute(
+      "aria-label",
+      /^Message #\d+ from lead$/,
+    );
+    for (const reply of await watcher.locator("#messages .reply-button").all())
+      await expect(reply).toBeHidden();
+    await watcher.keyboard.press("r");
+    await expect(watcher.locator("#reply-note")).toBeHidden();
+    await expect(watcher.locator("#message")).not.toBeFocused();
+    await expect(watcher.locator("#status")).not.toContainText("Choose a message");
     await watcher.screenshot({ path: testInfo.outputPath("watch-only.png") });
   } finally {
     await guest.close();
@@ -3231,4 +3245,168 @@ test("a link opened on page load lands on its message below many folded ones, an
   await expect(toggle(opened.id)).toHaveText("Show less");
   await expect(body(long[18].id)).toHaveClass(/folded/);
   expect(Math.abs((await offset()) - before)).toBeLessThanOrEqual(2);
+});
+
+test("keyboard shortcuts move between messages, reply, search, open the board list and never fire while typing", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const ids = [];
+  for (const [channel, text] of [
+    ["notes", "Notes board"],
+    ["work", "Deploy the worker"],
+    ["work", "Review the PR"],
+    ["work", "Ship the release"],
+  ]) {
+    const sent = await request.post(`${t.path}/channels/${channel}/messages`, {
+      headers: t.headers,
+      data: { username: "lead", text },
+    });
+    expect(sent.status()).toBe(201);
+    if (channel === "work") ids.push((await sent.json()).message.id);
+  }
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await expect(page.locator("#messages .message")).toHaveCount(3);
+  const row = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  const blur = () => page.evaluate(() => document.activeElement?.blur());
+
+  // Typing in a field never fires a shortcut.
+  await page.locator("#message").fill("");
+  await page.locator("#message").pressSequentially("jk/r?");
+  await expect(page.locator("#message")).toHaveValue("jk/r?");
+  await expect(page.locator("#message")).toBeFocused();
+  await expect(page.locator("#keys-dialog")).not.toBeVisible();
+  await page.locator("#message").fill("");
+  await blur();
+
+  // ? opens the help sheet; Escape closes it.
+  await page.keyboard.press("?");
+  await expect(page.locator("#keys-dialog")).toBeVisible();
+  await expect(page.locator("#keys-list kbd")).toHaveCount(8);
+  await page.screenshot({ path: testInfo.outputPath("keys-help.png") });
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#keys-dialog")).not.toBeVisible();
+
+  // k starts at the newest message; j and k move and stop at the ends.
+  await blur();
+  await page.keyboard.press("k");
+  await expect(row(ids[2])).toBeFocused();
+  await page.keyboard.press("k");
+  await expect(row(ids[1])).toBeFocused();
+  await page.keyboard.press("k");
+  await page.keyboard.press("k");
+  await expect(row(ids[0])).toBeFocused();
+  await page.keyboard.press("j");
+  await expect(row(ids[1])).toBeFocused();
+  await expect(row(ids[1])).toHaveCSS("outline-style", "solid");
+
+  // r replies to the selected message; Escape cancels the reply and keeps the draft.
+  await page.keyboard.press("r");
+  await expect(page.locator("#message")).toBeFocused();
+  await expect(page.locator("#reply-note-text")).toHaveText(`Replying to #${ids[1]} · lead`);
+  await page.locator("#message").pressSequentially("draft");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await expect(page.locator("#message")).toHaveValue("draft");
+  await page.locator("#message").fill("");
+
+  // The Reply button does the same, and the reply is sent with replyTo and shows in its thread.
+  await row(ids[1])
+    .getByRole("button", { name: `Reply to message #${ids[1]}` })
+    .click();
+  await expect(page.locator("#reply-note-text")).toHaveText(`Replying to #${ids[1]} · lead`);
+  await page.screenshot({ path: testInfo.outputPath("keys-reply.png") });
+  await page.locator("#message").fill("On it");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  const reply = page.locator(`#thread-${ids[1]} article`).filter({ hasText: "On it" });
+  await expect(reply).toBeVisible();
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.at(-1)).toMatchObject({ text: "On it", replyTo: ids[1], username: "human" });
+  // j now walks into the open thread, in reading order.
+  await blur();
+  await page.keyboard.press("k");
+  await expect(row(ids[2])).toBeFocused();
+  await page.keyboard.press("k");
+  await expect(reply).toBeFocused();
+
+  // r with nothing selected says how to choose a message.
+  await blur();
+  await page.keyboard.press("r");
+  await expect(page.locator("#status")).toHaveText(/Choose a message with j or k first/);
+  await expect(page.locator("#reply-note")).toBeHidden();
+
+  // / focuses search without typing a slash; Escape clears the search.
+  await page.keyboard.press("/");
+  await expect(page.locator("#search")).toBeFocused();
+  await expect(page.locator("#search")).toHaveValue("");
+  await page.keyboard.type("release");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#search-panel")).toBeVisible();
+  // With a reply pending, Escape in the search field clears the search first; the next one
+  // cancels the reply.
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("k");
+  await page.keyboard.press("r");
+  await expect(page.locator("#reply-note")).toBeVisible();
+  await page.locator("#search").focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#search-panel")).toBeHidden();
+  await expect(page.locator("#search")).toHaveValue("");
+  await expect(page.locator("#reply-note")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#reply-note")).toBeHidden();
+
+  // A reply survives switching boards, and the chip still names the author.
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("k");
+  await page.keyboard.press("r");
+  await openChannel(page, "notes");
+  await openChannel(page, "work");
+  await expect(page.locator("#reply-note-text")).toHaveText(/^Replying to #\d+ · (lead|human)$/);
+  await page.locator("#reply-cancel").click();
+  await expect(page.locator("#reply-note")).toBeHidden();
+
+  // g then b goes to the board list and focuses the open board.
+  await blur();
+  await page.keyboard.press("g");
+  await page.keyboard.press("b");
+  await expect(page.getByRole("button", { name: "# work", exact: true })).toBeFocused();
+  await expect(page.locator("#channels")).toBeVisible();
+  // A lone b, or g then another key, does nothing.
+  await page.keyboard.press("ArrowDown");
+  await blur();
+  await page.keyboard.press("b");
+  await expect(page.locator("body")).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("on an archived board j and k still move but r never starts a reply", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  await request.put(`${t.path}/channels/work/board`, {
+    headers: t.headers,
+    data: { credential, goal: "Ship" },
+  });
+  const sent = await request.post(`${t.path}/channels/work/messages`, {
+    headers: t.headers,
+    data: { username: "human", text: "Read me" },
+  });
+  const id = (await sent.json()).message.id;
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("k");
+  await expect(page.locator(`#messages article[data-id="${id}"]`)).toBeFocused();
+  await expect(page.locator(`#messages article[data-id="${id}"] .reply-button`)).toBeHidden();
+  await page.keyboard.press("r");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await expect(page.locator("#message")).not.toBeFocused();
 });
