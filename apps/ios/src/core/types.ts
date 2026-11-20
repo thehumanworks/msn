@@ -11,6 +11,12 @@ export type ApiErrorBody = {
   error: { code: string; message: string };
 };
 
+/** Message reactions (ADR 0047), in display order: ✓ done, 👀 seen, 👍 yes, ✗ no. */
+export const REACTION_KINDS = ["done", "seen", "yes", "no"] as const;
+export type ReactionKind = (typeof REACTION_KINDS)[number];
+/** Who reacted with each kind, in the order they reacted. Kinds nobody used are absent. */
+export type Reactions = Partial<Record<ReactionKind, string[]>>;
+
 export type Message = {
   id: number;
   tenant: string;
@@ -22,6 +28,7 @@ export type Message = {
   replyTo?: number;
   correlationId?: string;
   to?: string;
+  reactions?: Reactions;
 };
 
 /** One page of message search (ADR 0037), newest first. */

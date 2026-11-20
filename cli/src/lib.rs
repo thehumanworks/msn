@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod mutes;
 pub mod processing;
 pub mod profile;
+pub mod reactions;
 pub mod receipts;
 pub mod resumable;
 pub mod runner;
@@ -596,6 +597,56 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             set_pin(&url, &tenant, &token, channel, id, pin)
+        }
+        Command::React {
+            channel,
+            message_id,
+            kind,
+        } => react(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &channel,
+            &message_id,
+            &kind,
+            false,
+        ),
+        Command::Unreact {
+            channel,
+            message_id,
+            kind,
+        } => react(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &channel,
+            &message_id,
+            &kind,
+            true,
+        ),
+        Command::Reactions {
+            channel,
+            after,
+            before,
+        } => {
+            let after = after
+                .as_deref()
+                .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let before = before.as_deref().map(parse_message_id).transpose()?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            finish(&MsnClient::new(&url)?.get(
+                &reactions::list_path(&tenant, channel, after, before),
+                Some(&token),
+            )?)
         }
         Command::Pins { channel } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
@@ -1263,6 +1314,32 @@ fn label(
         return Err(CliError::conflict(message));
     }
     finish(&response)
+}
+
+/// Adds or removes one reaction (ADR 0047) as this key's name, or `--username` when unbound.
+/// Both directions are idempotent; the result says whether anything `changed`.
+/// `who` is the global `--tenant`, `--token` and `--username` options.
+fn react(
+    who: [Option<&str>; 3],
+    url: &Url,
+    channel: &str,
+    message_id: &str,
+    kind: &str,
+    remove: bool,
+) -> Result<(), CliError> {
+    let kind = reactions::parse_kind(kind)?;
+    let id = parse_message_id(message_id)?;
+    let [tenant, token, username] = who;
+    let tenant = require_tenant(tenant)?;
+    let token = require_token(token, "MSN_WORKSPACE_TOKEN")?;
+    let channel = slug(channel)?;
+    let username = identity::resolve_username(url, &tenant, &token, username)?;
+    finish(&MsnClient::new(url)?.post_json(
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/reactions"),
+        &token,
+        &[],
+        &reactions::body(&username, kind, remove),
+    )?)
 }
 
 /// Pins or unpins one message (ADR 0038). Unpin prints a small JSON result instead of 204's

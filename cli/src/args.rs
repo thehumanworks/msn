@@ -51,6 +51,9 @@ EXAMPLES:
   msn pin general 42                # board owner only; at most 10 per board
   msn unpin general 42
   msn pins general
+  msn react general 42 done         # ✓ done, 👀 seen, 👍 yes or ✗ no; one of each per name
+  msn unreact general 42 done
+  msn reactions general --after 40  # who reacted to which messages, oldest first
   msn export general --out ./general.msnarchive.jsonl
   msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100 --force
   msn export general --format md > general.md      # readable Markdown transcript
@@ -679,6 +682,30 @@ pub enum Command {
     Unpin { channel: String, message_id: String },
     /// List a board's pinned messages in message order
     Pins { channel: String },
+    /// React to a message: done (✓), seen (👀), yes (👍) or no (✗). Sends no message
+    React {
+        channel: String,
+        message_id: String,
+        /// done, seen, yes or no (aliases: check, eyes, +1, x)
+        kind: String,
+    },
+    /// Remove your reaction; succeeds when you had not reacted
+    Unreact {
+        channel: String,
+        message_id: String,
+        /// done, seen, yes or no
+        kind: String,
+    },
+    /// List current reactions by message id, oldest first, as JSON (500 messages per page)
+    Reactions {
+        channel: String,
+        /// Only messages after this id; continue from nextAfter while hasMore
+        #[arg(long)]
+        after: Option<String>,
+        /// Only messages before this id
+        #[arg(long)]
+        before: Option<String>,
+    },
     /// Search a channel's messages by words, sender, kind or label; newest first, as JSON
     Search {
         channel: String,

@@ -24,7 +24,7 @@ import { toggled } from "../core/fold.ts";
 import { messageLink } from "../core/links.ts";
 import { seenMark } from "../core/readMarks.ts";
 import { loadReceipts, type Receipt, RECEIPTS_EVERY_MS, receiptLine } from "../core/receipts.ts";
-import type { Message } from "../core/types.ts";
+import type { Message, ReactionKind } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
 import { MessageRow } from "../components/MessageRow.tsx";
 import { MutePanel, muteButtonLabel, useMutes } from "../components/MutePanel.tsx";
@@ -230,6 +230,14 @@ function ChannelBody({
   useEffect(() => () => loader.cancel(), [loader]);
   const parents = useStore(loader.state);
   // Message links (ADR 0042): the share sheet offers Copy, Messages, Mail and the rest.
+  // Reactions (ADR 0047): a failure shows in a banner until the next reaction.
+  const [reactError, setReactError] = useState<string | null>(null);
+  const onReact = useCallback(
+    (message: Message, kind: ReactionKind) => {
+      void controller.react(message.id, kind).then(setReactError);
+    },
+    [controller],
+  );
   const onShareLink = useCallback(
     (message: Message) => {
       const { origin, tenant } = session.session;
@@ -260,6 +268,10 @@ function ChannelBody({
     state.stale && state.error ? (
       <Banner tone="warning" action={{ label: "Retry", onPress: () => controller.refresh() }}>
         Showing what was loaded earlier. {state.error}
+      </Banner>
+    ) : reactError ? (
+      <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setReactError(null) }}>
+        Reaction not changed: {reactError}
       </Banner>
     ) : null;
 
@@ -345,6 +357,8 @@ function ChannelBody({
                 onShareLink={onShareLink}
                 onToggleFold={toggleFold}
                 unfolded={unfolded.has(item.id)}
+                me={me}
+                onReact={archived ? undefined : onReact}
               />
             );
           }}

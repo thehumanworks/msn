@@ -363,6 +363,91 @@ pub fn fetch_receipts(
     msn_cli::receipts::parse_channel(&value, channel)
 }
 
+/// Adds or removes one reaction (ADR 0047) as `username`. Returns the message's reactions after
+/// the change (`Value::Null` when it has none left).
+#[allow(clippy::too_many_arguments)]
+pub fn react(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+    kind: &str,
+    remove: bool,
+) -> Result<Value, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let kind = msn_cli::reactions::parse_kind(kind)?;
+    let response = client.post_json(
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/reactions"),
+        token,
+        &[],
+        &msn_cli::reactions::body(username, kind, remove),
+    )?;
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let message = &value["message"];
+    if message["id"].as_u64() != Some(id) || message["channel"].as_str() != Some(channel) {
+        return Err(CliError::generic(
+            "Reaction response named a different message.",
+        ));
+    }
+    Ok(message["reactions"].clone())
+}
+
+/// Current reactions (ADR 0047) for messages after `after`, by message id; at most a few pages.
+pub fn fetch_reactions(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    after: u64,
+) -> Result<ReactionRows, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let mut found = Vec::new();
+    let mut after = after;
+    for _ in 0..5 {
+        let value = get_json(
+            client,
+            &format!("/api/tenants/{tenant}/channels/{channel}/reactions?after={after}"),
+            token,
+        )?;
+        let (page, next) = parse_reactions(&value)?;
+        found.extend(page);
+        match next {
+            Some(next) if next > after => after = next,
+            _ => break,
+        }
+    }
+    Ok(found)
+}
+
+/// Reactions by message id, as the server lists them.
+pub type ReactionRows = Vec<(u64, Value)>;
+
+/// One reactions page: entries with an id and an object of kinds, and the next `after` when more.
+pub fn parse_reactions(value: &Value) -> Result<(ReactionRows, Option<u64>), CliError> {
+    let bad = || CliError::generic("Invalid reactions response.");
+    let rows = value["reactions"].as_array().ok_or_else(bad)?;
+    let mut page = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row["id"].as_u64().ok_or_else(bad)?;
+        if !row["reactions"].is_object() {
+            return Err(bad());
+        }
+        page.push((id, row["reactions"].clone()));
+    }
+    let next = if value["hasMore"].as_bool() == Some(true) {
+        Some(value["nextAfter"].as_u64().ok_or_else(bad)?)
+    } else {
+        None
+    };
+    Ok((page, next))
+}
+
 /// Unread counts above this computer's read marks (ADR 0045). The server keeps no read state;
 /// `me` is the reader's display name, used to leave out their own messages and count the ones
 /// addressed to them.
@@ -1047,6 +1132,23 @@ mod tests {
         );
         assert!(parse_send_outcome(&ok, "acme", "other").is_err());
         assert!(parse_send_outcome(&json!({"message": message(7)}), "acme", "general").is_err());
+    }
+
+    #[test]
+    fn reaction_pages_parse_ids_kinds_and_the_next_cursor() {
+        let (page, next) = parse_reactions(&json!({
+            "reactions": [{"id": 3, "reactions": {"done": ["lead"]}}],
+            "hasMore": true,
+            "nextAfter": 3
+        }))
+        .unwrap();
+        assert_eq!(page, vec![(3, json!({"done": ["lead"]}))]);
+        assert_eq!(next, Some(3));
+        let (empty, end) = parse_reactions(&json!({"reactions": [], "hasMore": false})).unwrap();
+        assert!(empty.is_empty() && end.is_none());
+        assert!(parse_reactions(&json!({"reactions": [{"id": 1}]})).is_err());
+        assert!(parse_reactions(&json!({"reactions": [], "hasMore": true})).is_err());
+        assert!(parse_reactions(&json!({})).is_err());
     }
 
     #[test]

@@ -42,7 +42,11 @@ import {
   newToken,
   optionalBody,
   labels as parseLabels,
+  REACTIONS,
+  type ReactionChange,
+  type Reactions,
   rawBody,
+  reactionChange,
   recipient,
   replyTarget,
   searchMatch,
@@ -78,6 +82,8 @@ export type Message = {
   labels?: Labels;
   /** Files sent with the message (ADR 0035); absent from JSON when it has none. */
   attachments?: Attachment[];
+  /** Who reacted, by kind (ADR 0047); absent from JSON when nobody has. */
+  reactions?: Reactions;
 };
 /** Attachment metadata on a message; the bytes come from the per-message download route. */
 export type Attachment = { index: number; id: string; name: string; mediaType: string; bytes: number };
@@ -119,6 +125,10 @@ const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
 const SCHEMA_VERSION = 20;
+/** Names per reaction kind on one message (ADR 0047). */
+export const MAX_REACTORS = 100;
+/** Reactions stored per workspace at once (ADR 0047); removing one frees its place. */
+export const MAX_REACTIONS = 100000;
 /** Pinned messages per board (ADR 0038). */
 export const MAX_PINS = 10;
 /** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
@@ -381,6 +391,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           generation INTEGER NOT NULL, holder TEXT, claimedAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
           PRIMARY KEY(channel, reader)
         );
+        CREATE TABLE IF NOT EXISTS reactions (
+          channel TEXT NOT NULL, messageId INTEGER NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+          createdAt TEXT NOT NULL, PRIMARY KEY(channel, messageId, kind, name)
+        );
         CREATE TABLE IF NOT EXISTS message_labels (
           channel TEXT NOT NULL, messageId INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
           updatedAt TEXT NOT NULL, PRIMARY KEY(channel, messageId, key)
@@ -448,6 +462,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["push_subscriptions", "person", "TEXT"],
         ["messages", "personaId", "TEXT"],
         ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
+        // Stored reactions (ADR 0047), for the workspace cap. The table is new with it, so 0 is
+        // exact for every existing database. Additive, so no schema_version step.
+        ["usage", "reactions", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
         if (
           !ctx.storage.sql
@@ -523,12 +540,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         // v17 → v18: owner-pinned messages (ADR 0038). The table is created above and starts empty.
         if (version < 18) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (18)");
+        // v18 → v19: message reactions (ADR 0047). The table is created above and starts empty.
+        if (version < 19) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (19)");
         // v19 → v20: saved board templates (ADR 0051). The table is created above and starts empty.
-        // v19 (ADR 0047, reactions, #48) belongs to another change. Recording it here is safe
-        // because #48's v19 step only records its version; drop the 19 once #48 has landed.
-        if (version < 20)
-          for (const applied of [19, 20])
-            ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (?)", applied);
+        if (version < 20) ctx.storage.sql.exec("INSERT OR IGNORE INTO schema_version VALUES (20)");
         if (version < 9) {
           // v8 → v9: durable coordination event journal (ADR 0017). It starts empty at the
           // migration point; pre-existing messages/channels/snapshots are not backfilled.
@@ -1813,9 +1828,168 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** Adds each message's current labels; one range query per page. */
-  /** Every message output carries its labels (ADR 0032) and attachments (ADR 0035). */
+  /** Every message output carries its labels (ADR 0032), attachments (ADR 0035) and reactions (ADR 0047). */
   private withLabels(channel: string, messages: Message[]): Message[] {
-    return this.withAttachments(channel, this.labelsOnly(channel, messages));
+    return this.withReactions(channel, this.withAttachments(channel, this.labelsOnly(channel, messages)));
+  }
+
+  /** Who reacted to these messages, by message id. Kinds in REACTIONS order. */
+  private reactionsOf(channel: string, ids: number[]) {
+    const rows = this.ctx.storage.sql
+      .exec<{ messageId: number; kind: string; name: string }>(
+        `SELECT messageId, kind, name FROM reactions WHERE channel = ? AND messageId IN (${ids
+          .map(() => "?")
+          .join(", ")}) ORDER BY messageId, createdAt, name`,
+        channel,
+        ...ids,
+      )
+      .toArray();
+    return this.groupReactions(rows);
+  }
+
+  private groupReactions(rows: { messageId: number; kind: string; name: string }[]) {
+    const byId = new Map<number, Reactions>();
+    for (const row of rows) {
+      const kinds = byId.get(row.messageId) ?? {};
+      const kind = row.kind as keyof Reactions;
+      kinds[kind] = [...(kinds[kind] ?? []), row.name];
+      byId.set(row.messageId, kinds);
+    }
+    for (const [id, kinds] of byId)
+      byId.set(id, Object.fromEntries(REACTIONS.filter((k) => kinds[k]).map((k) => [k, kinds[k]])));
+    return byId;
+  }
+
+  /** Who reacted to messages with ids in (after, before), by message id. Kinds in REACTIONS order. */
+  private reactionsIn(channel: string, after: number, before: number, limit = Number.MAX_SAFE_INTEGER) {
+    const rows = this.ctx.storage.sql
+      .exec<{ messageId: number; kind: string; name: string }>(
+        `SELECT r.messageId, r.kind, r.name FROM reactions r
+         WHERE r.channel = ? AND r.messageId > ? AND r.messageId < ?
+           AND r.messageId IN (SELECT r2.messageId FROM reactions r2 WHERE r2.channel = r.channel
+             AND r2.messageId > ? AND r2.messageId < ? GROUP BY r2.messageId ORDER BY r2.messageId LIMIT ?)
+         ORDER BY r.messageId, r.createdAt, r.name`,
+        channel,
+        after,
+        before,
+        after,
+        before,
+        limit,
+      )
+      .toArray();
+    return this.groupReactions(rows);
+  }
+
+  /**
+   * Adds reactions; messages nobody reacted to keep their shape. Pages read one id range; `sparse`
+   * ids that can be far apart (search matches) read by id instead, so the gaps cost nothing.
+   */
+  private withReactions(channel: string, messages: Message[], sparse = false): Message[] {
+    if (!messages.length) return messages;
+    const ids = messages.map((message) => message.id);
+    const found = sparse
+      ? this.reactionsOf(channel, ids)
+      : this.reactionsIn(channel, Math.min(...ids) - 1, Math.max(...ids) + 1);
+    for (const message of messages) {
+      const reactions = found.get(message.id);
+      if (reactions) message.reactions = reactions;
+    }
+    return messages;
+  }
+
+  /**
+   * Adds or removes one reaction (ADR 0047). Idempotent either way: `changed` says whether it did
+   * anything. Reacting writes no message and no event, so ids, cursors and unread counts never move.
+   */
+  private react(tenant: string, channel: string, id: number, change: ReactionChange): Response {
+    const changed = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql
+        .exec<{ deleted: number }>("SELECT deleted FROM messages WHERE channel = ? AND id = ?", channel, id)
+        .toArray()[0];
+      if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+      if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+      if (change.remove) {
+        const removed = this.ctx.storage.sql.exec(
+          "DELETE FROM reactions WHERE channel = ? AND messageId = ? AND kind = ? AND name = ?",
+          channel,
+          id,
+          change.kind,
+          change.username,
+        ).rowsWritten;
+        if (removed)
+          this.ctx.storage.sql.exec(
+            "UPDATE usage SET reactions = MAX(0, reactions - ?) WHERE singleton = 1",
+            removed,
+          );
+        return removed > 0;
+      }
+      if (
+        this.ctx.storage.sql
+          .exec(
+            "SELECT 1 FROM reactions WHERE channel = ? AND messageId = ? AND kind = ? AND name = ?",
+            channel,
+            id,
+            change.kind,
+            change.username,
+          )
+          .toArray().length
+      )
+        return false;
+      const count = this.ctx.storage.sql
+        .exec<{ n: number }>(
+          "SELECT COUNT(*) AS n FROM reactions WHERE channel = ? AND messageId = ? AND kind = ?",
+          channel,
+          id,
+          change.kind,
+        )
+        .one().n;
+      if (count >= MAX_REACTORS)
+        throw new HttpError(
+          409,
+          "reaction_limit",
+          `At most ${MAX_REACTORS} names can react with ${change.kind} to one message.`,
+        );
+      if (
+        this.ctx.storage.sql.exec<{ reactions: number }>("SELECT reactions FROM usage").one().reactions >=
+        MAX_REACTIONS
+      )
+        throw new HttpError(
+          409,
+          "reaction_limit",
+          `This workspace holds the most reactions it can (${MAX_REACTIONS.toLocaleString("en-US")}). Remove some first.`,
+        );
+      this.ctx.storage.sql.exec("UPDATE usage SET reactions = reactions + 1 WHERE singleton = 1");
+      this.ctx.storage.sql.exec(
+        "INSERT INTO reactions(channel, messageId, kind, name, createdAt) VALUES (?, ?, ?, ?, ?)",
+        channel,
+        id,
+        change.kind,
+        change.username,
+        new Date().toISOString(),
+      );
+      return true;
+    });
+    const row = this.ctx.storage.sql
+      .exec<MessageRow>(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND id = ?`, channel, id)
+      .one();
+    return json({ message: this.withLabels(channel, [toMessage(row, tenant)])[0], changed });
+  }
+
+  /**
+   * `GET …/reactions?after=&before=`: current reactions for messages in that id range, so a client
+   * can refresh the messages it shows without re-reading them. At most 500 messages per page.
+   */
+  private reactionPage(channel: string, params: URLSearchParams): Response {
+    const after = integer(params.get("after"), 0, Number.MAX_SAFE_INTEGER);
+    const before = integer(params.get("before"), Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
+    const limit = 500;
+    const found = this.reactionsIn(channel, after, before, limit + 1);
+    const entries = [...found].slice(0, limit).map(([id, reactions]) => ({ id, reactions }));
+    return json({
+      reactions: entries,
+      hasMore: found.size > limit,
+      ...(found.size > limit ? { nextAfter: entries.at(-1)?.id } : {}),
+    });
   }
 
   private labelsOnly(channel: string, messages: Message[]): Message[] {
@@ -2460,7 +2634,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     return json({
       // Attachments (ADR 0035) read by id range, which works in any order.
-      messages: this.withAttachments(channel, messages),
+      messages: this.withReactions(channel, this.withAttachments(channel, messages), true),
       hasMore: rows.length > limit,
       ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
       complete: this.searchIndexed(),
@@ -3308,6 +3482,16 @@ export class MsnDurableObject extends DurableObject<Env> {
               id,
             );
             this.ctx.storage.sql.exec("DELETE FROM pins WHERE channel = ? AND messageId = ?", channel, id);
+            const reactionsDropped = this.ctx.storage.sql.exec(
+              "DELETE FROM reactions WHERE channel = ? AND messageId = ?",
+              channel,
+              id,
+            ).rowsWritten;
+            if (reactionsDropped)
+              this.ctx.storage.sql.exec(
+                "UPDATE usage SET reactions = MAX(0, reactions - ?) WHERE singleton = 1",
+                reactionsDropped,
+              );
             // Deleted text must not stay findable (ADR 0037).
             this.ctx.storage.sql.exec("DELETE FROM message_search WHERE rowid = ?", id);
             const snapshotBytes = this.ctx.storage.sql
@@ -3396,6 +3580,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "labels"
             ? labelChange(await body(request))
             : null;
+        const reaction =
+          request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "reactions"
+            ? reactionChange(await body(request))
+            : null;
         const snapshotInput =
           request.method === "POST" && rest.length === 3 && rest[2] === "snapshots"
             ? await body(request)
@@ -3432,6 +3620,31 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         // Bound-name check precedes any transaction: a rejected send stores nothing and wakes nobody.
         if (input) this.requireBoundName(capability, username);
+        // A reaction names its sender like a send does (ADR 0047): a bound key reacts only as its
+        // name, and a board's shared credential only as one of the board's registered personas.
+        if (reaction) {
+          // Scope first, so a key for another board learns nothing about this board's personas.
+          this.requireScope(capability, slug(rest[1]));
+          this.requireBoundName(capability, reaction.username);
+          // Like sends, only signed GitHub deliveries speak as `github` (ADR 0036).
+          if (reaction.username === GITHUB_SENDER)
+            throw new HttpError(
+              403,
+              "reserved_name",
+              "The display name github is reserved for GitHub messages.",
+            );
+          if (
+            capability.shared_channel &&
+            !this.ctx.storage.sql
+              .exec("SELECT 1 FROM personas WHERE channel=? AND displayName=?", rest[1], reaction.username)
+              .toArray().length
+          )
+            throw new HttpError(
+              400,
+              "persona_required",
+              "Register your persona with msn persona add before reacting.",
+            );
+        }
         // Only signed GitHub deliveries post as `github` (ADR 0036).
         if (input && username === GITHUB_SENDER)
           throw new HttpError(
@@ -3625,6 +3838,14 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (change) {
             this.requireChannel(channel);
             return this.relabel(tenant, channel, messageId(rest[3]), change);
+          }
+          if (reaction) {
+            this.requireChannel(channel);
+            return this.react(tenant, channel, messageId(rest[3]), reaction);
+          }
+          if (rest.length === 3 && rest[2] === "reactions" && request.method === "GET") {
+            this.requireChannel(channel);
+            return this.reactionPage(channel, url.searchParams);
           }
           if (rest.length === 3 && rest[2] === "search" && request.method === "GET") {
             this.requireChannel(channel);

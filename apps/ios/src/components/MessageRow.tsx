@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
-import type { Message } from "../core/types.ts";
+import { REACTION_KINDS, type Message, type ReactionKind } from "../core/types.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
@@ -38,10 +38,32 @@ type Props = {
   onToggleFold?: (id: number) => void;
   /** The reader opened this message, or jumped to it. */
   unfolded?: boolean;
+  /** Your display name, to mark your own reactions (ADR 0047). */
+  me?: string;
+  /** Toggles your reaction; absent where reactions are read only (archived boards, search). */
+  onReact?: (message: Message, kind: ReactionKind) => void;
 };
 
 // The body's font size is 16; React Native's default line is about 1.2 times that.
 const BODY_LINE = 20;
+
+/** Reactions (ADR 0047): the symbol and spoken name of each kind. */
+export const REACTION_LABELS: Record<ReactionKind, { symbol: string; label: string }> = {
+  done: { symbol: "✓", label: "Done" },
+  seen: { symbol: "👀", label: "Seen" },
+  yes: { symbol: "👍", label: "Yes" },
+  no: { symbol: "✗", label: "No" },
+};
+
+/** "Done 2: lead, dev" for VoiceOver and the row summary. */
+export function reactionSummary(message: Message): string {
+  return REACTION_KINDS.filter((kind) => message.reactions?.[kind]?.length)
+    .map((kind) => {
+      const names = message.reactions?.[kind] ?? [];
+      return `${REACTION_LABELS[kind].label} ${names.length}: ${names.join(", ")}`;
+    })
+    .join("; ");
+}
 
 function preview(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -72,10 +94,14 @@ function MessageRowImpl({
   replyable = true,
   onToggleFold,
   unfolded = false,
+  me,
+  onReact,
 }: Props) {
   const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
   const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
   const foldLabel = fold.maxHeight === null ? "Show less" : "Show more";
+  const reacted = REACTION_KINDS.filter((kind) => message.reactions?.[kind]?.length);
+  const summary = reactionSummary(message);
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
   // Formatted text (ADR 0043): VoiceOver reads the words without markup and offers each link.
@@ -95,7 +121,7 @@ function MessageRowImpl({
       accessibilityRole="button"
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
-      }`}
+      }${summary ? `. Reactions: ${summary}` : ""}`}
       accessibilityHint={`${replyable ? "Double tap to reply. " : ""}Swipe up or down for more actions.`}
       // VoiceOver reads the row as one element, so its inner controls are offered as actions.
       accessibilityActions={[
@@ -106,6 +132,12 @@ function MessageRowImpl({
         ...(fold.long ? [{ name: "toggleFold", label: foldLabel }] : []),
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
+        ...(onReact
+          ? REACTION_KINDS.map((kind) => ({
+              name: `react_${kind}`,
+              label: `${me && message.reactions?.[kind]?.includes(me) ? "Remove" : "React"} ${REACTION_LABELS[kind].label.toLowerCase()}`,
+            }))
+          : []),
         ...links.map((link, index) => ({ name: `openLink${index}`, label: `Open link ${link.label}` })),
       ]}
       onAccessibilityAction={({ nativeEvent }) => {
@@ -115,6 +147,8 @@ function MessageRowImpl({
         else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
           onLoadParent?.(message.replyTo);
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
+        else if (nativeEvent.actionName.startsWith("react_"))
+          onReact?.(message, nativeEvent.actionName.slice("react_".length) as ReactionKind);
         else if (nativeEvent.actionName.startsWith("openLink")) {
           const link = links[Number(nativeEvent.actionName.slice("openLink".length))];
           if (link) openMessageLink(link.href);
@@ -194,6 +228,32 @@ function MessageRowImpl({
           <Text style={styles.foldText}>{foldLabel}</Text>
         </Pressable>
       ) : null}
+      {reacted.length || onReact ? (
+        <View style={styles.reactions}>
+          {REACTION_KINDS.map((kind) => {
+            const names = message.reactions?.[kind] ?? [];
+            if (!names.length && !onReact) return null;
+            const mine = me !== undefined && names.includes(me);
+            const { symbol, label } = REACTION_LABELS[kind];
+            return (
+              <Pressable
+                key={kind}
+                accessibilityRole="button"
+                accessibilityState={{ selected: mine, disabled: !onReact }}
+                accessibilityLabel={names.length ? `${label} ${names.length}: ${names.join(", ")}` : `React ${label.toLowerCase()}`}
+                disabled={!onReact}
+                onPress={() => onReact?.(message, kind)}
+                hitSlop={4}
+                style={[styles.chip, mine && styles.chipMine, !names.length && styles.chipEmpty]}
+              >
+                <Text style={[styles.chipText, mine && { color: colors.accent }]}>
+                  {names.length ? `${symbol} ${names.length}` : symbol}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
       {receipts ? (
         <Text
           style={styles.receipts}
@@ -252,5 +312,19 @@ const styles = StyleSheet.create({
   fold: { alignSelf: "flex-start", minHeight: 32, justifyContent: "center" },
   foldText: { color: colors.accent, fontSize: 14, fontWeight: "600" },
   receipts: { color: colors.muted, fontSize: 12 },
+  reactions: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs },
+  chip: {
+    minHeight: 32,
+    minWidth: 40,
+    paddingHorizontal: spacing.sm,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  chipMine: { borderColor: colors.accent },
+  chipEmpty: { opacity: 0.45, borderStyle: "dashed" },
+  chipText: { color: colors.muted, fontSize: 13 },
   linkAction: { color: colors.accent, fontSize: 12, fontWeight: "600" },
 });

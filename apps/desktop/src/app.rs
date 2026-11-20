@@ -92,6 +92,8 @@ enum Action {
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
+    /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
+    React(u64, &'static str, bool),
     /// Archive (`true`) or unarchive the open board (ADR 0046).
     SetArchived(bool),
     /// Mute the open board: 1h, 1d or `None` for until turned back on (ADR 0044).
@@ -214,6 +216,9 @@ impl MsnDesktopApp {
         {
             self.receipts_at = Some(std::time::Instant::now());
             let command = self.state.receipts_command();
+            self.dispatch_all(command.into_iter().collect());
+            // Reactions send no event either (ADR 0047), so they share the receipts timer.
+            let command = self.state.reactions_command();
             self.dispatch_all(command.into_iter().collect());
         }
     }
@@ -793,6 +798,12 @@ impl MsnDesktopApp {
             .as_ref()
             .map(|connection| connection.username.clone())
             .unwrap_or_default();
+        // Archived boards (ADR 0046) show reactions but take no changes.
+        let can_react = self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| !self.state.is_archived(channel));
         let scroll_to = self.scroll_to.take();
         let channel_name = self.state.selected_channel.clone().unwrap_or_default();
         // A reply that landed in a folded thread: point at it, since the log does not show it.
@@ -868,6 +879,7 @@ impl MsnDesktopApp {
                                         }
                                         let fold = Fold::new(&channel_name, id, &state.unfolded);
                                         render_message(ui, message, &me, Some(fold), actions);
+                                        render_reactions(ui, message, &me, can_react, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
                                         if replies > 0 {
@@ -894,6 +906,7 @@ impl MsnDesktopApp {
                                             let fold =
                                                 Fold::new(&channel_name, id, &state.unfolded);
                                             render_message(ui, reply, &me, Some(fold), actions);
+                                            render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
                                         if scroll_to == Some(id) {
@@ -1170,6 +1183,10 @@ impl MsnDesktopApp {
                     self.copied_link = Some(link);
                     self.state.status = Some(format!("Link to message #{id} copied."));
                 }
+            }
+            Action::React(id, kind, remove) => {
+                let commands = self.state.react(id, kind, remove);
+                self.dispatch_all(commands);
             }
             Action::SetArchived(archived) => {
                 let commands = self.state.set_archived(archived);
@@ -1605,6 +1622,91 @@ fn render_receipts(
     let label = egui::Label::new(egui::RichText::new(line).small().color(theme::muted()));
     let draw = |ui: &mut egui::Ui| {
         ui.add(label).on_hover_text(msn_cli::receipts::MEANING);
+    };
+    if own {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), draw);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.add_space(30.0 + ui.spacing().item_spacing.x);
+            draw(ui);
+        });
+    }
+}
+
+/// Reactions (ADR 0047): (kind, symbol, label), in the server's fixed order.
+const REACTIONS: [(&str, &str, &str); 4] = [
+    ("done", "✓", "Done"),
+    ("seen", "👀", "Seen"),
+    ("yes", "👍", "Yes"),
+    ("no", "✗", "No"),
+];
+
+/// The names that reacted with `kind`, in the order they reacted.
+fn reaction_names<'a>(message: &'a Value, kind: &str) -> Vec<&'a str> {
+    message["reactions"][kind]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// A row of reaction chips under a message: a count for each kind someone used, highlighted when
+/// one is yours, and the unused kinds as faint buttons. Clicking toggles your own reaction.
+fn render_reactions(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    can_react: bool,
+    actions: &mut Vec<Action>,
+) {
+    let Some(id) = message["id"].as_u64() else {
+        return;
+    };
+    let used: Vec<_> = REACTIONS
+        .iter()
+        .map(|&(kind, symbol, label)| (kind, symbol, label, reaction_names(message, kind)))
+        .collect();
+    if !can_react && used.iter().all(|(.., names)| names.is_empty()) {
+        return;
+    }
+    let own = message["username"].as_str() == Some(me);
+    let mut draw = |ui: &mut egui::Ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (kind, symbol, label, names) in &used {
+                if names.is_empty() && !can_react {
+                    continue;
+                }
+                let mine = names.contains(&me);
+                let (text, hover) = if names.is_empty() {
+                    (
+                        egui::RichText::new(*symbol).small().color(theme::muted()),
+                        format!("React: {}", label.to_lowercase()),
+                    )
+                } else {
+                    let color = if mine {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    };
+                    (
+                        egui::RichText::new(format!("{symbol} {}", names.len()))
+                            .small()
+                            .color(color),
+                        format!("{label}: {}", names.join(", ")),
+                    )
+                };
+                let button = egui::Button::new(text).small().selected(mine);
+                let response = ui.add_enabled(can_react, button);
+                let response = if can_react {
+                    response.on_hover_text(hover)
+                } else {
+                    response.on_disabled_hover_text(hover)
+                };
+                if response.clicked() {
+                    actions.push(Action::React(id, kind, mine));
+                }
+            }
+        });
     };
     if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), draw);

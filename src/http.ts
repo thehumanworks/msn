@@ -517,3 +517,31 @@ export function searchMatch(input: string): string | null {
     throw new HttpError(400, "invalid_query", `Use at most ${MAX_SEARCH_TERMS} words or phrases.`);
   return clauses.length ? clauses.join(" ") : null;
 }
+
+/** The fixed reaction kinds (ADR 0047), in display order: ✓ done, 👀 seen, 👍 yes, ✗ no. */
+export const REACTIONS = ["done", "seen", "yes", "no"] as const;
+export type ReactionKind = (typeof REACTIONS)[number];
+/** Who reacted with each kind, in the order they reacted; absent kinds are left out. */
+export type Reactions = Partial<Record<ReactionKind, string[]>>;
+
+export function reactionKind(value: unknown): ReactionKind {
+  if (typeof value !== "string" || !(REACTIONS as readonly string[]).includes(value))
+    throw new HttpError(400, "invalid_reaction", `kind must be one of ${REACTIONS.join(", ")}.`);
+  return value as ReactionKind;
+}
+
+/** Body of POST …/messages/{id}/reactions: who reacts, with which kind, and whether to remove it. */
+export type ReactionChange = { username: string; kind: ReactionKind; remove: boolean };
+
+export function reactionChange(input: Record<string, unknown>): ReactionChange {
+  for (const field of Object.keys(input))
+    if (!["username", "kind", "remove"].includes(field))
+      throw new HttpError(400, "invalid_reaction", `Unknown field ${field}; use username, kind and remove.`);
+  if (input.remove !== undefined && typeof input.remove !== "boolean")
+    throw new HttpError(400, "invalid_reaction", "remove must be true or false.");
+  return {
+    username: text(input.username, "username", 128),
+    kind: reactionKind(input.kind),
+    remove: input.remove === true,
+  };
+}

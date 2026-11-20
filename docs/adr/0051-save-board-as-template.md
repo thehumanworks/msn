@@ -18,7 +18,7 @@ The owner approved "save a board as a template": once a board's goal and team wo
 
 ## Schema
 
-v20 adds the table `board_templates(name PRIMARY KEY, goal, personas JSON, savedFrom, savedBy, createdAt)` with `CREATE TABLE IF NOT EXISTS`, and the `version < 20` step only records versions 19 and 20. v19 belongs to reactions (ADR 0047), which also only records its version, so either merge order is safe (see the schema rule in ADR 0039). Deleting a template never touches boards made from it.
+v20 adds the table `board_templates(name PRIMARY KEY, goal, personas JSON, savedFrom, savedBy, createdAt)` with `CREATE TABLE IF NOT EXISTS`, and the `version < 20` step only records its version. v19 belongs to reactions (ADR 0047), which also only records its version, so either merge order was safe (see the schema rule in ADR 0039). Deleting a template never touches boards made from it.
 
 ## Rejected
 

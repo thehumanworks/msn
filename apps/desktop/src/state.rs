@@ -144,6 +144,8 @@ pub struct ChannelState {
     /// Explicit commit positions (ADR 0040); empty until loaded or on a server without them.
     pub receipts: Vec<msn_cli::receipts::Receipt>,
     pub receipts_flight: Flight,
+    /// Reactions (ADR 0047) send no event, so they are re-read on the receipts timer.
+    pub reactions_flight: Flight,
     /// Thread roots the person opened (ADR 0041). Display only; kept across syncs.
     pub expanded: BTreeSet<u64>,
     /// Long messages the person opened with Show more, or jumped to (ADR 0050). Display only.
@@ -381,6 +383,50 @@ impl AppState {
             channel_generation,
             channel,
         })
+    }
+
+    /// Re-reads reactions (ADR 0047) for the cached messages; the app calls this on a timer,
+    /// because reacting is not a channel event.
+    pub fn reactions_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        let first = *state.messages.keys().next()?;
+        state
+            .reactions_flight
+            .request()
+            .then_some(Command::LoadReactions {
+                generation,
+                channel_generation,
+                channel,
+                after: first - 1,
+            })
+    }
+
+    /// Adds or removes the connected name's reaction on one message (ADR 0047). An archived
+    /// board takes no changes, so nothing is sent.
+    pub fn react(&mut self, id: u64, kind: &str, remove: bool) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if self.is_archived(&channel) {
+            self.status = Some(format!("{channel} is archived and read only."));
+            return Vec::new();
+        }
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Vec::new();
+        };
+        vec![Command::React {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            id,
+            kind: kind.into(),
+            remove,
+        }]
     }
 
     /// Reloads processed-by receipts for the open channel; the app also calls this on a timer,
@@ -772,6 +818,12 @@ impl AppState {
                 }
                 self.status = Some(BUSY.into());
             }
+            Command::React { .. } => self.status = Some(BUSY.into()),
+            Command::LoadReactions { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.reactions_flight.fail();
+                }
+            }
             Command::Disconnect => {}
             invalidation => {
                 let duplicate = self
@@ -942,6 +994,52 @@ impl AppState {
                 } else {
                     Vec::new()
                 }
+            }
+            UiEvent::Reactions {
+                generation,
+                channel_generation,
+                channel,
+                after,
+                reactions,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                let found: BTreeMap<u64, Value> = reactions.into_iter().collect();
+                for (id, message) in state.messages.range_mut(after + 1..) {
+                    set_reactions(message, found.get(id).cloned().unwrap_or(Value::Null));
+                }
+                if state.reactions_flight.finish() {
+                    let after = state.messages.keys().next().map_or(0, |first| first - 1);
+                    vec![Command::LoadReactions {
+                        generation,
+                        channel_generation,
+                        channel,
+                        after,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::Reacted {
+                generation,
+                channel_generation,
+                channel,
+                id,
+                reactions,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && let Some(message) = self
+                        .channel
+                        .as_mut()
+                        .and_then(|state| state.messages.get_mut(&id))
+                {
+                    set_reactions(message, reactions);
+                }
+                Vec::new()
             }
             UiEvent::Snapshots {
                 generation,
@@ -1307,6 +1405,15 @@ impl AppState {
                     state.receipts_flight.fail();
                 }
             }
+            // Reactions too (ADR 0047): a failed refresh keeps the chips shown.
+            "reactions" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.reactions_flight.fail();
+                }
+            }
+            "react" => self.status = Some(format!("Reaction not changed: {message}")),
             "sync-channel" | "load-snapshots" => {
                 if channel_generation != Some(self.channel_generation) {
                     return;
@@ -1324,6 +1431,19 @@ impl AppState {
             }
             _ => self.status = Some(message),
         }
+    }
+}
+
+/// Sets a message's reactions (ADR 0047); `Null` or an empty object removes the field, so the
+/// message keeps the shape it had before anyone reacted.
+fn set_reactions(message: &mut Value, reactions: Value) {
+    let Some(object) = message.as_object_mut() else {
+        return;
+    };
+    if reactions.as_object().is_some_and(|kinds| !kinds.is_empty()) {
+        object.insert("reactions".into(), reactions);
+    } else {
+        object.remove("reactions");
     }
 }
 
@@ -1769,6 +1889,85 @@ mod tests {
         });
         assert_eq!(state.selected_channel.as_deref(), Some("random"));
         assert!(state.channel.as_ref().unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn reactions_refresh_cached_messages_and_own_changes_apply_in_place() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(
+            &mut state,
+            vec![msg(4, "a"), msg(5, "b"), msg(6, "c")],
+            6,
+            0,
+        );
+        let Some(Command::LoadReactions { after, .. }) = state.reactions_command() else {
+            panic!("expected a reactions request");
+        };
+        assert_eq!(after, 3);
+        assert!(state.reactions_command().is_none());
+        let cg = state.channel_generation;
+        let rerun = state.apply(UiEvent::Reactions {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            after: 3,
+            reactions: vec![(5, json!({"done": ["lead"]}))],
+        });
+        assert!(matches!(
+            rerun.as_slice(),
+            [Command::LoadReactions { after: 3, .. }]
+        ));
+        let messages = &state.channel.as_ref().unwrap().messages;
+        assert_eq!(messages[&5]["reactions"], json!({"done": ["lead"]}));
+        assert!(messages[&4].get("reactions").is_none());
+
+        // The user's own change: alice reacts, as the connected name.
+        let commands = state.react(4, "seen", false);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::React { id: 4, kind, username, remove: false, .. }] if kind == "seen" && username == "alice"
+        ));
+        state.apply(UiEvent::Reacted {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            id: 4,
+            reactions: json!({"seen": ["alice"]}),
+        });
+        // A later refresh that no longer lists message 5 clears it; Null clears message 4.
+        state.apply(UiEvent::Reacted {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            id: 4,
+            reactions: Value::Null,
+        });
+        state.apply(UiEvent::Reactions {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            after: 3,
+            reactions: Vec::new(),
+        });
+        let messages = &state.channel.as_ref().unwrap().messages;
+        assert!(messages.values().all(|m| m.get("reactions").is_none()));
+
+        // A stale channel generation is ignored, and archived boards send nothing.
+        state.apply(UiEvent::Reacted {
+            generation: 1,
+            channel_generation: cg + 99,
+            channel: "general".into(),
+            id: 6,
+            reactions: json!({"no": ["x"]}),
+        });
+        assert!(
+            state.channel.as_ref().unwrap().messages[&6]
+                .get("reactions")
+                .is_none()
+        );
+        state.archived.insert("general".into());
+        assert!(state.react(6, "done", false).is_empty());
     }
 
     #[test]

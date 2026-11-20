@@ -2380,6 +2380,86 @@ test("the owner pins messages to the top of a board; agents see the pins but can
   await expect(page.locator("#pins")).toBeHidden();
 });
 
+test("people react to a message with a fixed set; reactions toggle and never add to the log", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  for (const name of ["lead", "dev <b>x</b>"])
+    await request.put(`${t.path}/channels/work/personas/${encodeURIComponent(name.split(" ")[0])}`, {
+      headers: shared,
+      data: { displayName: name },
+    });
+  const ids = [];
+  for (const text of ["Deploy the worker", "Review the PR"]) {
+    const sent = await request.post(`${t.path}/channels/work/messages`, {
+      headers: shared,
+      data: { username: "lead", text },
+    });
+    ids.push((await sent.json()).message.id);
+  }
+  for (const [username, kind] of [
+    ["lead", "done"],
+    ["dev <b>x</b>", "done"],
+    ["dev <b>x</b>", "seen"],
+  ])
+    expect(
+      (
+        await request.post(`${t.path}/channels/work/messages/${ids[0]}/reactions`, {
+          headers: shared,
+          data: { username, kind },
+        })
+      ).status(),
+    ).toBe(200);
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const row = (id) => page.locator(`#messages [data-id="${id}"] > .message-reactions`);
+  const done = row(ids[0]).getByRole("button", { name: /^Done, 2/ });
+  await expect(done).toHaveText("✓ 2");
+  // Names are untrusted and only ever shown as text.
+  await expect(done).toHaveAttribute("title", /Done: lead, dev <b>x<\/b>/);
+  await expect(row(ids[0]).getByRole("button", { name: /^Seen, 1/ })).toHaveText("👀 1");
+
+  await done.click();
+  await expect(row(ids[0]).getByRole("button", { name: /^Done, 3/ })).toHaveAttribute("aria-pressed", "true");
+  await row(ids[1]).getByRole("button", { name: "React yes" }).click();
+  const yes = row(ids[1]).getByRole("button", { name: /^Yes, 1: human/ });
+  await expect(yes).toHaveText("👍 1");
+  await expect(yes).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: testInfo.outputPath("reactions.png") });
+  await yes.click();
+  await expect(row(ids[1]).getByRole("button", { name: "React yes" })).toBeAttached();
+  await expect(row(ids[1]).locator(".reaction-chip:not(.reaction-add)")).toHaveCount(0);
+  // Reacting sends nothing: the log still has the same two messages and the cursor did not move.
+  await expect(page.locator("#messages .message")).toHaveCount(2);
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.map((m) => m.id)).toEqual(ids);
+  expect(history.messages[0].reactions).toEqual({
+    done: ["lead", "dev <b>x</b>", "human"],
+    seen: ["dev <b>x</b>"],
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // An archived board shows the counts but offers no way to change them.
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await expect(row(ids[0]).getByRole("button", { name: /^Done, 3/ })).toBeVisible();
+  for (const add of await page.locator("#messages .reaction-add").all()) await expect(add).toBeHidden();
+});
+
 test("a watch-only invitation lets someone read a board live without posting", async ({
   page,
   request,

@@ -105,3 +105,29 @@ test("catchup pins must belong to the stream and lead only a first page (ADR 003
   assert.throws(() => decodeCatchup(body([message(1)]), undefined, stream), ProtocolError);
   assert.throws(() => decodeCatchup(body([pin(2), pin(1)]), undefined, stream), ProtocolError);
 });
+
+test("messages keep known reactions and drop unknown kinds; bad reactions are protocol errors (ADR 0047)", async () => {
+  const { decodeMessage, decodeReactionPage } = await import("../src/core/decode.ts");
+  const raw = {
+    id: 3,
+    tenant: "acme",
+    channel: "general",
+    username: "asha",
+    text: "hi",
+    contentType: "text/plain",
+    createdAt: "2026-11-20T00:00:00.000Z",
+  };
+  assert.equal("reactions" in decodeMessage(raw), false);
+  assert.deepEqual(decodeMessage({ ...raw, reactions: { done: ["a", "b"], heart: ["x"] } }).reactions, {
+    done: ["a", "b"],
+  });
+  assert.equal("reactions" in decodeMessage({ ...raw, reactions: { heart: ["x"] } }), false);
+  assert.throws(() => decodeMessage({ ...raw, reactions: { done: "a" } }), ProtocolError);
+  assert.throws(() => decodeMessage({ ...raw, reactions: [] }), ProtocolError);
+  const page = decodeReactionPage({ reactions: [{ id: 3, reactions: { seen: ["a"] } }], hasMore: true, nextAfter: 3 });
+  assert.deepEqual([...page.reactions], [[3, { seen: ["a"] }]]);
+  assert.equal(page.nextAfter, 3);
+  assert.equal(decodeReactionPage({ reactions: [], hasMore: false }).nextAfter, null);
+  assert.throws(() => decodeReactionPage({ reactions: [], hasMore: true }), ProtocolError);
+  assert.throws(() => decodeReactionPage({ reactions: [{ id: 0, reactions: {} }], hasMore: false }), ProtocolError);
+});

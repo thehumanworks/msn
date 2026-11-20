@@ -50,6 +50,8 @@ export type MockServerHandle = {
   remove: (id: number) => void;
   publishSnapshot: (channel: string, text: string) => StoredSnapshot;
   createChannel: (channel: string) => void;
+  /** Reactions by message id (ADR 0047). Like the Worker, reacting sends no message or event. */
+  reactions: Map<number, Record<string, string[]>>;
   /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
   setPin: (id: number, pinned: boolean) => void;
   /** Make the token stop working, waking any pending event poll (like rotation/revocation). */
@@ -88,6 +90,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
   const events: MockEvent[] = [];
   const snapshots: StoredSnapshot[] = [];
   const pins = new Set<number>();
+  const reactions = new Map<number, Record<string, string[]>>();
   const pinnedRows = (channel: string) =>
     messages
       .filter((m) => m.channel === channel && !m.deleted && pins.has(m.id))
@@ -137,6 +140,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
       createdAt: m.createdAt,
       ...(m.replyTo ? { replyTo: m.replyTo } : {}),
       ...(m.to ? { to: m.to } : {}),
+      ...(reactions.has(m.id) ? { reactions: reactions.get(m.id) } : {}),
     };
   }
 
@@ -301,6 +305,29 @@ export async function startMockServer(): Promise<MockServerHandle> {
           });
         }
       }
+      if (rest[2] === "reactions" && rest.length === 3 && method === "GET") {
+        const after = Number(url.searchParams.get("after") ?? 0);
+        const rows = [...reactions]
+          .filter(([id]) => id > after && messages.some((m) => m.id === id && m.channel === channel && !m.deleted))
+          .sort(([a], [b]) => a - b)
+          .map(([id, value]) => ({ id, reactions: value }));
+        return json(res, 200, { reactions: rows, hasMore: false });
+      }
+      if (rest[2] === "messages" && rest[4] === "reactions" && rest.length === 5 && method === "POST") {
+        const body = await readBody(req);
+        const id = Number(rest[3]);
+        const message = messages.find((m) => m.id === id && m.channel === channel && !m.deleted);
+        if (!message) return json(res, 404, { error: { code: "message_not_found", message: "Message not found." } });
+        const kind = String(body.kind);
+        const current = { ...(reactions.get(id) ?? {}) };
+        const names = (current[kind] ?? []).filter((name) => name !== body.username);
+        if (body.remove !== true) names.push(String(body.username));
+        if (names.length) current[kind] = names;
+        else delete current[kind];
+        if (Object.keys(current).length) reactions.set(id, current);
+        else reactions.delete(id);
+        return json(res, 200, { message: toMessage(message), changed: true });
+      }
       if (rest[2] === "pins" && rest.length === 3 && method === "GET") {
         return json(res, 200, { pins: pinnedRows(channel), limit: 10 });
       }
@@ -431,6 +458,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
     messages,
     events,
     requests,
+    reactions,
     setPin: (id, pinned) => {
       if (pinned) pins.add(id);
       else pins.delete(id);
