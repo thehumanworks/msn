@@ -20,6 +20,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
+import { toggled } from "../core/fold.ts";
 import { messageLink } from "../core/links.ts";
 import { seenMark } from "../core/readMarks.ts";
 import { loadReceipts, type Receipt, RECEIPTS_EVERY_MS, receiptLine } from "../core/receipts.ts";
@@ -195,6 +196,9 @@ function ChannelBody({
     [expanded, open],
   );
   const pointer = useMemo(() => firstUnseen(state.messages, unseen), [state.messages, unseen]);
+  // Long messages the reader opened with Show more or jumped to (ADR 0050). Display only.
+  const [unfolded, setUnfolded] = useState<ReadonlySet<number>>(() => new Set());
+  const toggleFold = useCallback((id: number) => setUnfolded((current) => toggled(current, id)), []);
   // Read marks (ADR 0045): what reaches the screen while the app is active counts as read.
   const markRead = useRef<(ids: number[]) => void>(() => {});
   markRead.current = (ids) => {
@@ -351,6 +355,8 @@ function ChannelBody({
                 onReply={(m) => setReplyTo((current) => (current?.id === m.id ? null : m))}
                 receipts={receiptLine(receipts, item)}
                 onShareLink={onShareLink}
+                onToggleFold={toggleFold}
+                unfolded={unfolded.has(item.id)}
                 me={me}
                 onReact={archived ? undefined : onReact}
               />
@@ -364,6 +370,7 @@ function ChannelBody({
           accessibilityHint="Opens the thread and scrolls to the reply"
           onPress={() => {
             open(pointer.root);
+            setUnfolded((current) => new Set([...current, pointer.id]));
             setScrollTo(pointer.id);
           }}
           style={styles.pointer}

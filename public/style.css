@@ -1271,6 +1271,43 @@ body > footer {
     min-height: 32px;
   }
 }
+/* Long messages fold to their first 10 lines (ADR 0050). Display only: the text is all there. */
+.message-body {
+  font-size: 15px;
+  line-height: 1.5;
+}
+/* A mask uses only alpha: any opaque token works, in either theme. */
+.message-body.folded {
+  max-height: 15em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, var(--text) calc(100% - 3em), transparent);
+  mask-image: linear-gradient(to bottom, var(--text) calc(100% - 3em), transparent);
+}
+.fold-toggle {
+  display: inline-block;
+  margin: 4px 12px 0 0;
+  padding: 2px 0;
+  min-height: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.fold-toggle[hidden] {
+  display: none;
+}
+@media (min-width: 760px) {
+  .message-body {
+    font-size: 14px;
+  }
+}
+@media (pointer: coarse) {
+  .fold-toggle {
+    min-height: 32px;
+  }
+}
 /* Formatted message text (ADR 0043). Built from DOM nodes only; plain text stays one <p>. */
 .message code {
   font-family: var(--mono);

@@ -1,5 +1,6 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
+import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
 import { REACTION_KINDS, type Message, type ReactionKind } from "../core/types.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
@@ -30,11 +31,21 @@ type Props = {
   onShareLink?: (message: Message) => void;
   /** False where tapping a row does nothing, such as search results. */
   replyable?: boolean;
+  /**
+   * Long messages fold behind Show more (ADR 0050). Without it the body shows whole, as search
+   * hits do, since the match may be below the fold.
+   */
+  onToggleFold?: (id: number) => void;
+  /** The reader opened this message, or jumped to it. */
+  unfolded?: boolean;
   /** Your display name, to mark your own reactions (ADR 0047). */
   me?: string;
   /** Toggles your reaction; absent where reactions are read only (archived boards, search). */
   onReact?: (message: Message, kind: ReactionKind) => void;
 };
+
+// The body's font size is 16; React Native's default line is about 1.2 times that.
+const BODY_LINE = 20;
 
 /** Reactions (ADR 0047): the symbol and spoken name of each kind. */
 export const REACTION_LABELS: Record<ReactionKind, { symbol: string; label: string }> = {
@@ -81,9 +92,14 @@ function MessageRowImpl({
   receipts = null,
   onShareLink,
   replyable = true,
+  onToggleFold,
+  unfolded = false,
   me,
   onReact,
 }: Props) {
+  const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
+  const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
+  const foldLabel = fold.maxHeight === null ? "Show less" : "Show more";
   const reacted = REACTION_KINDS.filter((kind) => message.reactions?.[kind]?.length);
   const summary = reactionSummary(message);
   const task = parseTaskActivity(message);
@@ -113,6 +129,7 @@ function MessageRowImpl({
         ...(thread && onToggleThread
           ? [{ name: "toggleThread", label: threadLabel(thread.replies, thread.open, thread.unseen) }]
           : []),
+        ...(fold.long ? [{ name: "toggleFold", label: foldLabel }] : []),
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
         ...(onReact
@@ -126,6 +143,7 @@ function MessageRowImpl({
       onAccessibilityAction={({ nativeEvent }) => {
         if (nativeEvent.actionName === "activate" && replyable) onReply(message);
         else if (nativeEvent.actionName === "toggleThread") onToggleThread?.(message.id);
+        else if (nativeEvent.actionName === "toggleFold") onToggleFold?.(message.id);
         else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
           onLoadParent?.(message.replyTo);
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
@@ -182,18 +200,34 @@ function MessageRowImpl({
           </View>
         )
       ) : null}
-      {task ? (
-        <Text style={styles.body}>
-          Task <Text style={{ fontWeight: "700" }}>{task.body.task}</Text> · {task.body.action}
-          {task.body.title ? ` · ${task.body.title}` : ""}
-        </Text>
-      ) : structured ? (
-        <Text style={[styles.body, { fontFamily: mono, fontSize: 13 }]} numberOfLines={8}>
-          {message.text}
-        </Text>
-      ) : (
-        <MarkdownText text={message.text} blocks={tree ?? []} style={styles.body} />
-      )}
+      {/* The inner view keeps its natural height, so it is measured even while clipped. */}
+      <View style={fold.maxHeight === null ? undefined : { maxHeight: fold.maxHeight, overflow: "hidden" }}>
+        <View onLayout={onToggleFold ? (event) => setBodyHeight(event.nativeEvent.layout.height) : undefined}>
+          {task ? (
+            <Text style={styles.body}>
+              Task <Text style={{ fontWeight: "700" }}>{task.body.task}</Text> · {task.body.action}
+              {task.body.title ? ` · ${task.body.title}` : ""}
+            </Text>
+          ) : structured ? (
+            <Text style={[styles.body, { fontFamily: mono, fontSize: 13 }]} numberOfLines={8}>
+              {message.text}
+            </Text>
+          ) : (
+            <MarkdownText text={message.text} blocks={tree ?? []} style={styles.body} />
+          )}
+        </View>
+      </View>
+      {fold.long && onToggleFold ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: fold.maxHeight === null }}
+          onPress={() => onToggleFold(message.id)}
+          style={styles.fold}
+          hitSlop={8}
+        >
+          <Text style={styles.foldText}>{foldLabel}</Text>
+        </Pressable>
+      ) : null}
       {reacted.length || onReact ? (
         <View style={styles.reactions}>
           {REACTION_KINDS.map((kind) => {
@@ -275,6 +309,8 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   toggleText: { color: colors.accent, fontSize: 13, fontWeight: "600" },
+  fold: { alignSelf: "flex-start", minHeight: 32, justifyContent: "center" },
+  foldText: { color: colors.accent, fontSize: 14, fontWeight: "600" },
   receipts: { color: colors.muted, fontSize: 12 },
   reactions: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs },
   chip: {

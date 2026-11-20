@@ -148,6 +148,8 @@ pub struct ChannelState {
     pub reactions_flight: Flight,
     /// Thread roots the person opened (ADR 0041). Display only; kept across syncs.
     pub expanded: BTreeSet<u64>,
+    /// Long messages the person opened with Show more, or jumped to (ADR 0050). Display only.
+    pub unfolded: BTreeSet<u64>,
     /// Parents fetched for replies whose parent is not loaded; `None` means it no longer exists.
     pub parents: BTreeMap<u64, Option<Value>>,
     pub parents_inflight: BTreeSet<u64>,
@@ -695,6 +697,22 @@ impl AppState {
     pub fn open_thread_of(&mut self, id: u64) {
         if let Some(state) = self.channel.as_mut() {
             state.open_thread_of(id);
+        }
+    }
+
+    /// Show more / Show less on a long message in the selected channel (ADR 0050).
+    pub fn toggle_fold(&mut self, id: u64) {
+        if let Some(state) = self.channel.as_mut()
+            && !state.unfolded.remove(&id)
+        {
+            state.unfolded.insert(id);
+        }
+    }
+
+    /// A jump to a message shows it whole.
+    pub fn unfold(&mut self, id: u64) {
+        if let Some(state) = self.channel.as_mut() {
+            state.unfolded.insert(id);
         }
     }
 
