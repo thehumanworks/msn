@@ -504,3 +504,138 @@ describe("owner push notifications", () => {
     expect((await (await call(f.tenant, "/push", token)).json<{ devices: number }>()).devices).toBe(0);
   });
 });
+
+describe("board mutes (ADR 0044)", () => {
+  type Mute = { channel: string; until: string | null; everything: boolean };
+  const mutes = async (tenant: string, token: string) =>
+    (await (await call(tenant, "/push/mutes", token)).json<{ mutes: Mute[] }>()).mutes;
+
+  it("only an owner mutes, and each mute lasts forever, 1 hour or 1 day", async () => {
+    const f = await fixture();
+    expect((await call(f.tenant, "/push/mutes", f.agent)).status).toBe(403);
+    expect((await call(f.tenant, "/push/mutes/work", f.agent, "PUT", {})).status).toBe(403);
+    expect(await mutes(f.tenant, f.owner)).toEqual([]);
+    expect((await call(f.tenant, "/push/mutes/nope", f.owner, "PUT", {})).status).toBe(404);
+    const bad = await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { for: "2h" });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ error: { code: "invalid_mute" } });
+    expect((await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { everything: "yes" })).status).toBe(
+      400,
+    );
+
+    const forever = await call(f.tenant, "/push/mutes/work", f.owner, "PUT", {});
+    expect(forever.status).toBe(200);
+    expect(await forever.json()).toEqual({ channel: "work", until: null, everything: false });
+    // A PUT with no body at all is the same forever mute.
+    const bare = await exports.default.fetch(`https://msn.test/api/tenants/${f.tenant}/push/mutes/work`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${f.owner}` },
+    });
+    expect(bare.status).toBe(200);
+
+    const before = Date.now();
+    const hour = await (
+      await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { for: "1h", everything: true })
+    ).json<Mute>();
+    expect(hour.everything).toBe(true);
+    const ends = Date.parse(hour.until ?? "");
+    expect(ends - before).toBeGreaterThanOrEqual(3600_000 - 1000);
+    expect(ends - before).toBeLessThanOrEqual(3600_000 + 5000);
+    const day = await (await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { for: "1d" })).json<Mute>();
+    expect(Date.parse(day.until ?? "") - before).toBeGreaterThanOrEqual(86400_000 - 1000);
+    expect(await mutes(f.tenant, f.owner)).toEqual([day]);
+
+    expect((await call(f.tenant, "/push/mutes/work", f.owner, "DELETE")).status).toBe(204);
+    expect((await call(f.tenant, "/push/mutes/work", f.owner, "DELETE")).status).toBe(204);
+    expect(await mutes(f.tenant, f.owner)).toEqual([]);
+  });
+
+  it("a muted board stops notifying; messages to you still do unless everything is muted", async () => {
+    const f = await fixture();
+    const device = await browser();
+    await call(f.tenant, "/push", f.owner);
+    await call(f.tenant, "/push/subscriptions", f.owner, "PUT", device.subscription);
+    await call(f.tenant, "/push/mutes/work", f.owner, "PUT", {});
+
+    const blocked = JSON.stringify({ schema: "msn.task.v1", task: "t", action: "block", reason: "x" });
+    expect((await say(f, blocked, { contentType: "application/json" })).status).toBe(201);
+    expect((await say(f, "Need you", { to: "human" })).status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(JSON.parse(await decrypt(device, f.sent[0].body))).toMatchObject({
+      reason: "question",
+      body: "lead: Need you",
+    });
+
+    await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { everything: true });
+    await say(f, "Need you again", { to: "human" });
+    await say(f, blocked, { contentType: "application/json" });
+    // Messages keep arriving on the board; only the push is held back.
+    const stored = await (await call(f.tenant, "/channels/work/messages", f.agent)).json<{
+      messages: unknown[];
+    }>();
+    expect(stored.messages).toHaveLength(4);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(f.sent).toHaveLength(1);
+
+    await call(f.tenant, "/push/mutes/work", f.owner, "DELETE");
+    await say(f, blocked, { contentType: "application/json" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+    expect(JSON.parse(await decrypt(device, f.sent[1].body))).toMatchObject({ reason: "task_blocked" });
+  });
+
+  it("checks expiry at send time", async () => {
+    const f = await fixture();
+    const device = await browser();
+    await call(f.tenant, "/push", f.owner);
+    await call(f.tenant, "/push/subscriptions", f.owner, "PUT", device.subscription);
+    await call(f.tenant, "/push/mutes/work", f.owner, "PUT", { for: "1h", everything: true });
+    await say(f, "muted", { to: "human" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(f.sent).toHaveLength(0);
+    await runInDurableObject(f.stub, (_, state) => {
+      state.storage.sql.exec("UPDATE push_mutes SET until = ?", new Date(Date.now() - 1000).toISOString());
+    });
+    expect(await mutes(f.tenant, f.owner)).toEqual([]);
+    await say(f, "heard", { to: "human" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(JSON.parse(await decrypt(device, f.sent[0].body))).toMatchObject({ body: "lead: heard" });
+  });
+
+  it("is per person: one owner's mute leaves another owner's devices alone", async () => {
+    const f = await fixture();
+    const bob = (await f.stub.accountSession(f.tenant, "bob")).token;
+    const mine = await browser("https://fcm.googleapis.com/fcm/send/human-phone");
+    const legacy = await browser("https://fcm.googleapis.com/fcm/send/human-old");
+    const theirs = await browser("https://fcm.googleapis.com/fcm/send/bob-phone");
+    await call(f.tenant, "/push", f.owner);
+    await call(f.tenant, "/push/subscriptions", f.owner, "PUT", mine.subscription);
+    await call(f.tenant, "/push/subscriptions", f.owner, "PUT", legacy.subscription);
+    await call(f.tenant, "/push/subscriptions", bob, "PUT", theirs.subscription);
+    // A device registered before mutes existed has no person; it belongs to the workspace owner.
+    await runInDurableObject(f.stub, (_, state) => {
+      state.storage.sql.exec(
+        "UPDATE push_subscriptions SET person = NULL WHERE endpoint = ?",
+        legacy.subscription.endpoint,
+      );
+    });
+    await call(f.tenant, "/push/mutes/work", f.owner, "PUT", {});
+    expect(await mutes(f.tenant, bob)).toEqual([]);
+
+    await say(f, JSON.stringify({ schema: "msn.task.v1", task: "t", action: "block" }), {
+      contentType: "application/json",
+    });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(f.sent.map((s) => s.url)).toEqual([theirs.subscription.endpoint]);
+
+    // Addressed to human: human's devices hear it through the mute, and so does bob (an owner).
+    await say(f, "For human", { to: "human" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(4));
+    // Addressed to bob: human's mute holds, because it is not addressed to human.
+    await say(f, "For bob", { to: "bob" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(5));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(f.sent.at(-1)?.url).toBe(theirs.subscription.endpoint);
+    expect(f.sent).toHaveLength(5);
+  });
+});

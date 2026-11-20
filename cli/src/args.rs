@@ -34,6 +34,8 @@ EXAMPLES:
   msn peek general --wait 10
   msn commit general --through 42  # only after processing every delivered row through 42
   msn show general 42
+  msn mute general --for 1h         # owner: no push from #general for an hour
+  msn unmute general
   msn task open general task-1 --title 'Review change' --owner reviewer --reviewer planner
   msn task list general
   msn send general --text 'hello'
@@ -343,6 +345,23 @@ pub enum Command {
     },
     /// Fetch one exact message by channel and ID (404 absent, 410 deleted)
     Show { channel: String, message_id: String },
+    /// Hold back one board's push notifications for you on every device (owner account only).
+    /// Messages keep arriving. Messages addressed to you still notify unless --everything is set.
+    /// Without CHANNEL, list your mutes.
+    Mute {
+        channel: Option<String>,
+        /// 1h or 1d; leave it out to mute until msn unmute
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: Option<String>,
+        /// Also mute messages addressed to you
+        #[arg(long)]
+        everything: bool,
+        /// Print JSON instead of a sentence
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn a board's push notifications back on for you (owner account only)
+    Unmute { channel: String },
     /// Print a link that opens one message on its board in the web app (404 absent, 410 deleted).
     /// The link carries no credential; whoever opens it needs their own access.
     Link {
