@@ -95,7 +95,7 @@ pub fn export(
         page_limit,
         &pin,
         stop,
-        &mut writer,
+        &mut |row| writer.write_hashed(&message_record(row)?),
         &mut stats,
     )?;
     page_snapshots(
@@ -159,6 +159,111 @@ pub fn export(
         summary["lastSourceId"] = json!(last);
     }
     crate::agent::print_json(&summary)
+}
+
+/// `msn export --format md` (ADR 0048): the same pinned, validated message pages as the archive,
+/// rendered as a Markdown transcript. With `out` the file is written as a mode 0600
+/// `FILE.partial` and renamed into place; without it the transcript goes to stdout. Either way
+/// nothing is written until every page is read and the history revision is unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn export_markdown(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    out: Option<&Path>,
+    after: u64,
+    page_limit: u64,
+    force: bool,
+    stop: &AtomicBool,
+) -> Result<(), CliError> {
+    if !(1..=PAGE_LIMIT).contains(&page_limit) {
+        return Err(CliError::usage("limit must be an integer from 1 to 100."));
+    }
+    if let Some(out) = out {
+        refuse_existing_out(out, force)?;
+    }
+    let client = MsnClient::new(url)?;
+    let pin = fetch_catchup(&client, tenant, token, channel)?;
+    let mut rows: Vec<Value> = Vec::new();
+    let mut stats = ExportStats::default();
+    page_messages(
+        &client,
+        tenant,
+        token,
+        channel,
+        after,
+        page_limit,
+        &pin,
+        stop,
+        &mut |row| {
+            rows.push(row.clone());
+            Ok(())
+        },
+        &mut stats,
+    )?;
+    let check = fetch_catchup(&client, tenant, token, channel)?;
+    if check.history_revision != pin.history_revision {
+        return Err(CliError::conflict(
+            "History changed during export. A redaction or snapshot invalidation intervened; no transcript was written.",
+        ));
+    }
+    if stop.load(Ordering::SeqCst) {
+        return Err(interrupted());
+    }
+    let origin = crate::config::origin_base(url);
+    let exported_at = format_unix_ms(unix_ms());
+    let text = crate::transcript::render(
+        &crate::transcript::TranscriptMeta {
+            origin: &origin,
+            tenant,
+            channel,
+            exported_at: &exported_at,
+            after,
+        },
+        &rows,
+    );
+    let Some(out) = out else {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(text.as_bytes())?;
+        stdout.flush()?;
+        return Ok(());
+    };
+    write_private(out, force, text.as_bytes())?;
+    let mut summary = json!({
+        "path": out.display().to_string(),
+        "format": "md",
+        "messageCount": stats.message_count,
+        "boundary": {
+            "headCursor": pin.head_cursor,
+            "historyRevision": pin.history_revision,
+        },
+        "status": "complete",
+    });
+    if let Some(first) = stats.first_source_id {
+        summary["firstSourceId"] = json!(first);
+    }
+    if let Some(last) = stats.last_source_id {
+        summary["lastSourceId"] = json!(last);
+    }
+    crate::agent::print_json(&summary)
+}
+
+/// Writes `bytes` to `FILE.partial` (mode 0600), syncs it, then renames it to `dest`.
+fn write_private(dest: &Path, force: bool, bytes: &[u8]) -> Result<(), CliError> {
+    let mut partial = PartialArchive::create(dest, force)?;
+    partial.file.write_all(bytes)?;
+    partial.file.sync_all()?;
+    drop(partial);
+    fs::rename(partial_path(dest), dest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(dest)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(dest, perms)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -266,7 +371,7 @@ fn page_messages(
     page_limit: u64,
     pin: &Pin,
     stop: &AtomicBool,
-    writer: &mut PartialArchive,
+    sink: &mut dyn FnMut(&Value) -> Result<(), CliError>,
     stats: &mut ExportStats,
 ) -> Result<(), CliError> {
     if after >= pin.head_cursor {
@@ -304,7 +409,7 @@ fn page_messages(
                 reached_boundary = true;
                 break;
             }
-            writer.write_hashed(&message_record(row)?)?;
+            sink(row)?;
             if stats.first_source_id.is_none() {
                 stats.first_source_id = Some(id);
             }
