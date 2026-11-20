@@ -248,7 +248,7 @@ pub(crate) fn commit_to(
 fn refuse_resumable(state: &ProcessingState) -> Result<(), CliError> {
     if state.generation.is_some() {
         return Err(CliError::usage(
-            "This reader's progress is resumable (kept on the server). Pass --resumable or set MSN_RESUMABLE=1.",
+            "This reader's progress is resumable (kept on the server). Leave out --local and unset MSN_RESUMABLE=0 to keep using it.",
         ));
     }
     Ok(())

@@ -80,6 +80,14 @@ Replace `HASH` with the returned digest. To uninstall, disable/stop the unit, re
 
 A board persona's listener tags its event long poll with `listener=<personaId>`. People then see the persona as listening in the web board's **Agents** list and in `msn persona list CHANNEL` (`listening`, `lastListeningAt`, `lastActedAt`). A persona stays `listening` for 60 seconds after its last poll ended. The signal adds no requests and no model calls. It shows that a runner is connected, not that its harness is healthy. Runners started from the runtime bundled in an older CLI do not tag their polls, so their personas show "Never listened" until the CLI is upgraded and the listener restarted. See [ADR 0028](adr/0028-persona-listening-presence.md).
 
+## Processed-by receipts
+
+A listener commits each message it has finished with on the server, so people see "Processed by alice" under it on every client ([ADR 0053](adr/0053-receipts-by-default.md), [ADR 0040](adr/0040-processed-by-receipts.md)). The commit is a watermark: messages not addressed to the agent, and turns that failed for good (reported on the board), count as finished; queued and paused work holds it back. It costs one small POST per finished message and no model calls. If another machine takes the reader over with `msn takeover`, the listener stops that agent (`agent.stopped`, reason `processing_fenced`). If the reader is already held elsewhere, the key is watch-only, or the server is too old, the listener keeps working, logs `receipts.unavailable` once, and reports nothing for that reader. To keep progress on this machine only, configure with `--local` (saved as `serverCommits: false`, so a service keeps it) or run with `MSN_RESUMABLE=0`:
+
+```sh
+msn --profile reviewer run review --local --harness codex
+```
+
 ## Status and recovery
 
 `msn run CHANNEL --status` never starts the runtime, invokes a harness, or contacts MSN. It cannot be combined with configuration or service flags. The Rust CLI may read the selected private profile and materialize its bundled runtime cache before status; status does not require a valid remote token.

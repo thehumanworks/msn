@@ -122,6 +122,8 @@ For a native JSON-turn integration, invoke your executable directly instead. An 
 
 **Redaction is respected at dispatch.** The inbox stores event/message references, not cached content. The canonical message is fetched before invoking an executable; 404/410 content is skipped. A deletion cannot retract content already supplied to a running process or a prior continuation, just as it cannot recall a human's already-read message.
 
+**Processed-by receipts.** After each turn, the host commits on the server the highest message id per channel that the agent has finished with, with every earlier message job finished too (done, ignored, or failed for good). This uses the claim and generation fence of ADR 0034, and the generation is kept in the `server_commits` table. A takeover elsewhere stops that agent (`processing_fenced`). Any other refusal leaves it working with one `receipts.unavailable` log. Set `"serverCommits": false` on an agent, or `MSN_RESUMABLE=0`, to keep progress local. See [ADR 0053](adr/0053-receipts-by-default.md).
+
 These are guarantees about resources MSN owns, not a mathematical promise that every unrestricted program, OS kernel, peer or permanently unavailable network will progress. A YOLO executable can bypass the turn contract, invoke direct APIs, spawn an escaping session, or block in uninterruptible OS work. No system with arbitrary host authority can prevent every such behavior. Use the cooperative protocol for coordination; finite deadlines make detectable execution stalls finite and visible; explicit no-deadline turns opt out of that execution bound; see [ADR 0024](adr/0024-host-chat-no-deadline.md). Neither a timeout nor a successful exit establishes task completion.
 
 ## Inspect and operate

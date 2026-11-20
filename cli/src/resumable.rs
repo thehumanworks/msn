@@ -10,6 +10,13 @@
 //! R4 fenced_peek_and_commit_fail_closed -> tests/processing.rs::resumable_fenced_commit_is_conflict
 //! R5 local_commands_refuse_resumable_files -> tests/processing.rs::local_commit_refuses_resumable_file
 //! Server side (fence inside one storage transaction): tests/processing.test.ts.
+//!
+//! Default mode (ADR 0053): with neither `--resumable` nor `--local` (and `MSN_RESUMABLE` unset),
+//! progress goes to the server, so processed-by receipts (ADR 0040) name this reader.
+//! D1 default_peek_claims_and_commits_on_server -> tests/processing.rs::default_peek_and_commit_use_the_server
+//! D2 default_held_reader_names_takeover_and_local -> tests/processing.rs::default_held_reader_names_takeover_and_local
+//! D3 default_keeps_local_when_server_cannot_hold_progress -> tests/processing.rs::default_falls_back_to_local_for_watch_only_and_old_servers
+//! D4 local_flag_and_env_keep_progress_local -> tests/processing.rs::local_flag_and_env_keep_progress_local
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -28,17 +35,172 @@ use crate::processing::{
     validate_bounds, write_processing,
 };
 
-/// `MSN_RESUMABLE` turns resumable mode on for the MCP tools, read the way clap reads the
-/// `--resumable` flag's env: unset, empty, `0`, `false`, `no`, `off`, `n` and `f` mean off.
-pub fn enabled_by_env() -> bool {
-    let value = std::env::var("MSN_RESUMABLE")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    !matches!(
-        value.as_str(),
-        "" | "0" | "false" | "no" | "off" | "n" | "f"
-    )
+/// Where a reader's processing progress lives (ADR 0053).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// The default: send commits to the server, unless the server cannot hold them (a watch-only
+    /// key, or a server older than ADR 0034), in which case progress stays on this machine.
+    Default,
+    /// `--resumable` or `MSN_RESUMABLE=1`: the server or an error, never a fallback.
+    Server,
+    /// `--local` or `MSN_RESUMABLE=0`: progress stays on this machine; no receipts.
+    Local,
+}
+
+/// Reads `MSN_RESUMABLE` the way clap reads a boolean env: `0`, `false`, `no`, `off`, `n` and `f`
+/// keep progress local, any other non-empty value forces the server, unset or empty is the default.
+pub fn mode_from_env() -> Mode {
+    parse_mode(std::env::var("MSN_RESUMABLE").ok().as_deref())
+}
+
+fn parse_mode(value: Option<&str>) -> Mode {
+    let value = value.unwrap_or_default().trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" => Mode::Default,
+        "0" | "false" | "no" | "off" | "n" | "f" => Mode::Local,
+        _ => Mode::Server,
+    }
+}
+
+/// Flags win over the environment; clap keeps `--resumable` and `--local` apart.
+pub fn mode(resumable: bool, local: bool) -> Mode {
+    if resumable {
+        Mode::Server
+    } else if local {
+        Mode::Local
+    } else {
+        mode_from_env()
+    }
+}
+
+/// What a resumable step did when the default mode allows keeping progress local.
+enum Outcome {
+    Done,
+    /// The server cannot hold this reader's progress; carry on locally. The reason is printed.
+    KeepLocal(&'static str),
+}
+
+/// The server refusals that mean "this server cannot keep your progress", not "someone else holds
+/// it": a watch-only key (ADR 0039) may not write, and a server before ADR 0034 has no route.
+fn cannot_hold(response: &RawResponse) -> Option<&'static str> {
+    match (response.status, error_code(&response.body).as_deref()) {
+        (403, Some("watch_only")) => Some(
+            "This key is watch-only, so processing progress stays on this machine and no receipt names this reader.",
+        ),
+        (404, Some("route_not_found")) => Some(
+            "This server does not keep processing progress, so it stays on this machine and no receipt names this reader.",
+        ),
+        _ => None,
+    }
+}
+
+fn note(reason: &str) {
+    let _ = writeln!(io::stderr(), "msn: {reason}");
+}
+
+/// Peek in the given mode. Default mode claims the reader on the server on first use.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn peek_with(
+    mode: Mode,
+    out: &mut dyn Write,
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    reader: &str,
+    cursor_file: Option<&Path>,
+    wait: u64,
+    limit: u64,
+    stop: &AtomicBool,
+) -> Result<(), CliError> {
+    if mode == Mode::Local {
+        return crate::processing::peek_to(
+            out,
+            url,
+            tenant,
+            token,
+            channel,
+            reader,
+            cursor_file,
+            wait,
+            limit,
+            stop,
+        );
+    }
+    let fallback = mode == Mode::Default;
+    match peek_inner(
+        out,
+        url,
+        tenant,
+        token,
+        channel,
+        reader,
+        cursor_file,
+        wait,
+        limit,
+        stop,
+        fallback,
+    )? {
+        Outcome::Done => Ok(()),
+        Outcome::KeepLocal(reason) => {
+            note(reason);
+            crate::processing::peek_to(
+                out,
+                url,
+                tenant,
+                token,
+                channel,
+                reader,
+                cursor_file,
+                wait,
+                limit,
+                stop,
+            )
+        }
+    }
+}
+
+/// Commit in the given mode. Default mode follows the progress file: a reader that a peek claimed
+/// on the server commits there; one that stayed local (watch-only, older server) commits locally.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_with(
+    mode: Mode,
+    out: &mut dyn Write,
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    reader: &str,
+    cursor_file: Option<&Path>,
+    through: u64,
+) -> Result<(), CliError> {
+    if mode == Mode::Local {
+        return crate::processing::commit_to(
+            out,
+            url,
+            tenant,
+            channel,
+            reader,
+            cursor_file,
+            through,
+        );
+    }
+    match commit_inner(
+        out,
+        url,
+        tenant,
+        token,
+        channel,
+        reader,
+        cursor_file,
+        through,
+        mode == Mode::Default,
+    )? {
+        Outcome::Done => Ok(()),
+        Outcome::KeepLocal(_) => {
+            crate::processing::commit_to(out, url, tenant, channel, reader, cursor_file, through)
+        }
+    }
 }
 
 /// A label for whoever holds the reader, shown to the person deciding on a takeover.
@@ -107,7 +269,7 @@ fn refusal(response: &RawResponse, channel: &str, reader: &str) -> CliError {
                 .and_then(|v| v["error"]["details"]["holder"].as_str().map(str::to_string))
                 .unwrap_or_else(|| "unknown".into());
             CliError::conflict(format!(
-                "{} Holder: {holder}. If that agent is gone for good, take over explicitly: msn takeover {channel} --reader '{reader}'",
+                "{} Holder: {holder}. If that agent is gone for good, take over explicitly: msn takeover {channel} --reader '{reader}'. To keep this agent's progress on this machine instead (no receipts), pass --local or set MSN_RESUMABLE=0.",
                 error_message(response.status, &response.body)
             ))
         }
@@ -126,7 +288,7 @@ fn claim(
     reader: &str,
     expect: u64,
     carry: Option<u64>,
-) -> Result<Value, CliError> {
+) -> Result<Result<Value, RawResponse>, CliError> {
     let mut body = json!({ "expectGeneration": expect, "holder": holder() });
     if let Some(through) = carry {
         body["committedThrough"] = json!(through);
@@ -138,13 +300,14 @@ fn claim(
         &body,
     )?;
     if !(200..300).contains(&response.status) {
-        return Err(refusal(&response, channel, reader));
+        return Ok(Err(response));
     }
-    json_body(&response)
+    json_body(&response).map(Ok)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn peek(
+    mode: Mode,
     url: &Url,
     tenant: &str,
     token: &str,
@@ -155,7 +318,8 @@ pub fn peek(
     limit: u64,
     stop: Arc<AtomicBool>,
 ) -> Result<(), CliError> {
-    peek_to(
+    peek_with(
+        mode,
         &mut io::stdout().lock(),
         url,
         tenant,
@@ -171,8 +335,10 @@ pub fn peek(
 
 /// Resumable peek: claims an unheld reader on first use, then reads after the server's
 /// `committedThrough` with the generation fence on the same request (no extra round trip).
+/// With `fallback`, a server that cannot hold progress for this key leaves the file untouched and
+/// returns `KeepLocal`, after the lock is released, so the caller can peek locally.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn peek_to(
+fn peek_inner(
     out: &mut dyn Write,
     url: &Url,
     tenant: &str,
@@ -183,7 +349,8 @@ pub(crate) fn peek_to(
     wait: u64,
     limit: u64,
     stop: &AtomicBool,
-) -> Result<(), CliError> {
+    fallback: bool,
+) -> Result<Outcome, CliError> {
     validate_bounds(wait, limit)?;
     reader_hash(reader)?;
     let path = resolve_path(url, tenant, reader, channel, cursor_file)?;
@@ -191,7 +358,7 @@ pub(crate) fn peek_to(
     let path = lock.cursor_path();
     let mut state = load_processing(path, &ProcessingState::fresh(url, tenant, channel, reader))?;
     if stop.load(Ordering::SeqCst) {
-        return Ok(());
+        return Ok(Outcome::Done);
     }
     let client = Arc::new(MsnClient::new(url)?);
     let generation = match state.generation {
@@ -199,7 +366,15 @@ pub(crate) fn peek_to(
         None => {
             // First resumable use: claim only an unheld reader, carrying local progress forward.
             let carry = (state.committed_through > 0).then_some(state.committed_through);
-            let claimed = claim(&client, tenant, token, channel, reader, 0, carry)?;
+            let claimed = match claim(&client, tenant, token, channel, reader, 0, carry)? {
+                Ok(claimed) => claimed,
+                Err(response) => {
+                    if fallback && let Some(reason) = cannot_hold(&response) {
+                        return Ok(Outcome::KeepLocal(reason));
+                    }
+                    return Err(refusal(&response, channel, reader));
+                }
+            };
             let generation = generation_of(&claimed, "generation")?;
             let committed = generation_of(&claimed, "committedThrough")?;
             state.generation = Some(generation);
@@ -215,7 +390,7 @@ pub(crate) fn peek_to(
         encode(reader)
     );
     let Some(response) = get_interruptible(client, request, token.to_string(), stop)? else {
-        return Ok(());
+        return Ok(Outcome::Done);
     };
     let response = response?;
     if !(200..300).contains(&response.status) {
@@ -238,10 +413,12 @@ pub(crate) fn peek_to(
     out.flush()
         .map_err(|error| CliError::generic(error.to_string()))?;
     write_processing(path, &state)?;
-    Ok(())
+    Ok(Outcome::Done)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn commit(
+    mode: Mode,
     url: &Url,
     tenant: &str,
     token: &str,
@@ -250,7 +427,8 @@ pub fn commit(
     cursor_file: Option<&Path>,
     through: u64,
 ) -> Result<(), CliError> {
-    commit_to(
+    commit_with(
+        mode,
         &mut io::stdout().lock(),
         url,
         tenant,
@@ -262,9 +440,10 @@ pub fn commit(
     )
 }
 
-/// Resumable commit: the server checks the generation and writes in one transaction.
+/// Resumable commit: the server checks the generation and writes in one transaction. With
+/// `follow_file`, a progress file that was never claimed on the server returns `KeepLocal`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn commit_to(
+fn commit_inner(
     out: &mut dyn Write,
     url: &Url,
     tenant: &str,
@@ -273,7 +452,8 @@ pub(crate) fn commit_to(
     reader: &str,
     cursor_file: Option<&Path>,
     through: u64,
-) -> Result<(), CliError> {
+    follow_file: bool,
+) -> Result<Outcome, CliError> {
     if through > MAX_SAFE_INTEGER {
         return Err(CliError::usage(format!("Invalid integer: {through}")));
     }
@@ -283,6 +463,9 @@ pub(crate) fn commit_to(
     let path = lock.cursor_path();
     let mut state = load_processing(path, &ProcessingState::fresh(url, tenant, channel, reader))?;
     let Some(generation) = state.generation else {
+        if follow_file {
+            return Ok(Outcome::KeepLocal("progress file was never claimed"));
+        }
         return Err(CliError::usage(
             "Nothing to commit: run a resumable peek (or msn takeover) for this reader first.",
         ));
@@ -322,7 +505,7 @@ pub(crate) fn commit_to(
     )?;
     out.flush()
         .map_err(|error| CliError::generic(error.to_string()))?;
-    Ok(())
+    Ok(Outcome::Done)
 }
 
 pub fn takeover(
@@ -371,7 +554,8 @@ pub(crate) fn takeover_to(
         ));
     }
     let carry = (previous == 0 && local.committed_through > 0).then_some(local.committed_through);
-    let claimed = claim(&client, tenant, token, channel, reader, previous, carry)?;
+    let claimed = claim(&client, tenant, token, channel, reader, previous, carry)?
+        .map_err(|response| refusal(&response, channel, reader))?;
     let generation = generation_of(&claimed, "generation")?;
     let committed = generation_of(&claimed, "committedThrough")?;
     // The replaced machine's highestFetched is unknown here; peek again before committing.

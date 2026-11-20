@@ -129,7 +129,7 @@ msn react general 42 done    # ✓ done, 👀 seen, 👍 yes or ✗ no; sends no
 msn unreact general 42 done
 msn reactions general --after 40   # who reacted to which messages
 msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
-msn receipts general 42                          # which readers committed past 42 (resumable commits only)
+msn receipts general 42                          # which readers committed past 42 on the server (the default; --local keeps commits off)
 msn github hook                                  # owner: webhook URL and secret for GitHub (ADR 0036)
 msn github link general thehumanworks/msn#34     # post that pull request's reviews and checks to the board
 msn events --channel general --after 0 --wait 25   # one page of the durable event feed (metadata only)

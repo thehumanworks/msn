@@ -236,6 +236,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             limit,
             cursor_file,
             resumable,
+            local,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -249,12 +250,8 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
-            let peek = if resumable {
-                resumable::peek
-            } else {
-                processing::peek
-            };
-            peek(
+            resumable::peek(
+                resumable::mode(resumable, local),
                 &url,
                 &tenant,
                 &token,
@@ -271,6 +268,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             through,
             cursor_file,
             resumable,
+            local,
         } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -282,20 +280,16 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
-            let cursor_file = cursor_file.as_deref().map(Path::new);
-            if resumable {
-                resumable::commit(
-                    &url,
-                    &tenant,
-                    &token,
-                    channel,
-                    &reader,
-                    cursor_file,
-                    through,
-                )
-            } else {
-                processing::commit(&url, &tenant, channel, &reader, cursor_file, through)
-            }
+            resumable::commit(
+                resumable::mode(resumable, local),
+                &url,
+                &tenant,
+                &token,
+                channel,
+                &reader,
+                cursor_file.as_deref().map(Path::new),
+                through,
+            )
         }
         Command::Takeover {
             channel,

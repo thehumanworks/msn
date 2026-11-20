@@ -108,7 +108,7 @@ fn output_capped(cmd: &mut Command, cap: Duration) -> std::process::Output {
     }
 }
 
-fn peek_args(url: &str, cursor: &Path) -> Vec<String> {
+fn base_peek_args(url: &str, cursor: &Path) -> Vec<String> {
     vec![
         "--url".into(),
         url.into(),
@@ -125,7 +125,7 @@ fn peek_args(url: &str, cursor: &Path) -> Vec<String> {
     ]
 }
 
-fn commit_args(url: &str, cursor: &Path, through: &str) -> Vec<String> {
+fn base_commit_args(url: &str, cursor: &Path, through: &str) -> Vec<String> {
     vec![
         "--url".into(),
         url.into(),
@@ -142,6 +142,19 @@ fn commit_args(url: &str, cursor: &Path, through: &str) -> Vec<String> {
         "--cursor-file".into(),
         cursor.display().to_string(),
     ]
+}
+
+/// Local-only progress (`--local`, ADR 0053): the tests above the resumable section pin it.
+fn peek_args(url: &str, cursor: &Path) -> Vec<String> {
+    let mut args = base_peek_args(url, cursor);
+    args.push("--local".into());
+    args
+}
+
+fn commit_args(url: &str, cursor: &Path, through: &str) -> Vec<String> {
+    let mut args = base_commit_args(url, cursor, through);
+    args.push("--local".into());
+    args
 }
 
 fn lock_path(cursor: &Path) -> PathBuf {
@@ -394,6 +407,7 @@ fn default_processing_path_is_not_readers_and_ignores_eager_cursor() {
             "alice",
             "peek",
             "general",
+            "--local",
         ]),
         Duration::from_secs(8),
     );
@@ -488,7 +502,7 @@ fn resumable_first_peek_claims_with_local_progress() {
     .unwrap();
     let output = output_capped(
         home.command()
-            .args(resumable(peek_args(&server.url(), &cursor))),
+            .args(resumable(base_peek_args(&server.url(), &cursor))),
         Duration::from_secs(8),
     );
     assert!(
@@ -533,7 +547,7 @@ fn resumable_held_reader_names_takeover() {
     let cursor = home.file("proc.json");
     let output = output_capped(
         home.command()
-            .args(resumable(peek_args(&server.url(), &cursor))),
+            .args(resumable(base_peek_args(&server.url(), &cursor))),
         Duration::from_secs(8),
     );
     assert_eq!(output.status.code(), Some(5));
@@ -628,7 +642,7 @@ fn resumable_fenced_commit_is_conflict() {
     held_state(&server, &cursor);
     let output = output_capped(
         home.command()
-            .args(resumable(commit_args(&server.url(), &cursor, "7"))),
+            .args(resumable(base_commit_args(&server.url(), &cursor, "7"))),
         Duration::from_secs(8),
     );
     assert_eq!(output.status.code(), Some(5));
@@ -654,7 +668,7 @@ fn resumable_commit_saves_server_progress() {
     held_state(&server, &cursor);
     let output = output_capped(
         home.command()
-            .args(resumable(commit_args(&server.url(), &cursor, "7"))),
+            .args(resumable(base_commit_args(&server.url(), &cursor, "7"))),
         Duration::from_secs(8),
     );
     assert!(
@@ -678,8 +692,219 @@ fn local_commit_refuses_resumable_file() {
     ] {
         let output = output_capped(home.command().args(args), Duration::from_secs(8));
         assert_eq!(output.status.code(), Some(2));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("--resumable"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--local"));
     }
     assert!(server.recorded().is_empty());
     assert_eq!(state_json(&cursor)["committedThrough"], 3);
+}
+
+// Default mode (ADR 0053), D1–D4 in src/resumable.rs: no flag sends progress to the server.
+
+const CLAIMED: &str = r#"{"reader":"alice","generation":1,"committedThrough":0,"holder":"h"}"#;
+
+#[test]
+fn default_peek_and_commit_use_the_server() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(201, CLAIMED),
+        Scripted::json(200, RESUMED),
+        Scripted::json(
+            200,
+            r#"{"reader":"alice","generation":1,"committedThrough":7,"holder":"h"}"#,
+        ),
+    ]);
+    let home = TestHome::new("default-server");
+    let cursor = home.file("proc.json");
+    let peek = output_capped(
+        home.command().args(base_peek_args(&server.url(), &cursor)),
+        Duration::from_secs(8),
+    );
+    assert!(
+        peek.status.success(),
+        "{}",
+        String::from_utf8_lossy(&peek.stderr)
+    );
+    assert_eq!(parse_stdout(&peek)["generation"], 1);
+    let commit = output_capped(
+        home.command()
+            .args(base_commit_args(&server.url(), &cursor, "7")),
+        Duration::from_secs(8),
+    );
+    assert!(
+        commit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    assert_eq!(parse_stdout(&commit)["committedThrough"], 7);
+    let recorded = server.recorded();
+    assert_eq!(recorded.len(), 3);
+    assert!(recorded[0].path.ends_with("/processing/alice/claim"));
+    assert_eq!(body_json(&recorded[0])["expectGeneration"], 0);
+    assert!(
+        recorded[1]
+            .path
+            .contains("processingReader=alice&generation=1")
+    );
+    assert!(recorded[2].path.ends_with("/processing/alice/commit"));
+    assert_eq!(
+        body_json(&recorded[2]),
+        serde_json::json!({"generation":1,"through":7})
+    );
+    let state = state_json(&cursor);
+    assert_eq!(state["generation"], 1);
+    assert_eq!(state["committedThrough"], 7);
+}
+
+#[test]
+fn default_held_reader_names_takeover_and_local() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        409,
+        r#"{"error":{"code":"processing_held","message":"Generation 4 holds this reader.","details":{"generation":4,"holder":"old-box","committedThrough":9}}}"#,
+    )]);
+    let home = TestHome::new("default-held");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command().args(base_peek_args(&server.url(), &cursor)),
+        Duration::from_secs(8),
+    );
+    // Held is not "this server cannot keep progress": no silent fallback, no silent takeover.
+    assert_eq!(output.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("msn takeover general --reader 'alice'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--local"), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(server.recorded().len(), 1);
+    assert!(!cursor.exists());
+}
+
+#[test]
+fn default_falls_back_to_local_for_watch_only_and_old_servers() {
+    for (status, body) in [
+        (
+            403,
+            r#"{"error":{"code":"watch_only","message":"This access key can watch the board but not post or change anything."}}"#,
+        ),
+        (
+            404,
+            r#"{"error":{"code":"route_not_found","message":"Unknown processing operation."}}"#,
+        ),
+    ] {
+        let server = MockServer::spawn(vec![
+            Scripted::json(status, body),
+            Scripted::json(200, PAGE),
+        ]);
+        let home = TestHome::new("default-fallback");
+        let cursor = home.file("proc.json");
+        let peek = output_capped(
+            home.command().args(base_peek_args(&server.url(), &cursor)),
+            Duration::from_secs(8),
+        );
+        assert!(
+            peek.status.success(),
+            "{}",
+            String::from_utf8_lossy(&peek.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&peek.stderr).contains("stays on this machine"),
+            "{}",
+            String::from_utf8_lossy(&peek.stderr)
+        );
+        let envelope = parse_stdout(&peek);
+        assert!(envelope.get("generation").is_none());
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded[1].path.contains("after=0"), "{}", recorded[1].path);
+        // The commit follows the file: never claimed, so it stays local with no request.
+        let commit = output_capped(
+            home.command()
+                .args(base_commit_args(&server.url(), &cursor, "7")),
+            Duration::from_secs(8),
+        );
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        assert_eq!(server.recorded().len(), 2);
+        let state = state_json(&cursor);
+        assert!(state.get("generation").is_none());
+        assert_eq!(state["committedThrough"], 7);
+    }
+}
+
+#[test]
+fn default_channel_not_found_is_an_error_not_a_fallback() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        404,
+        r#"{"error":{"code":"channel_not_found","message":"Channel not found."}}"#,
+    )]);
+    let home = TestHome::new("default-404");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command().args(base_peek_args(&server.url(), &cursor)),
+        Duration::from_secs(8),
+    );
+    assert!(!output.status.success());
+    assert_eq!(server.recorded().len(), 1);
+    assert!(!cursor.exists());
+}
+
+#[test]
+fn local_flag_and_env_keep_progress_local() {
+    for env in [None, Some("0"), Some("false")] {
+        let server = MockServer::spawn(vec![Scripted::json(200, PAGE)]);
+        let home = TestHome::new("local-mode");
+        let cursor = home.file("proc.json");
+        let mut command = home.command();
+        match env {
+            None => command.args(peek_args(&server.url(), &cursor)),
+            Some(value) => command
+                .env("MSN_RESUMABLE", value)
+                .args(base_peek_args(&server.url(), &cursor)),
+        };
+        let output = output_capped(&mut command, Duration::from_secs(8));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recorded = server.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].path.contains("after=0"), "{}", recorded[0].path);
+        assert!(state_json(&cursor).get("generation").is_none());
+    }
+}
+
+#[test]
+fn resumable_and_local_conflict() {
+    let server = MockServer::spawn(vec![]);
+    let home = TestHome::new("both-flags");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command()
+            .args(resumable(peek_args(&server.url(), &cursor))),
+        Duration::from_secs(8),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn resumable_flag_never_falls_back() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        403,
+        r#"{"error":{"code":"watch_only","message":"This access key can watch the board but not post or change anything."}}"#,
+    )]);
+    let home = TestHome::new("strict-server");
+    let cursor = home.file("proc.json");
+    let output = output_capped(
+        home.command()
+            .args(resumable(base_peek_args(&server.url(), &cursor))),
+        Duration::from_secs(8),
+    );
+    assert!(!output.status.success());
+    assert_eq!(server.recorded().len(), 1);
+    assert!(!cursor.exists());
 }
