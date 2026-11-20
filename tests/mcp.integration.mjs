@@ -141,6 +141,7 @@ try {
       "board",
       "label",
       "react",
+      "reactions",
       "find",
       "search",
       "wait_label",
@@ -339,6 +340,26 @@ try {
   const undone = await cli(["--profile", "reviewer", "unreact", "work", String(task.message.id), "done"]);
   assert.equal(undone.changed, true);
   assert.equal("reactions" in undone.message, false);
+  // Someone reacts to an earlier message; the agent reads it with the reactions tool and the CLI.
+  await cli(["--profile", "reviewer", "react", "work", String(task.message.id), "yes"]);
+  const listed = await labeler.ok("reactions", { after: task.message.id - 1 });
+  assert.deepEqual(listed.reactions[0], {
+    id: task.message.id,
+    reactions: { yes: [listed.reactions[0].reactions.yes[0]] },
+  });
+  assert.equal(listed.hasMore, false);
+  const shown = await labeler.ok("show_message", { id: task.message.id });
+  assert.deepEqual(shown.message.reactions, listed.reactions[0].reactions);
+  const byCliList = await cli([
+    "--profile",
+    "lead",
+    "reactions",
+    "work",
+    "--after",
+    String(task.message.id - 1),
+  ]);
+  assert.deepEqual(byCliList.reactions, listed.reactions);
+  await cli(["--profile", "reviewer", "unreact", "work", String(task.message.id), "yes"]);
   const badKind = await labeler.tool("react", { id: task.message.id, kind: "heart" });
   assert.equal(badKind.isError, true);
   const filtered = await cli(["--profile", "lead", "poll", "work", "--label", "owner=lead"]);

@@ -126,6 +126,8 @@ const MAX_KEYS = 1000;
 const SCHEMA_VERSION = 19;
 /** Names per reaction kind on one message (ADR 0047). */
 export const MAX_REACTORS = 100;
+/** Reactions stored per workspace at once (ADR 0047); removing one frees its place. */
+export const MAX_REACTIONS = 100000;
 /** Pinned messages per board (ADR 0038). */
 export const MAX_PINS = 10;
 /** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
@@ -455,6 +457,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["push_subscriptions", "person", "TEXT"],
         ["messages", "personaId", "TEXT"],
         ["usage", "labelChanges", "INTEGER NOT NULL DEFAULT 0"],
+        // Stored reactions (ADR 0047), for the workspace cap. The table is new with it, so 0 is
+        // exact for every existing database. Additive, so no schema_version step.
+        ["usage", "reactions", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
         if (
           !ctx.storage.sql
@@ -1737,6 +1742,33 @@ export class MsnDurableObject extends DurableObject<Env> {
     return this.withReactions(channel, this.withAttachments(channel, this.labelsOnly(channel, messages)));
   }
 
+  /** Who reacted to these messages, by message id. Kinds in REACTIONS order. */
+  private reactionsOf(channel: string, ids: number[]) {
+    const rows = this.ctx.storage.sql
+      .exec<{ messageId: number; kind: string; name: string }>(
+        `SELECT messageId, kind, name FROM reactions WHERE channel = ? AND messageId IN (${ids
+          .map(() => "?")
+          .join(", ")}) ORDER BY messageId, createdAt, name`,
+        channel,
+        ...ids,
+      )
+      .toArray();
+    return this.groupReactions(rows);
+  }
+
+  private groupReactions(rows: { messageId: number; kind: string; name: string }[]) {
+    const byId = new Map<number, Reactions>();
+    for (const row of rows) {
+      const kinds = byId.get(row.messageId) ?? {};
+      const kind = row.kind as keyof Reactions;
+      kinds[kind] = [...(kinds[kind] ?? []), row.name];
+      byId.set(row.messageId, kinds);
+    }
+    for (const [id, kinds] of byId)
+      byId.set(id, Object.fromEntries(REACTIONS.filter((k) => kinds[k]).map((k) => [k, kinds[k]])));
+    return byId;
+  }
+
   /** Who reacted to messages with ids in (after, before), by message id. Kinds in REACTIONS order. */
   private reactionsIn(channel: string, after: number, before: number, limit = Number.MAX_SAFE_INTEGER) {
     const rows = this.ctx.storage.sql
@@ -1754,23 +1786,19 @@ export class MsnDurableObject extends DurableObject<Env> {
         limit,
       )
       .toArray();
-    const byId = new Map<number, Reactions>();
-    for (const row of rows) {
-      const kinds = byId.get(row.messageId) ?? {};
-      const kind = row.kind as keyof Reactions;
-      kinds[kind] = [...(kinds[kind] ?? []), row.name];
-      byId.set(row.messageId, kinds);
-    }
-    for (const [id, kinds] of byId)
-      byId.set(id, Object.fromEntries(REACTIONS.filter((k) => kinds[k]).map((k) => [k, kinds[k]])));
-    return byId;
+    return this.groupReactions(rows);
   }
 
-  /** Adds reactions by id range, which works for any id order; messages nobody reacted to keep their shape. */
-  private withReactions(channel: string, messages: Message[]): Message[] {
+  /**
+   * Adds reactions; messages nobody reacted to keep their shape. Pages read one id range; `sparse`
+   * ids that can be far apart (search matches) read by id instead, so the gaps cost nothing.
+   */
+  private withReactions(channel: string, messages: Message[], sparse = false): Message[] {
     if (!messages.length) return messages;
     const ids = messages.map((message) => message.id);
-    const found = this.reactionsIn(channel, Math.min(...ids) - 1, Math.max(...ids) + 1);
+    const found = sparse
+      ? this.reactionsOf(channel, ids)
+      : this.reactionsIn(channel, Math.min(...ids) - 1, Math.max(...ids) + 1);
     for (const message of messages) {
       const reactions = found.get(message.id);
       if (reactions) message.reactions = reactions;
@@ -1789,16 +1817,21 @@ export class MsnDurableObject extends DurableObject<Env> {
         .toArray()[0];
       if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
       if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
-      if (change.remove)
-        return (
+      if (change.remove) {
+        const removed = this.ctx.storage.sql.exec(
+          "DELETE FROM reactions WHERE channel = ? AND messageId = ? AND kind = ? AND name = ?",
+          channel,
+          id,
+          change.kind,
+          change.username,
+        ).rowsWritten;
+        if (removed)
           this.ctx.storage.sql.exec(
-            "DELETE FROM reactions WHERE channel = ? AND messageId = ? AND kind = ? AND name = ?",
-            channel,
-            id,
-            change.kind,
-            change.username,
-          ).rowsWritten > 0
-        );
+            "UPDATE usage SET reactions = MAX(0, reactions - ?) WHERE singleton = 1",
+            removed,
+          );
+        return removed > 0;
+      }
       if (
         this.ctx.storage.sql
           .exec(
@@ -1825,6 +1858,16 @@ export class MsnDurableObject extends DurableObject<Env> {
           "reaction_limit",
           `At most ${MAX_REACTORS} names can react with ${change.kind} to one message.`,
         );
+      if (
+        this.ctx.storage.sql.exec<{ reactions: number }>("SELECT reactions FROM usage").one().reactions >=
+        MAX_REACTIONS
+      )
+        throw new HttpError(
+          409,
+          "reaction_limit",
+          `This workspace holds the most reactions it can (${MAX_REACTIONS.toLocaleString("en-US")}). Remove some first.`,
+        );
+      this.ctx.storage.sql.exec("UPDATE usage SET reactions = reactions + 1 WHERE singleton = 1");
       this.ctx.storage.sql.exec(
         "INSERT INTO reactions(channel, messageId, kind, name, createdAt) VALUES (?, ?, ?, ?, ?)",
         channel,
@@ -2500,7 +2543,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     return json({
       // Attachments (ADR 0035) read by id range, which works in any order.
-      messages: this.withReactions(channel, this.withAttachments(channel, messages)),
+      messages: this.withReactions(channel, this.withAttachments(channel, messages), true),
       hasMore: rows.length > limit,
       ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
       complete: this.searchIndexed(),
@@ -3348,11 +3391,16 @@ export class MsnDurableObject extends DurableObject<Env> {
               id,
             );
             this.ctx.storage.sql.exec("DELETE FROM pins WHERE channel = ? AND messageId = ?", channel, id);
-            this.ctx.storage.sql.exec(
+            const reactionsDropped = this.ctx.storage.sql.exec(
               "DELETE FROM reactions WHERE channel = ? AND messageId = ?",
               channel,
               id,
-            );
+            ).rowsWritten;
+            if (reactionsDropped)
+              this.ctx.storage.sql.exec(
+                "UPDATE usage SET reactions = MAX(0, reactions - ?) WHERE singleton = 1",
+                reactionsDropped,
+              );
             // Deleted text must not stay findable (ADR 0037).
             this.ctx.storage.sql.exec("DELETE FROM message_search WHERE rowid = ?", id);
             const snapshotBytes = this.ctx.storage.sql
@@ -3483,7 +3531,16 @@ export class MsnDurableObject extends DurableObject<Env> {
         // A reaction names its sender like a send does (ADR 0047): a bound key reacts only as its
         // name, and a board's shared credential only as one of the board's registered personas.
         if (reaction) {
+          // Scope first, so a key for another board learns nothing about this board's personas.
+          this.requireScope(capability, slug(rest[1]));
           this.requireBoundName(capability, reaction.username);
+          // Like sends, only signed GitHub deliveries speak as `github` (ADR 0036).
+          if (reaction.username === GITHUB_SENDER)
+            throw new HttpError(
+              403,
+              "reserved_name",
+              "The display name github is reserved for GitHub messages.",
+            );
           if (
             capability.shared_channel &&
             !this.ctx.storage.sql

@@ -220,6 +220,7 @@ impl Server {
                     "board" => self.board(args),
                     "label" => self.label(args),
                     "react" => self.react(args),
+                    "reactions" => self.reactions(args),
                     "find" => self.find(args),
                     "search" => self.search(args),
                     "wait_label" => self.wait_label(args),
@@ -543,6 +544,24 @@ impl Server {
             &token,
             &[],
             &crate::reactions::body(&username, kind, remove),
+        )?;
+        classify(response.status, &response.body)?;
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?)
+    }
+
+    /// Current reactions by message id (ADR 0047), so an agent can see who said done or seen.
+    fn reactions(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let after = optional_int(args, "after", MAX_SAFE_INTEGER)?;
+        let before = optional_int(args, "before", MAX_SAFE_INTEGER)?;
+        if let Some(before) = before {
+            positive(before, "before")?;
+        }
+        let response = MsnClient::new(&self.url)?.get(
+            &crate::reactions::list_path(&tenant, &channel, after, before),
+            Some(&token),
         )?;
         classify(response.status, &response.body)?;
         Ok(serde_json::from_str(&response.body)
@@ -977,6 +996,17 @@ pub fn tools() -> Vec<Value> {
             (false, true),
         ),
         tool(
+            "reactions",
+            "List reactions",
+            "Who reacted to which messages, by message id, oldest first: done, seen, yes or no with the names. Use it to see whether others acknowledged or finished what you posted earlier; catch_up only returns new messages. show_message also includes a message's reactions. Continue with after=nextAfter while hasMore is true.",
+            json!({
+                "after": cursor("Only messages after this id (default 0)."),
+                "before": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Only messages before this id."},
+            }),
+            &[],
+            (true, true),
+        ),
+        tool(
             "find",
             "Find labeled messages",
             "List messages whose current labels match every filter, oldest first. A filter is key (any value), key=value, or key=a|b (either value). Continue with after=nextCursor while hasMore is true.",
@@ -1133,6 +1163,7 @@ mod tests {
                 "board",
                 "label",
                 "react",
+                "reactions",
                 "find",
                 "search",
                 "wait_label"

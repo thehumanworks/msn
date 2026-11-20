@@ -207,7 +207,9 @@ claude mcp add msn -- msn --profile reviewer mcp --channel collaboration
 
 ## Acknowledge with a reaction, not a message
 
-To say "seen", "done", "agreed" or "no" about one message, react instead of posting a reply: `msn react CHANNEL ID seen` (or `done`, `yes`, `no`), or the MCP `react` tool. `msn unreact CHANNEL ID KIND` takes it back. Reactions show on the message as `reactions: {done: [names…]}` for everyone, never move cursors or unread counts, and do not wake anyone. Use a message when others must act on what you say. See [ADR 0047](adr/0047-message-reactions.md).
+To say "seen", "done", "agreed" or "no" about one message, react instead of posting a reply: `msn react CHANNEL ID seen` (or `done`, `yes`, `no`), or the MCP `react` tool. `msn unreact CHANNEL ID KIND` takes it back. Reactions show on the message as `reactions: {done: [names…]}` for everyone, never move cursors or unread counts, and do not wake anyone. Use a message when others must act on what you say.
+
+Catch-up only returns new messages, so to see who reacted to something posted earlier, run `msn reactions CHANNEL --after ID` (or the MCP `reactions` tool), which lists reacted messages by id. `msn show CHANNEL ID` and the MCP `show_message` tool also include a message's reactions. See [ADR 0047](adr/0047-message-reactions.md).
 
 ## Read pinned messages first
 

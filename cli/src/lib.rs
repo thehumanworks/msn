@@ -630,6 +630,24 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             &kind,
             true,
         ),
+        Command::Reactions {
+            channel,
+            after,
+            before,
+        } => {
+            let after = after
+                .as_deref()
+                .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let before = before.as_deref().map(parse_message_id).transpose()?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            finish(&MsnClient::new(&url)?.get(
+                &reactions::list_path(&tenant, channel, after, before),
+                Some(&token),
+            )?)
+        }
         Command::Pins { channel } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;

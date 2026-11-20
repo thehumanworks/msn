@@ -276,6 +276,119 @@ describe("message reactions (ADR 0047)", () => {
     expect((await react(f, task.id, f.agent, "lead", "done")).status).toBe(200);
   });
 
+  it("caps reactions per workspace, frees a place on removal, and keeps the count across deletion", async () => {
+    const f = await fixture();
+    const task = await f.send("busy");
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    const count = () =>
+      runInDurableObject(
+        stub,
+        (_instance, state) =>
+          state.storage.sql.exec<{ reactions: number }>("SELECT reactions FROM usage").one().reactions,
+      );
+    await react(f, task.id, f.agent, "lead", "done");
+    await react(f, task.id, f.agent, "lead", "done");
+    await react(f, task.id, f.agent, "dev", "seen");
+    expect(await count()).toBe(2);
+    await react(f, task.id, f.agent, "dev", "seen", true);
+    await react(f, task.id, f.agent, "dev", "seen", true);
+    expect(await count()).toBe(1);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE usage SET reactions = 100000");
+    });
+    const full = await react(f, task.id, f.agent, "dev", "yes");
+    expect(full.status).toBe(409);
+    expect(await full.json()).toMatchObject({ error: { code: "reaction_limit" } });
+    // Removing one frees a place; re-adding an existing one is not blocked by the cap.
+    expect((await react(f, task.id, f.agent, "lead", "done")).status).toBe(200);
+    expect((await react(f, task.id, f.agent, "lead", "done", true)).status).toBe(200);
+    expect((await react(f, task.id, f.agent, "dev", "yes")).status).toBe(200);
+    expect(await count()).toBe(100000);
+  });
+
+  it("reserves the github name, as sends do", async () => {
+    const f = await fixture();
+    const task = await f.send("x");
+    const tenant = `react-gh-${crypto.randomUUID()}`;
+    const created = await exports.default.fetch(`https://msn.test/api/admin/tenants/${tenant}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${ADMIN}` },
+    });
+    const { token } = (await created.json()) as { token: string };
+    const sent = (await (
+      await call(tenant, "/channels/general/messages", token, "POST", { username: "a", text: "hi" })
+    ).json()) as { message: Message };
+    const github = await call(
+      tenant,
+      `/channels/general/messages/${sent.message.id}/reactions`,
+      token,
+      "POST",
+      {
+        username: "github",
+        kind: "done",
+      },
+    );
+    expect(github.status).toBe(403);
+    expect(await github.json()).toMatchObject({ error: { code: "reserved_name" } });
+    expect((await react(f, task.id, f.agent, "github", "done")).status).toBe(403);
+  });
+
+  it("keeps reactions inside their board: other boards' ids are 404, other boards' keys are 403", async () => {
+    const f = await fixture();
+    expect((await call(f.tenant, "/channels/other", f.owner, "PUT")).status).toBe(201);
+    const other = (await (
+      await call(f.tenant, "/channels/other/messages", f.owner, "POST", {
+        username: "human",
+        text: "elsewhere",
+      })
+    ).json()) as { message: Message };
+    // The id exists, but on another board.
+    const wrongBoard = await call(
+      f.tenant,
+      `/channels/work/messages/${other.message.id}/reactions`,
+      f.owner,
+      "POST",
+      {
+        username: "human",
+        kind: "done",
+      },
+    );
+    expect(wrongBoard.status).toBe(404);
+    // The work board's shared credential cannot reach the other board.
+    const scoped = await call(
+      f.tenant,
+      `/channels/other/messages/${other.message.id}/reactions`,
+      f.agent,
+      "POST",
+      {
+        username: "lead",
+        kind: "done",
+      },
+    );
+    expect(scoped.status).toBe(403);
+    expect((await call(f.tenant, "/channels/other/reactions", f.agent)).status).toBe(403);
+  });
+
+  it("search reads reactions only for its matches", async () => {
+    const f = await fixture();
+    const first = await f.send("needle one");
+    for (let i = 0; i < 5; i++) await react(f, (await f.send(`hay ${i}`)).id, f.agent, "dev", "seen");
+    const last = await f.send("needle two");
+    await react(f, first.id, f.agent, "lead", "done");
+    await react(f, last.id, f.agent, "dev", "no");
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    await runInDurableObject(stub, (instance: { backfillSearch?: (n: number) => unknown }) =>
+      instance.backfillSearch?.(1000),
+    );
+    const found = (await (await call(f.tenant, "/channels/work/search?q=needle", f.agent)).json()) as {
+      messages: Message[];
+    };
+    expect(found.messages.map((m) => [m.id, m.reactions])).toEqual([
+      [last.id, { no: ["dev"] }],
+      [first.id, { done: ["lead"] }],
+    ]);
+  });
+
   it("records schema v19 and creates the reactions table", async () => {
     const f = await fixture();
     const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));

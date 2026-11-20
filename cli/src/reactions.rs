@@ -23,6 +23,23 @@ pub fn parse_kind(raw: &str) -> Result<&'static str, CliError> {
     Ok(kind)
 }
 
+/// GET …/reactions for messages after `after` and before `before` (both optional).
+pub fn list_path(tenant: &str, channel: &str, after: Option<u64>, before: Option<u64>) -> String {
+    let mut query = Vec::new();
+    if let Some(after) = after {
+        query.push(format!("after={after}"));
+    }
+    if let Some(before) = before {
+        query.push(format!("before={before}"));
+    }
+    let query = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    };
+    format!("/api/tenants/{tenant}/channels/{channel}/reactions{query}")
+}
+
 /// Body of POST …/messages/{id}/reactions.
 pub fn body(username: &str, kind: &str, remove: bool) -> Value {
     if remove {
@@ -54,6 +71,23 @@ mod tests {
         }
         assert!(parse_kind("heart").is_err());
         assert!(parse_kind("").is_err());
+    }
+
+    #[test]
+    fn list_path_adds_only_the_bounds_given() {
+        use super::list_path;
+        assert_eq!(
+            list_path("t", "c", None, None),
+            "/api/tenants/t/channels/c/reactions"
+        );
+        assert_eq!(
+            list_path("t", "c", Some(4), Some(9)),
+            "/api/tenants/t/channels/c/reactions?after=4&before=9"
+        );
+        assert_eq!(
+            list_path("t", "c", None, Some(9)),
+            "/api/tenants/t/channels/c/reactions?before=9"
+        );
     }
 
     #[test]
