@@ -24,6 +24,8 @@ type Props = {
   onLoadParent?: (id: number) => void;
   /** Processed-by line from explicit commits only (ADR 0040), or null. */
   receipts?: string | null;
+  /** Opens the share sheet with a link to this message (ADR 0042); it offers Copy. */
+  onShareLink?: (message: Message) => void;
 };
 
 function preview(text: string): string {
@@ -51,6 +53,7 @@ function MessageRowImpl({
   parent,
   onLoadParent,
   receipts = null,
+  onShareLink,
 }: Props) {
   const task = parseTaskActivity(message);
   const structured = message.contentType === "application/json";
@@ -67,7 +70,7 @@ function MessageRowImpl({
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(message.text)
       }`}
-      accessibilityHint="Double tap to reply. Swipe up or down for more actions."
+      accessibilityHint={`Double tap to reply.${onShareLink ? " Touch and hold to copy or share a link." : ""} Swipe up or down for more actions.`}
       // VoiceOver reads the row as one element, so its inner controls are offered as actions.
       accessibilityActions={[
         { name: "activate", label: "Reply" },
@@ -75,14 +78,17 @@ function MessageRowImpl({
           ? [{ name: "toggleThread", label: threadLabel(thread.replies, thread.open, thread.unseen) }]
           : []),
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
+        ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
       ]}
       onAccessibilityAction={({ nativeEvent }) => {
         if (nativeEvent.actionName === "activate") onReply(message);
         else if (nativeEvent.actionName === "toggleThread") onToggleThread?.(message.id);
         else if (nativeEvent.actionName === "loadParent" && message.replyTo !== undefined)
           onLoadParent?.(message.replyTo);
+        else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
       }}
       onPress={() => onReply(message)}
+      onLongPress={onShareLink ? () => onShareLink(message) : undefined}
       style={[styles.row, own ? styles.own : styles.other, nested && styles.nested, selected && styles.selected]}
     >
       <View style={styles.head}>
