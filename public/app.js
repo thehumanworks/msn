@@ -783,6 +783,8 @@ function startEdit(article, id) {
   const toggle = article.querySelector(":scope > .fold-toggle");
   const form = document.createElement("form");
   form.className = "edit-form";
+  // The version this editor started from: a save after someone else's edit is refused (409).
+  let base = message.editedAt ?? null;
   const input = document.createElement("textarea");
   input.value = message.text;
   input.rows = Math.min(12, Math.max(2, message.text.split("\n").length));
@@ -819,9 +821,11 @@ function startEdit(article, id) {
     if (!text.trim()) return status("A message cannot be empty.", true);
     if (text === message.text) return close();
     save.disabled = true;
-    const ok = await saveEdit(message, text);
+    const ok = await saveEdit(message, text, base);
     save.disabled = false;
-    if (ok) close();
+    // After a conflict the user has seen the warning; a second Save replaces the newer version.
+    if (ok === "conflict") base = message.editedAt ?? null;
+    else if (ok) close();
   });
   if (body) body.hidden = true;
   if (toggle) toggle.classList.add("editing");
@@ -829,7 +833,7 @@ function startEdit(article, id) {
   input.focus();
 }
 
-async function saveEdit(message, text) {
+async function saveEdit(message, text, base) {
   if (!session || !channel) return false;
   const connection = session;
   const name = channel;
@@ -839,7 +843,7 @@ async function saveEdit(message, text) {
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: connection.username, text }),
+        body: JSON.stringify({ username: connection.username, text, ifEditedAt: base }),
       },
       connection,
     );
@@ -848,7 +852,18 @@ async function saveEdit(message, text) {
     status(`Message #${message.id} edited.`);
     return true;
   } catch (error) {
-    if (error.name !== "AbortError") status(error.message, true);
+    if (error.name === "AbortError") return false;
+    if (error.code === "edit_conflict") {
+      // Someone saved first (another tab or device): fetch their version, keep this editor open.
+      const state = connection.channels.get(name);
+      if (state) await loadEdits(connection, name, state);
+      status(
+        `Message #${message.id} changed while you were editing. Save again to replace it, or Cancel to keep the new version.`,
+        true,
+      );
+      return "conflict";
+    }
+    status(error.message, true);
     return false;
   }
 }

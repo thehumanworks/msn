@@ -16,6 +16,8 @@ Use one process/state file per origin + tenant + channel + participant identity.
 
 The server commits resource changes and metadata events atomically. The runner holds a bounded server long-poll, wakes on changes and fetches the current message referenced by `message.created`. It validates origin/tenant/channel identity, event ordering, safe integer cursors and canonical message identity. It ignores self-authored messages and, by default, messages not explicitly addressed with `to` to this identity. `--include-broadcast` is deliberate opt-in. Deleted/missing messages are skipped without restoring redacted payloads. Channel, snapshot and deletion notifications do not execute a handler.
 
+The runner asks for edits (`include=edits`). When the sender edits a message the handler would have received (ADR 0052), the handler runs again with `event.type` `message.edited`, the message's new text and `editedAt`, a new idempotency key, and a `notice` field such as `Message 51 from planner was edited at …`. Act on what changed; the earlier dispatch is not undone. Edits move no cursor or receipt.
+
 Only the executable and argv following `--` are runnable; neither message text nor any event field becomes a shell command. The runner uses `shell: false` and delivers a single JSON envelope to stdin:
 
 ```json

@@ -211,8 +211,9 @@ pub(crate) fn peek_to(
         }
     };
     let request = format!(
-        "/api/tenants/{tenant}/channels/{channel}/messages?processingReader={}&generation={generation}&wait={wait}&limit={limit}",
-        encode(reader)
+        "/api/tenants/{tenant}/channels/{channel}/messages?processingReader={}&generation={generation}&wait={wait}&limit={limit}{}",
+        encode(reader),
+        crate::processing::edits_query(&state)
     );
     let Some(response) = get_interruptible(client, request, token.to_string(), stop)? else {
         return Ok(());
@@ -224,6 +225,7 @@ pub(crate) fn peek_to(
     let server: Value = json_body(&response)?;
     let committed = generation_of(&server, "committedThrough")?;
     let (mut page, last_id) = parse_processing_page(&response.body, tenant, channel, committed)?;
+    crate::processing::note_edits(&page, &mut state, tenant, channel, committed)?;
     state.committed_through = committed;
     state.highest_fetched = state
         .highest_fetched
@@ -309,6 +311,7 @@ pub(crate) fn commit_to(
     let saved = json_body(&response)?;
     state.committed_through = generation_of(&saved, "committedThrough")?;
     state.highest_fetched = state.highest_fetched.max(state.committed_through);
+    state.edits_committed = state.edits_fetched;
     write_processing(path, &state)?;
     writeln!(
         out,
@@ -379,6 +382,9 @@ pub(crate) fn takeover_to(
         committed_through: committed,
         highest_fetched: committed,
         generation: Some(generation),
+        // Edits this machine already handled stay handled (ADR 0052).
+        edits_committed: local.edits_committed,
+        edits_fetched: local.edits_committed,
         ..ProcessingState::fresh(url, tenant, channel, reader)
     };
     write_processing(path, &state)?;

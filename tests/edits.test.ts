@@ -137,6 +137,33 @@ describe("edit a message you sent (ADR 0052)", () => {
     expect((await edit(f, json.id, f.agent, "lead", '{"state":"done"}')).status).toBe(200);
   });
 
+  it("refuses a save that started from an older version with 409 edit_conflict", async () => {
+    const f = await fixture();
+    const sent = await f.send("v1");
+    const patch = (text: string, ifEditedAt?: unknown) =>
+      call(f.tenant, `/channels/work/messages/${sent.id}`, f.agent, "PATCH", {
+        username: "lead",
+        text,
+        ...(ifEditedAt === undefined ? {} : { ifEditedAt }),
+      });
+    // Two editors open the never-edited message (ifEditedAt null). The first save wins.
+    const first = await patch("v2 from tab A", null);
+    expect(first.status).toBe(200);
+    const saved = ((await first.json()) as { message: Message }).message;
+    const second = await patch("v2 from tab B", null);
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({ error: { code: "edit_conflict" } });
+    expect((await read(f, f.agent)).messages[0].text).toBe("v2 from tab A");
+    // Starting from the current version succeeds; without ifEditedAt the last write wins.
+    expect((await patch("v3", saved.editedAt)).status).toBe(200);
+    expect((await patch("v4")).status).toBe(200);
+    for (const bad of [5, "yesterday", "x".repeat(65)]) {
+      const refused = await patch("v5", bad);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toMatchObject({ error: { code: "invalid_edit" } });
+    }
+  });
+
   it("does not move order, cursors, receipts, unread or since-you-left", async () => {
     const f = await fixture();
     const first = await f.send("first");
@@ -211,6 +238,48 @@ describe("edit a message you sent (ADR 0052)", () => {
     await edit(f, sent.id, f.agent, "lead", "final");
     const woke = (await (await poll).json()) as { events: { type: string }[] };
     expect(woke.events.map((e) => e.type)).toEqual(["message.edited"]);
+  });
+
+  it("tells a peek reader about edits to messages it already processed, and wakes its wait", async () => {
+    const f = await fixture();
+    const first = await f.send("first");
+    const second = await f.send("second", "dev");
+    type Page = { messages: Message[]; edited?: Message[]; editCursor?: number; editsHasMore?: boolean };
+    const page = async (query: string) =>
+      (await (await call(f.tenant, `/channels/work/messages?${query}`, f.agent)).json()) as Page;
+    // Without editsAfter the page keeps its shape.
+    expect("edited" in (await page(`after=${second.id}`))).toBe(false);
+    const start = await page(`after=${second.id}&editsAfter=0`);
+    expect(start).toMatchObject({ messages: [], edited: [], editCursor: 0, editsHasMore: false });
+    // A plain message long poll keeps waiting through an edit; one that asked for edits answers.
+    const plain = call(f.tenant, `/channels/work/messages?after=${second.id}&wait=1`, f.agent);
+    const asked = call(f.tenant, `/channels/work/messages?after=${second.id}&wait=10&editsAfter=0`, f.agent);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    await edit(f, first.id, f.agent, "lead", "first, edited");
+    const woke = (await (await asked).json()) as Page;
+    expect(Date.now() - started).toBeLessThan(900);
+    expect(woke.messages).toEqual([]);
+    expect(woke.edited?.map((m) => [m.id, m.text])).toEqual([[first.id, "first, edited"]]);
+    expect((await (await plain).json()) as Page).toMatchObject({ messages: [] });
+    // A reader that processed only `first` hears of that edit; `second` comes with its new text.
+    await edit(f, second.id, f.agent, "dev", "second, edited");
+    const partial = await page(`after=${first.id}&editsAfter=0`);
+    expect(partial.messages.map((m) => [m.id, m.text])).toEqual([[second.id, "second, edited"]]);
+    expect(partial.edited?.map((m) => m.id)).toEqual([first.id]);
+    // With the returned cursor the same edit is not reported again.
+    const later = await page(`after=${first.id}&editsAfter=${partial.editCursor}`);
+    expect(later.edited).toEqual([]);
+    expect(later.editCursor).toBe(partial.editCursor);
+    // Resumable peeks (processingReader) carry the same fields.
+    const reader = "/channels/work/processing/dev";
+    const claim = (await (
+      await call(f.tenant, `${reader}/claim`, f.agent, "POST", { expectGeneration: 0 })
+    ).json()) as { generation: number };
+    await call(f.tenant, `${reader}/commit`, f.agent, "POST", { generation: claim.generation, through: second.id });
+    const fenced = await page(`processingReader=dev&generation=${claim.generation}&editsAfter=0`);
+    expect(fenced.edited?.map((m) => m.id)).toEqual([first.id, second.id]);
+    expect(fenced.editCursor).toBe(partial.editCursor);
   });
 
   it("finds the new words in search and not the old ones", async () => {

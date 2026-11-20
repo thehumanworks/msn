@@ -115,6 +115,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         Command::Start {
             channel,
             after,
+            edits_after,
             limit,
             max_bytes,
         } => {
@@ -122,6 +123,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             let after = after
+                .as_deref()
+                .map(|v| parse_int(v, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let edits_after = edits_after
                 .as_deref()
                 .map(|v| parse_int(v, MAX_SAFE_INTEGER))
                 .transpose()?;
@@ -140,6 +145,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 cli.username.as_deref(),
                 cli.reader.as_deref(),
                 after,
+                edits_after,
                 limit,
                 budget,
             )
@@ -1345,10 +1351,8 @@ fn label(
     finish(&response)
 }
 
-/// Adds or removes one reaction (ADR 0047) as this key's name, or `--username` when unbound.
-/// Both directions are idempotent; the result says whether anything `changed`.
-/// `who` is the global `--tenant`, `--token` and `--username` options.
 /// Replaces the text of a message the caller sent (ADR 0052). Prints `{message, changed}`.
+/// `who` is the global `--tenant`, `--token` and `--username` options.
 fn edit(
     who: [Option<&str>; 3],
     url: &Url,
@@ -1371,6 +1375,9 @@ fn edit(
     )?)
 }
 
+/// Adds or removes one reaction (ADR 0047) as this key's name, or `--username` when unbound.
+/// Both directions are idempotent; the result says whether anything `changed`.
+/// `who` is the global `--tenant`, `--token` and `--username` options.
 fn react(
     who: [Option<&str>; 3],
     url: &Url,

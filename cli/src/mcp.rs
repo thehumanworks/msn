@@ -14,6 +14,7 @@
 //! I6 peek/commit share the CLI processing file -> tests/mcp.rs::peek_then_commit_moves_processing_progress
 //! I7 stdout carries only JSON-RPC lines -> tests/mcp.rs (every line parses)
 //! Out of scope: HTTP transport, resources, prompts, server-initiated requests.
+use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -72,6 +73,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
         reader: cli.reader.clone(),
         channel: channel.as_deref().map(slug).transpose()?.map(str::to_owned),
         resolved_reader: None,
+        edit_cursors: HashMap::new(),
         stop: Arc::new(AtomicBool::new(false)),
     };
     let stdin = io::stdin();
@@ -87,6 +89,9 @@ pub struct Server {
     pub reader: Option<String>,
     pub channel: Option<String>,
     resolved_reader: Option<String>,
+    /// Per-board edit cursor from the last start or catch_up (ADR 0052), so the next page reports
+    /// edits to messages the agent already read without the agent passing editsAfter.
+    edit_cursors: HashMap<String, u64>,
     stop: Arc<AtomicBool>,
 }
 
@@ -290,7 +295,8 @@ impl Server {
         positive(limit, "limit")?;
         let max_bytes = optional_int(args, "maxBytes", MAX_CATCHUP_MAX_BYTES)?
             .unwrap_or(DEFAULT_CATCHUP_MAX_BYTES);
-        Ok(agent::start_page(
+        let edits_after = self.edits_after(args, &channel)?;
+        let page = agent::start_page(
             &self.url,
             &tenant,
             &token,
@@ -298,9 +304,25 @@ impl Server {
             self.username.as_deref(),
             self.reader.as_deref(),
             after,
+            Some(edits_after),
             limit,
             max_bytes,
-        )?)
+        )?;
+        self.note_edit_cursor(&channel, &page);
+        Ok(page)
+    }
+
+    /// `editsAfter` when given, else the board's edit cursor from this session, else 0.
+    fn edits_after(&self, args: &Map<String, Value>, channel: &str) -> Result<u64, CliError> {
+        Ok(optional_int(args, "editsAfter", MAX_SAFE_INTEGER)?
+            .or_else(|| self.edit_cursors.get(channel).copied())
+            .unwrap_or(0))
+    }
+
+    fn note_edit_cursor(&mut self, channel: &str, page: &Value) {
+        if let Some(cursor) = page["editCursor"].as_u64() {
+            self.edit_cursors.insert(channel.to_owned(), cursor);
+        }
     }
 
     fn catch_up(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
@@ -314,8 +336,8 @@ impl Server {
         if max_bytes < MIN_CATCHUP_MAX_BYTES {
             return Err(CliError::usage("maxBytes must be an integer from 1024 to 262144.").into());
         }
-        let edits_after = optional_int(args, "editsAfter", MAX_SAFE_INTEGER)?;
-        let continuation = agent::catchup_query(after, edits_after);
+        let edits_after = self.edits_after(args, &channel)?;
+        let continuation = agent::catchup_query(after, Some(edits_after));
         let page = agent::fetch_json(
             &MsnClient::new(&self.url)?,
             &format!(
@@ -324,6 +346,7 @@ impl Server {
             &token,
         )?;
         agent::validate_catchup(&page, &tenant, &channel, after)?;
+        self.note_edit_cursor(&channel, &page);
         Ok(page)
     }
 
@@ -892,9 +915,10 @@ pub fn tools() -> Vec<Value> {
         tool(
             "start",
             "Start on a board",
-            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's pinned messages (read these first), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true.",
+            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's pinned messages (read these first), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true. `edited` lists earlier messages whose senders changed the text since your last start or catch_up in this session; the new text replaces what you read.",
             json!({
                 "after": cursor("Exact message id to continue after; omit for the latest snapshot."),
+                "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else 0."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the page (default 20)."},
                 "maxBytes": {"type":"integer","minimum":2048,"maximum":262144,"description":"Total result budget in bytes (default 32768)."},
             }),
@@ -904,10 +928,10 @@ pub fn tools() -> Vec<Value> {
         tool(
             "catch_up",
             "Catch up on a board",
-            "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor. Pass editsAfter (0 the first time, then the editCursor of the last page) to also get `edited`: earlier messages, at or before the page start, whose senders changed the text since then. Messages show editedAt when edited.",
+            "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor. `edited` lists earlier messages, at or before the page start, whose senders changed the text since your last start or catch_up on this board in this session (or since editsAfter); the new text replaces what you read. Messages show editedAt when edited.",
             json!({
                 "after": cursor("Exact message id to continue after; omit to allow the latest snapshot."),
-                "editsAfter": cursor("Edit cursor: 0 the first time, then the previous page's editCursor. Returns earlier messages edited since in `edited`; continue while editsHasMore."),
+                "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else 0. Continue while editsHasMore."),
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Messages in the tail (default 20)."},
                 "maxBytes": {"type":"integer","minimum":1024,"maximum":262144,"description":"Response budget in bytes (default 32768)."},
             }),
@@ -934,7 +958,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "peek",
             "Wait for work",
-            "Read messages after your committed processing progress, waiting up to `wait` seconds for new ones. Does not commit: process every message, then call commit with this result's nextCursor. Shares progress with `msn peek` for the same reader. With MSN_RESUMABLE=1 in the server's environment, progress is kept on the server (like `msn peek --resumable`) so a replacement on another machine can resume after `msn takeover`; a replaced agent gets a processing_fenced error and must stop. A result with archived: true means the board is archived: nothing new will arrive and every write is refused with board_archived, so stop waiting and do not retry.",
+            "Read messages after your committed processing progress, waiting up to `wait` seconds for new ones. Does not commit: process every message, then call commit with this result's nextCursor. Shares progress with `msn peek` for the same reader. `edited` lists messages you already committed whose senders changed the text since; the new text replaces what you read, and commit marks those edits handled. With MSN_RESUMABLE=1 in the server's environment, progress is kept on the server (like `msn peek --resumable`) so a replacement on another machine can resume after `msn takeover`; a replaced agent gets a processing_fenced error and must stop. A result with archived: true means the board is archived: nothing new will arrive and every write is refused with board_archived, so stop waiting and do not retry.",
             json!({
                 "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for new messages (default 0)."},
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Page size (default 100)."},
@@ -1022,7 +1046,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "edit_message",
             "Edit your message",
-            "Replace the text of a message you sent, for example to fix a mistake. Only the sender can edit; the id, its place on the board and any replies stay, and no new message is posted. The same text limits as send apply; a JSON message must stay valid JSON. Agents that already read it see the change through catch_up with editsAfter. Same text again changes nothing.",
+            "Replace the text of a message you sent, for example to fix a mistake. Only the sender can edit; the id, its place on the board and any replies stay, and no new message is posted. The same text limits as send apply; a JSON message must stay valid JSON. Agents that already read it see the change in `edited` on their next peek, start or catch_up. Same text again changes nothing.",
             json!({
                 "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Id of your message."},
                 "text": {"type":"string","minLength":1,"description":"The new text."},
@@ -1104,6 +1128,7 @@ mod tests {
             reader: None,
             channel: None,
             resolved_reader: None,
+            edit_cursors: HashMap::new(),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }

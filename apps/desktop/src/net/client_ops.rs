@@ -398,6 +398,8 @@ pub fn react(
 }
 
 /// Replaces the text of a message `username` sent (ADR 0052). Returns the edited message.
+/// `base` is the `editedAt` the editor started from (None for a never-edited message); the server
+/// refuses the save with 409 edit_conflict when the message changed since.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_message(
     client: &MsnClient,
@@ -407,6 +409,7 @@ pub fn edit_message(
     username: &str,
     id: u64,
     text: &str,
+    base: Option<&str>,
 ) -> Result<Value, CliError> {
     slug(tenant)?;
     slug(channel)?;
@@ -414,7 +417,7 @@ pub fn edit_message(
         "PATCH",
         &format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}"),
         token,
-        Some(&json!({ "username": username, "text": text })),
+        Some(&json!({ "username": username, "text": text, "ifEditedAt": base })),
     )?;
     classify(response.status, &response.body)?;
     let value: Value = serde_json::from_str(&response.body)

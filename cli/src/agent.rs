@@ -67,15 +67,27 @@ pub fn start(
     selected: Option<&str>,
     reader: Option<&str>,
     after: Option<u64>,
+    edits_after: Option<u64>,
     limit: u64,
     max_bytes: u64,
 ) -> Result<(), CliError> {
     print_json(&start_page(
-        url, tenant, token, channel, selected, reader, after, limit, max_bytes,
+        url,
+        tenant,
+        token,
+        channel,
+        selected,
+        reader,
+        after,
+        edits_after,
+        limit,
+        max_bytes,
     )?)
 }
 
 /// The `start` page as a value; `start` prints it and `msn mcp` returns it as a tool result.
+/// It always asks for edits (ADR 0052), from `edits_after` or 0, so a continuation reports
+/// earlier messages whose senders changed them since.
 #[allow(clippy::too_many_arguments)]
 pub fn start_page(
     url: &Url,
@@ -85,6 +97,7 @@ pub fn start_page(
     selected: Option<&str>,
     reader: Option<&str>,
     after: Option<u64>,
+    edits_after: Option<u64>,
     limit: u64,
     max_bytes: u64,
 ) -> Result<Value, CliError> {
@@ -121,7 +134,8 @@ pub fn start_page(
             "work": "peek CHANNEL; process messages INCLUDING required send/task results with stable --key; then commit CHANNEL --through THIS peek's processed nextCursor (not highestFetched)",
             "tasks": "task list CHANNEL; task events describe work, not exclusive ownership",
             "evidence": "show CHANNEL ID",
-            "continuation": "start CHANNEL --after nextCursor while hasMore is true; never use a saved read cursor for initial start",
+            "continuation": "start CHANNEL --after nextCursor --edits-after editCursor while hasMore is true; never use a saved read cursor for initial start",
+            "edits": "edited lists earlier messages whose senders changed them since editCursor; the new text replaces what you read",
             "send": "send CHANNEL --text TEXT --key STABLE_KEY; reuse identical bytes and key after uncertain results"
         },
         "warnings": [
@@ -171,7 +185,7 @@ pub fn start_page(
         .ok_or_else(|| {
             CliError::usage("Increase start max-bytes to fit identity and workflow metadata.")
         })?;
-    let continuation = after.map(|n| format!("&after={n}")).unwrap_or_default();
+    let continuation = catchup_query(after, Some(edits_after.unwrap_or(0)));
     let response = MsnClient::new(url)?.get(
         &format!(
             "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={server_budget}{continuation}"

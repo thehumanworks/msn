@@ -178,7 +178,11 @@ export class HostStore {
     return this.tx(() => {
       const current = this.agent(agent);
       if (event.id <= current.cursor) return true;
-      if (event.type === "message.created" && current.channels.includes(event.channel)) {
+      // An edit (ADR 0052) queues a turn like a new message: the agent may have acted on the old text.
+      if (
+        (event.type === "message.created" || event.type === "message.edited") &&
+        current.channels.includes(event.channel)
+      ) {
         const pending = this.db
           .prepare("SELECT COUNT(*) AS n FROM jobs WHERE agent=? AND status IN ('queued','running')")
           .get(agent).n;

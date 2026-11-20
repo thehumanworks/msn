@@ -259,6 +259,13 @@ type Receipt = {
 function toProcessing(row: ProcessingRow) {
   return { ...row };
 }
+/** `editsAfter` on a message page (ADR 0052): the reader's edit cursor, or null when not asked. */
+function editsAfterParam(url: URL): number | null {
+  return url.searchParams.has("editsAfter")
+    ? integer(url.searchParams.get("editsAfter"), 0, Number.MAX_SAFE_INTEGER)
+    : null;
+}
+
 function processingReader(value: string | undefined): string {
   let reader: string;
   try {
@@ -2060,6 +2067,13 @@ export class MsnDurableObject extends DurableObject<Env> {
       }
       // JSON payloads stay JSON (ADR 0004); the content type never changes on an edit.
       contentType(row.contentType, edit.text);
+      // Two editors on one message: the later save names the version it started from.
+      if (edit.ifEditedAt !== undefined && edit.ifEditedAt !== row.editedAt)
+        throw new HttpError(
+          409,
+          "edit_conflict",
+          "This message changed since you started editing. Reload it and edit again.",
+        );
       const { deleted: _deleted, bytes: oldBytes, ...current } = row;
       if (row.text === edit.text)
         return { message: this.withLabels(channel, [toMessage(current, tenant)])[0], changed: false };
@@ -2102,8 +2116,12 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.insertEvent(channel, "message.edited", id);
       return { message: this.withLabels(channel, [toMessage(updated, tenant)])[0], changed: true };
     });
-    // No message waiter wakes: an edit adds nothing after anyone's cursor.
-    if (result.changed) this.wakeEvents(channel);
+    // An edit adds nothing after anyone's cursor. Message polls recheck, and only those that asked
+    // for edits (editsAfter) answer; the rest keep waiting.
+    if (result.changed) {
+      this.wakeEvents(channel);
+      for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
+    }
     return json(result);
   }
 
@@ -2320,18 +2338,41 @@ export class MsnDurableObject extends DurableObject<Env> {
     filters: LabelFilter[] = [],
     before = Number.MAX_SAFE_INTEGER,
     fence: ProcessingFence | null = null,
+    editsAfter: number | null = null,
   ): Promise<Response> | Response {
-    const respond = (page: ReturnType<typeof this.page>) => {
+    // Edits to messages at or before `after` since the reader's edit cursor (ADR 0052). Opt-in,
+    // so older clients keep today's page shape. They end a wait like a new message does.
+    const edits = () => {
+      if (editsAfter === null) return null;
+      const found = this.editedSince(tenant, channel, editsAfter, after, CATCHUP_EDITS);
+      return {
+        edited: found.messages,
+        editCursor: found.hasMore
+          ? (found.seqs.at(-1) ?? editsAfter)
+          : Math.max(this.editCursor(channel), editsAfter),
+        editsHasMore: found.hasMore,
+      };
+    };
+    const ready = (page: ReturnType<typeof this.page>, edited: ReturnType<typeof edits>) =>
+      page.messages.length > 0 || (edited?.edited.length ?? 0) > 0;
+    const respond = (page: ReturnType<typeof this.page>, edited: ReturnType<typeof edits>) => {
       // Archived boards say so on every page, so a waiting client can stop instead of polling
       // forever for messages that cannot arrive (ADR 0046). Absent on active boards.
       const archived = this.archivedAt(channel) ? { archived: true } : {};
-      if (!fence) return json({ ...page, ...archived });
+      if (!fence) return json({ ...page, ...archived, ...(edited ?? {}) });
       // Recheck at reply time: a takeover during a long poll fences this reply, too.
       this.requireGeneration(channel, fence.reader, fence.generation);
-      return json({ ...page, ...archived, committedThrough: after, generation: fence.generation });
+      return json({
+        ...page,
+        ...archived,
+        ...(edited ?? {}),
+        committedThrough: after,
+        generation: fence.generation,
+      });
     };
     const page = this.page(tenant, channel, after, limit, filters, before);
-    if (page.messages.length || !wait) return respond(page);
+    const edited = edits();
+    if (ready(page, edited) || !wait) return respond(page, edited);
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
     // No await between SELECT and registration: sends cannot fall into a lost-wakeup gap.
@@ -2347,12 +2388,13 @@ export class MsnDurableObject extends DurableObject<Env> {
         try {
           this.authorize(hash); // Rotation revokes already-pending polls, too.
           const next = this.page(tenant, channel, after, limit, filters, before);
+          const nextEdits = edits();
           finished = true;
           cleanup();
           resolve(
             aborted
               ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499)
-              : respond(next),
+              : respond(next, nextEdits),
           );
         } catch (error) {
           finished = true;
@@ -2371,7 +2413,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             finish();
             return;
           }
-          if (this.page(tenant, channel, after, limit, filters, before).messages.length) finish();
+          if (ready(this.page(tenant, channel, after, limit, filters, before), edits())) finish();
         },
       };
       const abort = () => finish(true);
@@ -4179,6 +4221,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                   [],
                   Number.MAX_SAFE_INTEGER,
                   fence,
+                  editsAfterParam(url),
                 );
               }
               const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
@@ -4187,7 +4230,19 @@ export class MsnDurableObject extends DurableObject<Env> {
               const before = url.searchParams.has("before")
                 ? integer(url.searchParams.get("before"), 0, Number.MAX_SAFE_INTEGER)
                 : Number.MAX_SAFE_INTEGER;
-              return await this.poll(request, hash, tenant, channel, after, limit, wait, filters, before);
+              return await this.poll(
+                request,
+                hash,
+                tenant,
+                channel,
+                after,
+                limit,
+                wait,
+                filters,
+                before,
+                null,
+                editsAfterParam(url),
+              );
             }
           }
         }

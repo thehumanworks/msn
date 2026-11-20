@@ -77,6 +77,8 @@ export class HostRuntime {
           after: String(state.cursor),
           limit: "100",
           wait: state.initialized ? "25" : "0",
+          // Edits to messages the agent already handled come back as message.edited (ADR 0052).
+          include: "edits",
         });
         // A board persona tags its long poll so people can see it is listening (ADR 0028).
         if (state.initialized && connection.sharedChannel && connection.personaId)
@@ -197,7 +199,18 @@ export class HostRuntime {
         allowedChannels: agent.allowedChannels,
         conversationId: root,
         idempotencyKey: `msn-turn-${this.store.key(agent.id, job.id)}`,
-        trigger: job.trigger ?? { type: "message", resumed: activation.resumed, eventId: job.event.id },
+        trigger:
+          job.trigger ??
+          (job.event.type === "message.edited"
+            ? {
+                type: "message.edited",
+                resumed: activation.resumed,
+                eventId: job.event.id,
+                messageId: message.id,
+                editedAt: message.editedAt,
+                notice: `Message ${message.id} from ${message.username} was edited at ${message.editedAt}. The message below carries its new text, which replaces what you read before. Act only on what changed.`,
+              }
+            : { type: "message", resumed: activation.resumed, eventId: job.event.id }),
         message,
         board,
         state: state.state,

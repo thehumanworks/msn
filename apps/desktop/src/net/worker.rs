@@ -111,6 +111,8 @@ pub enum Command {
         username: String,
         id: u64,
         text: String,
+        /// The `editedAt` the editor started from; None for a never-edited message.
+        base: Option<String>,
     },
     /// Adds (`remove: false`) or removes one reaction as `username` (ADR 0047).
     React {
@@ -775,9 +777,17 @@ fn handle_command(
             username,
             id,
             text,
+            base,
             ..
         } => match client_ops::edit_message(
-            &cc.client, &cc.tenant, &cc.token, &channel, &username, id, &text,
+            &cc.client,
+            &cc.tenant,
+            &cc.token,
+            &channel,
+            &username,
+            id,
+            &text,
+            base.as_deref(),
         ) {
             Ok(message) => emit(
                 tx,

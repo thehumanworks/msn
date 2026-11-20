@@ -362,7 +362,12 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
     write_archive(
         &archive,
         &[
-            msg(10, "hello"),
+            {
+                // An edited source message (ADR 0052) keeps its editedAt in the import envelope.
+                let mut edited = msg(10, "hello");
+                edited["editedAt"] = json!("2026-11-20T10:00:00.000Z");
+                edited
+            },
             reply(11, 10, "world"),
             snapshot(1, 11, false),
         ],
@@ -425,11 +430,13 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
     assert_eq!(first["source"]["username"], "alice");
     assert_eq!(first["source"]["messageId"], 10);
     assert_eq!(first["payload"]["text"], "hello");
+    assert_eq!(first["source"]["editedAt"], "2026-11-20T10:00:00.000Z");
     assert_eq!(messages[1]["username"], "importer");
     let reply_body = &messages[2];
     assert_eq!(reply_body["replyTo"], 2);
     let reply_env: Value = serde_json::from_str(reply_body["text"].as_str().unwrap()).unwrap();
     assert_eq!(reply_env["provenance"]["replyTo"], 10);
+    assert!(reply_env["source"].get("editedAt").is_none());
     let snap = recorded
         .iter()
         .find(|row| row.path.ends_with("/snapshots"))

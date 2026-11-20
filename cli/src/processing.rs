@@ -47,6 +47,18 @@ pub struct ProcessingState {
     /// resumable peek and commit. Absent for local-only progress, so older files stay valid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// Edit cursor this reader has acted on (ADR 0052): the next peek reports edits after it to
+    /// messages at or before `committedThrough`. Commit moves it to `editsFetched`. Absent means
+    /// 0, so older files stay valid and older CLIs ignore it.
+    #[serde(rename = "editsCommitted", default, skip_serializing_if = "is_zero")]
+    pub edits_committed: u64,
+    /// The edit cursor of the last printed peek.
+    #[serde(rename = "editsFetched", default, skip_serializing_if = "is_zero")]
+    pub edits_fetched: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl ProcessingState {
@@ -59,6 +71,8 @@ impl ProcessingState {
             committed_through: 0,
             highest_fetched: 0,
             generation: None,
+            edits_committed: 0,
+            edits_fetched: 0,
         }
     }
 
@@ -168,8 +182,9 @@ pub(crate) fn peek_to(
     }
     let client = Arc::new(MsnClient::new(url)?);
     let request = format!(
-        "/api/tenants/{tenant}/channels/{channel}/messages?after={}&wait={wait}&limit={limit}",
-        state.committed_through
+        "/api/tenants/{tenant}/channels/{channel}/messages?after={}&wait={wait}&limit={limit}{}",
+        state.committed_through,
+        edits_query(&state)
     );
     let Some(response) = get_interruptible(client, request, token.to_string(), stop)? else {
         return Ok(());
@@ -182,6 +197,8 @@ pub(crate) fn peek_to(
         Some(id) => state.highest_fetched.max(id),
         None => state.highest_fetched,
     };
+    let mut next = state.clone();
+    let edits_changed = note_edits(&page, &mut next, tenant, channel, state.committed_through)?;
     page["committedThrough"] = json!(state.committed_through);
     page["highestFetched"] = json!(highest_fetched);
     let printed =
@@ -189,8 +206,7 @@ pub(crate) fn peek_to(
     writeln!(out, "{printed}")?;
     out.flush()
         .map_err(|error| CliError::generic(error.to_string()))?;
-    if last_id.is_some() {
-        let mut next = state;
+    if last_id.is_some() || edits_changed {
         next.highest_fetched = highest_fetched;
         write_processing(path, &next)?;
     }
@@ -229,6 +245,8 @@ pub(crate) fn commit_to(
         ));
     }
     state.committed_through = through;
+    // The edits that peek reported are handled with the messages it printed (ADR 0052).
+    state.edits_committed = state.edits_fetched;
     write_processing(path, &state)?;
     writeln!(
         out,
@@ -317,6 +335,12 @@ pub(crate) fn load_processing(
         None | Some(Value::Null) => None,
         Some(value) => Some(parse_watermark(value, "generation")?),
     };
+    let edits = |value: &Option<Value>, name: &str| match value {
+        None | Some(Value::Null) => Ok(0),
+        Some(value) => parse_watermark(value, name),
+    };
+    let edits_committed = edits(&saved.edits_committed, "editsCommitted")?;
+    let edits_fetched = edits(&saved.edits_fetched, "editsFetched")?;
     Ok(ProcessingState {
         server: saved.server,
         tenant: saved.tenant,
@@ -325,6 +349,8 @@ pub(crate) fn load_processing(
         committed_through,
         highest_fetched,
         generation,
+        edits_committed,
+        edits_fetched: edits_fetched.max(edits_committed),
     })
 }
 
@@ -370,6 +396,49 @@ struct ProcessingFile {
     highest_fetched: Value,
     #[serde(default)]
     generation: Option<Value>,
+    #[serde(rename = "editsCommitted", default)]
+    edits_committed: Option<Value>,
+    #[serde(rename = "editsFetched", default)]
+    edits_fetched: Option<Value>,
+}
+
+/// The `&editsAfter=` tail of a peek request (ADR 0052).
+pub(crate) fn edits_query(state: &ProcessingState) -> String {
+    format!("&editsAfter={}", state.edits_committed)
+}
+
+/// Checks the page's `edited` rows (earlier messages edited since `editsCommitted`) and records
+/// its `editCursor` as `editsFetched`. A server without edits omits both and changes nothing.
+/// Returns whether the state changed.
+pub(crate) fn note_edits(
+    page: &Value,
+    state: &mut ProcessingState,
+    tenant: &str,
+    channel: &str,
+    committed: u64,
+) -> Result<bool, CliError> {
+    let Some(cursor) = page.get("editCursor") else {
+        if page.get("edited").is_some() {
+            return Err(invalid_page());
+        }
+        return Ok(false);
+    };
+    let cursor = parse_page_cursor(cursor)?;
+    let Some(Value::Array(rows)) = page.get("edited") else {
+        return Err(invalid_page());
+    };
+    if cursor < state.edits_committed
+        || rows.iter().any(|row| {
+            row["tenant"].as_str() != Some(tenant)
+                || row["channel"].as_str() != Some(channel)
+                || row["id"].as_u64().is_none_or(|id| id == 0 || id > committed)
+        })
+    {
+        return Err(invalid_page());
+    }
+    let changed = cursor != state.edits_fetched;
+    state.edits_fetched = cursor;
+    Ok(changed)
 }
 
 fn parse_watermark(value: &Value, name: &str) -> Result<u64, CliError> {
@@ -945,6 +1014,57 @@ mod tests {
         assert_eq!(read_state(&file)["committedThrough"], 0);
         assert_eq!(read_state(&file)["highestFetched"], 7);
         assert!(recorded.lock().unwrap()[1].contains("after=0"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn peek_reports_edits_to_committed_messages_and_commit_moves_the_edit_cursor() {
+        // ADR 0052: the reader processed message 5; its sender then edited it.
+        const EDITED: &str = r#"{"messages":[],"nextCursor":5,"hasMore":false,"edited":[{"id":5,"tenant":"team","channel":"general","text":"new","editedAt":"2026-11-20T10:00:00.000Z"}],"editCursor":3,"editsHasMore":false}"#;
+        const FOREIGN: &str = r#"{"messages":[],"nextCursor":5,"hasMore":false,"edited":[{"id":9,"tenant":"team","channel":"general"}],"editCursor":4,"editsHasMore":false}"#;
+        let (url, recorded) = spawn_scripted(vec![(200, EDITED), (200, EDITED), (200, FOREIGN)]);
+        let dir = tmp_dir();
+        let file = dir.join("proc.json");
+        write_state(
+            &file,
+            &ProcessingState {
+                committed_through: 5,
+                highest_fetched: 5,
+                ..ProcessingState::fresh(&url, "team", "general", "alice")
+            },
+        );
+        let peek = |out: &mut Vec<u8>| {
+            peek_to(
+                out,
+                &url,
+                "team",
+                "tenant-secret",
+                "general",
+                "alice",
+                Some(&file),
+                0,
+                100,
+                &AtomicBool::new(false),
+            )
+        };
+        let mut printed = Vec::new();
+        peek(&mut printed).unwrap();
+        let page: Value = serde_json::from_slice(&printed).unwrap();
+        assert_eq!(page["edited"][0]["text"], "new");
+        assert_eq!(page["editCursor"], 3);
+        assert!(recorded.lock().unwrap()[0].ends_with("&editsAfter=0"));
+        // Peeking again without a commit replays the same edit, like unprocessed messages.
+        assert_eq!(read_state(&file)["editsFetched"], 3);
+        assert!(read_state(&file).get("editsCommitted").is_none());
+        peek(&mut Vec::new()).unwrap();
+        assert!(recorded.lock().unwrap()[1].ends_with("&editsAfter=0"));
+        commit_to(&mut Vec::new(), &url, "team", "general", "alice", Some(&file), 5).unwrap();
+        assert_eq!(read_state(&file)["editsCommitted"], 3);
+        assert_eq!(read_state(&file)["committedThrough"], 5);
+        // An edited row past committedThrough is not an edit to processed work: refused.
+        assert!(peek(&mut Vec::new()).is_err());
+        assert!(recorded.lock().unwrap()[2].ends_with("&editsAfter=3"));
+        assert_eq!(read_state(&file)["editsFetched"], 3);
         fs::remove_dir_all(dir).unwrap();
     }
 

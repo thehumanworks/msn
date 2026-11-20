@@ -546,13 +546,27 @@ export function reactionChange(input: Record<string, unknown>): ReactionChange {
   };
 }
 
-/** `PATCH …/messages/:id` body (ADR 0052): the sender's name and the new text, nothing else. */
-export type MessageEdit = { username: string; text: string };
+/**
+ * `PATCH …/messages/:id` body (ADR 0052): the sender's name and the new text. `ifEditedAt`, when
+ * present, is the `editedAt` the editor started from (null for a never-edited message); the edit
+ * is refused with 409 edit_conflict when the message changed since.
+ */
+export type MessageEdit = { username: string; text: string; ifEditedAt?: string | null };
 
 export function messageEdit(input: Record<string, unknown>): MessageEdit {
   for (const field of Object.keys(input))
-    if (!["username", "text"].includes(field))
-      throw new HttpError(400, "invalid_edit", `Unknown field ${field}; use username and text.`);
-  // The same limits as a send: non-blank, at most 16384 UTF-8 bytes.
-  return { username: text(input.username, "username", 128), text: text(input.text, "text", 16384) };
+    if (!["username", "text", "ifEditedAt"].includes(field))
+      throw new HttpError(400, "invalid_edit", `Unknown field ${field}; use username, text and ifEditedAt.`);
+  const edit: MessageEdit = {
+    username: text(input.username, "username", 128),
+    // The same limits as a send: non-blank, at most 16384 UTF-8 bytes.
+    text: text(input.text, "text", 16384),
+  };
+  if ("ifEditedAt" in input) {
+    const base = input.ifEditedAt;
+    if (base !== null && (typeof base !== "string" || base.length > 64 || !Number.isFinite(Date.parse(base))))
+      throw new HttpError(400, "invalid_edit", "ifEditedAt must be the message's editedAt, or null.");
+    edit.ifEditedAt = base;
+  }
+  return edit;
 }

@@ -315,6 +315,9 @@ pub enum Command {
         channel: String,
         #[arg(long)]
         after: Option<String>,
+        /// Edit cursor from the previous page's editCursor (default 0, ADR 0052)
+        #[arg(long = "edits-after")]
+        edits_after: Option<String>,
         #[arg(long)]
         limit: Option<String>,
         /// Total output budget, 2048–262144 bytes (default 32768)

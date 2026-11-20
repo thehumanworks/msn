@@ -77,6 +77,7 @@ function envFor(token) {
     MSN_WORKSPACE_TENANT: tenant,
     MSN_WORKSPACE_TOKEN: token,
     HOME: dir,
+    EDIT_LOG: join(dir, "edits.jsonl"),
     XDG_CONFIG_HOME: join(dir, "config"),
     XDG_STATE_HOME: join(dir, "state"),
   };
@@ -135,7 +136,9 @@ const exec=promisify(execFile); let raw=''; for await(const chunk of process.std
 const role=process.argv[2], binary=process.argv[3], key=process.env.MSN_IDEMPOTENCY_KEY;
 const cli=async args=>JSON.parse((await exec(binary,args,{env:process.env,timeout:10000})).stdout);
 assert.equal(input.schema,'msn.dispatch.v1'); assert.equal(input.message.to,role);
-if(role==='worker') {
+if(input.event.type==='message.edited') {
+ const {appendFile}=await import('node:fs/promises'); await appendFile(process.env.EDIT_LOG,JSON.stringify(input)+'\\n');
+} else if(role==='worker') {
  const board=await cli(['task','list','work']); const task=board.tasks.find(t=>t.id==='deliver');
  assert.equal(task.owner,'worker'); assert.equal(task.state,'open');
  const result=await cli(['send','work','--text','Evidence: acceptance fixture passed','--correlation-id','deliver','--key',key+'-evidence']);
@@ -184,7 +187,7 @@ try {
   const awakened = await (await pending).json();
   assert.equal(awakened.events[0].type, "message.created");
   assert.ok(Date.now() - started < 5000, "Event long-poll did not wake promptly");
-  await cli(
+  const assignment = await cli(
     [
       "send",
       "work",
@@ -203,6 +206,30 @@ try {
   assert.equal(workerDispatch.filter((e) => e.dispatched).length, 1);
   const reviewDispatch = await runner("reviewer", reviewer.token);
   assert.equal(reviewDispatch.filter((e) => e.dispatched).length, 1);
+  // The worker already processed the assignment. When the planner edits it, the worker's runner
+  // dispatches it again as an explicit edit notice with the new text (ADR 0052).
+  const receiptsBefore = await api(`/api/tenants/${tenant}/channels/work/receipts`, planner.token);
+  const edited = await cli(
+    ["edit", "work", String(assignment.message.id), "--text", "Complete deliver; also attach the log"],
+    planner.token,
+  );
+  assert.equal(edited.changed, true);
+  const editDispatch = await runner("worker", worker.token);
+  assert.equal(editDispatch.filter((e) => e.dispatched).length, 1);
+  const [notice] = (await readFile(join(dir, "edits.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(notice.event.type, "message.edited");
+  assert.equal(notice.message.id, assignment.message.id);
+  assert.equal(notice.message.text, "Complete deliver; also attach the log");
+  assert.match(notice.notice, new RegExp(`^Message ${assignment.message.id} from planner was edited`));
+  assert.equal((await runner("reviewer", reviewer.token)).filter((e) => e.dispatched).length, 0);
+  assert.deepEqual(
+    await api(`/api/tenants/${tenant}/channels/work/receipts`, planner.token),
+    receiptsBefore,
+    "An edit moved receipts",
+  );
   const board = await cli(["task", "list", "work"], planner.token);
   assert.equal(board.complete, true);
   assert.equal(board.tasks[0].state, "closed");

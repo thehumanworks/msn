@@ -113,13 +113,15 @@ export function renderTranscript(meta, messages) {
   );
   out.push(`- Exported: ${utc(exportedAt)}`);
   out.push("");
-  out.push("Times are UTC. Each message's text is shown exactly as it was sent, inside a code block.");
+  out.push("Times are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.");
   const shown = new Set();
   for (const message of messages) {
     out.push("", "---", "");
     out.push(`<a id="msg-${message.id}"></a>`);
-    // The time comes before the sender, so a sender name cannot fake it.
-    out.push(`### #${message.id} · ${utc(message.createdAt)} · ${inline(message.username)}`);
+    // The times come before the sender, so a sender name cannot fake them. An edited message
+    // (ADR 0052) says when its text last changed.
+    const edited = typeof message.editedAt === "string" ? ` (edited ${utc(message.editedAt)})` : "";
+    out.push(`### #${message.id} · ${utc(message.createdAt)}${edited} · ${inline(message.username)}`);
     const details = [];
     if (Number.isSafeInteger(message.replyTo)) {
       const target = shown.has(message.replyTo)

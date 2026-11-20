@@ -36,6 +36,8 @@ pub struct MsnDesktopApp {
     receipts_at: Option<std::time::Instant>,
     /// The message being edited and its draft text (ADR 0052); one at a time.
     editing: Option<(u64, String)>,
+    /// The `editedAt` of the message when its editor opened (ADR 0052).
+    edit_base: Option<String>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
     /// This connection's read-mark file (ADR 0045), once the connection's name is known.
@@ -147,6 +149,7 @@ impl MsnDesktopApp {
             copied_link: None,
             receipts_at: None,
             editing: None,
+            edit_base: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,
@@ -1211,20 +1214,25 @@ impl MsnDesktopApp {
                 }
             }
             Action::StartEdit(id) => {
-                let text = self
+                let message = self
                     .state
                     .channel
                     .as_ref()
-                    .and_then(|state| state.messages.get(&id))
+                    .and_then(|state| state.messages.get(&id));
+                let text = message
                     .and_then(|message| message["text"].as_str())
+                    .map(str::to_string);
+                let base = message
+                    .and_then(|message| message["editedAt"].as_str())
                     .map(str::to_string);
                 if let Some(text) = text {
                     self.editing = Some((id, text));
+                    self.edit_base = base;
                 }
             }
             Action::SaveEdit => {
                 if let Some((id, text)) = self.editing.take() {
-                    let commands = self.state.edit_message(id, text);
+                    let commands = self.state.edit_message(id, text, self.edit_base.take());
                     self.dispatch_all(commands);
                 }
             }
@@ -2384,6 +2392,7 @@ mod layout_tests {
             copied_link: None,
             receipts_at: None,
             editing: None,
+            edit_base: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,

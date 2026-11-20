@@ -259,6 +259,31 @@ test("only addressed non-self messages invoke the handler; argv is literal and s
   assert.equal((await f.records()).length, 1);
 });
 
+test("an edit to a message the handler already processed dispatches again with a notice (ADR 0052)", async (t) => {
+  const f = await fixture(t, [event(1, 4)], { 4: message(4) });
+  assert.equal((await f.start().done).code, 0);
+  assert.equal(JSON.parse(await readFile(f.state)).after, 1);
+  // The sender edits message 4: the server appends one message.edited event, nothing else moves.
+  f.config.events.push(event(2, 4, "message.edited"));
+  f.config.messages[4] = message(4, { text: "Review the patch, then the docs", editedAt: "2026-09-20T10:05:00.000Z" });
+  const result = await f.start().done;
+  assert.equal(result.code, 0, result.stderr);
+  const records = await f.records();
+  assert.equal(records.length, 2);
+  assert.equal(records[0].input.notice, undefined);
+  assert.equal(records[1].input.event.type, "message.edited");
+  assert.equal(records[1].input.message.text, "Review the patch, then the docs");
+  assert.match(records[1].input.notice, /^Message 4 from planner was edited at 2026-09-20T10:05:00.000Z\./);
+  assert.notEqual(records[1].key, records[0].key);
+  assert.equal(JSON.parse(await readFile(f.state)).after, 2);
+  assert.ok(f.requests.filter((r) => r.startsWith("/api/tenants/team/events")).every((r) => r.includes("include=edits")));
+  // An edit to a message that was not addressed to this reader, or to its own message, stays quiet.
+  f.config.events.push(event(3, 5, "message.edited"));
+  f.config.messages[5] = message(5, { to: "another-agent", editedAt: "2026-09-20T10:06:00.000Z" });
+  assert.equal((await f.start().done).code, 0);
+  assert.equal((await f.records()).length, 2);
+});
+
 test("broadcast handling is explicit opt-in", async (t) => {
   const f = await fixture(t, [event(1)], { 1: message(1, { to: undefined }) });
   assert.equal((await f.start({ extra: ["--include-broadcast"] }).done).code, 0);

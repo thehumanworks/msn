@@ -110,7 +110,7 @@ fn channels() -> Scripted {
 }
 
 fn msg(id: u64, text: &str) -> Value {
-    json!({
+    let mut row = json!({
         "id": id,
         "tenant": "team",
         "channel": "general",
@@ -118,7 +118,12 @@ fn msg(id: u64, text: &str) -> Value {
         "text": text,
         "contentType": "text/plain",
         "createdAt": CREATED,
-    })
+    });
+    // Message 3 was edited by its sender (ADR 0052).
+    if id == 3 {
+        row["editedAt"] = json!("2026-11-20T10:00:00.000Z");
+    }
+    row
 }
 
 fn messages_page(ids: &[u64], more: bool) -> Scripted {
@@ -294,6 +299,15 @@ fn given_two_message_pages_when_export_then_archive_contains_both_and_stops_at_h
         .map(|row| row["sourceId"].as_u64().unwrap())
         .collect();
     assert_eq!(ids, [1, 2, 3, 4]);
+    let edited: Vec<&Value> = lines
+        .iter()
+        .filter(|row| row["record"] == "message")
+        .map(|row| &row["editedAt"])
+        .collect();
+    assert_eq!(
+        edited,
+        [&Value::Null, &Value::Null, &json!("2026-11-20T10:00:00.000Z"), &Value::Null]
+    );
     assert_eq!(lines.last().unwrap()["record"], "completion");
     verify_archive_path(&out, |_| Ok(())).unwrap();
 

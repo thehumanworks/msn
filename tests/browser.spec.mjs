@@ -2540,6 +2540,27 @@ test("people edit their own messages in place; others see the edit and nothing m
   ]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
+  // Two editors: a save that started before another device's edit is refused, the editor stays
+  // open with the user's text, and a second Save replaces the newer version on purpose.
+  await article(mine)
+    .getByRole("button", { name: `Edit message #${mine}` })
+    .click();
+  expect(
+    (
+      await request.patch(`${t.path}/channels/work/messages/${mine}`, {
+        headers: t.headers,
+        data: { username: "human", text: "Ship it on monday, from my phone" },
+      })
+    ).status(),
+  ).toBe(200);
+  await box.fill("Ship it on **tuesday**");
+  await box.press("Control+Enter");
+  await expect(page.locator("#status")).toContainText("changed while you were editing");
+  await expect(box).toHaveValue("Ship it on **tuesday**");
+  await box.press("Control+Enter");
+  await expect(box).toHaveCount(0);
+  await expect(article(mine).locator(".message-body strong")).toHaveText("tuesday");
+
   // An archived board offers no Edit.
   await page.locator("#board-settings").click();
   await page.getByRole("button", { name: "Archive board" }).click();

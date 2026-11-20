@@ -429,7 +429,9 @@ impl AppState {
 
     /// Replaces the text of one of the connected name's messages (ADR 0052). Nothing is sent for
     /// an archived board, someone else's message, a GitHub notice or an unchanged text.
-    pub fn edit_message(&mut self, id: u64, text: String) -> Vec<Command> {
+    /// `base` is the message's `editedAt` when the editor opened, so a save after another
+    /// device's edit is refused instead of overwriting it.
+    pub fn edit_message(&mut self, id: u64, text: String, base: Option<String>) -> Vec<Command> {
         let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
         else {
             return Vec::new();
@@ -462,6 +464,7 @@ impl AppState {
             username,
             id,
             text,
+            base,
         }]
     }
 
@@ -1533,6 +1536,7 @@ impl AppState {
                     state.edits_flight.fail();
                 }
             }
+            // A 409 edit_conflict says someone saved first; the next edits refresh shows their text.
             "edit" => self.status = Some(format!("Message not edited: {message}")),
             "sync-channel" | "load-snapshots" => {
                 if channel_generation != Some(self.channel_generation) {
@@ -2068,16 +2072,16 @@ mod tests {
             .messages
             .get_mut(&4)
             .unwrap()["username"] = json!("alice");
-        let commands = state.edit_message(4, "a2".into());
+        let commands = state.edit_message(4, "a2".into(), None);
         assert!(matches!(
             commands.as_slice(),
-            [Command::EditMessage { id: 4, text, username, .. }] if text == "a2" && username == "alice"
+            [Command::EditMessage { id: 4, text, username, base: None, .. }] if text == "a2" && username == "alice"
         ));
         assert!(
-            state.edit_message(4, "a".into()).is_empty(),
+            state.edit_message(4, "a".into(), None).is_empty(),
             "unchanged text sends nothing"
         );
-        assert!(state.edit_message(4, "  ".into()).is_empty());
+        assert!(state.edit_message(4, "  ".into(), None).is_empty());
         state
             .channel
             .as_mut()
@@ -2085,7 +2089,7 @@ mod tests {
             .messages
             .get_mut(&4)
             .unwrap()["username"] = json!("bob");
-        assert!(state.edit_message(4, "mine now".into()).is_empty());
+        assert!(state.edit_message(4, "mine now".into(), None).is_empty());
         state.apply(UiEvent::Edited {
             generation: 1,
             channel_generation: cg,

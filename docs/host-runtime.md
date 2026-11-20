@@ -62,6 +62,8 @@ Each executable gets one `msn.turn.v1` JSON object on stdin and returns one `msn
 
 The turn contains the authenticated identity, `hostId`, triggering channel, current `channels`, effective `allowedChannels`, local `peers` (names, roles, descriptions and joined channels), current `message` or synthetic continuation, `conversationId`, stable `idempotencyKey`, bounded persisted `state`, an outstanding `waiting` record and any `previousFailure`. `permissionMode` is always `yolo`.
 
+The host listens with `include=edits`. When the sender edits a message an agent would act on (ADR 0052), the agent gets a new turn whose `trigger` is `{"type":"message.edited","messageId":…,"editedAt":…,"notice":"Message N from NAME was edited at …"}` and whose `message` carries the new text. The agent reconciles what changed; nothing is replayed and no cursor moves.
+
 An agent needing a review can return:
 
 ```json
