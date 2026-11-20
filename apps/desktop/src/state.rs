@@ -135,6 +135,8 @@ pub struct ChannelState {
     pub snapshots_error: Option<String>,
     pub task_board: Option<Value>,
     pub task_board_error: Option<String>,
+    /// The owner's pinned messages, shown above the conversation (ADR 0038).
+    pub pins: Vec<Value>,
     pub search: SearchState,
     /// Explicit commit positions (ADR 0040); empty until loaded or on a server without them.
     pub receipts: Vec<msn_cli::receipts::Receipt>,
@@ -670,6 +672,7 @@ impl AppState {
                 head,
                 revision,
                 board,
+                pins,
             } => {
                 if !self.is_current_channel(generation, channel_generation, &channel) {
                     return Vec::new();
@@ -682,6 +685,7 @@ impl AppState {
                     head,
                     revision,
                     board,
+                    pins,
                 )
             }
             UiEvent::Receipts {
@@ -852,6 +856,7 @@ impl AppState {
         head: u64,
         revision: u64,
         board: Result<Value, String>,
+        pins: Vec<Value>,
     ) -> Vec<Command> {
         let Some(state) = self.channel.as_mut() else {
             return Vec::new();
@@ -902,6 +907,7 @@ impl AppState {
         state.revision = revision;
         state.loaded = true;
         state.error = None;
+        state.pins = pins;
         match board {
             Ok(board) => {
                 state.task_board = Some(board);
@@ -1092,6 +1098,7 @@ mod tests {
             head,
             revision,
             board: Ok(json!({"tasks": [], "warnings": []})),
+            pins: Vec::new(),
         })
     }
 
@@ -1218,6 +1225,7 @@ mod tests {
             head: 1,
             revision: 0,
             board: Ok(json!({})),
+            pins: Vec::new(),
         });
         assert!(commands.is_empty());
         assert!(!state.channel.as_ref().unwrap().loaded);
@@ -1237,6 +1245,7 @@ mod tests {
             head: 1,
             revision: 0,
             board: Ok(json!({})),
+            pins: Vec::new(),
         });
         assert_eq!(state.selected_channel.as_deref(), Some("random"));
         assert!(state.channel.as_ref().unwrap().messages.is_empty());

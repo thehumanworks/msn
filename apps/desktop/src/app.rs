@@ -626,6 +626,12 @@ impl MsnDesktopApp {
             .show_separator_line(false)
             .frame(egui::Frame::new())
             .show(ui, |ui| self.composer_panel(ui, actions));
+        if let Some(state) = self.state.channel.as_ref().filter(|s| !s.pins.is_empty()) {
+            egui::Panel::top("pinned-messages")
+                .show_separator_line(false)
+                .frame(egui::Frame::new())
+                .show(ui, |ui| render_pins(ui, &state.pins));
+        }
         let me = self
             .state
             .connection
@@ -1207,6 +1213,43 @@ fn truncate(text: &str, max_chars: usize) -> String {
 /// else's on the left behind their avatar. Message text is only ever displayed, never
 /// interpreted or executed. Structured (`application/json`) messages get a labelled one-line
 /// summary; the authoritative task state lives in the Tasks tab, not here.
+/// The owner's pinned messages above the conversation (ADR 0038). Read-only here: pin with the
+/// web app or `msn pin`. Long text is shortened to one line; the full message is in history.
+fn render_pins(ui: &mut egui::Ui, pins: &[Value]) {
+    theme::card().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("Pinned · {}", pins.len())).color(theme::ACCENT),
+        )
+        .id_salt("pinned-header")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("pinned-list")
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    for pin in pins {
+                        ui.label(pin_line(pin))
+                            .on_hover_text(pin["text"].as_str().unwrap_or_default().to_string());
+                    }
+                });
+        });
+    });
+}
+
+/// `#id name: first line`, at most 160 characters.
+fn pin_line(pin: &Value) -> String {
+    let id = pin["id"].as_u64().unwrap_or(0);
+    let name = pin["username"].as_str().unwrap_or("?");
+    let text = pin["text"].as_str().unwrap_or("");
+    let first = text.lines().next().unwrap_or("");
+    let mut line: String = first.chars().take(160).collect();
+    if line.chars().count() < text.chars().count() {
+        line.push('…');
+    }
+    format!("#{id} {name}: {line}")
+}
+
 /// "3 messages matching “deploy” from ada, newest first", as the web app words it.
 fn search_summary(search: &SearchState) -> String {
     let count = search.results.len();
@@ -1611,6 +1654,22 @@ fn render_task(ui: &mut egui::Ui, task: &Value, actions: &mut Vec<Action>) {
             actions.push(Action::Claim(id.to_string()));
         }
     });
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::pin_line;
+    use serde_json::json;
+
+    #[test]
+    fn pin_line_shows_id_author_and_a_short_first_line() {
+        let pin = json!({"id": 7, "username": "lead", "text": "Rules\nsecond line"});
+        assert_eq!(pin_line(&pin), "#7 lead: Rules…");
+        let short = json!({"id": 8, "username": "lead", "text": "Plan"});
+        assert_eq!(pin_line(&short), "#8 lead: Plan");
+        let long = json!({"id": 9, "username": "x", "text": "é".repeat(200)});
+        assert_eq!(pin_line(&long).chars().count(), "#9 x: ".len() + 161);
+    }
 }
 
 #[cfg(test)]

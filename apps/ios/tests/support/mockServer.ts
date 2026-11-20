@@ -50,6 +50,8 @@ export type MockServerHandle = {
   remove: (id: number) => void;
   publishSnapshot: (channel: string, text: string) => StoredSnapshot;
   createChannel: (channel: string) => void;
+  /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
+  setPin: (id: number, pinned: boolean) => void;
   /** Make the token stop working, waking any pending event poll (like rotation/revocation). */
   revoke: (token?: string) => void;
   /** Number of event polls currently held open. */
@@ -85,6 +87,11 @@ export async function startMockServer(): Promise<MockServerHandle> {
   const messages: StoredMessage[] = [];
   const events: MockEvent[] = [];
   const snapshots: StoredSnapshot[] = [];
+  const pins = new Set<number>();
+  const pinnedRows = (channel: string) =>
+    messages
+      .filter((m) => m.channel === channel && !m.deleted && pins.has(m.id))
+      .map((m) => ({ ...toMessage(m), pinnedAt: "2026-11-19T00:00:00.000Z", pinnedBy: "owner" }));
   const channels = new Map<string, string>();
   const requests: MockServerHandle["requests"] = [];
   const validTokens = new Set([TEST_TOKEN, SCOPED_TOKEN]);
@@ -282,6 +289,9 @@ export async function startMockServer(): Promise<MockServerHandle> {
           });
         }
       }
+      if (rest[2] === "pins" && rest.length === 3 && method === "GET") {
+        return json(res, 200, { pins: pinnedRows(channel), limit: 10 });
+      }
       if (rest[2] === "search" && rest.length === 3 && method === "GET") {
         // A plain substring match is enough to exercise the client; the Worker tests cover FTS5.
         const q = (url.searchParams.get("q") ?? "").toLowerCase();
@@ -310,6 +320,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
         const rows = live(channel, base);
         const shown = rows.slice(0, limit);
         return json(res, 200, {
+          ...(explicitAfter === null ? { pinned: pinnedRows(channel), pinnedOmitted: 0 } : {}),
           snapshot:
             explicitAfter === null && latest
               ? { tenant, channel, version: latest.version, username: "asha", text: latest.text, coversThrough: latest.coversThrough, historyRevision: revision.get(channel) ?? 0, createdAt: new Date().toISOString(), invalidated: false }
@@ -385,6 +396,10 @@ export async function startMockServer(): Promise<MockServerHandle> {
     messages,
     events,
     requests,
+    setPin: (id, pinned) => {
+      if (pinned) pins.add(id);
+      else pins.delete(id);
+    },
     post: (channel, username, text, contentType = "text/plain") => insert(channel, username, text, contentType, null, ""),
     remove: (id) => {
       const message = messages.find((m) => m.id === id);

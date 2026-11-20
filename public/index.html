@@ -83,6 +83,12 @@
           <button type="button" id="reread" class="quiet" title="Reset this channel’s cached history and delivery cursor" disabled>Reread</button>
           <button type="button" id="more" class="quiet" hidden>Load next page</button>
         </div>
+        <section id="pins" class="pins" aria-labelledby="pins-title" hidden>
+          <details open>
+            <summary id="pins-title">Pinned</summary>
+            <ul id="pins-list"></ul>
+          </details>
+        </section>
         <section id="checkpoint" class="checkpoint" aria-label="Channel snapshot" hidden>
           <details>
             <summary id="checkpoint-title">Channel snapshot</summary>
