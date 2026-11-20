@@ -216,6 +216,10 @@ export async function acquireCheckpoint(file, binding) {
     throw error;
   }
 }
+/** The channel slug in an API path, for messages; "this board" when the path names none. */
+function channelOf(path) {
+  return /\/channels\/([a-z0-9][a-z0-9_-]{0,63})(?:[/?]|$)/.exec(path)?.[1] ?? "this board";
+}
 export async function request(connection, path, signal, options = {}) {
   let response;
   try {
@@ -236,12 +240,23 @@ export async function request(connection, path, signal, options = {}) {
     throw new RunnerError("Transport failed (redirects are forbidden).", true);
   }
   if (response.status < 200 || response.status >= 300) {
-    await response.body?.cancel();
+    // Keep only the error code (a slug), never the message text, from a small error body.
+    let code = null;
+    if (response.status === 409) {
+      const text = await response.text().catch(() => "");
+      try {
+        const parsed = text.length <= 4096 ? JSON.parse(text)?.error?.code : null;
+        if (typeof parsed === "string" && /^[a-z_]{1,64}$/.test(parsed)) code = parsed;
+      } catch {}
+    } else await response.body?.cancel();
     const error = new RunnerError(
-      `Server returned HTTP ${response.status}.`,
+      code === "board_archived"
+        ? `board_archived: Board ${channelOf(path)} is archived and read-only; do not retry. The board owner can run msn board unarchive.`
+        : `Server returned HTTP ${response.status}.`,
       response.status === 429 || response.status >= 500,
     );
     error.status = response.status;
+    if (code) error.code = code;
     throw error;
   }
   if (!response.body) throw new RunnerError("Missing JSON response body.");
@@ -427,7 +442,24 @@ export async function run(options, signal = new AbortController().signal, env = 
           wait: String(options.wait),
         });
         const page = await request(connection, `/api/tenants/${connection.tenant}/events?${params}`, signal);
-        for (const event of validatePage(page, binding, checkpoint.after)) {
+        const events = validatePage(page, binding, checkpoint.after);
+        // An empty page may mean the board was archived (ADR 0046): nothing new can arrive, so
+        // stop instead of waiting forever. One empty message page (before=1) carries the flag.
+        if (!events.length && !options.once) {
+          const probe = await request(
+            connection,
+            `/api/tenants/${connection.tenant}/channels/${binding.channel}/messages?after=0&before=1&limit=1`,
+            signal,
+          );
+          if (probe?.archived === true) {
+            const error = new RunnerError(
+              `board_archived: Board ${binding.channel} is archived and read-only, so no new messages will arrive. Stopping; the board owner can run msn board unarchive ${binding.channel}.`,
+            );
+            error.code = "board_archived";
+            throw error;
+          }
+        }
+        for (const event of events) {
           if (signal.aborted) break;
           const acted = await dispatch(event, connection, binding, options, signal);
           if (signal.aborted) break;
@@ -464,6 +496,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     process.stderr.write(
       `${error instanceof RunnerError ? error.message : "Event dispatcher stopped; checkpoint was not reset."}\n`,
     );
-    process.exitCode = controller.signal.aborted ? 130 : 1;
+    // Exit 5 (conflict), like msn wait: a supervisor should not restart a listener on an archived board.
+    process.exitCode = controller.signal.aborted ? 130 : error?.code === "board_archived" ? 5 : 1;
   }
 }

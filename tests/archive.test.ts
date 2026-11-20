@@ -340,9 +340,54 @@ describe("archived boards", () => {
     await archive(f);
     const page = await (await poll).json<{ messages: Message[]; archived?: boolean }>();
     expect(page).toMatchObject({ messages: [], archived: true });
-    const journal = await (await eventPoll).json<{ events: unknown[]; archived?: boolean }>();
-    expect(journal).toMatchObject({ events: [], archived: true });
+    // Event pages keep their exact shape: strict decoders (CLI, desktop, msn run) reject extra
+    // fields, so the archive ends the poll without adding one.
+    const journal = await (await eventPoll).json<Record<string, unknown>>();
+    expect(Object.keys(journal).sort()).toEqual(["events", "hasMore", "nextCursor"]);
+    expect(journal.events).toEqual([]);
     expect(Date.now() - started).toBeLessThan(10000);
+  });
+
+  it("gives a board-scoped key exactly {events, nextCursor, hasMore} on an archived board", async () => {
+    const f = await fixture();
+    await archive(f);
+    for (const query of ["", "?channel=work", "?channel=work&wait=1"]) {
+      const response = await call(`${f.api}/events${query}`, f.shared);
+      expect(response.status, query).toBe(200);
+      expect(Object.keys(await response.json<object>()).sort(), query).toEqual([
+        "events",
+        "hasMore",
+        "nextCursor",
+      ]);
+    }
+  });
+
+  it("refuses a write whose body arrived after the board was archived", async () => {
+    const f = await fixture();
+    // The body stream stays open until after the archive, so the entrance gate saw an active
+    // board; the recheck after the awaits must still refuse it.
+    for (const [path, json] of [
+      [`/channels/work/messages/${f.first.id}/labels`, { set: { state: "done" } }],
+      ["/channels/work/processing/lead/claim", { expectGeneration: 0 }],
+      ["/channels/work/messages", { username: "lead", text: "late" }],
+    ] as const) {
+      const { readable, writable } = new TransformStream();
+      const pending = call(`${f.api}${path}`, f.shared, {
+        method: "POST",
+        type: "application/json",
+        body: readable,
+        headers: { "Content-Type": "application/json" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      if (!(await archive(f)).ok) throw new Error("archive failed");
+      const writer = writable.getWriter();
+      await writer.write(new TextEncoder().encode(JSON.stringify(json)));
+      await writer.close();
+      const response = await pending;
+      expect(response.status, path).toBe(409);
+      expect((await response.json<{ error: { code: string } }>()).error.code, path).toBe("board_archived");
+      await archive(f, f.owner, "DELETE");
+    }
   });
 
   it("stays archived after the workspace restarts", async () => {

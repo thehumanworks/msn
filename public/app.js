@@ -1456,6 +1456,8 @@ async function refreshChannels(connection = session) {
     button.addEventListener("click", () => selectChannel(item.name));
     $("channels").append(button);
   }
+  // An unarchive (or archive) from another device shows up on the open board too (ADR 0046).
+  if (channel && session === connection) markArchived(channel, archivedBoards.has(channel));
   if (!channels.length) {
     const empty = document.createElement("div");
     empty.className = "empty";

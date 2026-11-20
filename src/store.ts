@@ -639,6 +639,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     const secretHash = secret ? await digest(secret) : null;
     const capability = this.authorize(hash);
     this.requireScope(capability, channel);
+    // Rechecked after the awaits above: an archive that landed meanwhile still wins (ADR 0046).
+    if (request.method !== "GET") this.requireActive(channel);
     if (rest.join("/") === "board/connection" && request.method === "GET") {
       if (!capability.owner_access && !capability.shared_channel)
         throw new HttpError(
@@ -805,6 +807,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         throw new HttpError(400, "invalid_credential", "Use a random channel credential.");
       const nextHash = await digest(credential);
       this.requireOwner(this.authorize(hash));
+      this.requireActive(channel);
       this.board(channel);
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
@@ -1577,7 +1580,6 @@ export class MsnDurableObject extends DurableObject<Env> {
       events,
       nextCursor: events.at(-1)?.id ?? after,
       hasMore: rows.length > limit,
-      ...(channel !== null && this.archivedAt(channel) ? { archived: true } : {}),
     };
   }
 
@@ -2073,6 +2075,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     const data = await rawBody(request, MAX_ATTACHMENT_BYTES);
     const id = await sha256(data);
     const result = this.ctx.storage.transactionSync(() => {
+      this.requireActive(channel); // After the awaits: an archive meanwhile still wins (ADR 0046).
       const now = Date.now();
       this.dropOrphans(now);
       const existing = this.ctx.storage.sql
@@ -2236,6 +2239,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (rest.length !== 1 || !["PUT", "DELETE"].includes(request.method))
       throw new HttpError(404, "route_not_found", "Unknown pin operation.");
     this.requireOwner(capability);
+    this.requireActive(channel);
     const id = messageId(rest[0]);
     if (request.method === "DELETE") {
       this.ctx.storage.sql.exec("DELETE FROM pins WHERE channel = ? AND messageId = ?", channel, id);
@@ -2754,6 +2758,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
       this.requireBoundName(capability, reader);
     const input = await body(request);
+    this.requireActive(channel); // After the await: an archive meanwhile still wins (ADR 0046).
     if (rest[1] === "claim") {
       const expected = processingInteger(input.expectGeneration, "expectGeneration");
       const holder =
@@ -3262,6 +3267,9 @@ export class MsnDurableObject extends DurableObject<Env> {
           : null;
         const snapshotHash = snapshotData ? await digest(JSON.stringify(snapshotData)) : "";
         const capability = this.authorize(hash);
+        // The entrance gate ran before the awaits above; check again so a label, snapshot or send
+        // whose body was still being read when the board was archived is refused too (ADR 0046).
+        if (request.method !== "GET" && rest[0] === "channels" && rest[1]) this.requireActive(slug(rest[1]));
         if (input && capability.shared_channel && !personaId) {
           const persona = this.ctx.storage.sql
             .exec<{ id: string }>(

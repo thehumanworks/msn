@@ -41,7 +41,7 @@ async function fixture(t, events = [], messages = {}) {
   const state = join(dir, "checkpoint.json");
   await writeFile(handler, handlerSource);
   const requests = [];
-  const config = { eventStatus: 200, identityStatus: 200, page: null, events, messages };
+  const config = { eventStatus: 200, identityStatus: 200, page: null, events, messages, archived: false };
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     requests.push(url.pathname + url.search);
@@ -60,6 +60,17 @@ async function fixture(t, events = [], messages = {}) {
         JSON.stringify(
           config.page ?? { events: remaining, nextCursor: remaining.at(-1)?.id ?? after, hasMore: false },
         ),
+      );
+    }
+    if (url.pathname === "/api/tenants/team/channels/work/messages") {
+      // The archive probe (ADR 0046): an empty page that says whether the board is archived.
+      return res.end(
+        JSON.stringify({
+          messages: [],
+          nextCursor: 0,
+          hasMore: false,
+          ...(config.archived ? { archived: true } : {}),
+        }),
       );
     }
     const id = Number(url.pathname.split("/").at(-1));
@@ -284,6 +295,28 @@ test("authentication loss stops without advancing checkpoint", async (t) => {
   await assert.rejects(readFile(f.state), { code: "ENOENT" });
   assert.equal((await f.records()).length, 0);
   await assert.rejects(stat(`${f.state}.lock`), { code: "ENOENT" });
+});
+
+test("an archived board stops the dispatcher with exit 5 after the last event is handled", async (t) => {
+  const f = await fixture(t, [event(1)], { 1: message(1) });
+  f.config.archived = true;
+  const result = await f.start({ onceFlag: false, extra: ["--wait", "1"] }).done;
+  assert.equal(result.code, 5);
+  assert.match(result.stderr, /board_archived/);
+  assert.match(result.stderr, /msn board unarchive work/);
+  // The pending event was handled and acknowledged before the dispatcher stopped.
+  assert.equal((await f.records()).length, 1);
+  assert.equal(JSON.parse(await readFile(f.state, "utf8")).after, 1);
+});
+
+test("an active board keeps the dispatcher waiting after an empty page", async (t) => {
+  const f = await fixture(t, [], {});
+  const run = f.start({ onceFlag: false, extra: ["--wait", "1"] });
+  await delay(500);
+  assert.equal(run.child.exitCode, null);
+  run.child.kill("SIGTERM");
+  assert.equal((await run.done).code, 130);
+  assert.ok(f.requests.some((r) => r.startsWith("/api/tenants/team/channels/work/messages?")));
 });
 
 test("foreign canonical message is rejected before invoking handler", async (t) => {
