@@ -7,6 +7,7 @@ use uuid::Uuid;
 use msn_cli::config::{MAX_SAFE_INTEGER, is_slug, parse_int, parse_origin, slug};
 use msn_cli::identity::validate_username;
 
+use crate::markdown;
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
 use crate::state::{
@@ -1389,9 +1390,18 @@ fn render_message(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Ve
     let own = username == me;
     let text = message["text"].as_str().unwrap_or("");
     let body = if message["contentType"].as_str() == Some("application/json") {
-        egui::RichText::new(format!("[structured] {}", summarize_json(text))).color(theme::MUTED)
+        Body::Rich(
+            egui::RichText::new(format!("[structured] {}", summarize_json(text)))
+                .color(theme::MUTED),
+        )
     } else {
-        egui::RichText::new(text)
+        // Formatted text (ADR 0043), parsed once per text; plain text keeps the single wrapped
+        // label it had before.
+        let parsed = markdown::parse_cached(text);
+        match &*parsed {
+            markdown::Parsed::Plain(plain) => Body::Rich(egui::RichText::new(plain)),
+            markdown::Parsed::Blocks(_) => Body::Markdown(parsed.clone()),
+        }
     };
     let header = message_header(ui, message, username, own);
     let shown = if own {
@@ -1559,22 +1569,27 @@ fn message_header(
 
 /// The bubble hugs its text and never exceeds most of the row, so long messages wrap inside
 /// it. The text is laid out first because a right-aligned bubble must know its width.
+enum Body {
+    Rich(egui::RichText),
+    Markdown(std::rc::Rc<markdown::Parsed>),
+}
+
+impl From<egui::RichText> for Body {
+    fn from(text: egui::RichText) -> Self {
+        Body::Rich(text)
+    }
+}
+
 fn bubble(
     ui: &mut egui::Ui,
     header: egui::text::LayoutJob,
-    body: egui::RichText,
+    body: impl Into<Body>,
     own: bool,
     controls: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     ui.spacing_mut().item_spacing.y = 3.0;
     let frame = theme::bubble(own);
     let wrap_width = (ui.available_width() * 0.82 - frame.total_margin().sum().x).max(120.0);
-    let galley = egui::WidgetText::from(body).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Wrap),
-        wrap_width,
-        egui::TextStyle::Body,
-    );
     // The header row's direction follows the bubble's side, so "Link" sits beside the name.
     let direction = if own {
         egui::Layout::right_to_left(egui::Align::Center)
@@ -1590,7 +1605,30 @@ fn bubble(
             controls(ui);
         }
     });
-    frame.show(ui, |ui| ui.label(galley)).response
+    match body.into() {
+        Body::Rich(text) => {
+            let galley = egui::WidgetText::from(text).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                wrap_width,
+                egui::TextStyle::Body,
+            );
+            frame.show(ui, |ui| ui.label(galley)).response
+        }
+        // Formatted text (ADR 0043).
+        Body::Markdown(parsed) => {
+            frame
+                .show(ui, |ui| {
+                    ui.set_max_width(wrap_width);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        if let markdown::Parsed::Blocks(blocks) = &*parsed {
+                            markdown::show(ui, blocks);
+                        }
+                    });
+                })
+                .response
+        }
+    }
 }
 
 /// A send that has not been confirmed yet: a dimmed own-side bubble with its status below.
@@ -2011,6 +2049,62 @@ mod layout_tests {
             assert_eq!(
                 positions[0], positions[1],
                 "history must not move the input"
+            );
+        }
+    }
+    /// Formatted messages (ADR 0043) render without markup characters, keep the composer in
+    /// view, and a long code line scrolls instead of widening the window.
+    #[test]
+    fn formatted_messages_render_inside_the_window_without_markup() {
+        let formatted = format!(
+            "## Plan\nShip **bold** and `code` with [docs](https://example.com/docs).\n\n- one\n- two\n\n> quoted\n\n```\n{}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+            "x".repeat(400)
+        );
+        let hostile = "[click](javascript:alert(1)) <img src=x onerror=alert(1)> **ok**";
+        // Tall windows so both messages are on screen at once.
+        for size in [egui::vec2(980.0, 1600.0), egui::vec2(560.0, 1600.0)] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut app = fixture(0);
+            if let Some(channel) = app.state.channel.as_mut() {
+                for (id, text) in [(1u64, formatted.as_str()), (2, hostile)] {
+                    channel.messages.insert(
+                        id,
+                        json!({"id": id, "username": "Jamie", "text": text, "createdAt": "2026-11-20T03:00:00Z"}),
+                    );
+                }
+            }
+            let mut texts = Vec::new();
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ui| app.draw(ui),
+                );
+                output.textures_delta.clear();
+                texts = output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            let all = texts.join("|");
+            assert!(all.contains("bold") && !all.contains("**bold**"), "{all}");
+            assert!(all.contains("Plan") && !all.contains("## Plan"), "{all}");
+            // The unsafe link stays literal text, so a reader sees exactly what was sent.
+            assert!(all.contains("[click](javascript:alert(1))"), "{all}");
+            let input = ctx
+                .read_response(egui::Id::new("message-input"))
+                .unwrap()
+                .rect;
+            assert!(
+                input.right() < size.x,
+                "composer must fit: {input:?}, {size:?}"
             );
         }
     }
