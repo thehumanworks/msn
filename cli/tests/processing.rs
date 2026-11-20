@@ -781,10 +781,19 @@ fn default_held_reader_names_takeover_and_local() {
 
 #[test]
 fn default_falls_back_to_local_for_watch_only_and_old_servers() {
+    // Also a key bound to another name reading under --reader: it may read, not commit.
+    default_fallbacks();
+}
+
+fn default_fallbacks() {
     for (status, body) in [
         (
             403,
             r#"{"error":{"code":"watch_only","message":"This access key can watch the board but not post or change anything."}}"#,
+        ),
+        (
+            403,
+            r#"{"error":{"code":"username_bound","message":"This access key may only send as \"owner\"."}}"#,
         ),
         (
             404,

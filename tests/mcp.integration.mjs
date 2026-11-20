@@ -401,13 +401,26 @@ try {
     "PASS: labels on send, conditional claims, filters, waiting on a label and search over MCP and CLI",
   );
 
-  // Receipts (ADR 0040): a local commit is invisible, so the reviewer is "no server commit",
-  // never "not yet". After a resumable commit the reviewer is processed. The sender is never listed.
+  // Receipts (ADR 0040, ADR 0053): the reviewer's MCP commits above went to the server by default,
+  // so it is already processed. A local-only agent (MSN_RESUMABLE=0) is "no server commit", never
+  // "not yet". The sender is never listed.
+  await cli(["--profile", "lead", "persona", "add", "work", "quiet", "--save-as", "quiet"]);
+  const quiet = mcp("quiet", { MSN_RESUMABLE: "0" });
+  await quiet.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+  const quietPage = await quiet.ok("peek", { wait: 0, limit: 100 });
+  assert.equal(quietPage.generation, undefined, "local mode never claims the reader");
+  await quiet.ok("commit", { through: quietPage.nextCursor });
+  await quiet.close();
   const before = await cli(["--profile", "lead", "receipts", "work", String(sent.message.id)]);
-  assert.deepEqual(before.processed, []);
+  assert.deepEqual(
+    before.processed.map((r) => r.name),
+    ["reviewer"],
+    "a default MCP commit is a server commit",
+  );
   assert.deepEqual(before.notYet, []);
-  assert.ok(before.noServerCommit.some((r) => r.name === "reviewer"));
+  assert.ok(before.noServerCommit.some((r) => r.name === "quiet"));
   assert.ok(!before.noServerCommit.some((r) => r.name === "lead"), "the sender is left out");
+  assert.ok(!before.processed.some((r) => r.name === "lead"), "the sender is left out");
   const resumable = mcp("reviewer", { MSN_RESUMABLE: "1" });
   await resumable.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
   const all = await resumable.ok("peek", { wait: 0, limit: 100 });

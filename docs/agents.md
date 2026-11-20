@@ -181,7 +181,7 @@ Peek stdout is `{messages, nextCursor, hasMore, committedThrough, highestFetched
 
 ### Resume on a new machine
 
-Processing progress lives on the server by default ([ADR 0053](adr/0053-receipts-by-default.md)). The first `peek` claims the reader (generation 1) and carries any local progress forward; every `commit` is sent there. Peek and commit output adds `generation`. `--resumable` (or `MSN_RESUMABLE=1`) makes this strict: never fall back. `--local` (or `MSN_RESUMABLE=0`, which the MCP `peek`/`commit` tools also read) keeps progress in a file on this machine, as before: no receipts and no resume elsewhere. With no flag, a watch-only key or a server too old to keep progress falls back to local with one line on stderr.
+Processing progress lives on the server by default ([ADR 0053](adr/0053-receipts-by-default.md)). The first `peek` claims the reader (generation 1) and carries any local progress forward; every `commit` is sent there. Peek and commit output adds `generation`. `--resumable` (or `MSN_RESUMABLE=1`) makes this strict: never fall back. `--local` (or `MSN_RESUMABLE=0`, which the MCP `peek`/`commit` tools also read) keeps progress in a file on this machine, as before: no receipts and no resume elsewhere. With no flag, a watch-only key, a key bound to another name than `--reader`, or a server too old to keep progress falls back to local with one line on stderr.
 
 A second machine never takes over by itself. Its peek fails with exit 5, and the error names the holder, the command to run, and `--local` for an agent that should keep its own progress instead:
 

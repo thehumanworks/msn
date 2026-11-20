@@ -44,6 +44,7 @@ const UNAVAILABLE = new Map([
   ["watch_only", "This key is watch-only and cannot commit."],
   ["route_not_found", "This server does not keep processing progress."],
   ["board_archived", "The board is archived."],
+  ["username_bound", "This key is bound to another name and cannot commit as this reader."],
   ["forbidden", "This key may not commit under this name."],
 ]);
 
@@ -117,7 +118,7 @@ export class ServerCommits {
         this.generation = 0;
         return { status: "retry", reason: code };
       }
-      if (UNAVAILABLE.has(code)) {
+      if (UNAVAILABLE.has(code) || error.status === 403) {
         this.unavailable = code;
         return { status: "unavailable", reason: code };
       }

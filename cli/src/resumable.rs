@@ -15,7 +15,7 @@
 //! progress goes to the server, so processed-by receipts (ADR 0040) name this reader.
 //! D1 default_peek_claims_and_commits_on_server -> tests/processing.rs::default_peek_and_commit_use_the_server
 //! D2 default_held_reader_names_takeover_and_local -> tests/processing.rs::default_held_reader_names_takeover_and_local
-//! D3 default_keeps_local_when_server_cannot_hold_progress -> tests/processing.rs::default_falls_back_to_local_for_watch_only_and_old_servers
+//! D3 default_keeps_local_when_server_cannot_hold_progress (watch-only, bound to another name, old server) -> tests/processing.rs::default_falls_back_to_local_for_watch_only_and_old_servers
 //! D4 local_flag_and_env_keep_progress_local -> tests/processing.rs::local_flag_and_env_keep_progress_local
 
 use std::io::{self, Write};
@@ -86,6 +86,9 @@ fn cannot_hold(response: &RawResponse) -> Option<&'static str> {
     match (response.status, error_code(&response.body).as_deref()) {
         (403, Some("watch_only")) => Some(
             "This key is watch-only, so processing progress stays on this machine and no receipt names this reader.",
+        ),
+        (403, Some("username_bound")) => Some(
+            "This key is bound to another name, so this reader's processing progress stays on this machine and no receipt names it.",
         ),
         (404, Some("route_not_found")) => Some(
             "This server does not keep processing progress, so it stays on this machine and no receipt names this reader.",
