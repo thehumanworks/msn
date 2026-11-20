@@ -1337,6 +1337,8 @@ async function poll(live = false) {
     generation === epoch &&
     !(archivedBoards.has(selected) && !state.hasMore)
   );
+  if (generation === epoch && archivedBoards.has(selected))
+    status(`#${selected} is archived · nothing new will arrive`);
 }
 
 /** Shows or hides the read-only state for the open board when the server reports it. */

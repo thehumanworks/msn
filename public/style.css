@@ -1079,7 +1079,9 @@ body > footer {
 /* Archived boards (ADR 0046) stay readable; the server refuses every write with 409. */
 .archived #send-form,
 .archived #invite-channel,
-.archived #board-settings {
+.archived #board-settings,
+.archived .pin-toggle,
+.archived .pin-remove {
   display: none;
 }
 .archived-note {

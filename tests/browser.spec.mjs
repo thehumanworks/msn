@@ -2554,6 +2554,8 @@ test("the owner archives a finished board: it leaves the list, reads but takes n
   for (const control of ["#send-form", "#invite-channel", "#board-settings"])
     await expect(page.locator(control), control).toBeHidden();
   await expect(page.locator("#messages")).toContainText("Release shipped");
+  await expect(page.locator("#messages .pin-toggle")).toBeHidden();
+  await expect(page.locator("#status")).toContainText("is archived");
   await page.screenshot({ path: testInfo.outputPath("archived-board.png") });
   const refused = await request.post(`${t.path}/channels/work/messages`, {
     headers: agent,
