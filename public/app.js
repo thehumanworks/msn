@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { boardCurl, inviteCurl } from "./curl.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
 import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
@@ -17,6 +18,8 @@ let session = null;
 let channel = "";
 let generation = 0;
 let polling = null;
+// Paste-ready curl steps for the invite link on show (ADR 0056); null hides the button.
+let inviteCurlText = null;
 /**
  * The open @ suggestions (ADR 0055): where the @ is, the names shown and the highlighted one.
  * `dismissed` is the @ that Escape closed, so typing on after it does not reopen the list.
@@ -218,6 +221,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("credential-token").value = "";
   $("credential-name").value = "";
   $("invite-link").value = "";
+  inviteCurlText = null;
   $("invite-dialog").close();
   $("message").value = "";
   $("recipient").value = "";
@@ -2174,6 +2178,10 @@ async function copy(value, message) {
 $("copy-access").addEventListener("click", () => copy(session.token, "Access key copied."));
 let inviteChannel = null;
 let activeInvite = null;
+function setInviteCurl(text) {
+  inviteCurlText = text;
+  $("copy-curl").hidden = text === null;
+}
 async function openInvite(scope) {
   $("revoke-invite").hidden = false;
   $("invite-watch-instead").hidden = true;
@@ -2188,6 +2196,7 @@ async function openInvite(scope) {
       // Only the owner may invite; the board's shared credential gets 400 shared_channel_invitation.
       $("invite-watch-instead").hidden = !session?.owner;
       $("invite-link").value = `${location.origin}/#board=${encodeURIComponent(JSON.stringify(shared))}`;
+      setInviteCurl(boardCurl(shared));
       $("invite-expiry").textContent =
         "All personas share this channel credential. Access lasts until the owner rotates it.";
       $("invite-dialog").showModal();
@@ -2211,6 +2220,7 @@ function showInviteForm(scope, { watch = false } = {}) {
   $("invite-form").hidden = false;
   $("invite-result").hidden = true;
   $("invite-link").value = "";
+  setInviteCurl(null);
 }
 // A board's owner sees the shared agent link first; a watcher gets their own read-only invitation.
 $("invite-watch-instead").addEventListener("click", () => {
@@ -2241,6 +2251,16 @@ $("invite-form").addEventListener("submit", async (event) => {
     if (session !== connection) return;
     activeInvite = result.id;
     $("invite-link").value = result.url;
+    setInviteCurl(
+      result.watch
+        ? null
+        : inviteCurl({
+            url: location.origin,
+            tenant: result.tenant,
+            code: result.code,
+            channel: result.channel,
+          }),
+    );
     $("invite-expiry").textContent =
       `${result.watch ? "Watch only · " : ""}Up to ${result.maxUses} recipients · Expires ${new Date(result.expiresAt).toLocaleString()}`;
     $("invite-form").hidden = true;
@@ -2252,6 +2272,7 @@ $("invite-form").addEventListener("submit", async (event) => {
   }
 });
 $("copy-invite").addEventListener("click", () => copy($("invite-link").value, "Invitation copied."));
+$("copy-curl").addEventListener("click", () => copy(inviteCurlText, "Curl commands copied."));
 $("revoke-invite").addEventListener("click", async () => {
   try {
     await api(`/invites/${activeInvite}`, { method: "DELETE" });
