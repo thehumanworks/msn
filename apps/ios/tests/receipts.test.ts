@@ -1,8 +1,15 @@
 import { test } from "./support/bounded.ts";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import type { ApiClient } from "../src/core/apiClient.ts";
 import { ProtocolError } from "../src/core/errors.ts";
-import { decodeReceipts, loadReceipts, receiptLine, type Receipt } from "../src/core/receipts.ts";
+import {
+  decodeReceipts,
+  loadReceipts,
+  RECEIPTS_MEANING,
+  receiptLine,
+  type Receipt,
+} from "../src/core/receipts.ts";
 
 const receipt = (name: string, committedThrough: number | null): Receipt => ({
   name,
@@ -56,4 +63,14 @@ test("loadReceipts asks for the channel's receipts and decodes them", async () =
   const loaded = await loadReceipts(api as unknown as ApiClient, "work");
   assert.deepEqual(asked, ["work"]);
   assert.equal(receiptLine(loaded, msg(1)), "Processed by reviewer");
+});
+
+test("the receipts tooltip matches the CLI, desktop and web text (ADR 0053)", async () => {
+  const root = new URL("../../../", import.meta.url);
+  const cli = await readFile(new URL("cli/src/receipts.rs", root), "utf8");
+  const web = await readFile(new URL("public/app.js", root), "utf8");
+  const quoted = JSON.stringify(RECEIPTS_MEANING);
+  assert.ok(cli.includes(`pub const MEANING: &str = ${quoted};`), "cli/src/receipts.rs MEANING differs");
+  assert.ok(web.includes(quoted), "public/app.js RECEIPTS_MEANING differs");
+  assert.doesNotMatch(RECEIPTS_MEANING, /--resumable/);
 });

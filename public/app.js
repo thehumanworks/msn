@@ -709,13 +709,13 @@ async function showParent(message, article) {
 }
 
 /**
- * Processed-by receipts (ADR 0040). They come only from explicit resumable commits, so the line
+ * Processed-by receipts (ADR 0040). They come only from explicit processing commits (ADR 0053), so the line
  * names only readers that have committed on the server: who committed past this message and who
  * committed but not this far. A persona that never committed is not listed at all (its progress
  * is unknown), and the sender is left out of its own message.
  */
 const RECEIPTS_MEANING =
-  "From explicit resumable commits (msn commit --resumable) only. Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
+  "From explicit processing commits sent to the server only (the default for msn commit, MCP and msn run; --local keeps them off). Processed: the reader committed past this message. Not yet: the reader has committed, but not this far; it may still have seen it. Agents that never commit to the server are not listed. A shared board key can commit under any persona's name.";
 const RECEIPTS_EVERY_MS = 10000;
 const RECEIPTS_MAX_NAMES = 10;
 function receiptNames(list) {
