@@ -1,6 +1,7 @@
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
+import { type MarkList, marksForListed, type Unread } from "./readMarks.ts";
 import { Store } from "./store.ts";
 import type { ChannelSummary } from "./types.ts";
 
@@ -8,9 +9,12 @@ export type ChannelListState = {
   phase: "loading" | "ready" | "error";
   channels: ChannelSummary[];
   error: string | null;
+  /** Unread counts above this device's read marks (ADR 0045), each for the mark it was asked about. */
+  unread: ReadonlyMap<string, Unread>;
 };
 
 const MAX_PAGES = 10;
+const NO_MARKS = new Store<MarkList>([]);
 const PAGE_SIZE = 100;
 
 /**
@@ -18,7 +22,12 @@ const PAGE_SIZE = 100;
  * coalesced: a burst of events causes one reload after `debounceMs`, never a fixed-interval poll.
  */
 export class ChannelListController {
-  readonly state = new Store<ChannelListState>({ phase: "loading", channels: [], error: null });
+  readonly state = new Store<ChannelListState>({
+    phase: "loading",
+    channels: [],
+    error: null,
+    unread: new Map(),
+  });
   private readonly ctl: SessionController;
   private readonly debounceMs: number;
   private readonly unsubscribe: Array<() => void> = [];
@@ -29,6 +38,11 @@ export class ChannelListController {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryAttempt = 0;
   private readonly backoff: BackoffOptions;
+
+  /** This identity's read marks, or an empty store when the session keeps none. */
+  get marks(): Store<MarkList> {
+    return this.ctl.marks?.state ?? NO_MARKS;
+  }
 
   constructor(ctl: SessionController, debounceMs = 750, backoff: BackoffOptions = {}) {
     this.ctl = ctl;
@@ -61,7 +75,8 @@ export class ChannelListController {
         after = result.nextCursor;
       }
       this.retryAttempt = 0;
-      this.state.set({ phase: "ready", channels, error: null });
+      this.state.update({ phase: "ready", channels, error: null });
+      void this.loadUnread(generation, channels);
     } catch (error) {
       if (generation !== this.generation) return;
       if (isAbortError(error)) {
@@ -79,6 +94,29 @@ export class ChannelListController {
         this.retryTimer = null;
         void this.load();
       }, backoffDelayMs(this.retryAttempt++, this.backoff));
+    }
+  }
+
+  /**
+   * Counts ride on each list reload, which is already event-driven and coalesced, so they add no
+   * polling of their own. A failure keeps the last counts: they are a hint.
+   */
+  private async loadUnread(generation: number, channels: ChannelSummary[]): Promise<void> {
+    const marks = this.ctl.marks;
+    if (!marks) return;
+    await marks.ready;
+    if (generation !== this.generation || this.disposed) return;
+    const asked = marksForListed(
+      marks.state.get(),
+      channels.map((channel) => channel.name),
+    );
+    if (!asked.length) return this.state.update({ unread: new Map() });
+    try {
+      const unread = await this.ctl.api.unreadCounts(this.ctl.session.username, asked, this.ctl.signal);
+      if (generation !== this.generation || this.disposed) return;
+      this.state.update({ unread });
+    } catch (error) {
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
     }
   }
 

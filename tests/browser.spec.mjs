@@ -1803,7 +1803,10 @@ test("only the owner account is offered notifications", async ({ page, request }
   await expect(page.locator("#notify")).toBeHidden();
 });
 
-test("the board list shows unread counts from this device's read marks", async ({ page, request }, testInfo) => {
+test("the board list shows unread counts from this device's read marks", async ({
+  page,
+  request,
+}, testInfo) => {
   const t = await provision(request);
   const post = async (channel, username, text, extra = {}) => {
     const response = await request.post(`${t.path}/channels/${channel}/messages`, {

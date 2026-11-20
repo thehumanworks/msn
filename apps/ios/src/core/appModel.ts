@@ -14,6 +14,7 @@ import {
   writeProfile,
   type ProfileSummary,
 } from "./profileStorage.ts";
+import { ReadMarks, readMarksKey } from "./readMarks.ts";
 import type { SecretStore } from "./sessionStorage.ts";
 import { Store } from "./store.ts";
 
@@ -214,7 +215,7 @@ export class AppModel {
       // profiles are never touched.
       this.intents.set(identityKey(session), input.remember ? session : null);
       this.wantedActive = input.remember ? identityKey(session) : null;
-      this.adopt(session);
+      this.adopt(session, input.remember);
       void this.sync().then((result) => this.reportSync(result, generation, input.remember));
       return null;
     } catch (error) {
@@ -223,9 +224,11 @@ export class AppModel {
     }
   }
 
-  private adopt(session: Session): void {
+  /** `remember`: the session is saved on this device, so its read marks may be too. */
+  private adopt(session: Session, remember = true): void {
     const controller: SessionController = new SessionController(session, {
       ...this.controllerOptions,
+      readMarks: new ReadMarks(this.store, session, remember ? undefined : { persist: false }),
       fetchImpl: this.fetchImpl,
       onAuthExpired: () => this.expire(controller),
     });
@@ -291,7 +294,11 @@ export class AppModel {
           const stored = await listProfiles(this.store);
           if (intent === null) {
             const existing = stored.find((profile) => identityKey(profile) === key);
-            if (existing) await removeProfile(this.store, existing.name);
+            if (existing) {
+              await removeProfile(this.store, existing.name);
+              // Board names read on this device go with the profile (ADR 0045).
+              await this.store.remove(readMarksKey(existing)).catch(() => undefined);
+            }
           } else {
             const name = planProfileName(stored, intent);
             if (name === null) {

@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FlatList, KeyboardAvoidingView, Platform, Pressable, Share, StyleSheet, View } from "react-native";
+import {
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  Share,
+  StyleSheet,
+  View,
+  type ViewToken,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Draft } from "../core/channelController.ts";
 import type { SessionController } from "../core/sessionController.ts";
@@ -12,6 +21,7 @@ import {
   type ThreadRow,
 } from "../core/threads.ts";
 import { messageLink } from "../core/links.ts";
+import { seenMark } from "../core/readMarks.ts";
 import { loadReceipts, type Receipt, RECEIPTS_EVERY_MS, receiptLine } from "../core/receipts.ts";
 import type { Message } from "../core/types.ts";
 import { Composer } from "../components/Composer.tsx";
@@ -135,6 +145,16 @@ function ChannelBody({
     [expanded, open],
   );
   const pointer = useMemo(() => firstUnseen(state.messages, unseen), [state.messages, unseen]);
+  // Read marks (ADR 0045): what reaches the screen while the app is active counts as read.
+  const markRead = useRef<(ids: number[]) => void>(() => {});
+  markRead.current = (ids) => {
+    if (!session.marks || session.state.get().kind === "paused") return;
+    const seen = seenMark(ids, unseen);
+    if (seen !== null) session.marks.advance(controller.channel, seen);
+  };
+  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken<ThreadRow>[] }) =>
+    markRead.current(viewableItems.flatMap((token) => (token.item ? [token.item.message.id] : []))),
+  ).current;
   const list = useRef<FlatList<ThreadRow>>(null);
   const [scrollTo, setScrollTo] = useState<number | null>(null);
   useEffect(() => {
@@ -224,6 +244,7 @@ function ChannelBody({
             list.current?.scrollToOffset({ offset: Math.max(0, index * 80), animated: true })
           }
           data={rows}
+          onViewableItemsChanged={onViewableItemsChanged}
           keyExtractor={(row) => String(row.message.id)}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"

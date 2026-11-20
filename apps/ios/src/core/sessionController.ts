@@ -4,6 +4,7 @@ import { ApiError, InsecureOriginError, ProtocolError, isAbortError } from "./er
 import { bootstrapEventCursor, EventStreamManager, type EventStreamOptions } from "./eventStream.ts";
 import type { FetchLike } from "./httpClient.ts";
 import type { Session } from "./session.ts";
+import type { ReadMarks } from "./readMarks.ts";
 import { Store } from "./store.ts";
 import type { CoordinationEvent } from "./types.ts";
 
@@ -25,6 +26,8 @@ export type SessionControllerOptions = {
   connectBackoff?: BackoffOptions;
   /** Called once when the server rejects the key (401). The controller has stopped itself. */
   onAuthExpired?: () => void;
+  /** This identity's read marks (ADR 0045); without them the list shows no unread counts. */
+  readMarks?: ReadMarks;
 };
 
 /**
@@ -41,6 +44,8 @@ export type SessionControllerOptions = {
 export class SessionController {
   readonly api: ApiClient;
   readonly session: Session;
+  /** Where this reader stopped on each board, on this device only (ADR 0045). */
+  readonly marks: ReadMarks | null;
   readonly state = new Store<ConnectionState>({
     kind: "connecting",
     ready: false,
@@ -61,6 +66,7 @@ export class SessionController {
   constructor(session: Session, options: SessionControllerOptions = {}) {
     this.session = session;
     this.options = options;
+    this.marks = options.readMarks ?? null;
     this.api = new ApiClient(session.origin, session.tenant, session.token, options.fetchImpl, session.channel);
     this.stream = new EventStreamManager(
       (after, limit, wait, channel, signal) => this.api.getEvents({ after, limit, wait, channel }, signal),
@@ -147,6 +153,7 @@ export class SessionController {
     this.epoch.abort();
     this.wakeSleep();
     this.state.update({ kind: "paused", message: null });
+    void this.marks?.flush();
     for (const listener of [...this.lifecycleListeners]) listener("paused");
   }
 
@@ -183,6 +190,7 @@ export class SessionController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.marks?.dispose();
     this.generation += 1;
     this.stream.stop();
     this.epoch.abort();

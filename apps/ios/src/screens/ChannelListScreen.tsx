@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { FlatList, Pressable, RefreshControl, StyleSheet, View } from "react-native";
 import type { ChannelListController } from "../core/channelList.ts";
+import { currentUnread, unreadBadge } from "../core/readMarks.ts";
 import type { ChannelSummary } from "../core/types.ts";
 import { formatCount, formatTime } from "../components/format.ts";
 import { colors, radius, spacing } from "../components/theme.ts";
@@ -17,6 +18,7 @@ export function ChannelListScreen({
   onSelect: (channel: string) => void;
 }) {
   const state = useStore(list.state);
+  const marks = useStore(list.marks);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -95,20 +97,35 @@ export function ChannelListScreen({
           tintColor={colors.muted}
         />
       }
-      renderItem={({ item }) => (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Channel ${item.name}, ${formatCount(item.messageCount, "message")}`}
-          onPress={() => onSelect(item.name)}
-          style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
-        >
-          <Text style={{ fontWeight: "700" }}>#{item.name}</Text>
-          <Text style={styles.meta}>
-            {formatCount(item.messageCount, "message")} · {formatCount(item.participantCount, "participant")}
-            {item.lastActivityAt ? ` · ${formatTime(item.lastActivityAt)}` : ""}
-          </Text>
-        </Pressable>
-      )}
+      renderItem={({ item }) => {
+        // Unread counts (ADR 0045): only for boards read on this device, and only while the
+        // count still matches where the reader stopped.
+        const badge = unreadBadge(currentUnread(state.unread, marks, item.name));
+        return (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Channel ${item.name}, ${badge ? `${badge.label}, ` : ""}${formatCount(item.messageCount, "message")}`}
+            onPress={() => onSelect(item.name)}
+            style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
+          >
+            <View style={styles.titleRow}>
+              <Text style={{ fontWeight: "700", flex: 1 }} numberOfLines={1}>
+                #{item.name}
+              </Text>
+              {badge ? (
+                <View style={styles.badges}>
+                  <Text style={styles.count}>{badge.count}</Text>
+                  {badge.toYou ? <Text style={styles.mine}>{badge.toYou}</Text> : null}
+                </View>
+              ) : null}
+            </View>
+            <Text style={styles.meta}>
+              {formatCount(item.messageCount, "message")} · {formatCount(item.participantCount, "participant")}
+              {item.lastActivityAt ? ` · ${formatTime(item.lastActivityAt)}` : ""}
+            </Text>
+          </Pressable>
+        );
+      }}
       ItemSeparatorComponent={() => <View style={{ height: spacing.sm }} />}
     />
   );
@@ -129,4 +146,31 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   meta: { color: colors.muted, fontSize: 13 },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  badges: { flexDirection: "row", gap: spacing.xs },
+  count: {
+    minWidth: 24,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    overflow: "hidden",
+    backgroundColor: colors.surfaceRaised,
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "700",
+    textAlign: "center",
+    fontVariant: ["tabular-nums"],
+  },
+  mine: {
+    minWidth: 24,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    overflow: "hidden",
+    backgroundColor: colors.accent,
+    color: colors.onAccent,
+    fontSize: 13,
+    fontWeight: "700",
+    textAlign: "center",
+  },
 });
