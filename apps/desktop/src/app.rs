@@ -9,7 +9,7 @@ use msn_cli::identity::validate_username;
 
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
-use crate::state::{AppState, PendingSend, PendingTaskEvent, Screen};
+use crate::state::{AppState, PendingSend, PendingTaskEvent, Screen, SearchState};
 use crate::theme;
 
 const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 80, 80);
@@ -23,6 +23,7 @@ pub struct MsnDesktopApp {
     composer: Composer,
     new_channel_name: String,
     active_tab: Tab,
+    search_input: String,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
 }
@@ -53,6 +54,7 @@ struct Composer {
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Chat,
+    Search,
     Snapshots,
     Tasks,
 }
@@ -60,6 +62,8 @@ enum Tab {
 enum Action {
     Select(String),
     Reload,
+    Search,
+    SearchOlder,
     Send,
     RetrySend(String),
     DiscardSend(String),
@@ -91,6 +95,7 @@ impl MsnDesktopApp {
             composer: Composer::default(),
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
+            search_input: String::new(),
             profile_store,
         }
     }
@@ -555,6 +560,7 @@ impl MsnDesktopApp {
         ui.add_space(4.0);
         match self.active_tab {
             Tab::Chat => self.chat_tab(ui, actions),
+            Tab::Search => self.search_tab(ui, actions),
             Tab::Snapshots => self.snapshots_tab(ui),
             Tab::Tasks => self.tasks_tab(ui, actions),
         }
@@ -571,6 +577,7 @@ impl MsnDesktopApp {
                 ui.spacing_mut().interact_size.y = 28.0;
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 5.0);
                 ui.selectable_value(&mut self.active_tab, Tab::Chat, "Chat");
+                ui.selectable_value(&mut self.active_tab, Tab::Search, "Search");
                 ui.selectable_value(&mut self.active_tab, Tab::Snapshots, "Snapshots");
                 ui.selectable_value(&mut self.active_tab, Tab::Tasks, "Tasks");
             });
@@ -709,6 +716,61 @@ impl MsnDesktopApp {
         });
     }
 
+    /// Board search (ADR 0037): words, "a phrase" or from:name; newest matches first.
+    fn search_tab(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some(state) = self.state.channel.as_ref() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                theme::field(&mut self.search_input)
+                    .hint_text("Search words, \"a phrase\" or from:name")
+                    .desired_width((ui.available_width() - 80.0).max(80.0)),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("Search").clicked() || enter {
+                actions.push(Action::Search);
+            }
+        });
+        ui.add_space(4.0);
+        let search = &state.search;
+        if let Some(error) = &search.error {
+            ui.colored_label(ERROR_COLOR, error);
+        }
+        if !search.active {
+            ui.weak("Find earlier messages on this board by words or sender.");
+            return;
+        }
+        ui.horizontal(|ui| {
+            if search.inflight {
+                ui.spinner();
+            }
+            ui.label(
+                egui::RichText::new(search_summary(search))
+                    .small()
+                    .color(theme::MUTED),
+            );
+        });
+        let me = self
+            .state
+            .connection
+            .as_ref()
+            .map(|connection| connection.username.clone())
+            .unwrap_or_default();
+        egui::ScrollArea::vertical()
+            .id_salt("search-results")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for message in &search.results {
+                    render_message(ui, message, &me);
+                    ui.add_space(4.0);
+                }
+                if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
+                    actions.push(Action::SearchOlder);
+                }
+            });
+    }
+
     fn snapshots_tab(&self, ui: &mut egui::Ui) {
         let Some(state) = self.state.channel.as_ref() else {
             return;
@@ -816,6 +878,14 @@ impl MsnDesktopApp {
                     let commands = self.state.select_channel(name);
                     self.dispatch_all(commands);
                 }
+            }
+            Action::Search => {
+                let commands = self.state.search(&self.search_input);
+                self.dispatch_all(commands);
+            }
+            Action::SearchOlder => {
+                let commands = self.state.search_older();
+                self.dispatch_all(commands);
             }
             Action::Send => self.send_composer_message(),
             Action::RetrySend(key) => self.retry_send(&key),
@@ -1062,6 +1132,27 @@ fn pin_line(pin: &Value) -> String {
         line.push('…');
     }
     format!("#{id} {name}: {line}")
+}
+
+/// "3 messages matching “deploy” from ada, newest first", as the web app words it.
+fn search_summary(search: &SearchState) -> String {
+    let count = search.results.len();
+    let mut summary = format!(
+        "{count}{} message{} matching",
+        if search.has_more { "+" } else { "" },
+        if count == 1 { "" } else { "s" },
+    );
+    if !search.text.is_empty() {
+        summary.push_str(&format!(" \u{201c}{}\u{201d}", search.text));
+    }
+    if let Some(from) = &search.from {
+        summary.push_str(&format!(" from {from}"));
+    }
+    summary.push_str(", newest first");
+    if !search.complete && !search.inflight {
+        summary.push_str(" \u{b7} older messages are still being indexed");
+    }
+    summary
 }
 
 fn render_message(ui: &mut egui::Ui, message: &Value, me: &str) {
@@ -1316,6 +1407,7 @@ mod layout_tests {
             composer: Composer::default(),
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
+            search_input: String::new(),
             profile_store: None,
         }
     }

@@ -481,3 +481,39 @@ export function contentDisposition(inline: boolean, name: string): string {
   );
   return `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
+
+/** Search input limits (ADR 0037). */
+export const MAX_SEARCH_QUERY = 256;
+const MAX_SEARCH_TERMS = 16;
+const MIN_PREFIX_CHARS = 3;
+
+/**
+ * Turns what a person typed into an FTS5 MATCH expression, so no input is ever FTS5 syntax.
+ * Words of 3+ characters match as words or word starts (`deplo` finds `deployed`); shorter words match whole words only; text in double quotes matches
+ * as an exact phrase. Every word and phrase must appear. Words are runs of letters, digits and
+ * `_`, the same split as the `unicode61` tokenizer, so punctuation separates words on both sides.
+ * Returns null when the input holds no words.
+ */
+export function searchMatch(input: string): string | null {
+  if (input.length > MAX_SEARCH_QUERY)
+    throw new HttpError(400, "invalid_query", `q must be at most ${MAX_SEARCH_QUERY} characters.`);
+  // A word needs a letter or digit; runs of only `_` or combining marks are dropped.
+  const words = (part: string) =>
+    (part.match(/[\p{L}\p{N}\p{M}_]+/gu) ?? []).filter((word) => /[\p{L}\p{N}]/u.test(word));
+  const clauses: string[] = [];
+  input.split('"').forEach((part, index) => {
+    // Odd parts sat between quotes; an unclosed quote still reads as a phrase.
+    if (index % 2) {
+      const phrase = words(part);
+      if (phrase.length) clauses.push(`"${phrase.join(" ")}"`);
+    } else {
+      // Only words of 3+ characters match word starts: a one- or two-letter prefix would
+      // expand to most of the index, and the index keeps no prefix tables.
+      for (const word of words(part))
+        clauses.push([...word].length >= MIN_PREFIX_CHARS ? `"${word}"*` : `"${word}"`);
+    }
+  });
+  if (clauses.length > MAX_SEARCH_TERMS)
+    throw new HttpError(400, "invalid_query", `Use at most ${MAX_SEARCH_TERMS} words or phrases.`);
+  return clauses.length ? clauses.join(" ") : null;
+}

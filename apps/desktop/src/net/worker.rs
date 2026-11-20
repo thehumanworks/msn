@@ -24,7 +24,7 @@ use msn_cli::identity::{fetch_identity, validate_username};
 
 use crate::profile::{Connection, SaveOutcome, SaveRequest};
 
-use super::client_ops::{self, SnapshotView};
+use super::client_ops::{self, SearchPage, SnapshotView};
 use super::events::{self, CoordinationEvent};
 
 pub const COMMAND_QUEUE_CAPACITY: usize = 32;
@@ -90,6 +90,17 @@ pub enum Command {
         key: String,
         request: TaskEventRequest,
     },
+    /// One page of message search (ADR 0037). `query` numbers the search so a slow answer to
+    /// an earlier query never replaces a newer one.
+    Search {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        query: u64,
+        text: String,
+        from: Option<String>,
+        before: Option<u64>,
+    },
 }
 
 impl Command {
@@ -101,7 +112,8 @@ impl Command {
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
             | Command::SendMessage { generation, .. }
-            | Command::SendTaskEvent { generation, .. } => Some(*generation),
+            | Command::SendTaskEvent { generation, .. }
+            | Command::Search { generation, .. } => Some(*generation),
             Command::Disconnect => None,
         }
     }
@@ -169,6 +181,13 @@ pub enum UiEvent {
     CoordinationEvents {
         generation: u64,
         events: Vec<CoordinationEvent>,
+    },
+    SearchResults {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        query: u64,
+        page: SearchPage,
     },
     Error {
         generation: u64,
@@ -468,6 +487,45 @@ fn handle_command(
                 ),
             }
         }
+        Command::Search {
+            channel_generation,
+            channel,
+            query,
+            text,
+            from,
+            before,
+            ..
+        } => match client_ops::search_messages(
+            &cc.client,
+            &cc.tenant,
+            &cc.token,
+            &channel,
+            &text,
+            from.as_deref(),
+            before,
+        ) {
+            Ok(page) => emit(
+                tx,
+                wake,
+                UiEvent::SearchResults {
+                    generation,
+                    channel_generation,
+                    channel,
+                    query,
+                    page,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "search",
+                err,
+                false,
+                None,
+            ),
+        },
         Command::LoadSnapshots {
             channel_generation,
             channel,

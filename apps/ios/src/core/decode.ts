@@ -10,6 +10,7 @@ import type {
   Identity,
   Message,
   MessagePage,
+  SearchPage,
   Snapshot,
   PinnedMessage,
 } from "./types.ts";
@@ -137,6 +138,25 @@ export function decodeMessagePage(raw: unknown, after: number): MessagePage {
   if (typeof page.hasMore !== "boolean" || !safeInt(page.nextCursor, 0)) bad("message page");
   if (page.nextCursor !== (messages.at(-1)?.id ?? after)) bad("message cursor");
   return { messages, nextCursor: page.nextCursor, hasMore: page.hasMore };
+}
+
+/** Search pages run newest first and must hold only the asked channel's messages. */
+export function decodeSearchPage(raw: unknown, channel: string): SearchPage {
+  const page = obj(raw, "search page");
+  if (!Array.isArray(page.messages) || typeof page.hasMore !== "boolean") bad("search page");
+  let previous = Number.MAX_SAFE_INTEGER + 1;
+  const messages = (page.messages as unknown[]).map((item) => {
+    const message = decodeMessage(item);
+    if (message.channel !== channel || message.id >= previous) bad("search order");
+    previous = message.id;
+    return message;
+  });
+  const result: SearchPage = { messages, hasMore: page.hasMore, complete: page.complete !== false };
+  if (page.hasMore) {
+    if (!safeInt(page.nextBefore, 1)) bad("search cursor");
+    result.nextBefore = page.nextBefore;
+  }
+  return result;
 }
 
 export function decodeSnapshot(raw: unknown): Snapshot {

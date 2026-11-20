@@ -272,6 +272,76 @@ pub fn show_message(
     Ok(value)
 }
 
+/// One page of search results (ADR 0037), newest first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchPage {
+    pub messages: Vec<Value>,
+    pub has_more: bool,
+    pub next_before: Option<u64>,
+    /// False while the server is still indexing messages older than the search feature.
+    pub complete: bool,
+}
+
+/// Searches one channel by words and an optional sender; checks every result's workspace and
+/// channel so a confused server cannot place another board's message in this view.
+pub fn search_messages(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    text: &str,
+    from: Option<&str>,
+    before: Option<u64>,
+) -> Result<SearchPage, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let text = (!text.trim().is_empty()).then_some(text);
+    let path = msn_cli::search::path(
+        tenant,
+        channel,
+        &msn_cli::search::Search {
+            text,
+            from,
+            before,
+            limit: msn_cli::search::DEFAULT_LIMIT,
+            ..Default::default()
+        },
+    )?;
+    let value = get_json(client, &path, token)?;
+    parse_search_page(&value, tenant, channel)
+}
+
+pub fn parse_search_page(
+    value: &Value,
+    tenant: &str,
+    channel: &str,
+) -> Result<SearchPage, CliError> {
+    let invalid = || CliError::generic("Search response did not match this workspace and channel.");
+    let messages = value["messages"].as_array().ok_or_else(invalid)?;
+    let mut last = u64::MAX;
+    for message in messages {
+        let id = message["id"].as_u64().ok_or_else(invalid)?;
+        if id >= last
+            || message["channel"].as_str() != Some(channel)
+            || message["tenant"].as_str() != Some(tenant)
+        {
+            return Err(invalid());
+        }
+        last = id;
+    }
+    let has_more = value["hasMore"].as_bool().ok_or_else(invalid)?;
+    let next_before = value["nextBefore"].as_u64();
+    if has_more && next_before.is_none() {
+        return Err(invalid());
+    }
+    Ok(SearchPage {
+        messages: messages.clone(),
+        has_more,
+        next_before: next_before.filter(|_| has_more),
+        complete: value["complete"].as_bool().unwrap_or(true),
+    })
+}
+
 /// A revision-consistent snapshot of a channel's canonical history.
 #[derive(Debug, Clone, PartialEq)]
 pub struct History {
@@ -607,6 +677,34 @@ mod tests {
 
     fn never() -> bool {
         false
+    }
+
+    #[test]
+    fn search_pages_must_belong_to_the_channel_and_run_newest_first() {
+        let message = |id: u64, channel: &str| json!({"id": id, "tenant": "t", "channel": channel});
+        let page = parse_search_page(
+            &json!({"messages": [message(9, "c"), message(4, "c")], "hasMore": true, "nextBefore": 4, "complete": false}),
+            "t",
+            "c",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                page.messages.len(),
+                page.has_more,
+                page.next_before,
+                page.complete
+            ),
+            (2, true, Some(4), false)
+        );
+        for bad in [
+            json!({"messages": [message(4, "c"), message(9, "c")], "hasMore": false}),
+            json!({"messages": [message(9, "other")], "hasMore": false}),
+            json!({"messages": [], "hasMore": true}),
+            json!({"messages": "nope", "hasMore": false}),
+        ] {
+            assert!(parse_search_page(&bad, "t", "c").is_err(), "{bad}");
+        }
     }
 
     #[test]

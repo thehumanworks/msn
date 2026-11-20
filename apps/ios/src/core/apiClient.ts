@@ -6,6 +6,7 @@ import {
   decodeMessage,
   decodeMessagePage,
   decodePins,
+  decodeSearchPage,
   decodeSendResult,
   decodeSnapshot,
 } from "./decode.ts";
@@ -20,6 +21,7 @@ import type {
   Message,
   MessagePage,
   PinnedMessage,
+  SearchPage,
   Snapshot,
 } from "./types.ts";
 import { ProtocolError } from "./errors.ts";
@@ -118,6 +120,21 @@ export class ApiClient {
       { signal },
     );
     return { message: decodeMessage(r?.message), historyRevision: r.historyRevision };
+  }
+
+  /** Board search (ADR 0037): words in `q`, an optional sender, older pages with `before`. */
+  async searchMessages(
+    channel: string,
+    query: { q?: string; from?: string; before?: number; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<SearchPage> {
+    return decodeSearchPage(
+      await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/search`, {
+        query: { q: query.q || undefined, from: query.from || undefined, before: query.before, limit: query.limit },
+        signal,
+      }),
+      channel,
+    );
   }
 
   async catchup(

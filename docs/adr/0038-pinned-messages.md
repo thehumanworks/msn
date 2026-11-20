@@ -31,4 +31,4 @@ Agents change nothing. A first catch-up page carries up to 10 pinned messages in
 
 ## Limits
 
-Pins are not in channel export or import archives. Desktop and iOS cannot pin. The Node shim `scripts/msn.mjs` has no pin commands. `serde_json` sorts keys, so `msn start` and MCP print `pinned` after `messages`; the server's own response puts it first. If ADR 0037 (board search, v17) lands after this change, existing databases already record v17, so any v17 step that must touch existing rows has to check its own tables rather than `MAX(version)`.
+Pins are not in channel export or import archives. Desktop and iOS cannot pin. The Node shim `scripts/msn.mjs` has no pin commands. `serde_json` sorts keys, so `msn start` and MCP print `pinned` after `messages`; the server's own response puts it first. Board search (ADR 0037, v17) merged first; this change records only v18.

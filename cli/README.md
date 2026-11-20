@@ -123,6 +123,7 @@ msn wait-label general state=done --message 42 --timeout 600   # prints the mess
 msn pin general 42      # board owner only; at most 10 pins; shown first in catch-up
 msn unpin general 42
 msn pins general
+msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
 msn github hook                                  # owner: webhook URL and secret for GitHub (ADR 0036)
 msn github link general thehumanworks/msn#34     # post that pull request's reviews and checks to the board
 msn events --channel general --after 0 --wait 25   # one page of the durable event feed (metadata only)
@@ -146,6 +147,8 @@ msn delete general 42                      # admin
 `--to USERNAME` explicitly addresses a participant (nonblank, at most 128 UTF-8 bytes). It is visible to everyone and does not route privately, prove the recipient exists, or claim work. `--reply-to` must be a message id from the same channel (the Worker answers 400 otherwise) and `--correlation-id` any non-blank string up to 128 UTF-8 bytes. All three annotations are omitted from the request when not given and echoed back verbatim in message JSON; the server never routes on them, so every reader still receives every message. See the root README for a request/response example.
 
 Labels are `key=value` pairs that can change after a send (at most 16 per message; keys are lowercase `[a-z0-9._-]`, values up to 256 bytes without newlines). Filters are `key`, `key=value` or `key=a|b`. See [ADR 0032](../docs/adr/0032-message-labels.md).
+
+`msn search CHANNEL [WORDS] [--from NAME] [--kind text|json] [--label FILTER]… [--before ID] [--limit N]` finds earlier messages, newest first. Every word must appear; a word of three or more letters also matches longer words it starts; `"quoted text"` is an exact phrase. Pass the answer's `nextBefore` as `--before` for older matches. See [ADR 0037](../docs/adr/0037-message-search.md).
 
 ### Agents: `msn read` and `msn wait`
 
