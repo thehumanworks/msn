@@ -1,5 +1,6 @@
 import { type AccessSettings, accessAccount, accessLoginUrl } from "./account";
 import { admin, bearer, failure, HttpError, json, slug } from "./http";
+import { quickstart } from "./quickstart";
 
 export { MsnDurableObject } from "./store";
 
@@ -46,6 +47,11 @@ export default {
                 },
               })
             : json(connection);
+      } else if ((url.pathname === "/api" || url.pathname === "/api/") && request.method === "GET") {
+        // Public curl quickstart (ADR 0056): plain text, no secrets, so `curl ORIGIN/api` explains itself.
+        response = new Response(quickstart(url.origin), {
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
       } else if (url.pathname === "/api/health" && request.method === "GET") {
         response = json({ ok: true, service: "msn" });
       } else if (url.pathname.startsWith("/api/github/hooks/") && request.method === "POST") {
