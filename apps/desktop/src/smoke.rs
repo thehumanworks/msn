@@ -64,7 +64,7 @@ pub fn run() -> ExitCode {
         }
     };
 
-    let (client, username) = match connect(&origin, &tenant, &token, username.as_deref()) {
+    let (client, username, _owner) = match connect(&origin, &tenant, &token, username.as_deref()) {
         Ok(ok) => ok,
         Err(err) => {
             report.fail("connect", err.to_string());

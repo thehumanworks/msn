@@ -403,3 +403,65 @@ fn link_prints_one_message_link_after_checking_it_exists() {
         assert!(out.stdout.is_empty());
     }
 }
+
+#[test]
+fn mute_and_unmute_call_the_owner_mute_endpoints() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            200,
+            r#"{"channel":"ops","until":"2026-11-20T04:00:00.000Z","everything":false}"#,
+        ),
+        Scripted::json(204, ""),
+        Scripted::json(
+            200,
+            r#"{"mutes":[{"channel":"ops","until":null,"everything":true}]}"#,
+        ),
+    ]);
+    let out = bin(&server)
+        .args(["mute", "ops", "--for", "1h"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "#ops muted until 2026-11-20T04:00:00.000Z (messages to you still notify)\n"
+    );
+    let out = bin(&server).args(["unmute", "ops"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = bin(&server).args(["mute", "--json"]).output().unwrap();
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed["mutes"][0]["everything"], true);
+
+    let recorded = server.recorded();
+    assert_eq!(recorded[0].method, "PUT");
+    assert_eq!(recorded[0].path, "/api/tenants/team/push/mutes/ops");
+    let sent: Value = serde_json::from_slice(&recorded[0].body).unwrap();
+    assert_eq!(sent, serde_json::json!({"for":"1h","everything":false}));
+    assert_eq!(recorded[1].method, "DELETE");
+    assert_eq!(recorded[1].path, "/api/tenants/team/push/mutes/ops");
+    assert_eq!(recorded[2].method, "GET");
+    assert_eq!(recorded[2].path, "/api/tenants/team/push/mutes");
+
+    // A board credential is not the owner: 403 keeps the auth exit code.
+    let server = MockServer::spawn(vec![Scripted::json(
+        403,
+        r#"{"error":{"code":"owner_required","message":"Use the human account connection for this operation."}}"#,
+    )]);
+    let out = bin(&server).args(["mute", "ops"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    // A bad duration fails before any request.
+    let out = bin(&server)
+        .args(["mute", "ops", "--for", "2h"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(server.recorded().len(), 1);
+}

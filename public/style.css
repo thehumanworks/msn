@@ -98,7 +98,7 @@ button:disabled {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-input:not([type="checkbox"]),
+input:not([type="checkbox"]):not([type="radio"]),
 select,
 textarea {
   width: 100%;
@@ -144,7 +144,7 @@ dialog > button {
   color: var(--muted);
   margin-bottom: 8px;
 }
-input:not([type="checkbox"]):focus,
+input:not([type="checkbox"]):not([type="radio"]):focus,
 textarea:focus {
   outline: none;
   border-color: var(--accent);
@@ -153,7 +153,8 @@ input::placeholder,
 textarea::placeholder {
   color: var(--muted);
 }
-input[type="checkbox"] {
+input[type="checkbox"],
+input[type="radio"] {
   accent-color: var(--accent);
   width: 18px;
   height: 18px;
@@ -1290,4 +1291,24 @@ nav button.has-unread .channel-name {
   background: var(--accent);
   color: var(--on-accent);
   font-weight: 600;
+}
+
+/* Board mutes (ADR 0044). */
+.mute-span {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.mute-span legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+#mute.muted {
+  border-color: var(--accent);
+  color: var(--accent);
 }

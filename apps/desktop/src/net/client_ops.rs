@@ -366,6 +366,48 @@ pub fn parse_unread(
     Ok(counts)
 }
 
+/// The owner's active board mutes (ADR 0044).
+pub fn list_mutes(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+) -> Result<Vec<msn_cli::mutes::Mute>, CliError> {
+    slug(tenant)?;
+    let value = msn_cli::mutes::list_with(client, tenant, token)?;
+    let rows = value["mutes"]
+        .as_array()
+        .ok_or_else(|| CliError::generic("Invalid response field mutes."))?;
+    Ok(rows
+        .iter()
+        .filter_map(msn_cli::mutes::Mute::from_value)
+        .collect())
+}
+
+/// Mutes one board for the owner: 1h, 1d or (`None`) until turned back on.
+pub fn set_mute(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    duration: Option<&str>,
+    everything: bool,
+) -> Result<(), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    msn_cli::mutes::mute_with(client, tenant, token, channel, duration, everything).map(|_| ())
+}
+
+pub fn clear_mute(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<(), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    msn_cli::mutes::unmute_with(client, tenant, token, channel)
+}
+
 /// One page of search results (ADR 0037), newest first.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchPage {

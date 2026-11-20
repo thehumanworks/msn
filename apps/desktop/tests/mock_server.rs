@@ -469,6 +469,7 @@ fn revocation_ends_the_pending_poll_reports_auth_failure_and_stops_listening() {
     state.apply(UiEvent::Connected {
         generation,
         username: "alice".into(),
+        owner: false,
     });
     let commands = state.apply(UiEvent::AuthFailed {
         generation,

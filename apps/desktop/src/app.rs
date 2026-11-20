@@ -46,6 +46,8 @@ pub struct MsnDesktopApp {
     /// Marks waiting to be written: (file, reader, marks).
     pending_marks: Option<(std::path::PathBuf, String, read_marks::Marks)>,
     marks_saved_at: Option<std::time::Instant>,
+    /// The "also mute messages addressed to me" box in the mute menu (ADR 0044).
+    mute_everything: bool,
 }
 
 #[derive(Default)]
@@ -88,6 +90,9 @@ enum Action {
     ShowReply(u64),
     LoadParent(u64),
     CopyLink(u64),
+    /// Mute the open board: 1h, 1d or `None` for until turned back on (ADR 0044).
+    Mute(Option<&'static str>),
+    Unmute,
     Send,
     RetrySend(String),
     DiscardSend(String),
@@ -129,6 +134,7 @@ impl MsnDesktopApp {
             pending_marks: None,
             marks_saved_at: None,
             profile_store,
+            mute_everything: false,
         }
     }
 
@@ -612,6 +618,9 @@ impl MsnDesktopApp {
                 if ui.add(reload).clicked() {
                     actions.push(Action::Reload);
                 }
+                if self.state.connection.as_ref().is_some_and(|c| c.owner) {
+                    self.mute_menu(ui, actions);
+                }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(&channel).heading()).truncate());
                     if !stacked {
@@ -631,6 +640,41 @@ impl MsnDesktopApp {
             Tab::Snapshots => self.snapshots_tab(ui),
             Tab::Tasks => self.tasks_tab(ui, actions),
         }
+    }
+
+    /// Owner only (ADR 0044): hold back this board's notifications on every device.
+    fn mute_menu(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let current = self.state.current_mute().cloned();
+        let label = mute_label(current.as_ref());
+        let color = if current.is_some() {
+            theme::ACCENT
+        } else {
+            theme::MUTED
+        };
+        ui.add_enabled_ui(!self.state.mutes_inflight, |ui| {
+            ui.menu_button(egui::RichText::new(label).color(color), |ui| {
+                ui.weak("Messages keep arriving. Only notifications stop.");
+                ui.checkbox(
+                    &mut self.mute_everything,
+                    "Also mute messages addressed to me",
+                );
+                ui.separator();
+                for (text, duration) in [
+                    ("Mute for 1 hour", Some("1h")),
+                    ("Mute for 1 day", Some("1d")),
+                    ("Mute until I turn it back on", None),
+                ] {
+                    if ui.button(text).clicked() {
+                        actions.push(Action::Mute(duration));
+                        ui.close();
+                    }
+                }
+                if current.is_some() && ui.button("Turn notifications back on").clicked() {
+                    actions.push(Action::Unmute);
+                    ui.close();
+                }
+            });
+        });
     }
 
     /// Segmented control for the channel views.
@@ -1034,6 +1078,14 @@ impl MsnDesktopApp {
                     self.state.status = Some(format!("Link to message #{id} copied."));
                 }
             }
+            Action::Mute(duration) => {
+                let commands = self.state.set_mute(duration, self.mute_everything);
+                self.dispatch_all(commands);
+            }
+            Action::Unmute => {
+                let commands = self.state.clear_mute();
+                self.dispatch_all(commands);
+            }
             Action::Send => self.send_composer_message(),
             Action::RetrySend(key) => self.retry_send(&key),
             Action::DiscardSend(key) => {
@@ -1315,6 +1367,20 @@ impl eframe::App for MsnDesktopApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_read_marks(true);
+    }
+}
+
+/// "Mute", "Muted" (until turned back on) or "Muted until 2026-11-20 04:42 UTC".
+fn mute_label(mute: Option<&msn_cli::mutes::Mute>) -> String {
+    match mute {
+        None => "Mute".into(),
+        Some(mute) => match mute.until.as_deref() {
+            None => "Muted".into(),
+            Some(until) => format!(
+                "Muted until {} UTC",
+                until.get(..16).unwrap_or(until).replace('T', " ")
+            ),
+        },
     }
 }
 
@@ -1866,6 +1932,7 @@ mod layout_tests {
         state.apply(UiEvent::Connected {
             generation: 1,
             username: "Alex".into(),
+            owner: false,
         });
         state.apply(UiEvent::EventsReady { generation: 1 });
         state.channels = vec!["general".into(), "design".into()];
@@ -1896,6 +1963,7 @@ mod layout_tests {
             pending_marks: None,
             marks_saved_at: None,
             profile_store: None,
+            mute_everything: false,
         }
     }
 
@@ -1965,6 +2033,42 @@ mod layout_tests {
             widths[2..].iter().all(|width| *width == widths[2]),
             "sidebar width must not drift: {widths:?}"
         );
+    }
+
+    #[test]
+    fn the_owner_sees_the_mute_menu_and_its_state() {
+        assert_eq!(mute_label(None), "Mute");
+        let mut mute = msn_cli::mutes::Mute {
+            channel: "general".into(),
+            until: None,
+            everything: false,
+        };
+        assert_eq!(mute_label(Some(&mute)), "Muted");
+        mute.until = Some("2026-11-20T04:42:00.000Z".into());
+        assert_eq!(mute_label(Some(&mute)), "Muted until 2026-11-20 04:42 UTC");
+
+        // The owner's header draws the menu at both widths without panicking.
+        let mut app = fixture(1);
+        app.state.connection.as_mut().unwrap().owner = true;
+        app.state.mutes.insert("general".into(), mute);
+        for size in [egui::vec2(980.0, 640.0), egui::vec2(480.0, 640.0)] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        }
+        app.mute_everything = true;
+        app.perform(Action::Mute(Some("1h")));
+        assert!(app.state.mutes_inflight);
+        app.state.mutes_inflight = false;
+        app.perform(Action::Unmute);
+        assert!(app.state.mutes_inflight);
     }
 
     #[test]

@@ -120,6 +120,22 @@ pub enum Command {
         channel: String,
         id: u64,
     },
+    /// The owner's active board mutes (ADR 0044). Only sent for an owner connection.
+    LoadMutes {
+        generation: u64,
+    },
+    /// Mutes a board for `duration` (1h or 1d; `None` until unmuted), then reloads the list.
+    SetMute {
+        generation: u64,
+        channel: String,
+        duration: Option<String>,
+        everything: bool,
+    },
+    /// Turns a board's notifications back on, then reloads the list.
+    ClearMute {
+        generation: u64,
+        channel: String,
+    },
 }
 
 impl Command {
@@ -135,7 +151,10 @@ impl Command {
             | Command::SendMessage { generation, .. }
             | Command::SendTaskEvent { generation, .. }
             | Command::Search { generation, .. }
-            | Command::LoadMessage { generation, .. } => Some(*generation),
+            | Command::LoadMessage { generation, .. }
+            | Command::LoadMutes { generation }
+            | Command::SetMute { generation, .. }
+            | Command::ClearMute { generation, .. } => Some(*generation),
             Command::Disconnect => None,
         }
     }
@@ -146,6 +165,8 @@ pub enum UiEvent {
     Connected {
         generation: u64,
         username: String,
+        /// The key is the workspace owner's: it may receive and mute notifications (ADR 0044).
+        owner: bool,
     },
     /// The outcome of the save requested with `Connect`. Never carries the token.
     ProfileSaved {
@@ -229,6 +250,11 @@ pub enum UiEvent {
         channel: String,
         id: u64,
         message: Option<Value>,
+    },
+    /// The owner's active board mutes, after a load or a change (ADR 0044).
+    Mutes {
+        generation: u64,
+        mutes: Vec<msn_cli::mutes::Mute>,
     },
     Error {
         generation: u64,
@@ -329,7 +355,7 @@ fn command_loop(
                 save,
                 ..
             } => match connect(&origin, &tenant, &token, chosen_username.as_deref()) {
-                Ok((client, username)) => {
+                Ok((client, username, owner)) => {
                     if marker.load(Ordering::SeqCst) != generation {
                         continue;
                     }
@@ -355,6 +381,7 @@ fn command_loop(
                         UiEvent::Connected {
                             generation,
                             username,
+                            owner,
                         },
                     );
                     if let Some(outcome) = outcome {
@@ -395,9 +422,10 @@ pub fn connect(
     tenant: &str,
     token: &str,
     chosen: Option<&str>,
-) -> Result<(MsnClient, String), CliError> {
+) -> Result<(MsnClient, String, bool), CliError> {
     slug(tenant)?;
     let identity = fetch_identity(origin, tenant, token)?;
+    let owner = identity.get("owner").and_then(Value::as_bool) == Some(true);
     let bound = identity
         .get("username")
         .and_then(Value::as_str)
@@ -432,7 +460,7 @@ pub fn connect(
             ));
         }
     };
-    Ok((MsnClient::new(origin)?, username))
+    Ok((MsnClient::new(origin)?, username, owner))
 }
 
 fn handle_command(
@@ -446,6 +474,31 @@ fn handle_command(
     let cancelled = || marker.load(Ordering::SeqCst) != generation;
     match command {
         Command::Connect { .. } | Command::Disconnect => {}
+        Command::LoadMutes { .. } | Command::SetMute { .. } | Command::ClearMute { .. } => {
+            let changed = match command {
+                Command::SetMute {
+                    channel,
+                    duration,
+                    everything,
+                    ..
+                } => client_ops::set_mute(
+                    &cc.client,
+                    &cc.tenant,
+                    &cc.token,
+                    &channel,
+                    duration.as_deref(),
+                    everything,
+                ),
+                Command::ClearMute { channel, .. } => {
+                    client_ops::clear_mute(&cc.client, &cc.tenant, &cc.token, &channel)
+                }
+                _ => Ok(()),
+            };
+            match changed.and_then(|()| client_ops::list_mutes(&cc.client, &cc.tenant, &cc.token)) {
+                Ok(mutes) => emit(tx, wake, UiEvent::Mutes { generation, mutes }),
+                Err(err) => emit_error(tx, wake, generation, None, "mute", err, true, None),
+            }
+        }
         Command::ListChannels { .. } => {
             match client_ops::list_channels(&cc.client, &cc.tenant, &cc.token) {
                 Ok(channels) => emit(
