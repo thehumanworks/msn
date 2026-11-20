@@ -2067,8 +2067,10 @@ $("channel-form").addEventListener("submit", async (event) => {
   }
 });
 
-// Board templates: the same file the CLI embeds. Only the account owner can create boards.
-let templates = null;
+// Board templates: the same file the CLI embeds, then the workspace's saved ones (ADR 0051).
+// Only the account owner can create boards.
+let builtInTemplates = null;
+let templates = [];
 const randomHex = () =>
   Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -2083,29 +2085,37 @@ function chosenTemplate() {
   return templates.find((t) => t.id === id) ?? templates[0];
 }
 
-$("start-template").addEventListener("click", async () => {
-  try {
-    if (!templates) {
-      const data = await (await fetch("/board-templates.json")).json();
-      if (!Array.isArray(data?.templates) || !data.templates.length) throw new Error("No templates");
-      templates = data.templates;
-    }
-  } catch {
-    status("Templates are unavailable. Reload and try again.", true);
-    return;
+/** Built-ins first, then saved ones. A failed saved-template fetch still leaves the built-ins. */
+async function loadTemplates() {
+  if (!builtInTemplates) {
+    const data = await (await fetch("/board-templates.json")).json();
+    if (!Array.isArray(data?.templates) || !data.templates.length) throw new Error("No templates");
+    builtInTemplates = data.templates;
   }
+  let own = [];
+  try {
+    own = (await api("/templates")).templates ?? [];
+  } catch {}
+  // A built-in added later wins over a saved template of the same name: one radio per value.
+  const builtIn = new Set(builtInTemplates.map((t) => t.id));
+  templates = [...builtInTemplates, ...own.filter((t) => !builtIn.has(t.id))];
+}
+
+function renderTemplates(selected) {
   const choices = $("template-choices");
   choices.querySelectorAll(".template-choice").forEach((node) => {
     node.remove();
   });
-  for (const [index, template] of templates.entries()) {
+  const fallback = templates.length > 1 ? templates[1].id : templates[0].id;
+  const pick = templates.some((t) => t.id === selected) ? selected : fallback;
+  for (const template of templates) {
     const label = document.createElement("label");
     label.className = "template-choice";
     const input = document.createElement("input");
     input.type = "radio";
     input.name = "template";
     input.value = template.id;
-    input.checked = index === (templates.length > 1 ? 1 : 0);
+    input.checked = template.id === pick;
     const text = document.createElement("span");
     text.className = "template-text";
     const title = document.createElement("strong");
@@ -2117,9 +2127,47 @@ $("start-template").addEventListener("click", async () => {
     team.textContent = template.personas.map((p) => p.name).join(" · ");
     text.append(title, summary, team);
     label.append(input, text);
+    if (template.own) {
+      title.append(" ");
+      const tag = document.createElement("span");
+      tag.className = "template-own";
+      tag.textContent = "Yours";
+      title.append(tag);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "quiet template-delete";
+      remove.textContent = "Delete";
+      remove.setAttribute("aria-label", `Delete template ${template.id}`);
+      remove.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        remove.disabled = true;
+        try {
+          await api(`/templates/${template.id}`, { method: "DELETE" });
+          templates = templates.filter((t) => t !== template);
+          renderTemplates(new FormData($("template-form")).get("template"));
+          status(`Template ${template.id} deleted. Boards made from it are unchanged.`);
+        } catch (error) {
+          remove.disabled = false;
+          $("template-error").textContent = error.message;
+          $("template-error").hidden = false;
+        }
+      });
+      label.append(remove);
+    }
     choices.append(label);
   }
   $("template-goal").placeholder = chosenTemplate().goal;
+}
+
+$("start-template").addEventListener("click", async () => {
+  try {
+    await loadTemplates();
+  } catch {
+    status("Templates are unavailable. Reload and try again.", true);
+    return;
+  }
+  renderTemplates(null);
   $("template-form").hidden = false;
   $("template-result").hidden = true;
   $("template-error").hidden = true;
@@ -2635,6 +2683,12 @@ $("board-settings").addEventListener("click", async () => {
     editingBoard = board;
     // Only the account owner archives a board (ADR 0046).
     $("archive-board-row").hidden = !session?.owner;
+    // Only the owner saves a board as a template (ADR 0051); watch-only keys are never owners.
+    $("save-template-row").hidden = !session?.owner;
+    $("template-name").value = "";
+    $("save-template").textContent = "Save as template";
+    $("save-template-note").hidden = true;
+    replaceTemplate = null;
     $("board-goal").value = board.goal;
     $("board-status").value = board.status;
     $("board-dialog").showModal();
@@ -2643,6 +2697,54 @@ $("board-settings").addEventListener("click", async () => {
   }
 });
 $("close-board").addEventListener("click", () => $("board-dialog").close());
+// Set after a save meets an existing name: the next press of the same name replaces it.
+let replaceTemplate = null;
+function templateNote(text, error = false) {
+  $("save-template-note").textContent = text;
+  $("save-template-note").classList.toggle("error", error);
+  $("save-template-note").hidden = false;
+}
+$("template-name").addEventListener("input", () => {
+  replaceTemplate = null;
+  $("save-template").textContent = "Save as template";
+});
+$("template-name").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  $("save-template").click();
+});
+$("save-template").addEventListener("click", async () => {
+  if (!editingBoard) return;
+  const name = $("template-name").value.trim();
+  if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(name)) {
+    templateNote("Name it with 1–40 lowercase letters, digits, hyphens or underscores.", true);
+    $("template-name").focus();
+    return;
+  }
+  const replace = replaceTemplate === name;
+  $("save-template").disabled = true;
+  try {
+    await api(`/templates/${name}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: editingBoard.channel, replace }),
+    });
+    replaceTemplate = null;
+    $("save-template").textContent = "Save as template";
+    templateNote(`Saved as ${name}. Choose it under Start a board from a template.`);
+  } catch (error) {
+    if (error.code === "template_exists") {
+      replaceTemplate = name;
+      $("save-template").textContent = "Replace template";
+      templateNote(
+        `You already have a template named ${name}. Press Replace template to overwrite it.`,
+        true,
+      );
+    } else templateNote(error.message, true);
+  } finally {
+    $("save-template").disabled = false;
+  }
+});
 $("archive-board").addEventListener("click", async () => {
   if (!editingBoard) return;
   $("board-dialog").close();

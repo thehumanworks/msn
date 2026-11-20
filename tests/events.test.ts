@@ -274,7 +274,7 @@ describe("durable coordination event feed", () => {
         .toArray(),
     );
     expect(versions.map((v) => v.version)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
     ]);
     const messages = await call(`${t.path}/channels/general/messages`, t.token);
     expect((await messages.json<{ messages: { text: string }[] }>()).messages.map((m) => m.text)).toEqual([

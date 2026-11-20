@@ -274,7 +274,7 @@ describe("message labels (ADR 0032)", () => {
         .toArray(),
     );
     // v13 labels, v14 resumable processing cursors (ADR 0034), v15 to v18 all migrate from v12.
-    expect(versions.map((row) => row.version)).toEqual([12, 13, 14, 15, 16, 17, 18, 19]);
+    expect(versions.map((row) => row.version)).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20]);
     expect((await list(t, "")).messages[0]).not.toHaveProperty("labels");
     expect((await relabel(t, before.id, { set: { state: "open" } })).status).toBe(200);
   });

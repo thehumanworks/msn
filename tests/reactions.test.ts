@@ -389,7 +389,7 @@ describe("message reactions (ADR 0047)", () => {
     ]);
   });
 
-  it("records schema v19 and creates the reactions table", async () => {
+  it("records schema v19 (now the latest, 20) and creates the reactions table", async () => {
     const f = await fixture();
     const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
     const versions = await runInDurableObject(stub, (_instance, state) =>
@@ -398,6 +398,7 @@ describe("message reactions (ADR 0047)", () => {
         .toArray()
         .map((row) => row.version),
     );
-    expect(versions.at(-1)).toBe(19);
+    expect(versions).toContain(19);
+    expect(versions.at(-1)).toBe(20);
   });
 });

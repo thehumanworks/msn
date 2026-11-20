@@ -344,7 +344,7 @@ describe("message search (ADR 0037)", () => {
         .toArray()
         .map((row) => row.version),
     );
-    expect(versions.at(-1)).toBe(19);
+    expect(versions.at(-1)).toBe(20);
     expect(await runInDurableObject(w.stub(), (_, state) => state.storage.getAlarm())).toBeNull();
   });
 });

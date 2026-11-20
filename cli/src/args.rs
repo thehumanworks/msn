@@ -945,7 +945,8 @@ pub enum BoardCommand {
         /// The board goal. Optional with --template, which supplies a default.
         #[arg(long, required_unless_present = "template")]
         goal: Option<String>,
-        /// A ready team from `msn board templates`, such as lead-reviewer
+        /// A ready team from `msn board templates`, such as lead-reviewer, or one of your own
+        /// from `msn board template list`
         #[arg(long)]
         template: Option<String>,
         /// Profile for the lead. Default with --template: CHANNEL-lead
@@ -954,6 +955,11 @@ pub enum BoardCommand {
     },
     /// List the ready board templates for `board create --template`.
     Templates,
+    /// Save a board's goal and personas as your own template, then list or delete them.
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
     Show {
         channel: String,
     },
@@ -979,6 +985,23 @@ pub enum BoardCommand {
         channel: String,
     },
 }
+/// Your own board templates (owner only). They belong to the workspace, next to the built-ins.
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// Save BOARD's goal and personas as template NAME. Copies no messages, keys or members.
+    Save {
+        channel: String,
+        name: String,
+        /// Overwrite a saved template with the same name
+        #[arg(long)]
+        replace: bool,
+    },
+    /// List the templates this workspace saved
+    List,
+    /// Delete a saved template. Boards made from it keep their goal and personas.
+    Delete { name: String },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum GithubCommand {
     /// Print the webhook URL, secret and events to add on each GitHub repository

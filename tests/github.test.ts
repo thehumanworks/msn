@@ -528,8 +528,8 @@ describe("boards follow GitHub pull requests (ADR 0036)", () => {
           .toArray()
           .map((row) => row.version),
     );
-    expect(versions.at(-1)).toBe(19);
-    expect(versions).toEqual(expect.arrayContaining([14, 15, 16, 17, 18, 19]));
+    expect(versions.at(-1)).toBe(20);
+    expect(versions).toEqual(expect.arrayContaining([14, 15, 16, 17, 18, 19, 20]));
   });
 
   it("keeps linking and the secret to the owner, and rotation cuts old signatures", async () => {

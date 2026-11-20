@@ -187,6 +187,111 @@ test("an owner starts a ready board from a template in one step", async ({ page,
   await expect(page.getByRole("button", { name: "Start a board from a template" })).toBeHidden();
 });
 
+test("an owner saves a board as a template and starts a new board from it", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const goal =
+    "Ship the docs\n\nTeam (Lead and reviewer):\n- lead: Writes the docs.\n- reviewer: Checks every page.";
+  await request.put(`${t.path}/channels/docs/board`, {
+    headers: t.headers,
+    data: { credential: "a".repeat(64), goal },
+  });
+  for (const name of ["lead", "reviewer"])
+    await request.put(`${t.path}/channels/docs/personas/p-${name}`, {
+      headers: { Authorization: `Bearer ${"a".repeat(64)}` },
+      data: { displayName: name },
+    });
+  await connect(page, t, "human");
+  await openChannel(page, "docs");
+  await page.locator("#board-settings").click();
+  const row = page.locator("#save-template-row");
+  await expect(row).toBeVisible();
+  await page.locator("#template-name").fill("docs-team");
+  await row.getByRole("button", { name: "Save as template" }).click();
+  await expect(page.locator("#save-template-note")).toHaveText(
+    "Saved as docs-team. Choose it under Start a board from a template.",
+  );
+  // Saving the same name again asks before it overwrites.
+  await row.getByRole("button", { name: "Save as template" }).click();
+  await expect(page.locator("#save-template-note")).toContainText(
+    "You already have a template named docs-team",
+  );
+  await row.getByRole("button", { name: "Replace template" }).click();
+  await expect(page.locator("#save-template-note")).toHaveText(/^Saved as docs-team/);
+  await row.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("save-template.png") });
+  await page.locator("#close-board").click();
+
+  // The saved template sits after the built-ins and starts a board in one step.
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  const dialog = page.locator("#template-dialog");
+  await expect(dialog.locator(".template-choice")).toHaveCount(4);
+  const mine = dialog.locator(".template-choice").nth(3);
+  await expect(mine).toContainText("docs-team Yours");
+  await expect(mine).toContainText("Saved from board docs.");
+  await expect(mine).toContainText("lead · reviewer");
+  await dialog.getByRole("radio", { name: /docs-team/ }).check();
+  await expect(page.locator("#template-goal")).toHaveAttribute("placeholder", "Ship the docs");
+  await page.locator("#template-channel").fill("docs2");
+  await page.screenshot({ path: testInfo.outputPath("saved-template-picker.png") });
+  await dialog.getByRole("button", { name: "Create board" }).click();
+  await expect(page.locator("#template-ready")).toHaveText("# docs2 is ready with 2 agents");
+  await page.locator("#close-template").click();
+  const created = await (await request.get(`${t.path}/channels/docs2/board`, { headers: t.headers })).json();
+  expect(created.board.goal).toBe(
+    "Ship the docs\n\nTeam (docs-team):\n- lead: Writes the docs.\n- reviewer: Checks every page.",
+  );
+
+  // Delete removes it from the picker; the board made from it keeps its goal.
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  await dialog.getByRole("button", { name: "Delete template docs-team" }).click();
+  await expect(dialog.locator(".template-choice")).toHaveCount(3);
+  await expect(dialog.getByRole("radio", { name: /Lead and reviewer/ })).toBeChecked();
+  await page.locator("#close-template").click();
+  const list = await (await request.get(`${t.path}/templates`, { headers: t.headers })).json();
+  expect(list.templates).toEqual([]);
+
+  // A shared board connection is not the owner: no save row in Goal & status.
+  await disconnect(page);
+  await connect(page, { ...t, token: "a".repeat(64) }, "lead");
+  await openChannel(page, "docs");
+  await page.locator("#board-settings").click();
+  await expect(page.locator("#save-template-row")).toBeHidden();
+});
+
+test("a saved template that shares a built-in name never shows a second radio", async ({ page, request }) => {
+  const t = await provision(request, { username: "human" });
+  // The Worker reserves built-in names today; a built-in added later could still match an older save.
+  await page.route(/\/templates$/, (route) =>
+    route.fulfill({
+      json: {
+        templates: [
+          {
+            id: "solo",
+            title: "solo",
+            summary: "Saved from board old.",
+            goal: "Old",
+            personas: [],
+            own: true,
+          },
+        ],
+        max: 20,
+      },
+    }),
+  );
+  await connect(page, t, "human");
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Start a board from a template" }).click();
+  const dialog = page.locator("#template-dialog");
+  await expect(dialog.locator(".template-choice")).toHaveCount(3);
+  await expect(dialog.locator('input[value="solo"]')).toHaveCount(1);
+  await expect(dialog).not.toContainText("Yours");
+});
+
 test("a template board whose persona setup fails still shows how to finish it", async ({ page, request }) => {
   const t = await provision(request, { username: "human" });
   await page.goto("/");
