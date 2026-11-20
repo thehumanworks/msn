@@ -374,3 +374,46 @@ test("pinned messages load with the channel and refresh on a later sync (ADR 003
     await server.close();
   }
 });
+
+test("reactions toggle your own and refresh on a later sync without moving messages (ADR 0047)", async () => {
+  const server = await startMockServer();
+  try {
+    server.createChannel("general");
+    server.post("general", "asha", "Deploy the worker");
+    server.post("general", "asha", "Review the PR");
+    server.reactions.set(1, { done: ["asha"] });
+    const ctl = track(
+      new SessionController(
+        { origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", usernamePrefix: null },
+        { ...fast, fetchImpl: nodeFetch },
+      ),
+    );
+    await ctl.start();
+    const channelCtl = track(new ChannelController(ctl, "general", { baseMs: 5, maxMs: 20 }, 0));
+    channelCtl.start();
+    await waitFor(() => channelCtl.state.get().phase === "ready", "channel ready");
+    const reactionsOf = (id: number) => channelCtl.state.get().messages.find((m) => m.id === id)?.reactions;
+    assert.deepEqual(reactionsOf(1), { done: ["asha"] });
+
+    assert.equal(await channelCtl.react(1, "done"), null);
+    assert.deepEqual(reactionsOf(1), { done: ["asha", "tomas"] });
+    const sent = server.requests.filter((r) => r.path.endsWith("/messages/1/reactions"));
+    assert.equal(sent.length, 1);
+    // A second tap removes it: the controller sends remove because tomas already reacted.
+    assert.equal(await channelCtl.react(1, "done"), null);
+    assert.deepEqual(reactionsOf(1), { done: ["asha"] });
+    assert.equal(await channelCtl.react(99, "seen"), "That message is no longer loaded.");
+
+    // Someone else reacts elsewhere; the next sync re-reads reactions for the loaded messages.
+    server.reactions.set(2, { seen: ["asha"] });
+    server.reactions.delete(1);
+    server.post("general", "asha", "later");
+    await waitFor(() => reactionsOf(2)?.seen?.[0] === "asha", "reactions refreshed");
+    assert.equal(reactionsOf(1), undefined);
+    assert.deepEqual(ids(channelCtl), [1, 2, 3]);
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});

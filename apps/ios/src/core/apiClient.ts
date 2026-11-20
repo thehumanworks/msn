@@ -6,6 +6,7 @@ import {
   decodeMessage,
   decodeMessagePage,
   decodePins,
+  decodeReactionPage,
   decodeSearchPage,
   decodeSendResult,
   decodeSnapshot,
@@ -21,6 +22,8 @@ import type {
   Message,
   MessagePage,
   PinnedMessage,
+  ReactionKind,
+  Reactions,
   SearchPage,
   Snapshot,
 } from "./types.ts";
@@ -210,6 +213,47 @@ export class ApiClient {
       options.after,
       { tenant: this.tenant, channel },
     );
+  }
+
+  /**
+   * POST …/messages/{id}/reactions (ADR 0047): adds or removes one reaction as `username`.
+   * Idempotent both ways. Returns the message with its reactions after the change.
+   */
+  async react(
+    channel: string,
+    id: number,
+    input: { username: string; kind: ReactionKind; remove: boolean },
+    signal?: AbortSignal,
+  ): Promise<Message> {
+    const r = await this.http.request<{ message: unknown }>(
+      `/channels/${encodeURIComponent(channel)}/messages/${id}/reactions`,
+      {
+        method: "POST",
+        body: { username: input.username, kind: input.kind, ...(input.remove ? { remove: true } : {}) },
+        signal,
+      },
+    );
+    const message = decodeMessage(r?.message);
+    if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
+      throw new ProtocolError("Reaction response named a different message.");
+    return message;
+  }
+
+  /** GET …/reactions (ADR 0047): current reactions for messages after `after`, a few pages at most. */
+  async listReactions(channel: string, after: number, signal?: AbortSignal): Promise<Map<number, Reactions>> {
+    const found = new Map<number, Reactions>();
+    let cursor = after;
+    for (let page = 0; page < 5; page++) {
+      const r = await this.http.request<unknown>(
+        `/channels/${encodeURIComponent(channel)}/reactions?after=${cursor}`,
+        { signal },
+      );
+      const { reactions, nextAfter } = decodeReactionPage(r);
+      for (const [id, value] of reactions) found.set(id, value);
+      if (nextAfter === null || nextAfter <= cursor) break;
+      cursor = nextAfter;
+    }
+    return found;
   }
 
   /** GET …/pins: the board owner's pinned messages (ADR 0038). */

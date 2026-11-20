@@ -4,7 +4,7 @@ import { createPendingSend } from "./composer.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
 import { Store } from "./store.ts";
-import type { CoordinationEvent, Message, PinnedMessage, Snapshot } from "./types.ts";
+import type { CoordinationEvent, Message, PinnedMessage, ReactionKind, Reactions, Snapshot } from "./types.ts";
 
 export const MAX_MESSAGES = 500;
 export const MAX_OUTBOX = 20;
@@ -79,6 +79,7 @@ export class ChannelController {
   private readonly byId = new Map<number, Message>();
   private syncCursor = 0;
   private pinsAt = 0;
+  private reactionsAt = 0;
   private needReload = true;
   private needSync = false;
   private pendingSnapshot: number | null = null;
@@ -281,9 +282,62 @@ export class ChannelController {
       for (const message of next.messages) this.byId.set(message.id, message);
       this.syncCursor = next.nextCursor;
       this.publishMessages();
-      if (!next.hasMore) return this.refreshPins();
+      if (!next.hasMore) {
+        await this.refreshReactions();
+        return this.refreshPins();
+      }
     }
     this.needSync = true;
+  }
+
+  /**
+   * Reactions send no message or event (ADR 0047), so a sync re-reads them for the loaded messages
+   * as often as pins. Best effort: a failed read keeps what is shown.
+   */
+  private async refreshReactions(): Promise<void> {
+    if (!this.byId.size || Date.now() - this.reactionsAt < this.pinRefreshMs) return;
+    this.reactionsAt = Date.now();
+    const after = Math.min(...this.byId.keys()) - 1;
+    try {
+      const found = await this.ctl.api.listReactions(this.channel, after, this.ctl.signal);
+      if (this.disposed) return;
+      let changed = false;
+      for (const [id, message] of this.byId) {
+        if (id <= after) continue;
+        const next = found.get(id);
+        if (JSON.stringify(next ?? null) === JSON.stringify(message.reactions ?? null)) continue;
+        this.byId.set(id, withReactions(message, next));
+        changed = true;
+      }
+      if (changed) this.publishMessages();
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
+  }
+
+  /**
+   * Toggles your reaction of one kind on a loaded message (ADR 0047): adds it, or removes it when
+   * you already reacted. Resolves to an error message, or null once the board shows the change.
+   */
+  async react(id: number, kind: ReactionKind): Promise<string | null> {
+    const message = this.byId.get(id);
+    if (!message) return "That message is no longer loaded.";
+    const username = this.ctl.session.username;
+    const remove = message.reactions?.[kind]?.includes(username) ?? false;
+    try {
+      const updated = await this.ctl.api.react(this.channel, id, { username, kind, remove }, this.ctl.signal);
+      if (this.disposed) return null;
+      const current = this.byId.get(id);
+      if (current) {
+        this.byId.set(id, withReactions(current, updated.reactions));
+        this.publishMessages();
+      }
+      return null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+      return error instanceof Error ? error.message : "Could not change the reaction.";
+    }
   }
 
   /** Best effort: a failed or unsupported pins read keeps what is shown. */
@@ -426,4 +480,10 @@ export class ChannelController {
         : "No answer from the server.";
     this.patchItem(id, { status: "uncertain", error: `${reason} It may or may not have been delivered.` });
   }
+}
+
+/** A copy of the message carrying these reactions; none leaves the field out, as the server does. */
+function withReactions(message: Message, reactions: Reactions | undefined): Message {
+  const { reactions: _old, ...rest } = message;
+  return reactions && Object.keys(reactions).length ? { ...rest, reactions } : rest;
 }

@@ -13,7 +13,9 @@ import type {
   SearchPage,
   Snapshot,
   PinnedMessage,
+  Reactions,
 } from "./types.ts";
+import { REACTION_KINDS } from "./types.ts";
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -117,7 +119,41 @@ export function decodeMessage(raw: unknown): Message {
     if (typeof m.to !== "string") bad("message");
     message.to = m.to;
   }
+  if (m.reactions !== undefined) {
+    const reactions = decodeReactions(m.reactions);
+    if (Object.keys(reactions).length) message.reactions = reactions;
+  }
   return message;
+}
+
+/** Reactions (ADR 0047): known kinds only, each a list of names. A kind added later is ignored. */
+export function decodeReactions(raw: unknown): Reactions {
+  const r = obj(raw, "reactions");
+  const reactions: Reactions = {};
+  for (const kind of REACTION_KINDS) {
+    const names = r[kind];
+    if (names === undefined) continue;
+    if (!Array.isArray(names) || names.some((name) => typeof name !== "string")) bad("reactions");
+    if (names.length) reactions[kind] = names as string[];
+  }
+  return reactions;
+}
+
+/** GET …/reactions: current reactions by message id, and where the next page starts. */
+export function decodeReactionPage(raw: unknown): {
+  reactions: Map<number, Reactions>;
+  nextAfter: number | null;
+} {
+  const page = obj(raw, "reaction page");
+  if (!Array.isArray(page.reactions) || typeof page.hasMore !== "boolean") bad("reaction page");
+  const reactions = new Map<number, Reactions>();
+  for (const item of page.reactions as unknown[]) {
+    const entry = obj(item, "reaction page");
+    if (!safeInt(entry.id, 1)) bad("reaction page");
+    reactions.set(entry.id, decodeReactions(entry.reactions));
+  }
+  if (page.hasMore && !safeInt(page.nextAfter, 1)) bad("reaction page");
+  return { reactions, nextAfter: page.hasMore ? (page.nextAfter as number) : null };
 }
 
 /** Messages must be strictly increasing and strictly after `after`, matching the cursor rules. */
