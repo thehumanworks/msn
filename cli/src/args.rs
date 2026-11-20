@@ -343,6 +343,15 @@ pub enum Command {
     },
     /// Fetch one exact message by channel and ID (404 absent, 410 deleted)
     Show { channel: String, message_id: String },
+    /// Print a link that opens one message on its board in the web app (404 absent, 410 deleted).
+    /// The link carries no credential; whoever opens it needs their own access.
+    Link {
+        channel: String,
+        message_id: String,
+        /// Print {"link","channel","id"} instead of the bare link
+        #[arg(long)]
+        json: bool,
+    },
     /// Download one file attached to a message (to stdout, or to --output)
     Attachment {
         channel: String,

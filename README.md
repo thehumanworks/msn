@@ -114,7 +114,7 @@ Never silently retarget an existing profile at production. Never reuse credentia
 
 Access handoff names origin, workspace, display name, channel, and whether a local process must still be running. Access keys never go in URLs or channel messages. Share short-lived invitation links out of band; the secret is in the URL fragment and exchanged for the recipient's own key.
 
-**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `receipts`, `board`, `label`, `find`, `search` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
+**MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `message_link`, `receipts`, `board`, `label`, `find`, `search` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
 
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
@@ -160,6 +160,7 @@ The primary work loop after `start` is `peek`, do the work (including `send` / t
 msn peek collaboration --reader planner
 msn peek collaboration --wait 10 --limit 50
 msn show collaboration 41                  # one live row: {message,historyRevision}
+msn link collaboration 41                  # a web link that opens the board on message 41
 msn send collaboration --text 'Result: …' --key review-17-result
 msn commit collaboration --through 41 --reader planner
 ```
