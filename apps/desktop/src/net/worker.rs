@@ -89,6 +89,23 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// Current reactions (ADR 0047) for the open channel's messages after `after`.
+    LoadReactions {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        after: u64,
+    },
+    /// Adds (`remove: false`) or removes one reaction as `username` (ADR 0047).
+    React {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        id: u64,
+        kind: String,
+        remove: bool,
+    },
     SendMessage {
         generation: u64,
         channel_generation: u64,
@@ -155,6 +172,8 @@ impl Command {
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
             | Command::LoadReceipts { generation, .. }
+            | Command::LoadReactions { generation, .. }
+            | Command::React { generation, .. }
             | Command::SendMessage { generation, .. }
             | Command::SendTaskEvent { generation, .. }
             | Command::Search { generation, .. }
@@ -249,6 +268,22 @@ pub enum UiEvent {
         channel_generation: u64,
         channel: String,
         receipts: Vec<msn_cli::receipts::Receipt>,
+    },
+    /// Reactions for every message after `after` that has any (ADR 0047); others have none.
+    Reactions {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        after: u64,
+        reactions: Vec<(u64, Value)>,
+    },
+    /// One message's reactions after the user's own change (`Null` when none are left).
+    Reacted {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        id: u64,
+        reactions: Value,
     },
     SearchResults {
         generation: u64,
@@ -640,6 +675,69 @@ fn handle_command(
                 "receipts",
                 err,
                 false,
+                None,
+            ),
+        },
+        Command::LoadReactions {
+            channel_generation,
+            channel,
+            after,
+            ..
+        } => {
+            match client_ops::fetch_reactions(&cc.client, &cc.tenant, &cc.token, &channel, after) {
+                Ok(reactions) => emit(
+                    tx,
+                    wake,
+                    UiEvent::Reactions {
+                        generation,
+                        channel_generation,
+                        channel,
+                        after,
+                        reactions,
+                    },
+                ),
+                Err(err) => emit_error(
+                    tx,
+                    wake,
+                    generation,
+                    Some(channel_generation),
+                    "reactions",
+                    err,
+                    false,
+                    None,
+                ),
+            }
+        }
+        Command::React {
+            channel_generation,
+            channel,
+            username,
+            id,
+            kind,
+            remove,
+            ..
+        } => match client_ops::react(
+            &cc.client, &cc.tenant, &cc.token, &channel, &username, id, &kind, remove,
+        ) {
+            Ok(reactions) => emit(
+                tx,
+                wake,
+                UiEvent::Reacted {
+                    generation,
+                    channel_generation,
+                    channel,
+                    id,
+                    reactions,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "react",
+                err,
+                true,
                 None,
             ),
         },
