@@ -27,6 +27,10 @@
   /* viewport.js narrows this to the visual viewport, so an open keyboard shrinks the
      app shell instead of pushing the composer under the keyboard. */
   --app-height: 100dvh;
+  /* Where the visible area starts inside the layout viewport, and how much of it the keyboard
+     covers below; viewport.js keeps both current. */
+  --app-top: 0px;
+  --app-below: 0px;
 }
 /* Light: the system asks for it and this device has not forced dark, or this device forced it. */
 @media (prefers-color-scheme: light) {
@@ -94,6 +98,7 @@ body {
 body.app {
   position: fixed;
   inset: 0;
+  top: var(--app-top);
   height: var(--app-height);
   min-height: 0;
   overflow: hidden;
@@ -163,6 +168,11 @@ dialog {
   max-height: calc(var(--app-height) - 32px);
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+/* A modal centres in the area the keyboard leaves visible, not behind the keyboard. */
+dialog:modal {
+  top: var(--app-top);
+  bottom: var(--app-below);
 }
 dialog::backdrop {
   background: var(--backdrop);
@@ -354,6 +364,14 @@ main {
   border-bottom: 1px solid var(--line);
   min-height: 56px;
 }
+/* The workspace header stays put while the list scrolls, including when the keyboard has
+   pushed the new-channel field to the top of a short visible area. */
+.pane-channels > .bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+}
 .bar-title {
   flex: 1;
   min-width: 0;
@@ -431,6 +449,15 @@ nav button[aria-current="true"] {
 }
 #display-name {
   color: var(--text);
+}
+/* An account workspace is named by a long generated id: two lines show it nearly whole. */
+#workspace-name {
+  white-space: normal;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 #identity-note {
   font-size: 11px;
@@ -635,10 +662,16 @@ nav .empty {
 .message:focus-within > .message-reactions .reaction-add {
   opacity: 0.7;
 }
-/* Touch screens have no hover: keep the add buttons faintly visible. */
+/* Touch screens have no hover: keep the add buttons faintly visible, and big enough to hit. */
 @media (hover: none) {
   .reaction-add {
     opacity: 0.45;
+  }
+}
+@media (pointer: coarse) {
+  .reaction-chip {
+    min-height: 32px;
+    min-width: 40px;
   }
 }
 .watching .reaction-chip,
@@ -826,6 +859,31 @@ nav .empty {
 #status.error {
   color: var(--error);
 }
+/* A phone or tablet with no keyboard attached has no use for the shortcut list. A connected
+   keyboard still answers "?", which opens it anyway. */
+@media (hover: none) and (pointer: coarse) {
+  #show-keys {
+    display: none;
+  }
+}
+/* While the keyboard is up and the person is writing, the board's chrome yields to the
+   conversation: the header and the composer stay, the toolbar strip and panels step aside. */
+.keyboard-open .pane-chat:has(.compose :focus) :is(.toolbar, search, .pins, .checkpoint, .since) {
+  display: none;
+}
+/* With the keyboard up, the home indicator is covered: its safe-area padding is empty space. */
+.keyboard-open :is(.compose, .identity) {
+  padding-bottom: 8px;
+}
+.keyboard-open #status {
+  padding-bottom: 4px;
+}
+/* In landscape the keyboard leaves room for little more than the composer: the board header
+   and the status line step aside too, so the message field and a few lines of log fit. */
+.keyboard-short .pane-chat:has(.compose :focus) > .bar,
+.keyboard-short body:has(.compose :focus) #status {
+  display: none;
+}
 /* A finger needs a larger target than a cursor; the dense toolbar is the reason .quiet exists. */
 @media (pointer: coarse) {
   .quiet {
@@ -901,6 +959,9 @@ body > footer {
   }
   .pane-channels {
     border-right: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .pane-channels > .bar {
     background: var(--surface);
   }
   .workspace[data-view="channels"] .pane-chat,
@@ -1044,6 +1105,11 @@ body > footer {
   overflow-wrap: anywhere;
 }
 .agents small {
+  color: var(--muted);
+}
+/* The empty note has no presence dot: it must not wrap into the dot's narrow column. */
+.agents li.agents-empty {
+  display: block;
   color: var(--muted);
 }
 .since {
@@ -1643,6 +1709,96 @@ nav button.has-unread .channel-name {
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 1px 6px;
+}
+
+/* Touch targets (mobile pass, PR 58). A finger needs about 44px. Controls that stand alone
+   grow to that; the small inline ones in a message row keep their look and get an invisible
+   hit area above and below instead, so the conversation stays as dense as before. */
+@media (pointer: coarse) {
+  .quiet,
+  .toolbar .quiet,
+  .compose-fields #recipient,
+  .theme-pick select,
+  .show-archived,
+  .check,
+  .live-toggle,
+  .template-delete,
+  .pins .pin-remove,
+  .since li button {
+    min-height: 44px;
+  }
+  .icon {
+    width: 44px;
+    min-height: 44px;
+  }
+  .access-details summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    margin-bottom: 0;
+  }
+  .access-details {
+    padding-block: 0;
+  }
+  .message-meta .pin-toggle,
+  .message-meta .copy-link,
+  .message-meta .reply-button,
+  .reaction-chip,
+  .label-chip,
+  .fold-toggle,
+  .thread-toggle {
+    position: relative;
+    min-height: 32px;
+    min-width: 44px;
+  }
+  .message-meta .pin-toggle,
+  .message-meta .copy-link,
+  .message-meta .reply-button {
+    padding: 0 8px;
+  }
+  /* Wrapped rows sit far enough apart that the hit areas above and below never overlap. */
+  .message-reactions,
+  .message-labels {
+    row-gap: 12px;
+  }
+  :is(
+    .message-meta .pin-toggle,
+    .message-meta .copy-link,
+    .message-meta .reply-button,
+    .reaction-chip,
+    .label-chip,
+    .fold-toggle,
+    .thread-toggle
+  )::after {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
+  }
+}
+/* The toolbar strip scrolls sideways with no scrollbar: fade the edge that has more. */
+.toolbar.more-right {
+  -webkit-mask-image: linear-gradient(to right, var(--text) calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, var(--text) calc(100% - 32px), transparent);
+}
+.toolbar.more-left {
+  -webkit-mask-image: linear-gradient(to left, var(--text) calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to left, var(--text) calc(100% - 32px), transparent);
+}
+.toolbar.more-left.more-right {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--text) 32px,
+    var(--text) calc(100% - 32px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--text) 32px,
+    var(--text) calc(100% - 32px),
+    transparent
+  );
 }
 /* Mention someone with @ (ADR 0055): the To field says who a message goes to before it is sent,
    and the suggestions open above the message field so an on-screen keyboard never covers them. */

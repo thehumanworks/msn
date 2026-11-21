@@ -1,5 +1,6 @@
 // Phone viewport behaviour shared by every page: the layout follows the visible area so an
-// open keyboard never hides the composer, and the page never zooms under a stray gesture.
+// open keyboard never hides the composer or any other field, and the page never zooms under a
+// stray gesture.
 
 const root = document.documentElement;
 const listeners = new Set();
@@ -9,7 +10,22 @@ export function onViewportChange(callback) {
   listeners.add(callback);
 }
 
+const KEYBOARD_MIN = 150;
+const SHORT_MAX = 300;
 let applied = 0;
+let appliedTop = -1;
+let appliedBelow = -1;
+
+// A field that takes focus while the keyboard opens can end up under the shortened shell, for
+// example the new-channel name at the foot of the board list. Bring it back into its own
+// scroller; `nearest` leaves a field that is already visible alone.
+function revealFocused() {
+  const field = document.activeElement;
+  if (!field?.matches?.("input:not([type=checkbox]):not([type=radio]), textarea, select")) return;
+  requestAnimationFrame(() => {
+    if (document.activeElement === field) field.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
 
 function sync() {
   // Without visualViewport the CSS default (100dvh) already applies; keep it rather than
@@ -17,13 +33,41 @@ function sync() {
   const viewport = window.visualViewport;
   if (!viewport) return;
   const height = Math.round(viewport.height);
+  // To show a focused field above the keyboard, iOS pans the visible area down inside the
+  // layout viewport rather than resizing it. The shell is fixed to the layout viewport, so it
+  // must follow that pan; pinned at the top it would sit above the screen while the visible
+  // area showed only the empty page beneath it.
+  const top = Math.max(0, Math.round(viewport.offsetTop));
+  // Dialogs live in the top layer, outside the shell; they centre in the visible area instead.
+  const below = Math.max(0, Math.round(window.innerHeight - viewport.offsetTop - viewport.height));
+  if (top !== appliedTop) {
+    appliedTop = top;
+    root.style.setProperty("--app-top", `${top}px`);
+  }
+  if (below !== appliedBelow) {
+    appliedBelow = below;
+    root.style.setProperty("--app-below", `${below}px`);
+  }
   // iOS also fires these while the visible area merely shifts. Only a changed height resizes
   // anything, and only that is worth telling a listener about mid-scroll.
   if (height === applied) return;
+  const shrank = applied !== 0 && height < applied;
   applied = height;
   root.style.setProperty("--app-height", `${height}px`);
+  // The keyboard is the only thing that takes this much of the screen from the visual viewport.
+  const keyboard = window.innerHeight - height > KEYBOARD_MIN;
+  root.classList.toggle("keyboard-open", keyboard);
+  // A phone in landscape keeps well under 300px above its keyboard.
+  root.classList.toggle("keyboard-short", keyboard && height < SHORT_MAX);
   for (const callback of listeners) callback();
+  if (shrank) revealFocused();
 }
+
+// Moving to another field while the keyboard stays up changes no height, so the resize path
+// above never sees it; reveal that field on focus instead.
+document.addEventListener("focusin", () => {
+  if (root.classList.contains("keyboard-open")) revealFocused();
+});
 
 if (window.visualViewport) {
   // resize fires as the keyboard animates; scroll fires when iOS shifts the visible area.

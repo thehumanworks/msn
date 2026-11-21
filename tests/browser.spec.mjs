@@ -1978,6 +1978,214 @@ test("the interface fits a phone, refuses zoom, and stays usable behind the keyb
   expect(box.docWidth).toBeLessThanOrEqual(box.innerWidth);
 });
 
+// iOS does not shrink the page for the keyboard: it pans the visible area down inside the layout
+// viewport until the focused field clears the keyboard. A shell pinned to the top of the layout
+// viewport then sits above the screen, and the person sees an empty page over the keyboard.
+test("an iOS keyboard pan keeps every field and dialog in the visible area", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone viewport only");
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general/board`, {
+    headers: t.headers,
+    data: { credential: "b".repeat(64), goal: "Ship it" },
+  });
+  for (const name of ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"])
+    await request.put(`${t.path}/channels/${name}`, { headers: t.headers });
+  for (let i = 0; i < 12; i++)
+    await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username: "agent", text: `message ${i}` },
+    });
+  await connect(page, t);
+  await channelsPane(page);
+
+  // Keyboard shortcuts need a keyboard; a touch-only phone does not list them.
+  await expect(page.locator("#show-keys")).toBeHidden();
+
+  const full = await page.evaluate(() => window.innerHeight);
+  const visible = Math.round(full * 0.55);
+  const pan = full - visible;
+  const keyboard = (height, offsetTop) =>
+    page.evaluate(
+      ([height, offsetTop]) => {
+        const viewport = window.visualViewport;
+        Object.defineProperty(viewport, "height", { value: height, configurable: true });
+        Object.defineProperty(viewport, "offsetTop", { value: offsetTop, configurable: true });
+        viewport.dispatchEvent(new Event("resize"));
+        viewport.dispatchEvent(new Event("scroll"));
+      },
+      [height, offsetTop],
+    );
+  const inView = (selector, top = pan, bottom = full) =>
+    page.evaluate(
+      ([selector, top, bottom]) => {
+        const rect = document.querySelector(selector).getBoundingClientRect();
+        return rect.height > 0 && rect.top >= top - 1 && rect.bottom <= bottom + 1;
+      },
+      [selector, top, bottom],
+    );
+
+  // The board list: naming a new channel at the foot of the list, as in the report. A phone
+  // keyboard capitalises and spaces; the name is typed the way it will be saved.
+  await page.locator("#new-channel").pressSequentially("MSN chat");
+  await expect(page.locator("#new-channel")).toHaveValue("msn-chat");
+  await page.locator("#new-channel").focus();
+  await keyboard(visible, pan);
+  await expect
+    .poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().top)))
+    .toBe(pan);
+  await expect.poll(() => inView("#new-channel")).toBe(true);
+  expect(await inView(".pane-channels .bar")).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("board-list-keyboard.png") });
+
+  // Moving to another field with the keyboard still up changes no height; that field is
+  // revealed too. The access details sit well above the new-channel field.
+  await page.getByText("Your access details").click();
+  await page.locator(".pane-channels").evaluate((pane) => pane.scrollTo(0, pane.scrollHeight));
+  expect(await inView("#credential-name")).toBe(false);
+  await page.locator("#credential-name").evaluate((field) => field.focus({ preventScroll: true }));
+  await expect.poll(() => inView("#credential-name")).toBe(true);
+  await page.locator("#credential-name").blur();
+  await page.getByText("Your access details").click();
+  await keyboard(full, 0);
+
+  // Dialog fields on the board list: the workspace invitation and a board from a template.
+  for (const [opener, field, dialog, close] of [
+    ["#invite-workspace", "#invite-uses", "#invite-dialog", "#close-invite"],
+    ["#start-template", "#template-channel", "#template-dialog", "#close-template"],
+  ]) {
+    await page.locator(opener).click();
+    await page.locator(field).focus();
+    await keyboard(visible, pan);
+    await expect.poll(() => inView(field)).toBe(true);
+    expect(await inView(dialog)).toBe(true);
+    await keyboard(full, 0);
+    await page.locator(close).click();
+  }
+  await expect.poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().top))).toBe(0);
+
+  // The composer: while writing, the board's toolbar steps aside for the conversation.
+  await openChannel(page, "general");
+  await expect(page.locator(".message")).toHaveCount(12);
+  await page.locator("#message").focus();
+  await keyboard(visible, pan);
+  await expect(page.locator(".toolbar")).toBeHidden();
+  await expect(page.locator("#search")).toBeHidden();
+  await expect.poll(() => inView("#message")).toBe(true);
+  expect(await inView("#channel-title")).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("composer-keyboard.png") });
+  // Searching keeps the search field (and its toolbar) above the keyboard.
+  await page.locator("#message").blur();
+  await page.locator("#search").evaluate((field) => field.focus({ preventScroll: true }));
+  await expect(page.locator(".toolbar")).toBeVisible();
+  await expect.poll(() => inView("#search")).toBe(true);
+  await page.locator("#search").blur();
+  await keyboard(full, 0);
+
+  // A dialog field: the dialog centres in what the keyboard leaves, not behind it.
+  await page.locator("#board-settings").click();
+  await page.locator("#board-goal").focus();
+  await keyboard(visible, pan);
+  await expect.poll(() => inView("#board-dialog")).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("dialog-keyboard.png") });
+  await keyboard(full, 0);
+  await page.locator("#close-board").click();
+
+  // A board with no personas says so on one line, not one word per line.
+  await page.locator("#agents").click();
+  const empty = page.locator("#agents-list .agents-empty");
+  await expect(empty).toHaveText("No personas on this board yet.");
+  expect(await empty.evaluate((el) => el.getBoundingClientRect().height)).toBeLessThan(60);
+  await page.locator("#close-agents").click();
+
+  // Rotating with the keyboard up: the shell follows the new visible area.
+  const size = page.viewportSize();
+  await page.setViewportSize({ width: size.height, height: size.width });
+  const wide = await page.evaluate(() => window.innerHeight);
+  await keyboard(wide, 0);
+  await page.locator("#message").focus();
+  const short = Math.round(wide * 0.45);
+  await keyboard(short, wide - short);
+  await expect
+    .poll(() => page.evaluate(() => Math.round(document.body.getBoundingClientRect().height)))
+    .toBe(short);
+  await page.screenshot({ path: testInfo.outputPath("landscape-keyboard.png") });
+  await expect.poll(() => inView("#message", wide - short, wide)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.locator("#message").blur();
+  await page.setViewportSize(size);
+  await keyboard(full, 0);
+
+  // The welcome form's create and join modes end in fields that open the keyboard too.
+  await disconnect(page);
+  for (const [mode, field] of [
+    ["create", "#username"],
+    ["join", "#join-code"],
+  ]) {
+    await page.locator("#entry-mode").selectOption(mode);
+    await page.locator(field).focus();
+    await keyboard(visible, pan);
+    await expect.poll(() => inView(field)).toBe(true);
+    await page.locator(field).blur();
+    await keyboard(full, 0);
+  }
+});
+
+// A finger needs about 44px. Inline controls in a message row may keep a smaller look when an
+// invisible hit area (a positioned ::after) makes up the difference.
+test("every control on a phone has a 44px touch target", async ({ page, request }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone viewport only");
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general/board`, {
+    headers: t.headers,
+    data: { credential: "c".repeat(64), goal: "Ship it" },
+  });
+  await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: "labelled", labels: { phase: "build" } },
+  });
+  await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n") },
+  });
+  const small = () =>
+    page.evaluate(() => {
+      const out = [];
+      const controls = document.querySelectorAll(
+        "button, input:not([type=checkbox]):not([type=radio]):not([type=file]), select, textarea, summary, label.check, label.show-archived, label.live-toggle",
+      );
+      for (const el of controls) {
+        const rect = el.getBoundingClientRect();
+        if (!rect.width || !rect.height || getComputedStyle(el).visibility === "hidden") continue;
+        const after = getComputedStyle(el, "::after");
+        const grow =
+          after.content !== "none" && after.position === "absolute" ? -2 * Number.parseFloat(after.top) : 0;
+        if (rect.height + grow < 43.5)
+          out.push(`${el.tagName.toLowerCase()}#${el.id}.${el.className} ${Math.round(rect.height)}+${grow}`);
+      }
+      return out;
+    });
+  await connect(page, t);
+  await channelsPane(page);
+  await page.getByText("Your access details").click();
+  expect(await small()).toEqual([]);
+  await openChannel(page, "general");
+  await expect(page.locator(".message")).toHaveCount(2);
+  await expect(page.locator(".label-chip")).toHaveCount(1);
+  expect(await small()).toEqual([]);
+  for (const [opener, close] of [
+    ["#board-settings", "#close-board"],
+    ["#invite-channel", "#close-invite"],
+    ["#agents", "#close-agents"],
+  ]) {
+    await page.locator(opener).click();
+    expect(await small()).toEqual([]);
+    await page.locator(close).click();
+  }
+});
+
 // The shell is pinned to the visual viewport, so any region that can grow past a short screen
 // needs its own scroll. Landscape is where that bites first.
 test("every control stays reachable on a landscape phone", async ({ page, request }, testInfo) => {
