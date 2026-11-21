@@ -168,6 +168,10 @@ pub struct ChannelState {
     /// conversation. `brief_version` is what a write builds on, and counts removed briefs too.
     pub brief: Option<crate::net::client_ops::Brief>,
     pub brief_version: u64,
+    /// The version the open brief editor builds on, taken when it opened. A change that arrives
+    /// while the owner types then makes Save a conflict instead of a silent overwrite. `None`
+    /// with no editor open, and after a conflict, so the next Save builds on the newest version.
+    pub brief_base: Option<u64>,
     pub brief_flight: Flight,
     /// The owner's write in flight, and its failure for the editor to show.
     pub brief_saving: bool,
@@ -754,6 +758,21 @@ impl AppState {
         })
     }
 
+    /// The owner opened the brief editor: a save now builds on the version shown at this moment.
+    /// Returns the text to edit.
+    pub fn open_brief_editor(&mut self) -> Option<String> {
+        let state = self.channel.as_mut()?;
+        state.brief_error = None;
+        state.brief_base = Some(state.brief_version);
+        Some(
+            state
+                .brief
+                .as_ref()
+                .map(|brief| brief.text.clone())
+                .unwrap_or_default(),
+        )
+    }
+
     /// Writes `text` as the board's new brief (ADR 0074); blank text removes it. The server
     /// allows only the owner. Refused here on an archived board, a text over 4 KiB, or while a
     /// write is in flight.
@@ -789,7 +808,7 @@ impl AppState {
             channel_generation,
             channel,
             text,
-            base_version: state.brief_version,
+            base_version: state.brief_base.unwrap_or(state.brief_version),
         }]
     }
 
@@ -1462,6 +1481,7 @@ impl AppState {
                 if saved {
                     state.brief_saving = false;
                     state.brief_error = None;
+                    state.brief_base = None;
                     state.brief_saves += 1;
                     self.status = Some(if state.brief.is_some() {
                         format!(
@@ -2006,6 +2026,11 @@ impl AppState {
                     && let Some(state) = self.channel.as_mut()
                 {
                     state.brief_saving = false;
+                    // After a conflict the owner has been told; the next Save replaces the
+                    // newer version on purpose.
+                    if message.starts_with(crate::net::client_ops::BRIEF_CONFLICT) {
+                        state.brief_base = None;
+                    }
                     state.brief_error = Some(message);
                 }
             }
@@ -3628,6 +3653,10 @@ mod tests {
                 .unwrap()
                 .contains("at most 4096")
         );
+        // The editor builds on the version it opened with, even when a newer one arrives while
+        // the owner types, so the server answers with a conflict instead of overwriting it.
+        assert_eq!(state.open_brief_editor().as_deref(), Some(""));
+        state.channel.as_mut().unwrap().brief_version = 5;
         let commands = state.set_brief("Be kind.".into());
         assert!(matches!(
             commands.as_slice(),

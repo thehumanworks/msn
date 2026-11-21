@@ -422,6 +422,9 @@ pub fn fetch_brief(
     parse_brief(&get_json(client, &path, token)?)
 }
 
+/// How a refused write starts when the brief changed while the owner was editing (ADR 0074).
+pub const BRIEF_CONFLICT: &str = "The brief was changed somewhere else.";
+
 /// Writes a new brief version over `base_version` (owner only); blank text removes the brief.
 pub fn put_brief(
     client: &MsnClient,
@@ -443,9 +446,9 @@ pub fn put_brief(
             ));
         }
         409 if response.body.contains("brief_conflict") => {
-            return Err(CliError::generic(
-                "The brief was changed somewhere else. Your text is kept; press Save again to replace the newer version.",
-            ));
+            return Err(CliError::generic(format!(
+                "{BRIEF_CONFLICT} Your text is kept; press Save again to replace the newer version."
+            )));
         }
         _ => {}
     }

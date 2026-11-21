@@ -4790,7 +4790,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** All reads stay synchronous: checkpoint, head and tail describe one consistent storage view. */
-  private catchup(tenant: string, channel: string, url: URL): Response {
+  private catchup(tenant: string, channel: string, url: URL, capability: TenantRow): Response {
     this.requireChannel(channel);
     const limit = integer(url.searchParams.get("limit"), 20, 100);
     const maxBytes = integer(url.searchParams.get("maxBytes"), 32768, 262144);
@@ -4846,9 +4846,14 @@ export class MsnDurableObject extends DurableObject<Env> {
     // says whether this reader has received this version before, and then remembers that it has.
     const briefRow = url.searchParams.has("after") ? null : this.briefRow(channel);
     const brief = briefRow?.text ? toBrief(briefRow) : null;
-    const briefReader = url.searchParams.has("reader")
+    // The reader must be one of this key's own names, as for `since` and processing: the bound name
+    // or `name/<worker>`. Otherwise one key could mark a brief as received for another agent and
+    // hide the change from it. A key that may not be this reader gets the brief with no
+    // `briefChanged` and no marker, not an error, so every client still gets its page.
+    const namedReader = url.searchParams.has("reader")
       ? text(url.searchParams.get("reader"), "reader", 128, "invalid_reader")
       : null;
+    const briefReader = namedReader !== null && this.ownsReader(capability, namedReader) ? namedReader : null;
     const briefFields = (withText: boolean) => {
       if (!brief) return {};
       const { text: _text, ...rest } = brief;
@@ -4998,6 +5003,14 @@ export class MsnDurableObject extends DurableObject<Env> {
     // later page's messages, only briefChanged, and the text is on every first page anyway.
     if (brief && briefShown && briefReader !== null) this.markBriefSeen(channel, briefReader, brief.version);
     return json(result);
+  }
+
+  /** Whether this key may read and write per-reader state as `reader` (ADR 0074). */
+  private ownsReader(capability: TenantRow, reader: string): boolean {
+    const bound = capability.bound_username;
+    if (bound !== null && bound !== undefined) return reader === bound || reader.startsWith(`${bound}/`);
+    const prefix = capability.bound_prefix;
+    return prefix === null || prefix === undefined || reader.startsWith(prefix);
   }
 
   private markBriefSeen(channel: string, reader: string, version: number): void {
@@ -6053,7 +6066,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             return json({ channel, created }, created ? 201 : 200);
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
-            return this.catchup(tenant, channel, url);
+            return this.catchup(tenant, channel, url, capability);
           if (rest[2] === "pins") return this.pinRoute(request, tenant, channel, rest.slice(3), capability);
           if (rest[2] === "processing")
             return await this.processingRoute(request, channel, rest.slice(3), capability);

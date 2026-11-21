@@ -143,6 +143,15 @@ test("the owner saves a brief over the version shown; a conflict keeps the text 
     assert.deepEqual([channelCtl.state.get().brief?.text, channelCtl.state.get().briefVersion], ["Mine.", 3]);
     assert.equal(await channelCtl.saveBrief("  "), null);
     assert.deepEqual([channelCtl.state.get().brief, channelCtl.state.get().briefVersion], [null, 4]);
+    // The editor saves over the version it opened with. A change that arrives while the owner
+    // types, and that this device has already loaded, is still a conflict; the next press wins.
+    const opened = channelCtl.state.get().briefVersion;
+    server.setBrief("work", "Theirs again.");
+    await waitFor(() => channelCtl.state.get().briefVersion === 5, "their second version");
+    assert.match((await channelCtl.saveBrief("Late.", opened)) ?? "", /changed somewhere else/);
+    assert.equal(channelCtl.state.get().brief?.text, "Theirs again.");
+    assert.equal(await channelCtl.saveBrief("Late."), null);
+    assert.deepEqual([channelCtl.state.get().brief?.text, channelCtl.state.get().briefVersion], ["Late.", 6]);
     channelCtl.dispose();
     ctl.dispose();
   } finally {

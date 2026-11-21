@@ -2275,19 +2275,19 @@ impl MsnDesktopApp {
                 self.dispatch_all(commands);
             }
             Action::EditBrief => {
-                if let (Some(channel), Some(state)) = (
+                if let (Some(channel), Some(text)) = (
                     self.state.selected_channel.clone(),
-                    self.state.channel.as_mut(),
+                    self.state.open_brief_editor(),
                 ) {
-                    state.brief_error = None;
+                    let saves_at_open = self
+                        .state
+                        .channel
+                        .as_ref()
+                        .map_or(0, |state| state.brief_saves);
                     self.brief_editor = Some(BriefEditor {
                         channel,
-                        text: state
-                            .brief
-                            .as_ref()
-                            .map(|brief| brief.text.clone())
-                            .unwrap_or_default(),
-                        saves_at_open: state.brief_saves,
+                        text,
+                        saves_at_open,
                     });
                 }
             }

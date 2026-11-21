@@ -252,6 +252,41 @@ describe("board brief (ADR 0074)", () => {
     }
   });
 
+  it("lets a key mark the brief as received only for its own names", async () => {
+    const f = await fixture();
+    await put(f, "Read me.", 0);
+    const invite = (await (
+      await call(f.tenant, "/invites", f.owner, "POST", { channel: "work", watch: true })
+    ).json()) as { code: string };
+    const watcher = (await (
+      await call(f.tenant, "/invites/redeem", undefined, "POST", { code: invite.code, username: "watcher" })
+    ).json()) as { token: string };
+
+    // A watch-only key bound to "watcher" and the owner's key bound to "human" both name "lead":
+    // each gets the brief, with no briefChanged, and nothing is recorded for lead.
+    for (const token of [watcher.token, f.owner]) {
+      const page = await catchup(f, "&reader=lead", token);
+      expect(page).toMatchObject({ brief: { text: "Read me." } });
+      expect("briefChanged" in page).toBe(false);
+    }
+    const seen = () =>
+      runInDurableObject(env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant])), (_, state) =>
+        state.storage.sql
+          .exec<{ reader: string }>("SELECT reader FROM brief_seen ORDER BY reader")
+          .toArray()
+          .map((row) => row.reader),
+      );
+    expect(await seen()).toEqual([]);
+    expect(await catchup(f, "&reader=lead")).toMatchObject({ briefChanged: true });
+
+    // A bound key may name itself or one of its workers (`name/<worker>`), and nothing else.
+    expect(await catchup(f, "&reader=human", f.owner)).toMatchObject({ briefChanged: true });
+    expect(await catchup(f, "&reader=human", f.owner)).toMatchObject({ briefChanged: false });
+    expect(await catchup(f, "&reader=human/w1", f.owner)).toMatchObject({ briefChanged: true });
+    expect("briefChanged" in (await catchup(f, "&reader=humanoid", f.owner))).toBe(false);
+    expect(await seen()).toEqual(["human", "human/w1", "lead"]);
+  });
+
   it("refuses a write on an archived board and from a watch-only key", async () => {
     const f = await fixture();
     await put(f, "Kept.", 0);

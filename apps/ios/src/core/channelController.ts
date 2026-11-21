@@ -613,13 +613,23 @@ export class ChannelController {
    * everyone else. Resolves to an error message to show, or null once the header shows the result.
    * When another device wrote first, the newer brief is read so the next save builds on it.
    */
-  async saveBrief(text: string): Promise<string | null> {
+  /**
+   * `baseVersion` is the version the editor showed when it opened. A change that arrives while
+   * the owner types is then a conflict, not a silent overwrite. Left out, the save builds on
+   * the newest version, which is what a second press after a conflict means.
+   */
+  async saveBrief(text: string, baseVersion?: number): Promise<string | null> {
     if (this.savingBrief) return null;
     const { over } = briefCount(text);
     if (over) return `A brief holds at most ${BRIEF_MAX_BYTES.toLocaleString("en-US")} bytes.`;
     this.savingBrief = true;
     try {
-      const saved = await this.ctl.api.putBrief(this.channel, text, this.state.get().briefVersion, this.ctl.signal);
+      const saved = await this.ctl.api.putBrief(
+        this.channel,
+        text,
+        baseVersion ?? this.state.get().briefVersion,
+        this.ctl.signal,
+      );
       if (!this.disposed && saved.currentVersion >= this.state.get().briefVersion)
         this.state.update({ brief: saved.brief, briefVersion: saved.currentVersion });
       return null;

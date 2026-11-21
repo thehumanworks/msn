@@ -1108,11 +1108,23 @@ impl Server {
     fn board(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         let (tenant, token) = self.credentials()?;
         let channel = self.channel(args)?;
-        Ok(agent::fetch_json(
-            &MsnClient::new(&self.url)?,
+        let client = MsnClient::new(&self.url)?;
+        let mut board = agent::fetch_json(
+            &client,
             &format!("/api/tenants/{tenant}/channels/{channel}/board"),
             &token,
-        )?)
+        )?;
+        // The owner's brief in full (ADR 0074): the way to read it when a start or catch_up page
+        // had no room for the text (`brief.omitted`). A server without briefs is not an error.
+        if let Ok(brief) = agent::fetch_json(
+            &client,
+            &format!("/api/tenants/{tenant}/channels/{channel}/brief"),
+            &token,
+        ) && let Some(object) = board.as_object_mut()
+        {
+            object.insert("brief".into(), brief["brief"].clone());
+        }
+        Ok(board)
     }
 }
 
@@ -1301,7 +1313,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "start",
             "Start on a board",
-            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's brief (`brief`: standing instructions, read it first and follow it; `briefChanged` true means this version is new to you since your last start), the owner's pinned messages (read these next), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true. `edited` lists earlier messages whose senders changed the text since your last start or catch_up in this session; the new text replaces what you read. A message with replacedBy was replaced by its sender: skip it and act on message replacedBy.",
+            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's brief (`brief`: standing instructions, read it first and follow it; `briefChanged` true means this version is new to you since your last start; if `brief.omitted` is true the text did not fit, so call `board` to read it), the owner's pinned messages (read these next), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true. `edited` lists earlier messages whose senders changed the text since your last start or catch_up in this session; the new text replaces what you read. A message with replacedBy was replaced by its sender: skip it and act on message replacedBy.",
             json!({
                 "after": cursor("Exact message id to continue after; omit for the latest snapshot."),
                 "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else the board's current edit position."),
@@ -1414,7 +1426,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "board",
             "Show the board",
-            "Show the shared board: goal, status and revision.",
+            "Show the shared board: goal, status and revision, and the owner's brief in full (`brief`, null when there is none). Call it when start or catch_up returned `brief.omitted`: the page had no room for the text.",
             json!({}),
             &[],
             (true, true),

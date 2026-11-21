@@ -167,7 +167,15 @@ function BriefEditor({
   onClose: () => void;
 }) {
   const brief = useStore(controller.state).brief;
-  return <BriefPanel brief={brief} onSave={(text) => controller.saveBrief(text)} onClose={onClose} />;
+  // The version on screen when the editor opened. After a refused save the owner has been told,
+  // so the next press builds on the newest version.
+  const base = useRef<number | undefined>(controller.state.get().briefVersion);
+  const save = async (text: string) => {
+    const failed = await controller.saveBrief(text, base.current);
+    if (failed) base.current = undefined;
+    return failed;
+  };
+  return <BriefPanel brief={brief} onSave={save} onClose={onClose} />;
 }
 
 function ChannelBody({
