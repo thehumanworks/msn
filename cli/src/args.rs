@@ -478,6 +478,9 @@ pub enum Command {
         /// Id of the same-channel message this one answers (sent as replyTo)
         #[arg(long = "reply-to")]
         reply_to: Option<String>,
+        /// The part of the --reply-to message you answer, shown above your reply (≤2,048 bytes)
+        #[arg(long, requires = "reply_to")]
+        quote: Option<String>,
         /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
         #[arg(long = "correlation-id")]
         correlation_id: Option<String>,

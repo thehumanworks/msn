@@ -49,8 +49,8 @@ use client::{
 use config::{
     CHANNELS_PAGE_LIMIT, DEFAULT_CATCHUP_MAX_BYTES, DEFAULT_SNAPSHOT_LIMIT, MAX_CATCHUP_MAX_BYTES,
     MAX_LIMIT, MAX_SAFE_INTEGER, MAX_SNAPSHOT_TEXT_BYTES, MAX_WAIT, MIN_CATCHUP_MAX_BYTES,
-    parse_int, require_correlation_id, require_idempotency_key, require_tenant, require_text,
-    require_token, slug,
+    parse_int, require_correlation_id, require_idempotency_key, require_quote, require_tenant,
+    require_text, require_token, slug,
 };
 use cursor::{CursorBinding, CursorLock, default_cursor_path, load_cursor, write_cursor};
 use error::CliError;
@@ -400,6 +400,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             json,
             key,
             reply_to,
+            quote,
             correlation_id,
             to,
             labels,
@@ -418,6 +419,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 .as_deref()
                 .map(|raw| parse_int(raw, MAX_SAFE_INTEGER))
                 .transpose()?;
+            let quote = quote.as_deref().map(require_quote).transpose()?;
             let correlation_id = correlation_id
                 .as_deref()
                 .map(require_correlation_id)
@@ -458,6 +460,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 key.as_deref(),
                 Correlation {
                     reply_to,
+                    quote,
                     correlation_id,
                     to,
                 },
@@ -1247,6 +1250,8 @@ fn create(url: &Url, tenant: &str, token: &str, channel: &str) -> Result<(), Cli
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Correlation {
     pub reply_to: Option<u64>,
+    /// The part of the `reply_to` message this reply quotes (ADR 0059); needs `reply_to`.
+    pub quote: Option<String>,
     pub correlation_id: Option<String>,
     pub to: Option<String>,
 }
@@ -1270,6 +1275,9 @@ pub fn send_body_with(
     }
     if let Some(reply_to) = correlation.reply_to {
         body["replyTo"] = json!(reply_to);
+    }
+    if let Some(quote) = &correlation.quote {
+        body["quote"] = json!(quote);
     }
     if let Some(correlation_id) = &correlation.correlation_id {
         body["correlationId"] = json!(correlation_id);

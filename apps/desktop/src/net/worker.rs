@@ -138,6 +138,7 @@ pub enum Command {
         text: String,
         key: String,
         reply_to: Option<u64>,
+        quote: Option<String>,
         correlation_id: Option<String>,
         to: Option<String>,
     },
@@ -199,6 +200,8 @@ pub enum Command {
         key: String,
         send_at: String,
         reply_to: Option<u64>,
+        /// The quote that rides on `reply_to` (ADR 0059).
+        quote: Option<String>,
         to: Option<String>,
     },
     /// Changes a scheduled message's text and/or time, or cancels it (`cancel`), then reloads.
@@ -1045,6 +1048,7 @@ fn handle_command(
             key,
             send_at,
             reply_to,
+            quote,
             to,
             ..
         } => {
@@ -1059,6 +1063,7 @@ fn handle_command(
                 &send_at,
                 Correlation {
                     reply_to,
+                    quote,
                     correlation_id: None,
                     to,
                 },
@@ -1103,6 +1108,7 @@ fn handle_command(
             text,
             key,
             reply_to,
+            quote,
             correlation_id,
             to,
             ..
@@ -1117,6 +1123,7 @@ fn handle_command(
                 &key,
                 Correlation {
                     reply_to,
+                    quote,
                     correlation_id,
                     to,
                 },

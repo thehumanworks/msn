@@ -195,6 +195,29 @@ test("CLI send forwards --reply-to and --correlation-id only when given, and rej
   assert.equal(JSON.parse(max.calls[0].body).correlationId, "🙂".repeat(32));
 });
 
+test("CLI send forwards --quote with --reply-to and refuses it alone (ADR 0059)", async () => {
+  const h = harness(
+    ["send", "general", "--text", "Done", "--reply-to", "42", "--quote", "Then tag it."],
+    [{}],
+  );
+  await h.execute();
+  assert.deepEqual(JSON.parse(h.calls[0].body), {
+    username: "free name",
+    text: "Done",
+    replyTo: 42,
+    quote: "Then tag it.",
+  });
+  for (const argv of [
+    ["send", "general", "--text", "x", "--quote", "alone"],
+    ["send", "general", "--text", "x", "--reply-to", "4", "--quote", " "],
+    ["send", "general", "--text", "x", "--reply-to", "4", "--quote", "x".repeat(2049)],
+  ]) {
+    const bad = harness(argv);
+    await assert.rejects(bad.execute(), /--quote/);
+    assert.equal(bad.calls.length, 0, argv.join(" "));
+  }
+});
+
 test("CLI --text sends omit contentType; --json validates locally and marks application/json", async () => {
   const plain = harness(["send", "general", "--text", "hello"], [{ message: { id: 1 } }]);
   await plain.execute();

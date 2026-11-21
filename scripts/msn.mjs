@@ -14,7 +14,7 @@ Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 node scripts/msn.mjs whoami
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
-node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME] [--key RETRY_KEY] [--reply-to ID] [--correlation-id STR]
+node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME] [--key RETRY_KEY] [--reply-to ID [--quote TEXT]] [--correlation-id STR]
 node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
@@ -28,7 +28,8 @@ node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
 follow prints one JSON message per line; cursor files are tenant/channel/server-bound.
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
---reply-to (same-channel message id) and --correlation-id (opaque, <=128 bytes) are optional
+--reply-to (same-channel message id), --quote (with --reply-to: the part of that message you answer)
+and --correlation-id (opaque, <=128 bytes) are optional
 annotations agents can filter on; every reader still receives every message.
 --to USERNAME addresses a participant in the channel; it does not make a message private.
 --json sends contentType application/json; invalid JSON exits 2 without any request.
@@ -113,6 +114,7 @@ export async function run({
       json: { type: "string" },
       key: { type: "string" },
       "reply-to": { type: "string" },
+      quote: { type: "string" },
       "correlation-id": { type: "string" },
       to: { type: "string" },
       after: { type: "string" },
@@ -270,6 +272,13 @@ export async function run({
     if (values["reply-to"] !== undefined) {
       body.replyTo = number(values["reply-to"], 0, Number.MAX_SAFE_INTEGER);
       if (!body.replyTo) throw new UsageError("--reply-to must be a positive message id.");
+    }
+    if (values.quote !== undefined) {
+      // A quote (ADR 0059) is the part of the --reply-to message being answered.
+      if (body.replyTo === undefined) throw new UsageError("--quote needs --reply-to.");
+      if (!values.quote.trim() || Buffer.byteLength(values.quote) > 2048)
+        throw new UsageError("--quote must be non-blank text of at most 2,048 UTF-8 bytes.");
+      body.quote = values.quote;
     }
     if (values["correlation-id"] !== undefined) {
       const id = values["correlation-id"];

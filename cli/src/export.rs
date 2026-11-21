@@ -626,6 +626,7 @@ fn message_record(row: &Value) -> Result<MessageRecord, CliError> {
             .and_then(Value::as_str)
             .map(str::to_string),
         reply_to: row.get("replyTo").and_then(Value::as_u64),
+        quote: row.get("quote").and_then(Value::as_str).map(str::to_string),
         correlation_id: row
             .get("correlationId")
             .and_then(Value::as_str)

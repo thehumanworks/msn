@@ -44,6 +44,7 @@ import {
   newToken,
   optionalBody,
   labels as parseLabels,
+  quoteText,
   REACTIONS,
   type ReactionChange,
   type Reactions,
@@ -81,6 +82,8 @@ export type Message = {
   createdAt: string;
   /** Opaque annotations; absent from JSON when unset. The server never matches on them. */
   replyTo?: number;
+  /** The part of the replyTo message this reply quotes (ADR 0059); absent when it quotes nothing. */
+  quote?: string;
   correlationId?: string;
   to?: string;
   personaId?: string;
@@ -96,7 +99,7 @@ export type Message = {
 /** Attachment metadata on a message; the bytes come from the per-message download route. */
 export type Attachment = { index: number; id: string; name: string; mediaType: string; bytes: number };
 /** Optional annotation input on send; `undefined` means "not supplied". */
-export type Correlation = { replyTo?: number; correlationId?: string; to?: string };
+export type Correlation = { replyTo?: number; quote?: string; correlationId?: string; to?: string };
 type MessageRow = {
   id: number;
   channel: string;
@@ -109,9 +112,10 @@ type MessageRow = {
   recipient: string | null;
   personaId: string | null;
   editedAt: string | null;
+  quote: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -299,11 +303,12 @@ function processingFence(url: URL): ProcessingFence | null {
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
-  const { replyTo, correlationId, recipient, personaId, editedAt, ...rest } = row;
+  const { replyTo, quote, correlationId, recipient, personaId, editedAt, ...rest } = row;
   return {
     ...rest,
     tenant,
     ...(replyTo === null ? {} : { replyTo }),
+    ...(quote == null ? {} : { quote }),
     ...(correlationId === null ? {} : { correlationId }),
     ...(recipient === null ? {} : { to: recipient }),
     ...(personaId == null ? {} : { personaId }),
@@ -324,6 +329,8 @@ type ScheduledRow = {
   createdAt: string;
   updatedAt: string;
   replyTo: number | null;
+  /** The part of the replyTo message this scheduled reply quotes (ADR 0059). */
+  quote: string | null;
   correlationId: string | null;
   recipient: string | null;
   personaId: string | null;
@@ -347,6 +354,7 @@ export type Scheduled = {
   createdAt: string;
   updatedAt: string;
   replyTo?: number;
+  quote?: string;
   correlationId?: string;
   to?: string;
   personaId?: string;
@@ -368,6 +376,7 @@ function toScheduled(row: ScheduledRow, tenant: string): Scheduled {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...(row.replyTo === null ? {} : { replyTo: row.replyTo }),
+    ...(row.quote == null ? {} : { quote: row.quote }),
     ...(row.correlationId === null ? {} : { correlationId: row.correlationId }),
     ...(row.recipient === null ? {} : { to: row.recipient }),
     ...(row.personaId === null ? {} : { personaId: row.personaId }),
@@ -399,6 +408,9 @@ export function payload(username: string, text: string, type: ContentType, corre
       ? [username, text]
       : [username, text, type, replyTo ?? null, correlationId ?? null];
   if (to !== undefined) fields.push(to);
+  // A quote (ADR 0059) wraps the rest, so every send without one hashes exactly as before.
+  if (correlation.quote !== undefined)
+    return JSON.stringify([JSON.stringify(fields), { quote: correlation.quote }]);
   return JSON.stringify(fields);
 }
 
@@ -535,7 +547,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           text TEXT NOT NULL, contentType TEXT NOT NULL, sendAt TEXT NOT NULL, dueMs INTEGER NOT NULL,
           createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, replyTo INTEGER, correlationId TEXT,
           recipient TEXT, personaId TEXT, labels TEXT, key TEXT, digest TEXT NOT NULL,
-          tokenHash TEXT NOT NULL, notify INTEGER NOT NULL, failedAt TEXT, error TEXT, errorMessage TEXT
+          tokenHash TEXT NOT NULL, notify INTEGER NOT NULL, failedAt TEXT, error TEXT, errorMessage TEXT,
+          quote TEXT
         );
         CREATE INDEX IF NOT EXISTS scheduled_due ON scheduled_messages(dueMs) WHERE failedAt IS NULL;
         CREATE INDEX IF NOT EXISTS scheduled_channel ON scheduled_messages(channel, dueMs);
@@ -576,6 +589,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["messages", "editedAt", "TEXT"],
         ["messages", "editSeq", "INTEGER"],
         ["usage", "edits", "INTEGER NOT NULL DEFAULT 0"],
+        // Quotes in replies (ADR 0059): NULL quotes nothing. Additive, so no schema_version step.
+        ["messages", "quote", "TEXT"],
+        // A scheduled reply's quote (ADR 0059/0060), for tables made before quotes existed.
+        ["scheduled_messages", "quote", "TEXT"],
       ]) {
         if (
           !ctx.storage.sql
@@ -838,6 +855,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           row.contentType,
           {
             ...(row.replyTo === null ? {} : { replyTo: row.replyTo }),
+            ...(row.quote == null ? {} : { quote: row.quote }),
             ...(row.correlationId === null ? {} : { correlationId: row.correlationId }),
             ...(row.recipient === null ? {} : { to: row.recipient }),
           },
@@ -2301,7 +2319,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           "edit_quota",
           "Edit limit reached (100,000 lifetime edits). Contact the administrator.",
         );
-      const bytes = new TextEncoder().encode(row.username + edit.text).length;
+      // A quote is part of the stored content (ADR 0059); an edit keeps it.
+      const bytes = new TextEncoder().encode(row.username + edit.text + (row.quote ?? "")).length;
       if (usage.bytes - oldBytes + bytes > MAX_CONTENT_BYTES)
         throw new HttpError(
           409,
@@ -2752,8 +2771,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       const row = this.ctx.storage.sql
         .exec<ScheduledRow>(
           `INSERT INTO scheduled_messages(tenant, channel, username, text, contentType, sendAt, dueMs, createdAt,
-             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify, quote)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           tenant,
           channel,
           message.username,
@@ -2773,6 +2792,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           hash,
           // The owner's own messages never notify the owner, as for a send.
           capability.owner_access ? 0 : 1,
+          message.correlation.quote ?? null,
         )
         .one();
       return { body: { scheduled: toScheduled(row, tenant), replayed: false }, status: 201 };
@@ -2973,7 +2993,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             "attachment_not_found",
             "Upload each attachment to this channel first; unused uploads expire after 24 hours.",
           );
-      const bytes = new TextEncoder().encode(username + content).length;
+      const bytes = new TextEncoder().encode(username + content + (correlation.quote ?? "")).length;
       if (usage.messages >= MAX_MESSAGES || usage.bytes + bytes > MAX_CONTENT_BYTES) {
         throw new HttpError(
           409,
@@ -2984,7 +3004,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -2997,6 +3017,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           correlation.correlationId ?? null,
           correlation.to ?? null,
           personaId,
+          correlation.quote ?? null,
         )
         .one();
       this.ctx.storage.sql.exec(
@@ -4234,7 +4255,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, bytes = 0 WHERE id = ?",
               id,
             );
             this.ctx.storage.sql.exec(
@@ -4325,6 +4346,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         const correlation: Correlation = input
           ? {
               replyTo: replyTarget(input.replyTo),
+              quote: quoteText(input.quote, input.replyTo),
               correlationId: correlationId(input.correlationId),
               to: recipient(input.to),
             }
@@ -4341,13 +4363,6 @@ export class MsnDurableObject extends DurableObject<Env> {
         // The time window is checked after the idempotency lookup, so a late retry still replays.
         const sendAt =
           input?.sendAt === undefined || input.sendAt === null ? null : sendAtValue(input.sendAt);
-        // Quoted replies (ADR 0059) are not carried by the schedule yet.
-        if (sendAt && input?.quote !== undefined && input.quote !== null)
-          throw new HttpError(
-            400,
-            "invalid_send_at",
-            "A scheduled message cannot quote another message yet. Send the quote now, or schedule it without the quote.",
-          );
         if (sendAt && files.length)
           throw new HttpError(
             400,

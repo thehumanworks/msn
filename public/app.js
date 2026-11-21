@@ -5,6 +5,7 @@ import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
 import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
+import { quoteOf, quotePreview } from "./quote.js";
 import { localInput, presets, SCHEDULED_REFRESH_MS, sendAtFrom, summary, whenText } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { renderTranscript } from "./transcript.js";
@@ -128,6 +129,8 @@ function draft(connection = session, name = channel) {
       // The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
       mentionTo: null,
       replyTo: null,
+      // The part of the replyTo message this reply quotes (ADR 0059), or null.
+      quote: null,
       files: [],
       // Files a draft had before a reload; files are never stored, so they must be attached again.
       missingFiles: 0,
@@ -252,6 +255,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
       state.recipient = "";
       state.mentionTo = null;
       state.replyTo = null;
+      state.quote = null;
       state.files = [];
       state.retry = null;
     }
@@ -480,6 +484,7 @@ function showFiles(state) {
         content: state.content,
         recipient: state.recipient,
         replyTo: state.replyTo,
+        quote: state.replyTo === null ? null : state.quote,
       });
     item.textContent = kept
       ? `Send retries this message with its ${count} already uploaded · editing it needs them attached again`
@@ -580,7 +585,24 @@ function appendMessage(message, target = $("messages")) {
     reply.setAttribute("aria-label", `Reply to message #${message.id}`);
     reply.setAttribute("aria-keyshortcuts", "r");
     reply.addEventListener("click", () => replyTo(message));
-    meta.append(reply);
+    // Quote (ADR 0059): the text selected in this message, or all of it, goes above the reply.
+    const quote = document.createElement("button");
+    quote.type = "button";
+    quote.className = "quiet quote-button";
+    quote.textContent = "Quote";
+    quote.title = `Quote message #${message.id}, or the part of it you selected (q)`;
+    quote.setAttribute("aria-label", `Quote message #${message.id} in a reply`);
+    quote.setAttribute("aria-keyshortcuts", "q");
+    // A tap can clear the selection before the click; read it while it is still there.
+    quote.addEventListener("pointerdown", () => {
+      pressedSelection = selectionIn(article);
+    });
+    quote.addEventListener("click", () => {
+      const selected = pressedSelection ?? selectionIn(article);
+      pressedSelection = null;
+      quoteMessage(message, selected);
+    });
+    meta.append(reply, quote);
   }
   const content = messageContent(message, boardUpdate, structured);
   article.append(meta);
@@ -603,6 +625,21 @@ function appendMessage(message, target = $("messages")) {
       annotation.append(`${label}: `, link);
     } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
+  }
+  // The quoted part of the replyTo message (ADR 0059). Plain text; pressing it shows the source.
+  if (typeof message.quote === "string" && message.replyTo != null) {
+    const block = document.createElement("blockquote");
+    block.className = "message-quote";
+    block.cite = `#msg=${message.replyTo}`;
+    const source = document.createElement("button");
+    source.type = "button";
+    source.className = "quote-source";
+    source.textContent = message.quote;
+    source.title = `Quoted from message #${message.replyTo}. Show it`;
+    source.setAttribute("aria-label", `Quote from message #${message.replyTo}: ${message.quote}`);
+    source.addEventListener("click", () => showParent(message, article));
+    block.append(source);
+    article.append(block);
   }
   // Search hits show in full: the match may be below the fold (ADR 0050).
   article.append(...(target === $("search-results") ? [content] : foldable(content)));
@@ -1614,7 +1651,9 @@ async function openLink({ channel: name, id }) {
     }
     // A reply whose parent is not loaded quotes the parent, so the message reads in context.
     const message = state.messages.find((item) => item.id === id);
-    if (message?.replyTo != null && !logArticle(message.replyTo)) void showParent(message, article);
+    // A reply that carries a quote (ADR 0059) already shows what it answers.
+    if (message?.replyTo != null && message.quote == null && !logArticle(message.replyTo))
+      void showParent(message, article);
     for (const node of $("messages").querySelectorAll(".linked")) node.classList.remove("linked");
     article.classList.add("linked");
     showMessage(id);
@@ -2657,6 +2696,7 @@ $("send-form").addEventListener("submit", async (event) => {
   const content = $("message").value;
   const recipient = $("recipient").value;
   const replyId = state.replyTo;
+  const quote = replyId === null ? null : state.quote;
   state.content = content;
   state.recipient = recipient;
   if (!content.trim() || new TextEncoder().encode(content).length > 16384) {
@@ -2681,6 +2721,7 @@ $("send-form").addEventListener("submit", async (event) => {
           content,
           recipient,
           replyTo: replyId,
+          quote,
         })
       : null;
   state.sending = true;
@@ -2707,6 +2748,7 @@ $("send-form").addEventListener("submit", async (event) => {
           text: content,
           ...(recipient.trim() ? { to: recipient } : {}),
           ...(replyId !== null ? { replyTo: replyId } : {}),
+          ...(quote !== null ? { quote } : {}),
           ...(attachments.length ? { attachments } : {}),
           ...(sendAt ? { sendAt } : {}),
         });
@@ -2727,7 +2769,10 @@ $("send-form").addEventListener("submit", async (event) => {
       state.content = "";
       state.recipient = "";
       state.mentionTo = null;
-      if (state.replyTo === replyId) state.replyTo = null;
+      if (state.replyTo === replyId) {
+        state.replyTo = null;
+        state.quote = null;
+      }
       // A closed @ belonged to the sent text; the next message's @ opens the list again.
       mention.dismissed = -1;
     }
@@ -3439,7 +3484,11 @@ if ("serviceWorker" in navigator)
  */
 function showReplyTo(state) {
   const id = state?.replyTo ?? null;
+  const quote = id === null ? null : (state.quote ?? null);
   $("reply-note").hidden = id === null;
+  $("quote-note").hidden = quote === null;
+  $("quote-note-text").textContent = quote === null ? "" : quotePreview(quote);
+  $("quote-note-text").title = quote ?? "";
   if (id === null) {
     $("reply-note-text").textContent = "";
     return;
@@ -3461,6 +3510,8 @@ function canPost() {
 function replyTo(message) {
   if (!canPost()) return;
   const state = draft();
+  // A quote belongs to the message it came from; replying to another message drops it.
+  if (state.replyTo !== message.id) state.quote = null;
   state.replyTo = message.id;
   showReplyTo(state);
   keepDraft();
@@ -3468,9 +3519,65 @@ function replyTo(message) {
   $("message").focus();
 }
 
+/*
+ * Quote in a reply (ADR 0059). Quote replies to the message with the text selected inside it, or
+ * with all of its text when nothing in it is selected. The quote is kept with the draft.
+ */
+let pressedSelection = null;
+
+/** The text selected inside one message's body, or null. */
+function selectionIn(article) {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  const body = article?.querySelector(":scope > .message-body");
+  if (!body) return null;
+  const range = selection.getRangeAt(0);
+  if (!body.contains(range.startContainer) || !body.contains(range.endContainer)) return null;
+  return quoteOf(selection.toString());
+}
+
+/** The log message whose body holds the current selection, with that text. */
+function selectedText() {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
+  const node = selection.getRangeAt(0).startContainer;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const article = element?.closest?.("#messages article");
+  const text = article ? selectionIn(article) : null;
+  if (!text) return null;
+  const id = Number(article.dataset.id);
+  const message = session?.channels.get(channel)?.messages.find((item) => item.id === id);
+  return message ? { message, text } : null;
+}
+
+function quoteMessage(message, selected = null) {
+  if (!canPost()) return;
+  const quote = selected ?? quoteOf(message.text);
+  if (quote === null) return status("This message has no text to quote.", true);
+  replyTo(message);
+  const state = draft();
+  if (state.replyTo !== message.id) return;
+  state.quote = quote;
+  showReplyTo(state);
+  keepDraft();
+}
+
+function removeQuote() {
+  if (!session || !channel || draft().quote === null) return false;
+  draft().quote = null;
+  showReplyTo(draft());
+  keepDraft();
+  return true;
+}
+$("quote-remove").addEventListener("click", () => {
+  removeQuote();
+  $("message").focus();
+});
+
 function cancelReply() {
   if (!session || !channel || draft().replyTo === null) return false;
   draft().replyTo = null;
+  draft().quote = null;
   showReplyTo(draft());
   keepDraft();
   return true;
@@ -3609,6 +3716,15 @@ document.addEventListener("keydown", (event) => {
     if (!message) return status("Choose a message with j or k first, then press r to reply.");
     event.preventDefault();
     replyTo(message);
+  } else if (action === "quote") {
+    if (!canPost()) return;
+    // Text selected inside a message wins; else the message chosen with j or k, quoted whole.
+    const picked = selectedText();
+    const message = picked?.message ?? selectedMessage();
+    if (!message)
+      return status("Select text in a message, or choose one with j or k, then press q to quote.");
+    event.preventDefault();
+    quoteMessage(message, picked?.text ?? null);
   }
 });
 

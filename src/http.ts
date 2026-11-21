@@ -154,6 +154,20 @@ export function replyTarget(value: unknown): number | undefined {
   return value;
 }
 
+/** Longest quote a reply may carry (ADR 0059), in UTF-8 bytes. */
+export const MAX_QUOTE_BYTES = 2048;
+
+/**
+ * Optional `quote` body field (ADR 0059): the part of the replyTo message a reply answers.
+ * Absent/null means none. It needs a replyTo, so a quote always names the message it comes from.
+ */
+export function quoteText(value: unknown, replyTo: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (replyTo === undefined || replyTo === null)
+    throw new HttpError(400, "invalid_quote", "quote needs replyTo: name the message it comes from.");
+  return text(value, "quote", MAX_QUOTE_BYTES, "invalid_quote");
+}
+
 /** Optional `correlationId` body field: absent/null means unset; otherwise opaque text ≤ 128 bytes. */
 export function correlationId(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;

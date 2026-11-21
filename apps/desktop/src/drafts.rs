@@ -3,7 +3,7 @@
 //! The file lives beside the read marks (ADR 0045):
 //! `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/desktop-drafts/<reader-hash>.json`, mode 0600 in
 //! a 0700 directory, written atomically (a temporary file renamed over the old one). It holds
-//! `{"reader": name, "drafts": [[channel, {"text", "to", "replyTo"}], …]}`, least recently
+//! `{"reader": name, "drafts": [[channel, {"text", "to", "replyTo", "quote"?}], …]}`, least recently
 //! changed first; at most `MAX_DRAFTS` boards are kept. It never holds a key, and nothing in it
 //! goes to the server. A message that failed to send is not a draft: it stays in the pending list
 //! with its retry key for this run only, so a restart can never send it twice.
@@ -31,11 +31,17 @@ pub struct Draft {
     pub to: String,
     #[serde(rename = "replyTo")]
     pub reply_to: String,
+    /// The reply's quote (ADR 0059); left out of the file when empty, so older files still load.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quote: String,
 }
 
 impl Draft {
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.to.is_empty() && self.reply_to.is_empty()
+        self.text.is_empty()
+            && self.to.is_empty()
+            && self.reply_to.is_empty()
+            && self.quote.is_empty()
     }
 
     /// Small enough to write down; a longer draft stays in memory for this run.
@@ -44,6 +50,7 @@ impl Draft {
             && self.text.len() <= MAX_TEXT_BYTES
             && self.to.len() <= MAX_TO_BYTES
             && self.reply_to.len() <= MAX_REPLY_TO_BYTES
+            && self.quote.len() <= crate::quote::MAX_QUOTE_BYTES
     }
 }
 
@@ -179,7 +186,31 @@ mod tests {
             text: text.into(),
             to: to.into(),
             reply_to: reply_to.into(),
+            quote: String::new(),
         }
+    }
+
+    #[test]
+    fn a_quote_is_kept_with_its_draft_and_old_files_still_load() {
+        // Quote in a reply (ADR 0059).
+        let quoted = Draft {
+            quote: "Ship it?".into(),
+            ..draft("yes", "", "3")
+        };
+        let text = serde_json::to_string(&quoted).unwrap();
+        assert_eq!(serde_json::from_str::<Draft>(&text).unwrap(), quoted);
+        let old: Draft = serde_json::from_str(r#"{"text":"a","to":"","replyTo":"3"}"#).unwrap();
+        assert_eq!(old.quote, "");
+        assert!(
+            !serde_json::to_string(&draft("a", "", ""))
+                .unwrap()
+                .contains("quote")
+        );
+        let too_long = Draft {
+            quote: "x".repeat(2049),
+            ..draft("yes", "", "3")
+        };
+        assert!(!too_long.storable());
     }
 
     #[test]

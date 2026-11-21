@@ -188,6 +188,60 @@ describe("send a message later (ADR 0060)", () => {
     expect(await f.alarm()).toBeNull();
   });
 
+  it("carries a reply's quote through the schedule, a text change and posting", async () => {
+    const f = await fixture();
+    const source = await call(f.tenant, "/channels/work/messages", f.agent, "POST", {
+      username: "dev",
+      text: "Review the ADR. Then tag the CLI.",
+    });
+    const parent = ((await source.json()) as { message: Message }).message;
+    const input = {
+      username: "lead",
+      text: "Will tag it.",
+      replyTo: parent.id,
+      quote: "Then tag the CLI.",
+      sendAt: later(),
+    };
+    const headers = { "Idempotency-Key": "sched-quote" };
+    const first = await call(f.tenant, "/channels/work/messages", f.agent, "POST", input, headers);
+    expect(first.status).toBe(201);
+    const scheduled = ((await first.json()) as { scheduled: Scheduled & { quote?: string } }).scheduled;
+    expect(scheduled).toMatchObject({ replyTo: parent.id, quote: "Then tag the CLI." });
+    // The quote is part of the digest, as for a direct send.
+    const other = await call(
+      f.tenant,
+      "/channels/work/messages",
+      f.agent,
+      "POST",
+      { ...input, quote: "Review the ADR." },
+      headers,
+    );
+    expect(other.status).toBe(409);
+    // A text change keeps the quote.
+    const changed = await call(f.tenant, `/channels/work/scheduled/${scheduled.id}`, f.agent, "PATCH", {
+      username: "lead",
+      text: "Tagging it now.",
+    });
+    expect(changed.status).toBe(200);
+    expect(((await changed.json()) as { scheduled: { quote?: string } }).scheduled.quote).toBe(
+      "Then tag the CLI.",
+    );
+    await f.arrive();
+    const posted = (await f.messages()).find((m) => m.username === "lead") as Message & {
+      replyTo?: number;
+      quote?: string;
+    };
+    expect(posted).toMatchObject({ text: "Tagging it now.", replyTo: parent.id, quote: "Then tag the CLI." });
+    // A quote still needs replyTo when scheduled.
+    const lone = await call(f.tenant, "/channels/work/messages", f.agent, "POST", {
+      username: "lead",
+      text: "x",
+      quote: "y",
+      sendAt: later(),
+    });
+    expect(lone.status).toBe(400);
+  });
+
   it("keeps the alarm set when one alarm job throws", async () => {
     const f = await fixture();
     const scheduled = await f.schedule("still armed");

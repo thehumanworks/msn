@@ -51,6 +51,8 @@ pub struct PendingSend {
     pub channel: String,
     pub text: String,
     pub reply_to: Option<u64>,
+    /// The part of the reply_to message this reply quotes (ADR 0059).
+    pub quote: Option<String>,
     pub correlation_id: Option<String>,
     pub to: Option<String>,
     pub error: Option<String>,
@@ -459,6 +461,7 @@ impl AppState {
         text: String,
         when: &str,
         reply_to: Option<u64>,
+        quote: Option<String>,
         to: Option<String>,
     ) -> Result<Command, String> {
         let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
@@ -485,6 +488,7 @@ impl AppState {
             key: uuid::Uuid::new_v4().to_string(),
             send_at,
             reply_to,
+            quote,
             to,
         })
     }
@@ -2218,19 +2222,24 @@ mod tests {
         let mut state = ready_state(1);
         state.select_channel("general".into());
         synced(&mut state, vec![msg(4, "a")], 4, 0);
-        assert!(state.schedule("  ".into(), "1h", None, None).is_err());
+        assert!(state.schedule("  ".into(), "1h", None, None, None).is_err());
         assert!(
             state
-                .schedule("hi".into(), "2026-11-21T09:00", None, None)
+                .schedule("hi".into(), "2026-11-21T09:00", None, None, None)
                 .is_err()
         );
         let Ok(Command::Schedule {
-            send_at, text, key, ..
-        }) = state.schedule("hi".into(), "1h", Some(4), None)
+            send_at,
+            text,
+            key,
+            quote,
+            ..
+        }) = state.schedule("hi".into(), "1h", Some(4), Some("a".into()), None)
         else {
             panic!("expected a schedule command");
         };
         assert_eq!(text, "hi");
+        assert_eq!(quote.as_deref(), Some("a"));
         assert!(send_at.ends_with('Z'));
         assert!(!key.is_empty());
         let Some(Command::LoadScheduled { .. }) = state.scheduled_command() else {
@@ -2605,6 +2614,7 @@ mod tests {
                 channel: "general".into(),
                 text: "hello".into(),
                 reply_to: Some(3),
+                quote: None,
                 correlation_id: None,
                 to: Some("bob".into()),
                 error: None,
@@ -2642,6 +2652,7 @@ mod tests {
                 channel: "general".into(),
                 text: "hello".into(),
                 reply_to: None,
+                quote: None,
                 correlation_id: None,
                 to: None,
                 error: None,
@@ -2656,6 +2667,7 @@ mod tests {
             text: "hello".into(),
             key: "k".into(),
             reply_to: None,
+            quote: None,
             correlation_id: None,
             to: None,
         });

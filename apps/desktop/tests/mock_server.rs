@@ -415,6 +415,7 @@ fn commands_from_an_old_generation_never_execute() {
             text: "should never be sent".into(),
             key: "old-key".into(),
             reply_to: None,
+            quote: None,
             correlation_id: None,
             to: None,
         })
@@ -616,6 +617,7 @@ fn a_full_command_queue_hands_the_command_back_with_its_payload() {
             text: format!("payload {accepted}"),
             key: format!("key-{accepted}"),
             reply_to: Some(7),
+            quote: None,
             correlation_id: None,
             to: Some("bob".into()),
         };

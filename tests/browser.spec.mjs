@@ -2150,6 +2150,11 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
     headers: t.headers,
     data: { username: "agent", text: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n") },
   });
+  // A reply that quotes the first message (ADR 0059).
+  await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: "on it", replyTo: 1, quote: "labelled" },
+  });
   const small = () =>
     page.evaluate(() => {
       const out = [];
@@ -2172,17 +2177,30 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
   await page.getByText("Your access details").click();
   expect(await small()).toEqual([]);
   await openChannel(page, "general");
-  await expect(page.locator(".message")).toHaveCount(2);
+  await expect(page.locator(".message")).toHaveCount(3);
   await expect(page.locator(".label-chip")).toHaveCount(1);
   expect(await small()).toEqual([]);
-  for (const [opener, close] of [
-    ["#board-settings", "#close-board"],
-    ["#invite-channel", "#close-invite"],
-    ["#agents", "#close-agents"],
+  // An open thread with a quoted reply, and a composer replying with a quote (ADR 0059).
+  await page.locator(".thread-toggle").first().click();
+  await expect(page.locator(".message-quote")).toBeVisible();
+  await page.getByRole("button", { name: "Quote message #1 in a reply" }).click();
+  await expect(page.locator("#quote-note")).toBeVisible();
+  expect(await small()).toEqual([]);
+  await page.locator("#reply-cancel").click();
+  // Each dialog opens only after its data loads. Measure once it is open and filled in, or the
+  // check races the open and sees no dialog controls at all.
+  for (const [opener, dialog, ready, close] of [
+    ["#board-settings", "#board-dialog", "#board-goal", "#close-board"],
+    ["#invite-channel", "#invite-dialog", "#copy-invite", "#close-invite"],
+    ["#agents", "#agents-dialog", "#agents-list li", "#close-agents"],
   ]) {
     await page.locator(opener).click();
+    await expect(page.locator(dialog)).toHaveJSProperty("open", true);
+    await expect(page.locator(ready).first()).toBeVisible();
+    await expect(page.locator(close)).toBeVisible();
     expect(await small()).toEqual([]);
     await page.locator(close).click();
+    await expect(page.locator(dialog)).toHaveJSProperty("open", false);
   }
 });
 
@@ -3771,7 +3789,7 @@ test("keyboard shortcuts move between messages, reply, search, open the board li
   // ? opens the help sheet; Escape closes it.
   await page.keyboard.press("?");
   await expect(page.locator("#keys-dialog")).toBeVisible();
-  await expect(page.locator("#keys-list kbd")).toHaveCount(8);
+  await expect(page.locator("#keys-list kbd")).toHaveCount(9);
   await page.screenshot({ path: testInfo.outputPath("keys-help.png") });
   await page.keyboard.press("Escape");
   await expect(page.locator("#keys-dialog")).not.toBeVisible();
@@ -3896,6 +3914,141 @@ test("on an archived board j and k still move but r never starts a reply", async
   await page.keyboard.press("r");
   await expect(page.locator("#reply-note")).toBeHidden();
   await expect(page.locator("#message")).not.toBeFocused();
+  // Nor does Quote (ADR 0059).
+  await expect(page.locator(`#messages article[data-id="${id}"] .quote-button`)).toBeHidden();
+  await page.keyboard.press("q");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await expect(page.locator("#quote-note")).toBeHidden();
+});
+
+test("quote the selected part, or all, of a message in a reply; the reply shows it and links back (ADR 0059)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const sent = await request.post(`${t.path}/channels/work/messages`, {
+    headers: t.headers,
+    data: { username: "lead", text: "Ship the Worker today.\n\nThen tag the **CLI**." },
+  });
+  const root = (await sent.json()).message.id;
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const row = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  await expect(row(root)).toBeVisible();
+  // Select the second paragraph as rendered, then press Quote on that message.
+  // Select `text` as rendered inside one message's body, across inline elements.
+  const select = (id, text) =>
+    page.evaluate(
+      ([id, text]) => {
+        const body = document.querySelector(`#messages article[data-id="${id}"] > .message-body`);
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        let all = "";
+        while (walker.nextNode()) {
+          nodes.push([walker.currentNode, all.length]);
+          all += walker.currentNode.data;
+        }
+        const from = all.indexOf(text);
+        const to = from + text.length;
+        const at = (offset) => {
+          const [node, base] = nodes.findLast(([, base]) => base <= offset);
+          return [node, offset - base];
+        };
+        const range = document.createRange();
+        range.setStart(...at(from));
+        range.setEnd(...at(to));
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      },
+      [id, text],
+    );
+  await select(root, "Then tag the CLI.");
+  await row(root)
+    .getByRole("button", { name: `Quote message #${root} in a reply` })
+    .click();
+  await expect(page.locator("#reply-note-text")).toHaveText(`Replying to #${root} · lead`);
+  await expect(page.locator("#quote-note")).toBeVisible();
+  await expect(page.locator("#quote-note-text")).toHaveText("Then tag the CLI.");
+  await expect(page.locator("#message")).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath("quote-compose.png") });
+  await page.locator("#message").fill("Tagging v0.2 now");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await expect(page.locator("#quote-note")).toBeHidden();
+  let history = (await (await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })).json())
+    .messages;
+  expect(history.at(-1)).toMatchObject({
+    text: "Tagging v0.2 now",
+    replyTo: root,
+    quote: "Then tag the CLI.",
+    username: "human",
+  });
+  const reply = page.locator(`#thread-${root} article`).filter({ hasText: "Tagging v0.2 now" });
+  await expect(reply.locator(".message-quote")).toHaveText("Then tag the CLI.");
+  await page.screenshot({ path: testInfo.outputPath("quote-reply.png") });
+  // The quote links back: pressing it shows and highlights the source message.
+  await reply.locator(".quote-source").click();
+  await expect(row(root)).toHaveClass(/flash/);
+
+  // With nothing selected, Quote takes the whole message; removing the quote keeps the reply.
+  await page.evaluate(() => window.getSelection().removeAllRanges());
+  await row(root)
+    .getByRole("button", { name: `Quote message #${root} in a reply` })
+    .click();
+  await expect(page.locator("#quote-note-text")).toHaveText("Ship the Worker today. Then tag the **CLI**.");
+  await page.locator("#quote-remove").click();
+  await expect(page.locator("#quote-note")).toBeHidden();
+  await expect(page.locator("#reply-note")).toBeVisible();
+
+  // A quote is part of the kept draft: it comes back after a reload.
+  await select(root, "Ship the Worker today.");
+  await row(root)
+    .getByRole("button", { name: `Quote message #${root} in a reply` })
+    .click();
+  await expect(page.locator("#quote-note-text")).toHaveText("Ship the Worker today.");
+  await page.waitForTimeout(600);
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# work");
+  await openChannel(page, "work");
+  await expect(page.locator("#quote-note-text")).toHaveText("Ship the Worker today.");
+  // Replying to another message drops the quote, which belonged to the first one.
+  await row(root).locator(".thread-toggle").click();
+  await reply.getByRole("button", { name: /^Reply to message/ }).click();
+  await expect(page.locator("#quote-note")).toBeHidden();
+  await page.locator("#reply-cancel").click();
+
+  // q quotes the text selected in a message, without choosing the message first.
+  await page.evaluate(() => document.activeElement?.blur());
+  await select(root, "Then tag the CLI.");
+  await page.keyboard.press("q");
+  await expect(page.locator("#reply-note-text")).toHaveText(`Replying to #${root} · lead`);
+  await expect(page.locator("#quote-note-text")).toHaveText("Then tag the CLI.");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#reply-note")).toBeHidden();
+  await expect(page.locator("#quote-note")).toBeHidden();
+
+  // A quote from another client is plain text, never markup.
+  const hostile = await request.post(`${t.path}/channels/work/messages`, {
+    headers: t.headers,
+    data: {
+      username: "lead",
+      text: "see above",
+      replyTo: root,
+      quote: '<img src=x onerror="window.pwned=1">',
+    },
+  });
+  expect(hostile.status()).toBe(201);
+  const hostileId = (await hostile.json()).message.id;
+  await expect(page.locator(`article[data-id="${hostileId}"] .message-quote`)).toHaveText(
+    '<img src=x onerror="window.pwned=1">',
+  );
+  expect(await page.locator(`article[data-id="${hostileId}"] .message-quote img`).count()).toBe(0);
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+  history = (await (await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })).json())
+    .messages;
+  expect(history.length).toBe(3);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("typing @ suggests the board's people; a pick writes @name and fills an empty To (ADR 0055)", async ({

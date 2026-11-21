@@ -15,6 +15,7 @@ const memory = (fields = {}) => ({
   content: "",
   recipient: "",
   replyTo: null,
+  quote: null,
   files: [],
   missingFiles: 0,
   retry: null,
@@ -35,7 +36,15 @@ test("a draft round-trips with its recipient, reply target and retry key, never 
   const text = JSON.stringify(stored);
   assert.ok(!text.includes("a.txt"), "file names and contents are not stored");
   const parsed = parseDrafts(text);
-  assert.deepEqual(parsed[key], { content: "hi", recipient: "worker", replyTo: 7, files: 1, retry, at: 123 });
+  assert.deepEqual(parsed[key], {
+    content: "hi",
+    recipient: "worker",
+    replyTo: 7,
+    quote: null,
+    files: 1,
+    retry,
+    at: 123,
+  });
   assert.deepEqual(
     restoreDraft(parsed[key]),
     memory({ content: "hi", recipient: "worker", replyTo: 7, missingFiles: 1, retry }),
@@ -93,6 +102,8 @@ test("malformed stored values are dropped entry by entry", () => {
       "a\nbad-type": { ...good, content: 5 },
       "a\nempty": { ...good, content: "" },
       "a\ntoken": { ...good, token: "secret" },
+      "a\nbad-quote": { ...good, replyTo: 3, quote: 7 },
+      "a\nlong-quote": { ...good, replyTo: 3, quote: "x".repeat(2049) },
     }),
   );
   assert.deepEqual(Object.keys(parsed), ["a\ngood", "a\ntoken"]);
@@ -122,6 +133,7 @@ test("an unchanged uncertain send keeps its uploaded files; any change does not"
   assert.equal(unchangedRetryFiles(retry, { ...now, recipient: "" }), null);
   assert.equal(unchangedRetryFiles(retry, { ...now, replyTo: null }), null);
   assert.equal(unchangedRetryFiles(retry, { ...now, username: "Tom" }), null);
+  assert.equal(unchangedRetryFiles(retry, { ...now, quote: "a line" }), null);
   assert.equal(unchangedRetryFiles(null, now), null);
   assert.equal(unchangedRetryFiles({ payload: "nope", key: "k" }, now), null);
   const noFiles = {
@@ -129,4 +141,17 @@ test("an unchanged uncertain send keeps its uploaded files; any change does not"
     key: "k",
   };
   assert.equal(unchangedRetryFiles(noFiles, now), null);
+});
+
+test("a reply's quote is kept with its reply target (ADR 0059)", () => {
+  const key = markId("Tomas", "general");
+  const stored = putDraft({}, key, memory({ content: "yes", replyTo: 7, quote: "Ship it?" }));
+  const parsed = parseDrafts(JSON.stringify(stored));
+  assert.equal(parsed[key].quote, "Ship it?");
+  assert.equal(restoreDraft(parsed[key]).quote, "Ship it?");
+  // Drafts kept before quotes existed have no quote field and still load.
+  const old = { content: "ok", recipient: "", replyTo: 7, files: 0, retry: null, at: 1 };
+  assert.equal(parseDrafts(JSON.stringify({ [key]: old }))[key].quote, null);
+  // A quote without a reply target is dropped, not sent on its own.
+  assert.equal(putDraft({}, key, memory({ content: "x", quote: "orphan" }))[key].quote, null);
 });
