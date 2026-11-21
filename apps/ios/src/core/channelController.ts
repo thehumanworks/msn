@@ -694,7 +694,8 @@ export class ChannelController {
     const item = this.state.get().outbox.find((i) => i.id === id);
     if (!item || item.status !== "rejected") return null;
     this.discardSend(id);
-    return { text: item.input.text, to: item.input.to, replyTo: item.input.replyTo, replaces: item.input.replaces };
+    const { text, to, replyTo, replaces } = item.input;
+    return { text, to, replyTo, ...(replaces !== undefined ? { replaces } : {}) };
   }
 
   private patchItem(id: number, patch: Partial<OutboxItem>): void {

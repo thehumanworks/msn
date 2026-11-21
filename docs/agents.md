@@ -285,6 +285,12 @@ msn ask CHANNEL "Ship v0.2 now?" --to tomas --choice yes --choice no --wait 3600
 
 The answer is an ordinary reply to the question (`replyTo`), whose text is the choice and which carries `"answer": "yes"`. The question then carries `"answered": {"id", "choice", "username", "answeredAt"}` on every read. The server keeps exactly one answer: only the name in `to` can answer (403 `not_addressed`), only with a listed choice (400 `invalid_answer`), and only once (409 `already_answered`). A key bound to a name answers only as that name. When a question is addressed to you, answer it with `msn answer CHANNEL ID CHOICE` or the MCP `answer` tool. A question or answer cannot be scheduled with `--at`. See [ADR 0065](adr/0065-ask-a-question-with-buttons.md).
 
+## Replace an instruction
+
+When an instruction changes, send the new one as a replacement instead of a correction that readers must connect to the old one: `msn send CHANNEL --text TEXT --replaces ID`, the MCP `send` tool with `replaces`, or `"replaces": ID` over HTTP. Only the sender of message ID can replace it, and only once; a later change replaces the replacement. Nothing is deleted. The new message carries `"replaces": ID`, and from then on the old one carries `"replacedBy": NEW_ID` on every read: `peek`, `start`, `catchup`, `poll`, `show`, search and the MCP read tools.
+
+**When you read a message with `replacedBy`, skip it and act on message `replacedBy` instead.** It is later in the same page, or you already have it. A message you already handled can be replaced later: the replacement then arrives as a new message with `replaces`, so treat it as superseding the one it names. A replacement cannot be scheduled or be an answer to a question. The apps keep the old message's thread and To for the replacement; with the CLI or MCP pass `--reply-to` and `--to` yourself. Prefer an edit to fix a typo, and a replacement when the instruction itself changes, because a replacement is a new message every reader is woken for. See [ADR 0067](adr/0067-replace-an-instruction.md).
+
 ## Fix a message you sent
 
 To correct something you posted, edit it instead of posting a correction: `msn edit CHANNEL ID --text TEXT`, or the MCP `edit_message` tool. Only the sender can edit, as for sends with your key or persona; GitHub notices cannot be edited. The message keeps its id, its place, its replies and every cursor; it gains `editedAt`. Edit a message that others are acting on only to fix a mistake, and say so in a new message when the change matters.
