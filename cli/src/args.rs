@@ -860,7 +860,7 @@ pub enum Command {
         /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
         #[arg(long = "label", value_name = "FILTER")]
         labels: Vec<String>,
-        /// Only messages older than this id; pass the previous page's nextBefore
+        /// Only messages older than this id; pass the previous page's nextBefore while hasMore is true (a page can be short or empty before the last one)
         #[arg(long)]
         before: Option<String>,
         /// Page size, 1–100 (default 20)

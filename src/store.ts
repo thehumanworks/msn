@@ -4388,11 +4388,11 @@ export class MsnDurableObject extends DurableObject<Env> {
     // newest first. The walk is bounded: one request reads at most searchScanWindow ids.
     let floor = 0;
     if (everyBoard && !scope && !match) {
-      const top =
-        before === Number.MAX_SAFE_INTEGER
-          ? (this.ctx.storage.sql.exec<{ top: number | null }>("SELECT MAX(id) AS top FROM messages").one()
-              .top ?? 0) + 1
-          : before;
+      // Never above the newest message, so a huge `before` cannot ask for a run of empty windows.
+      const newest =
+        this.ctx.storage.sql.exec<{ top: number | null }>("SELECT MAX(id) AS top FROM messages").one().top ??
+        0;
+      const top = Math.min(before, newest + 1);
       floor = Math.max(0, top - this.searchScanWindow);
       where.push("m.id >= ?");
       bindings.push(floor);

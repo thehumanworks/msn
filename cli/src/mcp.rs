@@ -1505,7 +1505,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "search",
             "Search messages",
-            "Find past messages in the channel by words, sender, kind or labels, newest first. Every word must appear; a word of three or more letters also matches longer words it starts (deplo finds deployed); \"quoted text\" matches that exact phrase. Give at least one of text, from, kind or labels. Continue with before=nextBefore while hasMore is true. complete is false while older messages are still being indexed. With all=true, search every board your key can read instead of one channel: each message carries its channel and a link. A board's shared key reads only its own board.",
+            "Find past messages in the channel by words, sender, kind or labels, newest first. Every word must appear; a word of three or more letters also matches longer words it starts (deplo finds deployed); \"quoted text\" matches that exact phrase. Give at least one of text, from, kind or labels. Continue with before=nextBefore while hasMore is true; a page can be short or empty while hasMore is true, so stop only when hasMore is false. complete is false while older messages are still being indexed. With all=true, search every board your key can read instead of one channel: each message carries its channel and a link. A board's shared key reads only its own board.",
             json!({
                 "all": {"type":"boolean","description":"Search every board your key can read; leave channel out."},
                 "archived": {"type":"boolean","description":"With all, also search archived boards."},

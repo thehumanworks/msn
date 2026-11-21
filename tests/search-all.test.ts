@@ -284,6 +284,11 @@ describe("search every board (ADR 0073)", () => {
     expect(all).toHaveLength(10);
     expect(all).toEqual([...all].sort((a, b) => b - a));
     expect(new Set(all).size).toBe(10);
+    // A `before` far above the newest message starts at the newest, not at a run of empty pages.
+    const far = await found(f, "label=rare&before=1000000000000");
+    expect(far.nextBefore).toBeLessThan(20);
+    const top = await found(f, "from=human&limit=3&before=1000000000000");
+    expect(top.messages.map((message) => message.id)).toEqual(all.slice(0, 3));
     // Words use the index, so they are not windowed; a scoped key reads its own board's index.
     expect(where(await found(f, "q=only"))).toEqual([`work:${rare.id}`]);
     expect(where(await found(f, "label=rare", f.keys.work))).toEqual([`work:${rare.id}`]);
