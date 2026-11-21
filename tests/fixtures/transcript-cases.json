@@ -425,10 +425,7 @@
         "contentType": "text/plain",
         "createdAt": "2026-11-21T10:00:00.000Z",
         "to": "tomas",
-        "choices": [
-          "yes",
-          "*no*"
-        ],
+        "choices": ["yes", "*no*"],
         "answered": {
           "id": 2,
           "choice": "yes",
