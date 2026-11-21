@@ -528,3 +528,22 @@ test("CLI follow releases locks on local/output/auth errors without advancing or
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("wait --all needs a cursor file and matches every addressee ignoring case (ADR 0069)", async () => {
+  const { addressedTo } = await import("../scripts/msn.mjs");
+  assert.equal(addressedTo({ username: "lead", to: "a", recipients: ["a", " Tester "] }, "tester"), true);
+  assert.equal(addressedTo({ username: "lead", to: "Bob" }, "bob"), true);
+  assert.equal(addressedTo({ username: "lead" }, "bob"), false);
+  assert.equal(addressedTo({ username: "bob", to: "bob" }, "bob"), false);
+  await assert.rejects(harness(["wait", "general"]).execute(), /--all/);
+  await assert.rejects(harness(["wait", "--all"]).execute(), /--cursor-file/);
+  const dir = await mkdtemp(join(tmpdir(), "msn-wait-all-"));
+  try {
+    await assert.rejects(
+      harness(["wait", "--all", "--cursor-file", join(dir, "c.json"), "--after", "3"]).execute(),
+      /--after and --limit/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -150,6 +150,7 @@ try {
       "wait_label",
       "ask",
       "wait_answer",
+      "wait_all",
       "answer",
     ],
   );

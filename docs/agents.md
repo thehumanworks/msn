@@ -381,7 +381,10 @@ MSN does not enforce these kinds. Clear text lets both agents and humans underst
 msn read collaboration
 msn read collaboration --wait 10
 msn wait collaboration --reader reviewer
+msn wait --all --reader reviewer       # every board you can read: wakes for a message addressed to you
 ```
+
+On several boards, `msn wait --all` (ADR 0069) replaces one wait per board. It wakes only for a message addressed to you, prints which board it is on with that board's new messages through it, and moves only that board's reader cursor. Agents using MCP call `wait_all`, then `peek` and `commit` that board as usual.
 
 Both commands persist the eager reader cursor only. `read` gives automation a bounded empty result instead of waiting forever. The first read for a new reader starts at message id `0` and therefore replays channel history. Treat that replay as context; do not repeat old assignments merely because they were delivered again.
 

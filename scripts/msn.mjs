@@ -4,6 +4,7 @@ import { lstat, open, readFile, realpath, rename, unlink, writeFile } from "node
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { addressees } from "./host/protocol.mjs";
 
 export const help = `msn — channel messaging for agents and humans (Node 22+)
 
@@ -18,6 +19,7 @@ node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME ...] [--key RETR
 node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
+node scripts/msn.mjs wait --all --cursor-file ./boards.json [--username NAME] [--wait 25]
 node scripts/msn.mjs provision TENANT [--username NAME | --username-prefix PREFIX]
 node scripts/msn.mjs rotate TENANT [--username NAME | --username-prefix PREFIX | --unbind]
 node scripts/msn.mjs keys
@@ -27,6 +29,9 @@ node scripts/msn.mjs delete CHANNEL MESSAGE_ID
 
 poll defaults to wait=0; repeat a cursor to reread surviving messages.
 follow prints one JSON message per line; cursor files are tenant/channel/server-bound.
+wait --all blocks until a message addressed to you (--username, MSN_USERNAME or the key's name)
+arrives on any board, prints {channel, message, messages, nextCursor} and moves only that board's
+cursor in the --cursor-file, which keeps one cursor per board (a new board starts at 0).
 Send retries MUST reuse --key after an uncertain result (printed to stderr).
 --reply-to (same-channel message id), --quote (with --reply-to: the part of that message you answer)
 and --correlation-id (opaque, <=128 bytes) are optional
@@ -124,6 +129,7 @@ export async function run({
       username: { type: "string" },
       "username-prefix": { type: "string" },
       unbind: { type: "boolean" },
+      all: { type: "boolean" },
     },
   });
   if (values.help || !positionals.length) {
@@ -146,13 +152,20 @@ export async function run({
       "send",
       "poll",
       "follow",
+      "wait",
       "provision",
       "rotate",
       "delete",
     ].includes(command)
   )
     throw new Error(`Unknown command: ${command}`);
-  const expected = ["channels", "whoami", "keys"].includes(command) ? 1 : command === "delete" ? 3 : 2;
+  if (command === "wait" && !values.all)
+    throw new UsageError("wait needs --all here; use the msn CLI to wait on one board.");
+  const expected = ["channels", "whoami", "keys", "wait"].includes(command)
+    ? 1
+    : command === "delete"
+      ? 3
+      : 2;
   if (positionals.length !== expected) throw new Error("Wrong arguments. Run --help.");
   const admin = ["provision", "rotate", "delete", "keys", "key-create", "key-revoke"].includes(command);
   const token = admin ? env.MSN_ADMIN_TOKEN : (env.MSN_WORKSPACE_TOKEN ?? env.MSN_TOKEN);
@@ -231,6 +244,10 @@ export async function run({
   }
   if (command === "channels") {
     out(JSON.stringify(await request("/channels?limit=1000")));
+    return;
+  }
+  if (command === "wait") {
+    await waitAll({ request, values, env, base, tenant, out, err, signal });
     return;
   }
   const channel = slug(target);
@@ -385,6 +402,140 @@ export async function run({
         err(`Could not remove cursor lock ${lock.lockPath}: ${error.message}`),
       );
     }
+  }
+}
+
+/** A message addressed to `me` by someone else; names match trimmed and ignoring case (ADR 0069). */
+export function addressedTo(message, me) {
+  const self = me.trim().toLowerCase();
+  if (!self || message.username === me) return false;
+  return addressees(message).some((to) => to.trim().toLowerCase() === self);
+}
+
+/**
+ * `wait --all` (ADR 0069): catch every board up from its cursor, then long-poll the event feed
+ * and read only the boards it names, until a message addressed to this agent arrives.
+ */
+async function waitAll({ request, values, env, base, tenant, out, err, signal }) {
+  let file = values["cursor-file"];
+  if (!file) throw new UsageError("wait --all needs --cursor-file FILE to keep each board's cursor.");
+  if (values.after !== undefined || values.limit !== undefined)
+    throw new UsageError("wait --all keeps a cursor per board; --after and --limit do not apply.");
+  const wait = number(values.wait, 25, 25);
+  if (!wait) throw new Error("wait must be positive.");
+  let me = values.username ?? env.MSN_USERNAME;
+  if (me === undefined) {
+    const identity = await request("");
+    me = identity.username;
+    if (typeof me !== "string" || !me.trim())
+      throw new UsageError("This key has no exact username binding. Choose --username NAME.");
+  }
+  const lock = await lockCursor(file);
+  file = lock.path;
+  const binding = { server: base.origin, tenant, name: me };
+  let boards = {};
+  try {
+    try {
+      const saved = JSON.parse(await readFile(file, "utf8"));
+      if (Object.keys(binding).some((key) => saved[key] !== binding[key]))
+        throw new Error("Cursor file belongs to a different server, tenant or name.");
+      boards = saved.boards ?? {};
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    // Read the event head first, so a message sent while catching up still has a newer event.
+    let events;
+    try {
+      events = (await request("/events/head")).head;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      // A server before ADR 0069: page the journal to its end instead.
+      events = 0;
+      for (let more = true; more; ) {
+        const page = await request(`/events?after=${events}&limit=100`);
+        events = page.nextCursor;
+        more = page.hasMore;
+      }
+    }
+    const read = {};
+    const scan = async (channel) => {
+      const start = boards[channel] ?? 0;
+      let after = Math.max(start, read[channel] ?? 0);
+      for (;;) {
+        const page = await request(`/channels/${channel}/messages?after=${after}&limit=100`);
+        if (!page.messages.length && page.archived) return null;
+        const found = page.messages.findIndex((message) => addressedTo(message, me));
+        if (found >= 0) {
+          const message = page.messages[found];
+          // The board's new messages through the addressed one, as `msn wait CHANNEL` prints them.
+          const messages = [];
+          for (let from = start; from < message.id; ) {
+            const chunk = await request(`/channels/${channel}/messages?after=${from}&limit=100`);
+            messages.push(...chunk.messages.filter((m) => m.id <= message.id));
+            if (!chunk.messages.length || chunk.nextCursor <= from) break;
+            from = chunk.nextCursor;
+          }
+          return { channel, message, messages };
+        }
+        if (!page.messages.length || !page.hasMore || page.nextCursor <= after) {
+          read[channel] = Math.max(after, page.nextCursor);
+          return null;
+        }
+        after = page.nextCursor;
+      }
+    };
+    const listed = [];
+    for (let after = "", more = true; more; ) {
+      const page = await request(`/channels?limit=1000&after=${after}`);
+      listed.push(...page.channels.map((row) => row.name));
+      more = page.hasMore && page.channels.length > 0;
+      after = page.channels.at(-1)?.name ?? after;
+    }
+    let hit = null;
+    for (const channel of listed) if (!hit) hit = await scan(slug(channel));
+    let backoff = 1000;
+    while (!hit && !signal?.aborted) {
+      let page;
+      try {
+        page = await request(`/events?after=${events}&wait=${wait}&limit=100`);
+      } catch (error) {
+        if (signal?.aborted) return;
+        if (error.status && error.status < 500 && error.status !== 429) throw error;
+        err(`${error.message}; reconnecting from event ${events}`);
+        const { setTimeout } = await import("node:timers/promises");
+        try {
+          await setTimeout(backoff, undefined, { signal });
+        } catch {
+          return;
+        }
+        backoff = Math.min(backoff * 2, 15000);
+        continue;
+      }
+      backoff = 1000;
+      events = page.nextCursor;
+      const touched = [
+        ...new Set(
+          page.events
+            .filter((event) => event.type === "message.created" || event.type === "channel.created")
+            .map((event) => event.channel),
+        ),
+      ];
+      for (const channel of touched) if (!hit) hit = await scan(slug(channel));
+    }
+    if (!hit) return;
+    out(JSON.stringify({ ...hit, nextCursor: hit.message.id }));
+    const temp = `${file}.${process.pid}.tmp`;
+    try {
+      const next = { ...binding, boards: { ...boards, [hit.channel]: hit.message.id } };
+      await writeFile(temp, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+      await rename(temp, file);
+    } finally {
+      await unlink(temp).catch(() => {});
+    }
+  } finally {
+    await unlink(lock.lockPath).catch((error) =>
+      err(`Could not remove cursor lock ${lock.lockPath}: ${error.message}`),
+    );
   }
 }
 

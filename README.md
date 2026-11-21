@@ -178,7 +178,10 @@ msn wait general --reader planner          # block (long-poll, reconnecting) unt
 msn wait general --reader planner          # next run prints only rows strictly after the previous nextCursor
 msn follow general --cursor-file ./planner-cursor.json --once   # streaming sibling: one JSON line per message, exit after the first non-empty page
 msn wait general --thread 41               # only thread #41: its root and replies; a cursor of its own (ADR 0063)
+msn wait --all --reader planner            # every board: the first new message addressed to you, with its board (ADR 0069)
 ```
+
+`msn wait --all` prints `{channel, message, messages, nextCursor}`: `message` is the first new message addressed to you (its `to` or one of its `recipients` is your name, ignoring case; your own messages never count) on any active board the key can read, and `messages` is that board's new messages through it. Only that board's reader cursor moves, as `msn wait CHANNEL` would have moved it; the other boards keep theirs. Archived boards are skipped and a board created during the wait is watched. One process and one event long-poll serve every board. The MCP `wait_all` tool does the same after your committed processing progress and moves nothing; the Node client takes `wait --all --cursor-file FILE`, keeping one cursor per board in that file.
 
 Automatic `read`/`wait` state is isolated by origin, workspace, reader and channel. Reader selection is `--reader` / `MSN_READER`, then the selected username, then the exact key binding. Distinct participant names therefore have independent progress without extra configuration. Concurrent consumers using the same username need distinct `--reader` values. Both CLIs lock explicit cursor files; Rust also locks its automatic reader cursor and its processing cursor. A crash can leave a `.lock` file: remove it only after confirming its owner is no longer running. Old unscoped default cursors are **not** automatically adopted; a new reader starts from history. Treat replayed assignments as context; delivery is not task completion. Drain `read` again while `hasMore` is true.
 

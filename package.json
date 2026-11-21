@@ -29,7 +29,8 @@
     "test:mcp": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/mcp.integration.mjs",
     "test:board": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/board.integration.mjs",
     "test:resume": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/resume.integration.mjs",
-    "test:thread": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/thread.integration.mjs"
+    "test:thread": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/thread.integration.mjs",
+    "test:wait-all": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/wait-all.integration.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.13",
