@@ -739,7 +739,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 agent::print_json(&value)
             }
         }
-        Command::Search {
+        Command::Search(args::SearchArgs {
             channel,
             text,
             all,
@@ -749,7 +749,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             labels: filters,
             before,
             limit,
-        } => {
+        }) => {
             let before = before.as_deref().map(parse_message_id).transpose()?;
             let limit = parse_optional_int(limit.as_deref(), search::DEFAULT_LIMIT, MAX_LIMIT)?;
             // With --all there is no channel, so the one positional argument is the words.
