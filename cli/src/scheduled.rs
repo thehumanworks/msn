@@ -17,7 +17,10 @@ pub fn parse_when(raw: &str, now_secs: u64) -> Result<String, CliError> {
         return Ok(rfc3339(now_secs.saturating_add(seconds)));
     }
     let zoned = value.len() >= 16
-        && value.as_bytes().get(10).is_some_and(|b| *b == b'T' || *b == b't')
+        && value
+            .as_bytes()
+            .get(10)
+            .is_some_and(|b| *b == b'T' || *b == b't')
         && (value.ends_with('Z')
             || value.ends_with('z')
             || value
@@ -110,8 +113,20 @@ mod tests {
             parse_when("2026-11-21T10:00:00+01:00", 0).unwrap(),
             "2026-11-21T10:00:00+01:00"
         );
-        assert_eq!(parse_when("2026-11-21T09:00Z", 0).unwrap(), "2026-11-21T09:00Z");
-        for bad in ["2026-11-21T09:00:00", "tomorrow", "10", "m", "0m", "5w", "", "1h-"] {
+        assert_eq!(
+            parse_when("2026-11-21T09:00Z", 0).unwrap(),
+            "2026-11-21T09:00Z"
+        );
+        for bad in [
+            "2026-11-21T09:00:00",
+            "tomorrow",
+            "10",
+            "m",
+            "0m",
+            "5w",
+            "",
+            "1h-",
+        ] {
             assert!(parse_when(bad, 0).is_err(), "{bad}");
         }
     }
