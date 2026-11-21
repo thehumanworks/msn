@@ -240,12 +240,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         }
         Command::Peek {
             channel,
+            thread,
             wait,
             limit,
             cursor_file,
             resumable,
             local,
         } => {
+            let thread = parse_thread(thread.as_deref())?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -258,6 +260,22 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
+            if let Some(thread) = thread {
+                // A thread's progress always stays on this machine (ADR 0063).
+                return processing::peek_scoped(
+                    &mut io::stdout().lock(),
+                    &url,
+                    &tenant,
+                    &token,
+                    channel,
+                    Some(thread),
+                    &reader,
+                    cursor_file.as_deref().map(Path::new),
+                    wait,
+                    limit,
+                    &stop,
+                );
+            }
             resumable::peek(
                 resumable::mode(resumable, local),
                 &url,
@@ -274,10 +292,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         Command::Commit {
             channel,
             through,
+            thread,
             cursor_file,
             resumable,
             local,
         } => {
+            let thread = parse_thread(thread.as_deref())?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -288,6 +308,18 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &token,
                 cli.reader.as_deref().or(cli.username.as_deref()),
             )?;
+            if let Some(thread) = thread {
+                return processing::commit_scoped(
+                    &mut io::stdout().lock(),
+                    &url,
+                    &tenant,
+                    channel,
+                    Some(thread),
+                    &reader,
+                    cursor_file.as_deref().map(Path::new),
+                    through,
+                );
+            }
             resumable::commit(
                 resumable::mode(resumable, local),
                 &url,
@@ -521,6 +553,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         }
         Command::Poll {
             channel,
+            thread,
             labels: filters,
             after,
             wait,
@@ -536,7 +569,10 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 return Err(CliError::usage("limit must be an integer from 1 to 100."));
             }
             labels::filter_query(&filters)?;
-            poll(&url, &tenant, &token, channel, after, wait, limit, &filters)
+            let thread = parse_thread(thread.as_deref())?;
+            poll(
+                &url, &tenant, &token, channel, thread, after, wait, limit, &filters,
+            )
         }
         Command::Receipts {
             channel,
@@ -988,6 +1024,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &url,
                 &tenant,
                 channel,
+                None,
                 after.as_deref(),
                 file,
                 reader.as_deref(),
@@ -1007,11 +1044,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         }
         Command::Wait {
             channel,
+            thread,
             after,
             wait,
             limit,
             cursor_file,
         } => {
+            let thread = parse_thread(thread.as_deref())?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -1035,12 +1074,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 (Some(_), None) => None,
                 (None, Some(path)) => Some(PathBuf::from(path)),
                 (None, None) => {
+                    // A thread keeps its own cursor beside the board's (ADR 0063).
                     let path = default_cursor_path(
                         &url,
                         &tenant,
                         reader.as_deref().expect("automatic reader"),
                         channel,
-                    )?;
+                    )?
+                    .with_file_name(cursor::state_file_name(channel, thread));
                     if let Some(parent) = path.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -1054,6 +1095,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &url,
                 &tenant,
                 channel,
+                thread,
                 after.as_deref(),
                 file,
                 reader.as_deref(),
@@ -1063,6 +1105,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 tenant: &tenant,
                 token: &token,
                 channel,
+                thread,
                 wait,
                 limit,
                 cursor_file: file,
@@ -1072,6 +1115,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         }
         Command::Follow {
             channel,
+            thread,
             after,
             wait,
             limit,
@@ -1082,6 +1126,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             let (wait, limit) = parse_loop_bounds(wait.as_deref(), limit.as_deref())?;
+            let thread = parse_thread(thread.as_deref())?;
             if after.is_some() && cursor_file.is_some() {
                 return Err(CliError::usage(
                     "Use either --after or --cursor-file, not both.",
@@ -1092,12 +1137,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let lock = file.as_deref().map(CursorLock::acquire).transpose()?;
             let file = lock.as_ref().map(CursorLock::cursor_path);
             let cursor_after =
-                resolve_cursor(&url, &tenant, channel, after.as_deref(), file, None)?;
+                resolve_cursor(&url, &tenant, channel, thread, after.as_deref(), file, None)?;
             let target = LoopTarget {
                 url: &url,
                 tenant: &tenant,
                 token: &token,
                 channel,
+                thread,
                 wait,
                 limit,
                 cursor_file: file,
@@ -1157,6 +1203,11 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
 }
 
+/// `--thread ID` (ADR 0063): a positive message id, or `None` for the whole board.
+fn parse_thread(raw: Option<&str>) -> Result<Option<u64>, CliError> {
+    raw.map(parse_message_id).transpose()
+}
+
 fn parse_message_id(raw: &str) -> Result<u64, CliError> {
     match parse_int(raw, MAX_SAFE_INTEGER)? {
         0 => Err(CliError::usage("Message id must be a positive integer.")),
@@ -1193,6 +1244,7 @@ fn resolve_cursor(
     url: &Url,
     tenant: &str,
     channel: &str,
+    thread: Option<u64>,
     after: Option<&str>,
     cursor_file: Option<&Path>,
     reader: Option<&str>,
@@ -1201,7 +1253,9 @@ fn resolve_cursor(
     match cursor_file {
         Some(path) => load_cursor(
             path,
-            &CursorBinding::new(url, tenant, channel, after).with_reader(reader),
+            &CursorBinding::new(url, tenant, channel, after)
+                .with_reader(reader)
+                .with_thread(thread),
         ),
         None => Ok(after),
     }
@@ -1376,6 +1430,7 @@ fn poll(
     tenant: &str,
     token: &str,
     channel: &str,
+    thread: Option<u64>,
     after: u64,
     wait: u64,
     limit: u64,
@@ -1383,7 +1438,8 @@ fn poll(
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
     let path = format!(
-        "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}{}",
+        "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}{}{}",
+        processing::thread_query(thread),
         labels::filter_query(filters)?
     );
     finish(&client.get(&path, Some(token))?)
@@ -1876,6 +1932,8 @@ struct LoopTarget<'a> {
     tenant: &'a str,
     token: &'a str,
     channel: &'a str,
+    /// Only this thread (ADR 0063); its cursor file is bound to it.
+    thread: Option<u64>,
     wait: u64,
     limit: u64,
     cursor_file: Option<&'a Path>,
@@ -1950,6 +2008,7 @@ fn poll_loop(
         tenant,
         token,
         channel,
+        thread,
         wait,
         limit,
         cursor_file,
@@ -1959,7 +2018,8 @@ fn poll_loop(
     let mut backoff_ms = BACKOFF_START_MS;
     while !stop.load(Ordering::SeqCst) {
         let path = format!(
-            "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}"
+            "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit={limit}{}",
+            processing::thread_query(thread)
         );
         let Some(response) =
             get_interruptible(Arc::clone(&client), path, token.to_string(), &stop)?
@@ -1988,7 +2048,9 @@ fn poll_loop(
                     if let Some(path) = cursor_file {
                         write_cursor(
                             path,
-                            &CursorBinding::new(url, tenant, channel, after).with_reader(reader),
+                            &CursorBinding::new(url, tenant, channel, after)
+                                .with_reader(reader)
+                                .with_thread(thread),
                         )?;
                     }
                 }
