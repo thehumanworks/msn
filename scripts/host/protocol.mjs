@@ -26,20 +26,15 @@ export function name(value) {
  * else `to` alone, else none (a message for everyone). Agents wake on an exact name in this list.
  */
 export function addressees(message) {
-  if (Array.isArray(message?.recipients) && message.recipients.length) return message.recipients;
+  // Read leniently: any non-empty list of valid names counts; a malformed list is ignored and `to`
+  // alone stands, so a later server change to the list cannot stop deployed runtimes.
+  const list = message?.recipients;
+  if (Array.isArray(list) && list.length && list.every(name)) return list;
   return typeof message?.to === "string" ? [message.to] : [];
 }
-/** A message's addressing is well formed: `to` a name, and `recipients` absent or 2 to 8 names starting with it. */
+/** A message's addressing is well formed: `to` absent or a name. `recipients` is read by addressees(). */
 export function validAddress(message) {
-  if (message.to !== undefined && !name(message.to)) return false;
-  if (message.recipients === undefined) return true;
-  return (
-    Array.isArray(message.recipients) &&
-    message.recipients.length >= 2 &&
-    message.recipients.length <= 8 &&
-    message.recipients.every(name) &&
-    message.recipients[0] === message.to
-  );
+  return message.to === undefined || name(message.to);
 }
 function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);

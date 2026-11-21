@@ -103,6 +103,7 @@ describe("several names on one message (ADR 0067)", () => {
       [],
       nine,
       ["reviewer", "reviewer"],
+      ["reviewer", " Reviewer"],
       ["reviewer", " "],
       ["reviewer", 7],
       ["x".repeat(129)],
@@ -182,8 +183,8 @@ describe("several names on one message (ADR 0067)", () => {
           })
         ).status,
       ).toBe(201);
-    // "Reviewer" and "reviewer" find one persona; the sender "lead" names itself too.
-    await f.sent({ to: ["reviewer", "Reviewer", "worker", "lead"] });
+    // The sender "lead" names itself too; it is never woken by its own message.
+    await f.sent({ to: ["reviewer", "worker", "lead"] });
     const notices = await runInDurableObject(f.stub, (_: MsnDurableObject, state) =>
       state.storage.sql
         .exec<{ personaId: string }>("SELECT personaId FROM webhook_notices ORDER BY personaId")

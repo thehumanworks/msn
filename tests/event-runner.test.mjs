@@ -301,20 +301,22 @@ test("only addressed non-self messages invoke the handler; argv is literal and s
 test("a message addressed to several names invokes the handler of each named agent only (ADR 0067)", async (t) => {
   const f = await fixture(
     t,
-    [2, 3, 4].map((id) => event(id)),
+    [2, 3, 4, 5].map((id) => event(id)),
     {
       2: message(2, { to: "lead", recipients: ["lead", "reviewer"] }),
       3: message(3, { to: "lead", recipients: ["lead", "worker"] }),
-      // A malformed list is refused like any other invalid canonical message.
-      4: message(4, { to: "lead", recipients: ["lead"] }),
+      // A malformed list is ignored and `to` alone stands, so a future list shape cannot stop the runner.
+      4: message(4, { to: "reviewer", recipients: ["reviewer", 3] }),
+      // Any list of valid names is read, whatever its length.
+      5: message(5, { to: "reviewer", recipients: ["reviewer"] }),
     },
   );
   const result = await f.start().done;
-  assert.notEqual(result.code, 0);
+  assert.equal(result.code, 0, result.stderr);
   const records = await f.records();
   assert.deepEqual(
     records.map((record) => record.input.message.id),
-    [2],
+    [2, 4, 5],
   );
 });
 

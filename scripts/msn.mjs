@@ -292,7 +292,8 @@ export async function run({
       if (names.length > 8) throw new UsageError("--to names at most 8 people.");
       if (names.some((name) => !name.trim() || Buffer.byteLength(name) > 128))
         throw new UsageError("--to must be a non-blank username of at most 128 UTF-8 bytes.");
-      if (new Set(names).size !== names.length) throw new UsageError("--to names someone twice.");
+      if (new Set(names.map((name) => name.trim().toLowerCase())).size !== names.length)
+        throw new UsageError("--to names someone twice.");
       body.to = names.length === 1 ? names[0] : names;
     }
     // Validate the payload before networking, then infer an exact-name key's sender.

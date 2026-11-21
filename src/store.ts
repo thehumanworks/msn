@@ -36,6 +36,7 @@ import {
   INLINE_MEDIA_TYPES,
   idempotencyKey,
   integer,
+  isAddressed,
   json,
   type LabelChange,
   type LabelFilter,
@@ -5009,10 +5010,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       const others = rows.slice(0, UNREAD_CAP).filter((row) => row.username !== me);
       const toYou = self
         ? others.filter((row) =>
-            addressees({
+            isAddressed(me, {
               to: row.recipient,
               recipients: row.recipients === null ? null : (JSON.parse(row.recipients) as string[]),
-            }).some((name) => name.trim().toLowerCase() === self),
+            }),
           ).length
         : 0;
       return { channel, after, count: others.length, toYou, ...(capped ? { capped: true } : {}) };

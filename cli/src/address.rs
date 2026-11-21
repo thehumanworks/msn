@@ -24,7 +24,12 @@ pub fn validate_names(names: &[String], field: &str) -> Result<Vec<String>, CliE
                 "{field} must be a non-blank username of at most 128 UTF-8 bytes."
             )));
         }
-        if names[..index].contains(name) {
+        // A repeat is the same name trimmed and ignoring case, as the server matches names.
+        let folded = crate::status::js_trim(name).to_lowercase();
+        if names[..index]
+            .iter()
+            .any(|kept| crate::status::js_trim(kept).to_lowercase() == folded)
+        {
             return Err(CliError::usage(format!("{field} names {name:?} twice.")));
         }
     }
@@ -112,6 +117,7 @@ mod tests {
         assert!(validate_names(&nine, "--to").is_err());
         assert!(validate_names(&nine[..8], "--to").is_ok());
         assert!(validate_names(&names(&["a", "a"]), "--to").is_err());
+        assert!(validate_names(&names(&["bob", " Bob"]), "--to").is_err());
         assert!(validate_names(&names(&["a", " "]), "--to").is_err());
         assert!(validate_names(&["x".repeat(129)], "--to").is_err());
         assert!(validate_names(&[], "--to").unwrap().is_empty());

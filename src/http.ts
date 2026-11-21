@@ -268,7 +268,8 @@ export function recipients(value: unknown): string[] | undefined {
       `to must be one name or a list of 1 to ${MAX_RECIPIENTS} names.`,
     );
   const names = value.map((name) => text(name, "Each to name", 128));
-  if (new Set(names).size !== names.length)
+  // A repeat is the same name trimmed and ignoring case, as names are matched everywhere.
+  if (new Set(names.map((name) => name.trim().toLowerCase())).size !== names.length)
     throw new HttpError(400, "invalid_message", "to must not name anyone twice.");
   return names;
 }
