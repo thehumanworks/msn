@@ -62,7 +62,7 @@ export function ScheduledPanel({ channel, scheduled, me, owner }: Props) {
             return (
               <View key={item.id} style={styles.item}>
                 <Text style={styles.when}>
-                  {item.status === "failed" ? "Was due" : "Posts"} {whenText(item.sendAt)} · {item.username}
+                  {item.status === "failed" ? "Was due" : item.repeats ? "Repeats, next" : "Posts"} {whenText(item.sendAt)} · {item.username}
                 </Text>
                 {isEditing ? (
                   <>
@@ -110,7 +110,7 @@ export function ScheduledPanel({ channel, scheduled, me, owner }: Props) {
                           />
                         ) : null}
                         <Button
-                          label="Cancel message"
+                          label={item.repeats ? "Stop repeating" : "Cancel message"}
                           variant="ghost"
                           busy={busy}
                           onPress={() => void run(() => channel.cancelScheduled(item.id))}

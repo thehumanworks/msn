@@ -79,6 +79,16 @@ import {
   type VapidKeys,
 } from "./push";
 import {
+  copiesPerDay,
+  MAX_REPEAT_COPIES_PER_DAY,
+  nextRepeat,
+  onWeekend,
+  type Repeat,
+  type RepeatRequest,
+  repeatRequest,
+  repeatStart,
+} from "./repeat";
+import {
   SINCE_EVENTS,
   SINCE_LABEL_BATCH,
   SINCE_LABELS,
@@ -468,6 +478,7 @@ type ScheduledRow = {
   text: string;
   contentType: ContentType;
   sendAt: string;
+  dueMs: number;
   createdAt: string;
   updatedAt: string;
   replyTo: number | null;
@@ -485,6 +496,8 @@ type ScheduledRow = {
   failedAt: string | null;
   error: string | null;
   errorMessage: string | null;
+  /** The repeat rule as JSON (ADR 0072), or NULL for a message that posts once. */
+  repeat: string | null;
 };
 export type Scheduled = {
   id: number;
@@ -503,6 +516,8 @@ export type Scheduled = {
   recipients?: string[];
   personaId?: string;
   labels?: Labels;
+  /** Set when the message repeats (ADR 0072): `sendAt` is then the time of the next copy. */
+  repeat?: Repeat;
   /** `pending` until it posts (then it is a message and leaves the list); `failed` if it could not. */
   status: "pending" | "failed";
   failedAt?: string;
@@ -526,6 +541,7 @@ function toScheduled(row: ScheduledRow, tenant: string): Scheduled {
     ...(row.recipients == null ? {} : { recipients: JSON.parse(row.recipients) as string[] }),
     ...(row.personaId === null ? {} : { personaId: row.personaId }),
     ...(row.labels === null ? {} : { labels: JSON.parse(row.labels) as Labels }),
+    ...(row.repeat == null ? {} : { repeat: JSON.parse(row.repeat) as Repeat }),
     status: row.failedAt === null ? "pending" : "failed",
     ...(row.failedAt === null
       ? {}
@@ -783,6 +799,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         // `recipient` keeps the first, so older reads and indexes see one name. Additive, no step.
         ["messages", "recipients", "TEXT"],
         ["scheduled_messages", "recipients", "TEXT"],
+        // Repeat a scheduled message (ADR 0072): the rule as JSON, NULL for one that posts once.
+        // Additive, so no schema_version step and safe in any merge order.
+        ["scheduled_messages", "repeat", "TEXT"],
         // Replace an instruction with a newer one (ADR 0068): NULL on every other message.
         // Additive, so no schema_version step and safe in any merge order.
         ["messages", "replaces", "INTEGER"],
@@ -1065,6 +1084,11 @@ export class MsnDurableObject extends DurableObject<Env> {
               "The persona that scheduled this message was removed or renamed.",
             );
         }
+        // A repeating message (ADR 0072) stays on the schedule: the write that posts this copy
+        // also moves the row to its next time, so a retried alarm finds nothing due and never
+        // posts the copy twice. The last copy removes the row and takes the idempotency key.
+        const next =
+          row.repeat === null ? null : nextRepeat(JSON.parse(row.repeat) as Repeat, row.dueMs, now);
         const response = this.send(
           row.tenant,
           row.channel,
@@ -1078,13 +1102,14 @@ export class MsnDurableObject extends DurableObject<Env> {
             ...(row.recipient === null ? {} : { to: row.recipient }),
             ...(row.recipients == null ? {} : { recipients: JSON.parse(row.recipients) as string[] }),
           },
-          row.key,
+          next === null ? row.key : null,
           row.digest,
           row.personaId,
           Boolean(row.notify),
           row.labels === null ? undefined : (JSON.parse(row.labels) as Labels),
           [],
           row.id,
+          next,
         );
         if (response.status < 300) posted++;
       } catch (error) {
@@ -3565,7 +3590,9 @@ export class MsnDurableObject extends DurableObject<Env> {
       correlation: Correlation;
       personaId: string | null;
       labels: Labels | undefined;
-      sendAt: string;
+      /** Null only with `repeat`, when the Worker finds the first time (ADR 0072). */
+      sendAt: string | null;
+      repeat: RepeatRequest | null;
     },
     key: string | null,
     payloadHash: string,
@@ -3609,7 +3636,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
       }
       // Only a new schedule needs a future time; a retry above replays whenever it arrives.
-      sendAtWindow(message.sendAt);
+      // A repeat is resolved here too: its first time and its end are counted from now.
+      const start = message.repeat ? repeatStart(message.repeat, message.sendAt) : null;
+      const sendAt = start ? start.sendAt : sendAtWindow(message.sendAt as string);
       if (
         message.correlation.replyTo !== undefined &&
         !this.ctx.storage.sql
@@ -3645,20 +3674,35 @@ export class MsnDurableObject extends DurableObject<Env> {
           "scheduled_quota",
           `Too many scheduled messages (${MAX_SCHEDULED_PER_SENDER} per sender and ${MAX_SCHEDULED_PER_BOARD} per board waiting, ${MAX_SCHEDULED} per workspace). Cancel one or wait for one to post.`,
         );
+      // Repeating messages together post a bounded number of copies a day (ADR 0072), so a
+      // schedule cannot use up the workspace's lifetime message quota.
+      if (start) {
+        const perDay = this.ctx.storage.sql
+          .exec<{ repeat: string }>("SELECT repeat FROM scheduled_messages WHERE repeat IS NOT NULL")
+          .toArray()
+          .reduce((sum, other) => sum + copiesPerDay(JSON.parse(other.repeat) as Repeat), 0);
+        if (perDay + copiesPerDay(start.repeat) > MAX_REPEAT_COPIES_PER_DAY)
+          throw new HttpError(
+            409,
+            "scheduled_quota",
+            `This workspace's repeating messages may post at most ${MAX_REPEAT_COPIES_PER_DAY} copies a day in total (now ${Math.round(perDay * 10) / 10}; this one adds ${Math.round(copiesPerDay(start.repeat) * 10) / 10}). Stop one, or repeat less often.`,
+          );
+      }
       this.createChannel(channel);
       const now = new Date().toISOString();
       const row = this.ctx.storage.sql
         .exec<ScheduledRow>(
           `INSERT INTO scheduled_messages(tenant, channel, username, text, contentType, sendAt, dueMs, createdAt,
-             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify, quote, recipients)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify, quote, recipients,
+             repeat)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           tenant,
           channel,
           message.username,
           message.text,
           message.type,
-          message.sendAt,
-          Date.parse(message.sendAt),
+          sendAt,
+          Date.parse(sendAt),
           now,
           now,
           message.correlation.replyTo ?? null,
@@ -3673,6 +3717,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           capability.owner_access ? 0 : 1,
           message.correlation.quote ?? null,
           message.correlation.recipients ? JSON.stringify(message.correlation.recipients) : null,
+          start ? JSON.stringify(start.repeat) : null,
         )
         .one();
       return { body: { scheduled: toScheduled(row, tenant), replayed: false }, status: 201 };
@@ -3755,6 +3800,23 @@ export class MsnDurableObject extends DurableObject<Env> {
       // JSON payloads stay JSON (ADR 0004); the content type never changes.
       if (update.text !== undefined) contentType(row.contentType, update.text);
       const sendAt = update.sendAt ?? row.sendAt;
+      // A new time moves only the next copy of a repeating message (ADR 0072), within its end
+      // and, for weekdays, on a weekday of its zone, as when it was scheduled.
+      if (update.sendAt !== undefined && row.repeat !== null) {
+        const rule = JSON.parse(row.repeat) as Repeat;
+        if (Date.parse(sendAt) > Date.parse(rule.until))
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            "sendAt is after this repeating message's end. Stop it and schedule a new one to run longer.",
+          );
+        if (rule.every === "weekdays" && onWeekend(Date.parse(sendAt), rule.timeZone))
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            `sendAt falls on a weekend in ${rule.timeZone}, and this message repeats Monday to Friday. Give a weekday.`,
+          );
+      }
       // A failed message retries only at a new time; changing its text alone keeps it failed.
       const retry = update.sendAt !== undefined;
       return this.ctx.storage.sql
@@ -3798,13 +3860,23 @@ export class MsnDurableObject extends DurableObject<Env> {
     labels: Labels | undefined = undefined,
     attachments: AttachmentRef[] = [],
     scheduledId: number | null = null,
+    scheduledNext: number | null = null,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       // Rechecked inside the write: an archive that lands while a send awaits its body still wins.
       this.requireActive(channel);
       // A scheduled message leaves the schedule in the same write that posts it (ADR 0060). A
       // failure below rolls both back, so it is never posted twice or lost.
-      if (scheduledId !== null)
+      // A repeating one (ADR 0072) moves to its next time in this write instead.
+      if (scheduledId !== null && scheduledNext !== null)
+        this.ctx.storage.sql.exec(
+          "UPDATE scheduled_messages SET sendAt = ?, dueMs = ?, updatedAt = ? WHERE id = ?",
+          new Date(scheduledNext).toISOString(),
+          scheduledNext,
+          new Date().toISOString(),
+          scheduledId,
+        );
+      else if (scheduledId !== null)
         this.ctx.storage.sql.exec("DELETE FROM scheduled_messages WHERE id = ?", scheduledId);
       if (key) {
         // A key that is waiting on the schedule belongs to that message (ADR 0060). Posting under
@@ -5544,9 +5616,16 @@ export class MsnDurableObject extends DurableObject<Env> {
         // The time window is checked after the idempotency lookup, so a late retry still replays.
         const sendAt =
           input?.sendAt === undefined || input.sendAt === null ? null : sendAtValue(input.sendAt);
+        // `repeat` posts a copy on a schedule (ADR 0072); it may come without sendAt, and the
+        // Worker then finds the first time. Everything refused for a scheduled send is refused too.
+        const repeat =
+          input?.repeat === undefined || input.repeat === null
+            ? null
+            : repeatRequest(input.repeat, sendAt !== null);
+        const later = sendAt !== null || repeat !== null;
         // A question or an answer is about now (ADR 0065): a later post could find the question
         // answered or the answer stale, so neither can be scheduled.
-        if (sendAt && (correlation.choices !== undefined || correlation.answer !== undefined))
+        if (later && (correlation.choices !== undefined || correlation.answer !== undefined))
           throw new HttpError(
             400,
             "invalid_send_at",
@@ -5554,13 +5633,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           );
         // A replacement (ADR 0068) is about the message as it stands now; a later post could find
         // it already replaced.
-        if (sendAt && correlation.replaces !== undefined)
+        if (later && correlation.replaces !== undefined)
           throw new HttpError(
             400,
             "invalid_send_at",
             "A replacement cannot be scheduled. Send it now, or schedule a new message.",
           );
-        if (sendAt && files.length)
+        if (later && files.length)
           throw new HttpError(
             400,
             "invalid_send_at",
@@ -5570,6 +5649,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         let hashInput = sendLabels ? JSON.stringify([base, sendLabels]) : base;
         if (files.length) hashInput = JSON.stringify([hashInput, files]);
         if (sendAt) hashInput = JSON.stringify([hashInput, { sendAt }]);
+        if (repeat) hashInput = JSON.stringify([hashInput, { repeat }]);
         const payloadHash = input ? await digest(hashInput) : "";
         const change =
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "labels"
@@ -5922,11 +6002,20 @@ export class MsnDurableObject extends DurableObject<Env> {
                   "invalid_key",
                   "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
                 );
-              if (sendAt)
+              if (later)
                 return await this.schedule(
                   tenant,
                   channel,
-                  { username, text: content, type, correlation, personaId, labels: sendLabels, sendAt },
+                  {
+                    username,
+                    text: content,
+                    type,
+                    correlation,
+                    personaId,
+                    labels: sendLabels,
+                    sendAt,
+                    repeat,
+                  },
                   key,
                   payloadHash,
                   hash,
