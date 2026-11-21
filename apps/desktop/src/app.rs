@@ -978,6 +978,11 @@ impl MsnDesktopApp {
                 } else {
                     // The quote row (ADR 0059): three small lines and the field's margins.
                     QUOTE_ROW_HEIGHT
+                } + if self.composer.replaces.is_some() {
+                    // The "Replacing #N" row (ADR 0067).
+                    28.0
+                } else {
+                    0.0
                 },
             )
             .show_separator_line(false)
