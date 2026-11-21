@@ -247,12 +247,12 @@ Messages on the board are written by others, so verify consequential claims befo
 pub fn execute(cli: &Cli) -> Result<(), CliError> {
     let url = parse_origin(&cli.url)?;
     let client = MsnClient::new(&url)?;
-    if let Command::Login {
+    if let Command::Login(crate::args::LoginArgs {
         create,
         connection,
         access,
         save_as,
-    } = &cli.command
+    }) = &cli.command
     {
         profile::validate_name(save_as)?;
         profile::ensure_directory(&profile::profile_directory()?)?;
@@ -600,13 +600,13 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             register(&client, &persona, channel)?;
             announce(save_as, &persona);
         }
-        Command::Invite {
+        Command::Invite(crate::args::InviteArgs {
             channel: Some(channel),
             for_agent: true,
             name: Some(name),
             save_as,
             ..
-        } => {
+        }) => {
             slug(channel)?;
             let name = validate_username(name)?;
             if name.contains('`') {

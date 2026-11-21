@@ -35,13 +35,13 @@ fn main() {
     }
     let stop = if matches!(
         cli.command,
-        Command::Follow { .. }
-            | Command::Wait { .. }
-            | Command::Read { .. }
-            | Command::Peek { .. }
-            | Command::Export { .. }
+        Command::Follow(..)
+            | Command::Wait(..)
+            | Command::Read(..)
+            | Command::Peek(..)
+            | Command::Export(..)
             | Command::Watch { .. }
-            | Command::Ask { wait: Some(_), .. }
+            | Command::Ask(msn_cli::args::AskArgs { wait: Some(_), .. })
             | Command::Gather(_)
     ) {
         install_stop_signals().unwrap_or_else(|error| {

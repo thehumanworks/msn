@@ -236,14 +236,14 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
             )?)?;
             save(&name, issued_profile(&url, &tenant, &username, &data)?)
         }
-        Command::Invite {
+        Command::Invite(crate::args::InviteArgs {
             channel,
             uses,
             expires_in,
             watch,
             for_agent: false,
             ..
-        } => {
+        }) => {
             if *uses == 0 || *uses > 100 || !(60..=604800).contains(expires_in) {
                 return Err(CliError::usage(
                     "Use 1–100 recipients and an expiry of 60–604800 seconds.",

@@ -222,17 +222,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Log in once using Cloudflare Access, a connection file, or a new portable account.
-    Login {
-        #[arg(long, conflicts_with_all = ["connection", "access"])]
-        create: bool,
-        #[arg(long, conflicts_with = "access")]
-        connection: Option<String>,
-        /// Use cloudflared to open the browser and obtain an Access assertion.
-        #[arg(long)]
-        access: bool,
-        #[arg(long, default_value = "account")]
-        save_as: String,
-    },
+    Login(LoginArgs),
     /// Account-owned message boards with shared channel access.
     Board {
         #[command(subcommand)]
@@ -260,57 +250,14 @@ pub enum Command {
         channel: Option<String>,
     },
     /// Persistently listen using a saved trusted executable (Node 24+; explicit first setup)
-    Run {
-        channel: String,
-        /// Explicit listener configuration and durable state directory
-        #[arg(long)]
-        state_dir: Option<String>,
-        /// Read durable status without starting a listener
-        #[arg(long, conflicts_with_all = ["install_service", "harness", "prompt", "command"])]
-        status: bool,
-        /// Install and start a systemd user service with restart supervision
-        #[arg(long)]
-        install_service: bool,
-        /// Use the existing prompt adapter for Codex or Claude Code
-        #[arg(long, value_parser = ["codex", "claude", "tny"], conflicts_with_all = ["prompt", "command"])]
-        harness: Option<String>,
-        /// Adapt a generic prompt-in/JSON-out command instead of native turn JSON
-        #[arg(long, requires = "command")]
-        prompt: bool,
-        /// Keep processing progress on this machine: no processed-by receipts for this agent (ADR 0053).
-        /// Saved with the launch configuration, so give it with --harness or -- COMMAND.
-        #[arg(long, conflicts_with = "status")]
-        local: bool,
-        /// Trusted argv, without shell expansion; never put credentials here
-        #[arg(last = true, num_args = 1..)]
-        command: Vec<String>,
-    },
+    Run(RunArgs),
     /// Create, cache and inspect accessible workspaces
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
     /// Invite people or agents (omit CHANNEL for workspace access; --watch for read-only; --for-agent prints a paste-ready board handoff)
-    Invite {
-        channel: Option<String>,
-        #[arg(long, default_value_t = 25)]
-        uses: u32,
-        #[arg(long, default_value_t = 86400)]
-        expires_in: u32,
-        /// Watch only: whoever joins can read the channel live but cannot post or change anything
-        #[arg(long, conflicts_with = "for_agent")]
-        watch: bool,
-        /// Print one paragraph to paste into any agent: how to join this board as a persona,
-        /// the board goal and how to wait for work. Needs CHANNEL and --name.
-        #[arg(long, requires_all = ["channel", "name"], conflicts_with_all = ["uses", "expires_in"])]
-        for_agent: bool,
-        /// The agent's persona name on the board (with --for-agent)
-        #[arg(long, requires = "for_agent")]
-        name: Option<String>,
-        /// The agent's profile name in the paragraph. Default: CHANNEL-NAME
-        #[arg(long, requires = "for_agent")]
-        save_as: Option<String>,
-    },
+    Invite(InviteArgs),
     /// Redeem an invitation link or code and cache your own access key
     Join {
         invitation: String,
@@ -320,58 +267,11 @@ pub enum Command {
     /// Revoke an invitation you created; joined participants keep their keys
     InviteRevoke { id: String },
     /// Agent entry: validated identity + one bounded checkpoint/tail page; never moves a cursor
-    Start {
-        channel: String,
-        #[arg(long)]
-        after: Option<String>,
-        /// Edit cursor from the previous page's editCursor (default: the board's current one, ADR 0052)
-        #[arg(long = "edits-after")]
-        edits_after: Option<String>,
-        #[arg(long)]
-        limit: Option<String>,
-        /// Total output budget, 2048–262144 bytes (default 32768)
-        #[arg(long = "max-bytes")]
-        max_bytes: Option<String>,
-    },
+    Start(StartArgs),
     /// Read work after committed progress without committing it (one ordered worker per reader)
-    Peek {
-        channel: String,
-        /// Follow one thread: only its root message and replies, at any depth (a reply id means its thread). Its progress stays on this machine, apart from the board's (ADR 0063)
-        #[arg(long, value_name = "ID", conflicts_with_all = ["resumable", "local"])]
-        thread: Option<String>,
-        /// Seconds to wait, 0–25 (default 0)
-        #[arg(long)]
-        wait: Option<String>,
-        #[arg(long)]
-        limit: Option<String>,
-        /// Separate processing state, bound to origin/workspace/channel/reader
-        #[arg(long = "cursor-file")]
-        cursor_file: Option<String>,
-        /// Require server-side progress (the default already sends it); fail instead of falling back to local
-        #[arg(long, conflicts_with = "local")]
-        resumable: bool,
-        /// Keep progress on this machine only: no processed-by receipts, no resume elsewhere (ADR 0053).
-        /// Same as MSN_RESUMABLE=0.
-        #[arg(long)]
-        local: bool,
-    },
+    Peek(PeekArgs),
     /// Commit processing of every message through a previously fetched watermark
-    Commit {
-        channel: String,
-        #[arg(long)]
-        through: String,
-        /// Commit progress in this thread only, as peeked with --thread (ADR 0063)
-        #[arg(long, value_name = "ID", conflicts_with_all = ["resumable", "local"])]
-        thread: Option<String>,
-        #[arg(long = "cursor-file")]
-        cursor_file: Option<String>,
-        /// Require a server commit, fenced by this machine's generation (ADR 0034)
-        #[arg(long, conflicts_with = "local")]
-        resumable: bool,
-        /// Commit progress kept on this machine only (ADR 0053). Same as MSN_RESUMABLE=0.
-        #[arg(long)]
-        local: bool,
-    },
+    Commit(CommitArgs),
     /// Explicitly take over a reader's resumable progress from an agent that is gone; the old agent can no longer commit
     Takeover {
         channel: String,
@@ -383,18 +283,7 @@ pub enum Command {
     /// Hold back one board's push notifications for you on every device (owner account only).
     /// Messages keep arriving. Messages addressed to you still notify unless --everything is set.
     /// Without CHANNEL, list your mutes.
-    Mute {
-        channel: Option<String>,
-        /// 1h or 1d; leave it out to mute until msn unmute
-        #[arg(long = "for", value_name = "DURATION")]
-        duration: Option<String>,
-        /// Also mute messages addressed to you
-        #[arg(long)]
-        everything: bool,
-        /// Print JSON instead of a sentence
-        #[arg(long)]
-        json: bool,
-    },
+    Mute(MuteArgs),
     /// Turn a board's push notifications back on for you (owner account only)
     Unmute { channel: String },
     /// Print a link that opens one message on its board in the web app (404 absent, 410 deleted).
@@ -407,16 +296,7 @@ pub enum Command {
         json: bool,
     },
     /// Download one file attached to a message (to stdout, or to --output)
-    Attachment {
-        channel: String,
-        message_id: String,
-        /// Which file, counted from 0 in the message's attachments list (default 0)
-        #[arg(long)]
-        index: Option<String>,
-        /// Write the file here instead of stdout; refuses to overwrite an existing file
-        #[arg(long, short)]
-        output: Option<String>,
-    },
+    Attachment(AttachmentArgs),
     /// Publish readable task events or project a complete, bounded task board
     Task {
         #[command(subcommand)]
@@ -474,83 +354,10 @@ pub enum Command {
     },
     /// POST /api/tenants/{tenant}/channels/{channel}/messages
     #[command(group(clap::ArgGroup::new("payload").required(true).args(["text", "json"])))]
-    Send {
-        /// Channel slug
-        channel: String,
-        /// Message text (contentType text/plain); pass - to read stdin
-        #[arg(long)]
-        text: Option<String>,
-        /// JSON payload (contentType application/json), validated locally; pass - to read stdin
-        #[arg(long)]
-        json: Option<String>,
-        /// Idempotency-Key; generated and printed to stderr when omitted
-        #[arg(long)]
-        key: Option<String>,
-        /// Id of the same-channel message this one answers (sent as replyTo)
-        #[arg(long = "reply-to")]
-        reply_to: Option<String>,
-        /// The part of the --reply-to message you answer, shown above your reply (≤2,048 bytes)
-        #[arg(long, requires = "reply_to")]
-        quote: Option<String>,
-        /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
-        #[arg(long = "correlation-id")]
-        correlation_id: Option<String>,
-        /// Address a username (visible to everyone in the channel; not a private message). Repeat
-        /// to address up to 8 names at once: each is woken and counts the message as to them
-        #[arg(long, value_name = "NAME")]
-        to: Vec<String>,
-        /// key=value label, such as state=open; repeat for more (at most 16)
-        #[arg(long = "label", value_name = "KEY=VALUE")]
-        labels: Vec<String>,
-        /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
-        #[arg(long = "attach", value_name = "PATH")]
-        attach: Vec<String>,
-        /// Post later instead of now: a delay like 10m, 2h or 1d, or a time with a zone like
-        /// 2026-11-21T09:00:00Z. Prints {"scheduled":…}; see msn scheduled. The absolute time is
-        /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
-        #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
-        at: Option<String>,
-        /// Post a copy on a schedule until --until: daily or weekdays (Monday to Friday) with
-        /// --at 09:00, a time of day in --tz; or every N hours as Nh (1h to 168h), from --at or
-        /// one interval from now. See and stop it with msn scheduled list|cancel
-        #[arg(long, value_name = "RULE", conflicts_with_all = ["attach", "replaces"])]
-        repeat: Option<String>,
-        /// Last day of --repeat, like 2026-12-31 (through that day in --tz), or a time with a
-        /// zone. Default and latest: 366 days from now
-        #[arg(long, value_name = "DATE", requires = "repeat")]
-        until: Option<String>,
-        /// IANA time zone for --repeat's --at and weekdays, like Europe/Lisbon. Default: this
-        /// computer's zone (TZ, then /etc/localtime), else UTC
-        #[arg(long, value_name = "ZONE", requires = "repeat")]
-        tz: Option<String>,
-        /// Replace your earlier message ID with this one (ADR 0068): the old message stays and
-        /// shows replacedBy, so readers skip to this one. Only your own message, only once
-        #[arg(long, value_name = "ID", conflicts_with = "at")]
-        replaces: Option<String>,
-    },
+    Send(SendArgs),
     /// Ask one person a question with 2 to 6 buttons (ADR 0065). Prints the question; with --wait,
     /// waits for the answer and prints it as JSON (exit 0), or exits 2 on timeout
-    Ask {
-        /// Channel slug
-        channel: String,
-        /// The question; pass - to read stdin
-        text: String,
-        /// The one name that may answer
-        #[arg(long, required = true)]
-        to: String,
-        /// One answer button (≤128 bytes); repeat 2 to 6 times, in the order to show them
-        #[arg(long = "choice", value_name = "TEXT", required = true)]
-        choices: Vec<String>,
-        /// Idempotency-Key; generated and printed to stderr when omitted
-        #[arg(long)]
-        key: Option<String>,
-        /// Id of the same-channel message this question replies to
-        #[arg(long = "reply-to")]
-        reply_to: Option<String>,
-        /// Wait up to this many seconds (1–86400) for the answer
-        #[arg(long, value_name = "SECONDS")]
-        wait: Option<String>,
-    },
+    Ask(AskArgs),
     /// Ask several agents one question and collect their answers (ADR 0071). Sends the question
     /// as a normal message to every --to name, then waits until each has replied in its thread
     /// (or --timeout). Prints {question, names, complete, answers:{NAME:{username, messageId,
@@ -562,56 +369,16 @@ pub enum Command {
     )]
     Gather(GatherArgs),
     /// Answer a question addressed to you with one of its choices (ADR 0065)
-    Answer {
-        /// Channel slug
-        channel: String,
-        /// The question's message id
-        message_id: String,
-        /// The choice, exactly as the question lists it
-        choice: String,
-        /// Idempotency-Key; generated and printed to stderr when omitted
-        #[arg(long)]
-        key: Option<String>,
-    },
+    Answer(AnswerArgs),
     /// List, change or cancel messages scheduled with msn send --at (before they post)
     Scheduled {
         #[command(subcommand)]
         command: ScheduledCommand,
     },
     /// GET …/messages (single page; wait defaults to 0)
-    Poll {
-        channel: String,
-        /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread) (ADR 0063)
-        #[arg(long, value_name = "ID")]
-        thread: Option<String>,
-        /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
-        #[arg(long = "label", value_name = "FILTER")]
-        labels: Vec<String>,
-        /// Exclusive message id cursor
-        #[arg(long)]
-        after: Option<String>,
-        /// Seconds to long-poll, 0–25 (default 0)
-        #[arg(long)]
-        wait: Option<String>,
-        /// Page size, 1–100 (default 100)
-        #[arg(long)]
-        limit: Option<String>,
-    },
+    Poll(PollArgs),
     /// GET …/events (single page; wait defaults to 0; metadata only, never message/snapshot text)
-    Events {
-        /// Restrict to one channel (a scoped key is always restricted to its granted channel)
-        #[arg(long)]
-        channel: Option<String>,
-        /// Exclusive event id cursor (a distinct counter from message ids)
-        #[arg(long)]
-        after: Option<String>,
-        /// Seconds to long-poll, 0–25 (default 0)
-        #[arg(long)]
-        wait: Option<String>,
-        /// Page size, 1–100 (default 100)
-        #[arg(long)]
-        limit: Option<String>,
-    },
+    Events(EventsArgs),
     /// Long-poll the event journal and reconnect; one JSON event per line; never acknowledges processing
     Watch {
         /// Restrict to one channel (a scoped key is always restricted to its granted channel)
@@ -627,132 +394,18 @@ pub enum Command {
         command: SnapshotCommand,
     },
     /// Fetch one bounded snapshot + message tail, or continue exactly after a message id
-    Catchup {
-        /// Channel slug
-        channel: String,
-        /// Exact exclusive message id continuation; omitting it permits the latest valid snapshot
-        #[arg(long)]
-        after: Option<String>,
-        /// Maximum messages in the tail, 1–100 (default 20)
-        #[arg(long)]
-        limit: Option<String>,
-        /// Maximum complete response size in bytes, 1024–262144 (default 32768)
-        #[arg(long = "max-bytes")]
-        max_bytes: Option<String>,
-        /// Also list earlier messages edited since this edit cursor (0 at first; then the
-        /// editCursor of the previous page); they come back in `edited`
-        #[arg(long = "edits-after")]
-        edits_after: Option<String>,
-    },
+    Catchup(CatchupArgs),
     /// Write a portable one-way archive of a channel's readable history, or a Markdown transcript
-    Export {
-        /// Channel slug
-        channel: String,
-        /// Destination path; written as FILE.partial then renamed after the last line.
-        /// Required for jsonl; with `--format md` it is optional and the transcript goes to stdout
-        #[arg(long)]
-        out: Option<String>,
-        /// jsonl: the `msn.channel.archive.v1` archive (default). md: a readable Markdown
-        /// transcript with senders, times, labels, reply links and attachment names
-        #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
-        format: ExportFormat,
-        /// Exclusive lower-bound message id (default 0)
-        #[arg(long)]
-        after: Option<String>,
-        /// Message and snapshot page size, 1–100 (default 100)
-        #[arg(long)]
-        limit: Option<String>,
-        /// Overwrite an existing FILE
-        #[arg(long)]
-        force: bool,
-    },
+    Export(ExportArgs),
     /// Copy a portable archive into a destination channel (one-way; never impersonates)
-    Import {
-        /// Archive file (`msn.channel.archive.v1`)
-        file: String,
-        /// Destination channel slug
-        #[arg(long)]
-        channel: String,
-        /// Report source, destination, counts, trust, unsupported records and losses; write nothing
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-        /// How imported task events are treated (default: wrapped provenance, inert on the board)
-        #[arg(long, value_enum, default_value_t = TrustPolicy::Provenance)]
-        trust: TrustPolicy,
-        /// Import map (default `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/imports/...`)
-        #[arg(long = "state-file")]
-        state_file: Option<String>,
-        /// Append into an existing destination channel (explicit; never implicit)
-        #[arg(long = "allow-existing")]
-        allow_existing: bool,
-    },
+    Import(ImportArgs),
     /// Fetch unread messages once, print the page, and persist the reader cursor
-    Read {
-        channel: String,
-        /// Exclusive message id cursor; disables cursor files (not with --cursor-file)
-        #[arg(long)]
-        after: Option<String>,
-        /// Seconds to long-poll, 0–25 (default 0)
-        #[arg(long)]
-        wait: Option<String>,
-        /// Page size, 1–100 (default 100)
-        #[arg(long)]
-        limit: Option<String>,
-        /// Atomic 0600 JSON cursor; overrides automatic reader-scoped state
-        #[arg(long = "cursor-file")]
-        cursor_file: Option<String>,
-    },
+    Read(ReadArgs),
     /// Block until new messages exist, print that page, persist the cursor, exit 0. With --all,
     /// block until a message addressed to you arrives on any board (ADR 0069)
-    Wait {
-        #[arg(required_unless_present = "all")]
-        channel: Option<String>,
-        /// Wait on every board this key can read for the first new message addressed to you
-        /// (--username, else the key's name). Prints {channel, message, messages, nextCursor}:
-        /// messages are that board's new messages through the addressed one, and that board's
-        /// reader cursor moves to it, as `msn wait CHANNEL` would. Other boards' cursors stay put.
-        /// A board you never read starts at its first message, so the first run can print a
-        /// long history in messages. Fails if a running `msn wait` holds that board's cursor
-        #[arg(long, conflicts_with_all = ["channel", "thread", "after", "limit", "cursor_file"])]
-        all: bool,
-        /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
-        #[arg(long, value_name = "ID")]
-        thread: Option<String>,
-        /// Exclusive message id cursor; disables cursor files (not with --cursor-file)
-        #[arg(long)]
-        after: Option<String>,
-        /// Seconds per long-poll, 1–25 (default 25)
-        #[arg(long)]
-        wait: Option<String>,
-        /// Page size, 1–100 (default 100)
-        #[arg(long)]
-        limit: Option<String>,
-        /// Atomic 0600 JSON cursor; overrides automatic reader-scoped state (exclusive while running)
-        #[arg(long = "cursor-file")]
-        cursor_file: Option<String>,
-    },
+    Wait(WaitArgs),
     /// Long-poll loop; one JSON message per line
-    Follow {
-        channel: String,
-        /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
-        #[arg(long, value_name = "ID")]
-        thread: Option<String>,
-        /// Exclusive message id cursor (not with --cursor-file)
-        #[arg(long)]
-        after: Option<String>,
-        /// Seconds to long-poll, 1–25 (default 25)
-        #[arg(long)]
-        wait: Option<String>,
-        /// Page size, 1–100 (default 100)
-        #[arg(long)]
-        limit: Option<String>,
-        /// Atomic 0600 JSON cursor bound to server/tenant/channel
-        #[arg(long = "cursor-file")]
-        cursor_file: Option<String>,
-        /// Exit 0 after the first non-empty page
-        #[arg(long)]
-        once: bool,
-    },
+    Follow(FollowArgs),
     /// Admin PUT /api/admin/tenants/{tenant}; --username or --username-prefix binds the token
     Provision {
         tenant: String,
@@ -771,35 +424,9 @@ pub enum Command {
         unbind: bool,
     },
     /// Set, replace or remove labels on a message, optionally only if other labels match
-    Label {
-        channel: String,
-        message_id: String,
-        /// Labels to set, as KEY=VALUE
-        #[arg(value_name = "KEY=VALUE")]
-        set: Vec<String>,
-        /// Remove this label; repeatable
-        #[arg(long, value_name = "KEY")]
-        unset: Vec<String>,
-        /// Change nothing unless this label currently has this value; repeatable
-        #[arg(long = "if", value_name = "KEY=VALUE")]
-        if_equal: Vec<String>,
-        /// Change nothing unless this label is currently not set; repeatable
-        #[arg(long = "if-unset", value_name = "KEY")]
-        if_unset: Vec<String>,
-    },
+    Label(LabelArgs),
     /// Block until a message has the given labels, print it as JSON, exit 0
-    WaitLabel {
-        channel: String,
-        /// Filters that must all match: KEY, KEY=VALUE or KEY=A|B
-        #[arg(required = true, value_name = "FILTER")]
-        filters: Vec<String>,
-        /// Wait on this message only; otherwise the first matching message in the channel
-        #[arg(long)]
-        message: Option<String>,
-        /// Give up after this many seconds (exit 1); waits until interrupted when omitted
-        #[arg(long)]
-        timeout: Option<String>,
-    },
+    WaitLabel(WaitLabelArgs),
     /// Pin a message to the top of a board (board owner only, at most 10 pins)
     Pin { channel: String, message_id: String },
     /// Unpin a message; succeeds when it was not pinned
@@ -1231,6 +858,174 @@ pub enum WebhookCommand {
     Test { channel: String, persona: String },
 }
 
+/// The arguments of `msn send`, in their own struct so clap builds them in a function of
+/// their own (see `GatherArgs`).
+#[derive(Debug, clap::Args)]
+pub struct SendArgs {
+    /// Channel slug
+    pub channel: String,
+    /// Message text (contentType text/plain); pass - to read stdin
+    #[arg(long)]
+    pub text: Option<String>,
+    /// JSON payload (contentType application/json), validated locally; pass - to read stdin
+    #[arg(long)]
+    pub json: Option<String>,
+    /// Idempotency-Key; generated and printed to stderr when omitted
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Id of the same-channel message this one answers (sent as replyTo)
+    #[arg(long = "reply-to")]
+    pub reply_to: Option<String>,
+    /// The part of the --reply-to message you answer, shown above your reply (≤2,048 bytes)
+    #[arg(long, requires = "reply_to")]
+    pub quote: Option<String>,
+    /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
+    #[arg(long = "correlation-id")]
+    pub correlation_id: Option<String>,
+    /// Address a username (visible to everyone in the channel; not a private message). Repeat
+    /// to address up to 8 names at once: each is woken and counts the message as to them
+    #[arg(long, value_name = "NAME")]
+    pub to: Vec<String>,
+    /// key=value label, such as state=open; repeat for more (at most 16)
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+    /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
+    #[arg(long = "attach", value_name = "PATH")]
+    pub attach: Vec<String>,
+    /// Post later instead of now: a delay like 10m, 2h or 1d, or a time with a zone like
+    /// 2026-11-21T09:00:00Z. Prints {"scheduled":…}; see msn scheduled. The absolute time is
+    /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
+    #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
+    pub at: Option<String>,
+    /// Post a copy on a schedule until --until: daily or weekdays (Monday to Friday) with
+    /// --at 09:00, a time of day in --tz; or every N hours as Nh (1h to 168h), from --at or
+    /// one interval from now. See and stop it with msn scheduled list|cancel
+    #[arg(long, value_name = "RULE", conflicts_with_all = ["attach", "replaces"])]
+    pub repeat: Option<String>,
+    /// Last day of --repeat, like 2026-12-31 (through that day in --tz), or a time with a
+    /// zone. Default and latest: 366 days from now
+    #[arg(long, value_name = "DATE", requires = "repeat")]
+    pub until: Option<String>,
+    /// IANA time zone for --repeat's --at and weekdays, like Europe/Lisbon. Default: this
+    /// computer's zone (TZ, then /etc/localtime), else UTC
+    #[arg(long, value_name = "ZONE", requires = "repeat")]
+    pub tz: Option<String>,
+    /// Replace your earlier message ID with this one (ADR 0068): the old message stays and
+    /// shows replacedBy, so readers skip to this one. Only your own message, only once
+    #[arg(long, value_name = "ID", conflicts_with = "at")]
+    pub replaces: Option<String>,
+}
+
+/// The arguments of `msn run`, in their own struct so clap builds them in a function of
+/// their own (see `GatherArgs`).
+#[derive(Debug, clap::Args)]
+pub struct RunArgs {
+    pub channel: String,
+    /// Explicit listener configuration and durable state directory
+    #[arg(long)]
+    pub state_dir: Option<String>,
+    /// Read durable status without starting a listener
+    #[arg(long, conflicts_with_all = ["install_service", "harness", "prompt", "command"])]
+    pub status: bool,
+    /// Install and start a systemd user service with restart supervision
+    #[arg(long)]
+    pub install_service: bool,
+    /// Use the existing prompt adapter for Codex or Claude Code
+    #[arg(long, value_parser = ["codex", "claude", "tny"], conflicts_with_all = ["prompt", "command"])]
+    pub harness: Option<String>,
+    /// Adapt a generic prompt-in/JSON-out command instead of native turn JSON
+    #[arg(long, requires = "command")]
+    pub prompt: bool,
+    /// Keep processing progress on this machine: no processed-by receipts for this agent (ADR 0053).
+    /// Saved with the launch configuration, so give it with --harness or -- COMMAND.
+    #[arg(long, conflicts_with = "status")]
+    pub local: bool,
+    /// Trusted argv, without shell expansion; never put credentials here
+    #[arg(last = true, num_args = 1..)]
+    pub command: Vec<String>,
+}
+
+/// The arguments of `msn wait`, in their own struct so clap builds them in a function of
+/// their own (see `GatherArgs`).
+#[derive(Debug, clap::Args)]
+pub struct WaitArgs {
+    #[arg(required_unless_present = "all")]
+    pub channel: Option<String>,
+    /// Wait on every board this key can read for the first new message addressed to you
+    /// (--username, else the key's name). Prints {channel, message, messages, nextCursor}:
+    /// messages are that board's new messages through the addressed one, and that board's
+    /// reader cursor moves to it, as `msn wait CHANNEL` would. Other boards' cursors stay put.
+    /// A board you never read starts at its first message, so the first run can print a
+    /// long history in messages. Fails if a running `msn wait` holds that board's cursor
+    #[arg(long, conflicts_with_all = ["channel", "thread", "after", "limit", "cursor_file"])]
+    pub all: bool,
+    /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
+    #[arg(long, value_name = "ID")]
+    pub thread: Option<String>,
+    /// Exclusive message id cursor; disables cursor files (not with --cursor-file)
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Seconds per long-poll, 1–25 (default 25)
+    #[arg(long)]
+    pub wait: Option<String>,
+    /// Page size, 1–100 (default 100)
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Atomic 0600 JSON cursor; overrides automatic reader-scoped state (exclusive while running)
+    #[arg(long = "cursor-file")]
+    pub cursor_file: Option<String>,
+}
+
+/// The arguments of `msn peek`, in their own struct so clap builds them in a function of
+/// their own (see `GatherArgs`).
+#[derive(Debug, clap::Args)]
+pub struct PeekArgs {
+    pub channel: String,
+    /// Follow one thread: only its root message and replies, at any depth (a reply id means its thread). Its progress stays on this machine, apart from the board's (ADR 0063)
+    #[arg(long, value_name = "ID", conflicts_with_all = ["resumable", "local"])]
+    pub thread: Option<String>,
+    /// Seconds to wait, 0–25 (default 0)
+    #[arg(long)]
+    pub wait: Option<String>,
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Separate processing state, bound to origin/workspace/channel/reader
+    #[arg(long = "cursor-file")]
+    pub cursor_file: Option<String>,
+    /// Require server-side progress (the default already sends it); fail instead of falling back to local
+    #[arg(long, conflicts_with = "local")]
+    pub resumable: bool,
+    /// Keep progress on this machine only: no processed-by receipts, no resume elsewhere (ADR 0053).
+    /// Same as MSN_RESUMABLE=0.
+    #[arg(long)]
+    pub local: bool,
+}
+
+/// The arguments of `msn ask`, in their own struct so clap builds them in a function of
+/// their own (see `GatherArgs`).
+#[derive(Debug, clap::Args)]
+pub struct AskArgs {
+    /// Channel slug
+    pub channel: String,
+    /// The question; pass - to read stdin
+    pub text: String,
+    /// The one name that may answer
+    #[arg(long, required = true)]
+    pub to: String,
+    /// One answer button (≤128 bytes); repeat 2 to 6 times, in the order to show them
+    #[arg(long = "choice", value_name = "TEXT", required = true)]
+    pub choices: Vec<String>,
+    /// Idempotency-Key; generated and printed to stderr when omitted
+    #[arg(long)]
+    pub key: Option<String>,
+    /// Id of the same-channel message this question replies to
+    #[arg(long = "reply-to")]
+    pub reply_to: Option<String>,
+    /// Wait up to this many seconds (1–86400) for the answer
+    #[arg(long, value_name = "SECONDS")]
+    pub wait: Option<String>,
+}
+
 /// The arguments of `msn search` (ADR 0037, ADR 0073), in their own struct so clap builds them in
 /// a function of their own: inline subcommand fields overflow the test-thread stack in debug builds.
 #[derive(Debug, clap::Args)]
@@ -1291,4 +1086,307 @@ pub struct GatherArgs {
     /// Wait up to this many seconds (1–86400) for every answer
     #[arg(long, value_name = "SECONDS", default_value = "600")]
     pub timeout: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct InviteArgs {
+    pub channel: Option<String>,
+    #[arg(long, default_value_t = 25)]
+    pub uses: u32,
+    #[arg(long, default_value_t = 86400)]
+    pub expires_in: u32,
+    /// Watch only: whoever joins can read the channel live but cannot post or change anything
+    #[arg(long, conflicts_with = "for_agent")]
+    pub watch: bool,
+    /// Print one paragraph to paste into any agent: how to join this board as a persona,
+    /// the board goal and how to wait for work. Needs CHANNEL and --name.
+    #[arg(long, requires_all = ["channel", "name"], conflicts_with_all = ["uses", "expires_in"])]
+    pub for_agent: bool,
+    /// The agent's persona name on the board (with --for-agent)
+    #[arg(long, requires = "for_agent")]
+    pub name: Option<String>,
+    /// The agent's profile name in the paragraph. Default: CHANNEL-NAME
+    #[arg(long, requires = "for_agent")]
+    pub save_as: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct FollowArgs {
+    pub channel: String,
+    /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
+    #[arg(long, value_name = "ID")]
+    pub thread: Option<String>,
+    /// Exclusive message id cursor (not with --cursor-file)
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Seconds to long-poll, 1–25 (default 25)
+    #[arg(long)]
+    pub wait: Option<String>,
+    /// Page size, 1–100 (default 100)
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Atomic 0600 JSON cursor bound to server/tenant/channel
+    #[arg(long = "cursor-file")]
+    pub cursor_file: Option<String>,
+    /// Exit 0 after the first non-empty page
+    #[arg(long)]
+    pub once: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PollArgs {
+    pub channel: String,
+    /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread) (ADR 0063)
+    #[arg(long, value_name = "ID")]
+    pub thread: Option<String>,
+    /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
+    #[arg(long = "label", value_name = "FILTER")]
+    pub labels: Vec<String>,
+    /// Exclusive message id cursor
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Seconds to long-poll, 0–25 (default 0)
+    #[arg(long)]
+    pub wait: Option<String>,
+    /// Page size, 1–100 (default 100)
+    #[arg(long)]
+    pub limit: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LabelArgs {
+    pub channel: String,
+    pub message_id: String,
+    /// Labels to set, as KEY=VALUE
+    #[arg(value_name = "KEY=VALUE")]
+    pub set: Vec<String>,
+    /// Remove this label; repeatable
+    #[arg(long, value_name = "KEY")]
+    pub unset: Vec<String>,
+    /// Change nothing unless this label currently has this value; repeatable
+    #[arg(long = "if", value_name = "KEY=VALUE")]
+    pub if_equal: Vec<String>,
+    /// Change nothing unless this label is currently not set; repeatable
+    #[arg(long = "if-unset", value_name = "KEY")]
+    pub if_unset: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ImportArgs {
+    /// Archive file (`msn.channel.archive.v1`)
+    pub file: String,
+    /// Destination channel slug
+    #[arg(long)]
+    pub channel: String,
+    /// Report source, destination, counts, trust, unsupported records and losses; write nothing
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    /// How imported task events are treated (default: wrapped provenance, inert on the board)
+    #[arg(long, value_enum, default_value_t = TrustPolicy::Provenance)]
+    pub trust: TrustPolicy,
+    /// Import map (default `$XDG_STATE_HOME/msn/<origin-hash>/<tenant>/imports/...`)
+    #[arg(long = "state-file")]
+    pub state_file: Option<String>,
+    /// Append into an existing destination channel (explicit; never implicit)
+    #[arg(long = "allow-existing")]
+    pub allow_existing: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ExportArgs {
+    /// Channel slug
+    pub channel: String,
+    /// Destination path; written as FILE.partial then renamed after the last line.
+    /// Required for jsonl; with `--format md` it is optional and the transcript goes to stdout
+    #[arg(long)]
+    pub out: Option<String>,
+    /// jsonl: the `msn.channel.archive.v1` archive (default). md: a readable Markdown
+    /// transcript with senders, times, labels, reply links and attachment names
+    #[arg(long, value_enum, default_value_t = ExportFormat::Jsonl)]
+    pub format: ExportFormat,
+    /// Exclusive lower-bound message id (default 0)
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Message and snapshot page size, 1–100 (default 100)
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Overwrite an existing FILE
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CommitArgs {
+    pub channel: String,
+    #[arg(long)]
+    pub through: String,
+    /// Commit progress in this thread only, as peeked with --thread (ADR 0063)
+    #[arg(long, value_name = "ID", conflicts_with_all = ["resumable", "local"])]
+    pub thread: Option<String>,
+    #[arg(long = "cursor-file")]
+    pub cursor_file: Option<String>,
+    /// Require a server commit, fenced by this machine's generation (ADR 0034)
+    #[arg(long, conflicts_with = "local")]
+    pub resumable: bool,
+    /// Commit progress kept on this machine only (ADR 0053). Same as MSN_RESUMABLE=0.
+    #[arg(long)]
+    pub local: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StartArgs {
+    pub channel: String,
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Edit cursor from the previous page's editCursor (default: the board's current one, ADR 0052)
+    #[arg(long = "edits-after")]
+    pub edits_after: Option<String>,
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Total output budget, 2048–262144 bytes (default 32768)
+    #[arg(long = "max-bytes")]
+    pub max_bytes: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ReadArgs {
+    pub channel: String,
+    /// Exclusive message id cursor; disables cursor files (not with --cursor-file)
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Seconds to long-poll, 0–25 (default 0)
+    #[arg(long)]
+    pub wait: Option<String>,
+    /// Page size, 1–100 (default 100)
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Atomic 0600 JSON cursor; overrides automatic reader-scoped state
+    #[arg(long = "cursor-file")]
+    pub cursor_file: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CatchupArgs {
+    /// Channel slug
+    pub channel: String,
+    /// Exact exclusive message id continuation; omitting it permits the latest valid snapshot
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Maximum messages in the tail, 1–100 (default 20)
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Maximum complete response size in bytes, 1024–262144 (default 32768)
+    #[arg(long = "max-bytes")]
+    pub max_bytes: Option<String>,
+    /// Also list earlier messages edited since this edit cursor (0 at first; then the
+    /// editCursor of the previous page); they come back in `edited`
+    #[arg(long = "edits-after")]
+    pub edits_after: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct WaitLabelArgs {
+    pub channel: String,
+    /// Filters that must all match: KEY, KEY=VALUE or KEY=A|B
+    #[arg(required = true, value_name = "FILTER")]
+    pub filters: Vec<String>,
+    /// Wait on this message only; otherwise the first matching message in the channel
+    #[arg(long)]
+    pub message: Option<String>,
+    /// Give up after this many seconds (exit 1); waits until interrupted when omitted
+    #[arg(long)]
+    pub timeout: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct MuteArgs {
+    pub channel: Option<String>,
+    /// 1h or 1d; leave it out to mute until msn unmute
+    #[arg(long = "for", value_name = "DURATION")]
+    pub duration: Option<String>,
+    /// Also mute messages addressed to you
+    #[arg(long)]
+    pub everything: bool,
+    /// Print JSON instead of a sentence
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LoginArgs {
+    #[arg(long, conflicts_with_all = ["connection", "access"])]
+    pub create: bool,
+    #[arg(long, conflicts_with = "access")]
+    pub connection: Option<String>,
+    /// Use cloudflared to open the browser and obtain an Access assertion.
+    #[arg(long)]
+    pub access: bool,
+    #[arg(long, default_value = "account")]
+    pub save_as: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EventsArgs {
+    /// Restrict to one channel (a scoped key is always restricted to its granted channel)
+    #[arg(long)]
+    pub channel: Option<String>,
+    /// Exclusive event id cursor (a distinct counter from message ids)
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Seconds to long-poll, 0–25 (default 0)
+    #[arg(long)]
+    pub wait: Option<String>,
+    /// Page size, 1–100 (default 100)
+    #[arg(long)]
+    pub limit: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AttachmentArgs {
+    pub channel: String,
+    pub message_id: String,
+    /// Which file, counted from 0 in the message's attachments list (default 0)
+    #[arg(long)]
+    pub index: Option<String>,
+    /// Write the file here instead of stdout; refuses to overwrite an existing file
+    #[arg(long, short)]
+    pub output: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AnswerArgs {
+    /// Channel slug
+    pub channel: String,
+    /// The question's message id
+    pub message_id: String,
+    /// The choice, exactly as the question lists it
+    pub choice: String,
+    /// Idempotency-Key; generated and printed to stderr when omitted
+    #[arg(long)]
+    pub key: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Tripwire for the debug stack. Test threads get 2 MiB; clap's derive
+    /// builds every inline subcommand field on one frame. If this test aborts
+    /// with a stack overflow, a subcommand grew too large: move its inline
+    /// fields into a `clap::Args` struct (see `SendArgs`, `SearchArgs`).
+    #[test]
+    fn command_parser_fits_in_1536_kib_of_stack_or_move_inline_subcommand_fields_into_an_args_struct()
+     {
+        std::thread::Builder::new()
+            .stack_size(1536 * 1024)
+            .spawn(|| {
+                Cli::command().debug_assert();
+                Cli::try_parse_from(["msn", "search", "--all", "words"])
+                    .expect("search --all parses");
+            })
+            .expect("spawn thread")
+            .join()
+            .expect("the command parser overflowed 1536 KiB of stack");
+    }
 }

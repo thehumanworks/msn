@@ -30,7 +30,7 @@ pub(crate) struct Profile {
 ///
 /// `true` means the command was fully handled and normal command execution should stop.
 pub fn prepare(cli: &mut Cli, matches: &ArgMatches) -> Result<bool, CliError> {
-    if matches!(&cli.command, Command::Login { .. }) {
+    if matches!(&cli.command, Command::Login(..)) {
         return Ok(false);
     }
     match &cli.command {
@@ -70,7 +70,7 @@ pub fn prepare(cli: &mut Cli, matches: &ArgMatches) -> Result<bool, CliError> {
         && cli.tenant.is_none()
         && cli.token.is_none()
         && matches.value_source("url") != Some(ValueSource::CommandLine)
-        && !matches!(&cli.command, Command::Login { .. } | Command::Health)
+        && !matches!(&cli.command, Command::Login(..) | Command::Health)
         && profile_path("account")?.exists()
     {
         cli.profile = Some("account".into());
