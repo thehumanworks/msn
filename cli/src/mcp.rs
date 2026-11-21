@@ -30,7 +30,7 @@ use crate::client::{MsnClient, classify};
 use crate::config::{
     DEFAULT_CATCHUP_MAX_BYTES, DEFAULT_SNAPSHOT_LIMIT, MAX_CATCHUP_MAX_BYTES, MAX_LIMIT,
     MAX_SAFE_INTEGER, MAX_WAIT, MIN_CATCHUP_MAX_BYTES, parse_origin, require_correlation_id,
-    require_idempotency_key, require_tenant, require_text, require_token, slug,
+    require_idempotency_key, require_quote, require_tenant, require_text, require_token, slug,
 };
 use crate::error::CliError;
 use crate::identity::{resolve_username, validate_username};
@@ -374,8 +374,21 @@ impl Server {
             Some(key) => require_idempotency_key(key)?.to_owned(),
             None => Uuid::new_v4().to_string(),
         };
+        let reply_to = optional_int(args, "replyTo", MAX_SAFE_INTEGER)?;
+        let quote = optional_str(args, "quote")?
+            .map(require_quote)
+            .transpose()
+            .map_err(|_| {
+                CliError::usage("quote must be non-blank text of at most 2,048 UTF-8 bytes.")
+            })?;
+        if quote.is_some() && reply_to.is_none() {
+            return Err(
+                CliError::usage("quote needs replyTo: name the message it comes from.").into(),
+            );
+        }
         let correlation = Correlation {
-            reply_to: optional_int(args, "replyTo", MAX_SAFE_INTEGER)?,
+            reply_to,
+            quote,
             correlation_id: optional_str(args, "correlationId")?
                 .map(require_correlation_id)
                 .transpose()
@@ -955,6 +968,7 @@ pub fn tools() -> Vec<Value> {
                 "json": {"description":"Any JSON value, sent as application/json."},
                 "key": {"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Idempotency key; generated when omitted."},
                 "replyTo": cursor("Id of the same-channel message this one answers."),
+                "quote": {"type":"string","maxLength":2048,"description":"The part of the replyTo message you answer, shown above your reply as a quote. Needs replyTo."},
                 "correlationId": {"type":"string","maxLength":128,"description":"Opaque correlation string."},
                 "to": {"type":"string","description":"Address a username. Visible to everyone; not private."},
                 "attach": {"type":"array","maxItems":4,"items":{"type":"string"},"description":"Local file paths to attach (up to 4, 1 MiB each), e.g. a log, screenshot or patch."},

@@ -165,6 +165,40 @@ fn send_returns_key_and_posts_once() {
 }
 
 #[test]
+fn send_carries_a_quote_and_refuses_one_without_reply_to() {
+    // Quote in a reply (ADR 0059).
+    let home = Home::new();
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"message":{"id":9,"tenant":"team","channel":"general","username":"alice","text":"yes","replyTo":4,"quote":"Ship it?"}}"#,
+    )]);
+    let replies = session(
+        &home,
+        &server,
+        &[
+            call(
+                1,
+                "send",
+                json!({"text":"yes","key":"q-1","replyTo":4,"quote":"Ship it?"}),
+            ),
+            call(
+                2,
+                "send",
+                json!({"text":"yes","key":"q-2","quote":"Ship it?"}),
+            ),
+        ],
+    );
+    assert_eq!(ok(&replies[1])["message"]["quote"], "Ship it?");
+    assert_eq!(replies[2]["result"]["isError"], true);
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        json!({"username":"alice","text":"yes","replyTo":4,"quote":"Ship it?"})
+    );
+}
+
+#[test]
 fn peek_then_commit_moves_processing_progress() {
     let home = Home::local();
     let page = r#"{"messages":[{"id":5,"tenant":"team","channel":"general"},{"id":7,"tenant":"team","channel":"general"}],"nextCursor":7,"hasMore":false}"#;

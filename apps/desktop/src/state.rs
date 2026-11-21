@@ -51,6 +51,8 @@ pub struct PendingSend {
     pub channel: String,
     pub text: String,
     pub reply_to: Option<u64>,
+    /// The part of the reply_to message this reply quotes (ADR 0059).
+    pub quote: Option<String>,
     pub correlation_id: Option<String>,
     pub to: Option<String>,
     pub error: Option<String>,
@@ -2408,6 +2410,7 @@ mod tests {
                 channel: "general".into(),
                 text: "hello".into(),
                 reply_to: Some(3),
+                quote: None,
                 correlation_id: None,
                 to: Some("bob".into()),
                 error: None,
@@ -2445,6 +2448,7 @@ mod tests {
                 channel: "general".into(),
                 text: "hello".into(),
                 reply_to: None,
+                quote: None,
                 correlation_id: None,
                 to: None,
                 error: None,
@@ -2459,6 +2463,7 @@ mod tests {
             text: "hello".into(),
             key: "k".into(),
             reply_to: None,
+            quote: None,
             correlation_id: None,
             to: None,
         });

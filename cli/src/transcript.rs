@@ -228,6 +228,23 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
             out.push(String::new());
             out.extend(details);
         }
+        // A quote (ADR 0059) is the part of the replyTo message this reply answers, kept verbatim too.
+        if let Some(quote) = message.get("quote").and_then(Value::as_str) {
+            out.push(String::new());
+            out.push(
+                fence(quote, "text")
+                    .split('\n')
+                    .map(|line| {
+                        if line.is_empty() {
+                            ">".to_string()
+                        } else {
+                            format!("> {line}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
         let info = if message["contentType"].as_str() == Some("application/json") {
             "json"
         } else {

@@ -12,6 +12,7 @@ use crate::markdown;
 use crate::mention;
 use crate::net::worker::{Command, EVENT_QUEUE_CAPACITY, TaskEventRequest, UiEvent, Worker};
 use crate::profile;
+use crate::quote::{MAX_QUOTE_BYTES, quote_of};
 use crate::read_marks;
 use crate::state::{
     AppState, ChannelState, PendingSend, PendingTaskEvent, Screen, SearchState, ThreadRow,
@@ -98,6 +99,8 @@ enum Shortcut {
     Next,
     Previous,
     Reply,
+    /// Quote the selected message in a reply (ADR 0059).
+    Quote,
     Boards,
     Close,
     Help,
@@ -105,15 +108,19 @@ enum Shortcut {
     Chord,
 }
 
+/// Height of the composer's quote row (ADR 0059), with the space around it.
+const QUOTE_ROW_HEIGHT: f32 = 64.0;
+
 /// How long `g` waits for its second key.
 const CHORD: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// The help window, in the order it lists them.
-const SHORTCUTS: [(&str, &str); 7] = [
+const SHORTCUTS: [(&str, &str); 8] = [
     ("/", "Search this board"),
     ("j", "Next message"),
     ("k", "Previous message"),
     ("r", "Reply to the selected message"),
+    ("q", "Quote the selected message in a reply"),
     ("g then b", "Go to the board list"),
     ("Esc", "Close, cancel the reply or leave search"),
     ("?", "Show these shortcuts"),
@@ -135,6 +142,7 @@ fn key_shortcut(event: &egui::Event, typing: bool, chord: bool) -> Option<Shortc
             ("j", _) => Some(Shortcut::Next),
             ("k", _) => Some(Shortcut::Previous),
             ("r", _) => Some(Shortcut::Reply),
+            ("q", _) => Some(Shortcut::Quote),
             ("g", _) => Some(Shortcut::Chord),
             ("?", _) => Some(Shortcut::Help),
             _ => None,
@@ -176,6 +184,9 @@ struct Composer {
     text: String,
     to: String,
     reply_to: String,
+    /// The part of the reply_to message this reply quotes (ADR 0059); empty for none. It starts
+    /// as the whole message and the person trims it to the part they answer.
+    quote: String,
     /// The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
     mention_to: Option<String>,
     error: Option<String>,
@@ -206,6 +217,10 @@ enum Action {
     CancelEdit,
     /// Address the next message as a reply to this one (ADR 0054).
     Reply(u64),
+    /// Reply to this message quoting its text (ADR 0059).
+    Quote(u64),
+    /// Show the message a quote came from, loading it when it is not loaded (ADR 0059).
+    ShowQuoted(u64),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
     React(u64, &'static str, bool),
     /// Archive (`true`) or unarchive the open board (ADR 0046).
@@ -937,6 +952,11 @@ impl MsnDesktopApp {
                     40.0
                 } else {
                     0.0
+                } + if self.composer.quote.is_empty() {
+                    0.0
+                } else {
+                    // The quote row (ADR 0059): three small lines and the field's margins.
+                    QUOTE_ROW_HEIGHT
                 },
             )
             .show_separator_line(false)
@@ -1231,13 +1251,67 @@ impl MsnDesktopApp {
                 );
                 ui.add_space(6.0);
                 ui.label(label("Reply to #"));
-                ui.add(
+                let target = ui.add(
                     egui::TextEdit::singleline(&mut self.composer.reply_to)
                         .margin(egui::Margin::symmetric(10, 5))
                         .font(egui::TextStyle::Small)
                         .desired_width(44.0),
                 );
+                // A quote belongs to the message it came from (ADR 0059): a typed change of
+                // the reply target drops it, as replying to another message does.
+                if target.changed() {
+                    self.composer.quote.clear();
+                }
             });
+            // The quote (ADR 0059), above the addressing row because this layout runs upwards.
+            // It starts as the whole message; cut it down to the part you answer.
+            if !self.composer.quote.is_empty() {
+                let mut remove = false;
+                // A fixed-height row: three lines, scrolling for more, so a long quote never
+                // spills over the To row below it.
+                let line = ui.text_style_height(&egui::TextStyle::Small);
+                let height = line * 3.0 + 12.0;
+                let width = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, height),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Quote")
+                                .small()
+                                .strong()
+                                .color(theme::accent()),
+                        )
+                        .on_hover_text(
+                            "Shown above your reply. Edit it down to the part you answer.",
+                        );
+                        let field = (ui.available_width() - 70.0).max(80.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("composer-quote-scroll")
+                            .max_height(height)
+                            .max_width(field)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.composer.quote)
+                                        .id_salt("composer-quote")
+                                        .margin(egui::Margin::symmetric(10, 5))
+                                        .font(egui::TextStyle::Small)
+                                        .desired_rows(3)
+                                        .desired_width(field),
+                                );
+                            });
+                        remove = ui
+                            .small_button("Remove")
+                            .on_hover_text("Remove the quote, keep the reply")
+                            .clicked();
+                    },
+                );
+                if remove {
+                    self.composer.quote.clear();
+                }
+            }
             if let Some(error) = &self.composer.error {
                 ui.colored_label(theme::error(), error);
             }
@@ -1466,6 +1540,7 @@ impl MsnDesktopApp {
                     self.show_keys = false;
                 } else if !self.composer.reply_to.trim().is_empty() {
                     self.composer.reply_to.clear();
+                    self.composer.quote.clear();
                 } else if self.active_tab == Tab::Search {
                     self.active_tab = Tab::Chat;
                 } else if self.selected.is_some() {
@@ -1508,6 +1583,13 @@ impl MsnDesktopApp {
                 None => {
                     self.state.status =
                         Some("Choose a message with j or k first, then press r to reply.".into())
+                }
+            },
+            Shortcut::Quote => match self.selected {
+                Some(id) => self.quote_message(id),
+                None => {
+                    self.state.status =
+                        Some("Choose a message with j or k first, then press q to quote it.".into())
                 }
             },
         }
@@ -1623,9 +1705,33 @@ impl MsnDesktopApp {
         if archived || self.state.channel.is_none() {
             return;
         }
+        // A quote belongs to the message it came from; replying to another drops it.
+        if self.composer.reply_to.trim() != id.to_string() {
+            self.composer.quote.clear();
+        }
         self.composer.reply_to = id.to_string();
         self.active_tab = Tab::Chat;
         self.focus = Some(FocusTarget::Composer);
+    }
+
+    /// Replies to `id` with its whole text as the quote (ADR 0059). The quote field is editable,
+    /// so the person cuts it down to the part they answer.
+    fn quote_message(&mut self, id: u64) {
+        let text = self
+            .state
+            .channel
+            .as_ref()
+            .and_then(|state| state.messages.get(&id))
+            .and_then(|message| message["text"].as_str())
+            .and_then(quote_of);
+        let Some(text) = text else {
+            self.state.status = Some("This message has no text to quote.".into());
+            return;
+        };
+        self.reply_to(id);
+        if self.composer.reply_to == id.to_string() {
+            self.composer.quote = text;
+        }
     }
 
     fn keys_window(&mut self, ctx: &egui::Context) {
@@ -1737,6 +1843,23 @@ impl MsnDesktopApp {
             }
             Action::CancelEdit => self.editing = None,
             Action::Reply(id) => self.reply_to(id),
+            Action::Quote(id) => self.quote_message(id),
+            Action::ShowQuoted(id) => {
+                let loaded = self
+                    .state
+                    .channel
+                    .as_ref()
+                    .is_some_and(|state| state.messages.contains_key(&id));
+                if loaded {
+                    self.state.open_thread_of(id);
+                    self.state.unfold(id);
+                    self.selected = Some(id);
+                    self.scroll_to = Some(id);
+                } else {
+                    let commands = self.state.load_parent(id);
+                    self.dispatch_all(commands);
+                }
+            }
             Action::React(id, kind, remove) => {
                 let commands = self.state.react(id, kind, remove);
                 self.dispatch_all(commands);
@@ -1798,6 +1921,18 @@ impl MsnDesktopApp {
                 }
             },
         };
+        // A quote rides on its reply target (ADR 0059); without one it is not sent.
+        let quote = match (reply_to, self.composer.quote.trim()) {
+            (None, _) | (_, "") => None,
+            _ if self.composer.quote.len() > MAX_QUOTE_BYTES => {
+                self.composer.error = Some(
+                    "Quote must be at most 2,048 UTF-8 bytes. Cut it to the part you answer."
+                        .into(),
+                );
+                return;
+            }
+            _ => Some(self.composer.quote.clone()),
+        };
         self.composer.error = None;
         self.composer.text.clear();
         // To filled by an @ pick belongs to that message (ADR 0055); a typed To stays.
@@ -1808,6 +1943,7 @@ impl MsnDesktopApp {
         self.mention_dismissed = None;
         // A reply target is for one message (ADR 0054); the next message starts unaddressed.
         self.composer.reply_to.clear();
+        self.composer.quote.clear();
         // Your reply folds into its thread; open it so the reply does not seem to vanish.
         if let Some(parent) = reply_to {
             self.state.open_thread_of(parent);
@@ -1822,6 +1958,7 @@ impl MsnDesktopApp {
                 channel: channel.clone(),
                 text: text.clone(),
                 reply_to,
+                quote: quote.clone(),
                 correlation_id: None,
                 to: to.clone(),
                 error: None,
@@ -1836,6 +1973,7 @@ impl MsnDesktopApp {
             text,
             key,
             reply_to,
+            quote,
             correlation_id: None,
             to,
         });
@@ -1858,6 +1996,7 @@ impl MsnDesktopApp {
             text: pending.text.clone(),
             key: key.to_string(),
             reply_to: pending.reply_to,
+            quote: pending.quote.clone(),
             correlation_id: pending.correlation_id.clone(),
             to: pending.to.clone(),
         };
@@ -1999,11 +2138,13 @@ impl MsnDesktopApp {
                     kept.text == self.composer.text
                         && kept.to == self.composer.to
                         && kept.reply_to == self.composer.reply_to
+                        && kept.quote == self.composer.quote
                 }
                 None => {
                     self.composer.text.is_empty()
                         && self.composer.to.is_empty()
                         && self.composer.reply_to.is_empty()
+                        && self.composer.quote.is_empty()
                 }
             };
             if !unchanged {
@@ -2011,6 +2152,7 @@ impl MsnDesktopApp {
                     text: self.composer.text.clone(),
                     to: self.composer.to.clone(),
                     reply_to: self.composer.reply_to.clone(),
+                    quote: self.composer.quote.clone(),
                 };
                 self.drafts_dirty |= self.drafts.set(board, &draft);
             }
@@ -2038,6 +2180,7 @@ impl MsnDesktopApp {
             text: draft.text,
             to: draft.to,
             reply_to: draft.reply_to,
+            quote: draft.quote,
             mention_to: None,
             error: None,
         };
@@ -2399,6 +2542,14 @@ fn link_controls(ui: &mut egui::Ui, id: u64, can_post: bool, actions: &mut Vec<A
     {
         actions.push(Action::Reply(id));
     }
+    if can_post
+        && ui
+            .link(egui::RichText::new("Quote").small().color(theme::muted()))
+            .on_hover_text(format!("Reply to message #{id} quoting it (q)"))
+            .clicked()
+    {
+        actions.push(Action::Quote(id));
+    }
     if ui
         .link(egui::RichText::new("Link").small().color(theme::muted()))
         .on_hover_text(format!("Copy a link to message #{id}"))
@@ -2501,23 +2652,41 @@ fn render_message(
         }
     };
     let header = message_header(ui, message, username, own);
+    // The quoted part of the replyTo message (ADR 0059); pressing it shows the source.
+    let source = message["replyTo"].as_u64();
+    let quote = message["quote"].as_str().filter(|_| source.is_some());
+    let mut quote_clicked = false;
     let shown = if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            bubble(ui, header, body, true, fold.as_mut(), |ui| {
-                link_controls(ui, id, can_post, actions);
-                if editable {
-                    edit_control(ui, id, actions);
-                }
-            })
+            bubble(
+                ui,
+                header,
+                quote.map(|text| (text, &mut quote_clicked)),
+                body,
+                true,
+                fold.as_mut(),
+                |ui| {
+                    link_controls(ui, id, can_post, actions);
+                    if editable {
+                        edit_control(ui, id, actions);
+                    }
+                },
+            )
         })
         .inner
     } else {
         ui.horizontal_top(|ui| {
             theme::avatar(ui, username, 30.0, None);
             ui.vertical(|ui| {
-                bubble(ui, header, body, false, fold.as_mut(), |ui| {
-                    link_controls(ui, id, can_post, actions)
-                })
+                bubble(
+                    ui,
+                    header,
+                    quote.map(|text| (text, &mut quote_clicked)),
+                    body,
+                    false,
+                    fold.as_mut(),
+                    |ui| link_controls(ui, id, can_post, actions),
+                )
             })
             .inner
         })
@@ -2525,6 +2694,9 @@ fn render_message(
     };
     if fold.is_some_and(|fold| fold.toggled) {
         actions.push(Action::ToggleFold(id));
+    }
+    if quote_clicked && let Some(source) = source {
+        actions.push(Action::ShowQuoted(source));
     }
     // The bubble's frame only senses hover; give it a stable id that senses the right click.
     let shown = ui.interact(
@@ -2535,6 +2707,10 @@ fn render_message(
     shown.context_menu(|ui| {
         if can_post && ui.button("Reply").clicked() {
             actions.push(Action::Reply(id));
+            ui.close();
+        }
+        if can_post && ui.button("Quote in a reply").clicked() {
+            actions.push(Action::Quote(id));
             ui.close();
         }
         if ui.button("Copy link to this message").clicked() {
@@ -2779,6 +2955,7 @@ impl From<egui::RichText> for Body {
 fn bubble(
     ui: &mut egui::Ui,
     header: egui::text::LayoutJob,
+    quote: Option<(&str, &mut bool)>,
     body: impl Into<Body>,
     own: bool,
     fold: Option<&mut Fold>,
@@ -2803,6 +2980,7 @@ fn bubble(
         }
     });
     let mut long = false;
+    let mut quote = quote;
     let response = match body.into() {
         Body::Rich(text) => {
             let galley = egui::WidgetText::from(text).into_galley(
@@ -2813,6 +2991,9 @@ fn bubble(
             );
             frame
                 .show(ui, |ui| {
+                    if let Some((text, clicked)) = quote.take() {
+                        *clicked = show_quote(ui, text);
+                    }
                     long = fold_clip(ui, fold.as_deref(), |ui| {
                         ui.label(galley);
                     });
@@ -2824,6 +3005,9 @@ fn bubble(
             frame
                 .show(ui, |ui| {
                     ui.set_max_width(wrap_width);
+                    if let Some((text, clicked)) = quote.take() {
+                        *clicked = show_quote(ui, text);
+                    }
                     long = fold_clip(ui, fold.as_deref(), |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                             if let markdown::Parsed::Blocks(blocks) = &*parsed {
@@ -2856,6 +3040,36 @@ fn bubble(
     response
 }
 
+/// A reply's quote (ADR 0059) above its text: muted, behind an accent bar, at most six lines.
+/// Returns true when it was pressed, which shows the message it came from.
+fn show_quote(ui: &mut egui::Ui, text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut shown = lines[..lines.len().min(6)].join("\n");
+    if lines.len() > 6 {
+        shown.push('…');
+    }
+    let shown = truncate(&shown, 400);
+    let response = ui
+        .horizontal_top(|ui| {
+            ui.add_space(10.0);
+            ui.add(
+                egui::Label::new(egui::RichText::new(shown).small().color(theme::muted()))
+                    .wrap()
+                    .sense(egui::Sense::click()),
+            )
+        })
+        .inner;
+    ui.painter().vline(
+        response.rect.left() - 6.0,
+        response.rect.y_range(),
+        egui::Stroke::new(3.0, theme::accent()),
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Quoted from the message this replies to. Click to show it.")
+        .clicked()
+}
+
 /// A send that has not been confirmed yet: a dimmed own-side bubble with its status below.
 fn render_pending(ui: &mut egui::Ui, key: &str, pending: &PendingSend, actions: &mut Vec<Action>) {
     ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
@@ -2874,11 +3088,13 @@ fn render_pending(ui: &mut egui::Ui, key: &str, pending: &PendingSend, actions: 
                 ..Default::default()
             },
         );
+        let mut ignored = false;
         ui.scope(|ui| {
             ui.set_opacity(0.55);
             bubble(
                 ui,
                 header,
+                pending.quote.as_deref().map(|text| (text, &mut ignored)),
                 egui::RichText::new(&pending.text),
                 true,
                 None,
@@ -3250,7 +3466,9 @@ mod layout_tests {
             key_shortcut(&escape()[0], true, false),
             Some(Shortcut::Close)
         );
-        assert_eq!(SHORTCUTS.len(), 7);
+        assert_eq!(SHORTCUTS.len(), 8);
+        assert_eq!(key_shortcut(&key("q"), false, false), Some(Shortcut::Quote));
+        assert_eq!(key_shortcut(&key("q"), true, false), None);
     }
 
     #[test]
@@ -3873,5 +4091,66 @@ mod draft_tests {
         assert!(!path.exists(), "Disconnect forgets the drafts");
         assert_eq!(app.composer.text, "");
         let _ = std::fs::remove_dir_all(dir);
+    }
+    /// Quote in a reply (ADR 0059): Quote fills the reply target and the quote, the quote is
+    /// kept with the board's draft, replying elsewhere drops it, and Send carries it once.
+    #[test]
+    fn quote_replies_with_the_message_text_and_sends_it_once() {
+        let mut app = fixture(3);
+        app.sync_composer();
+        app.perform(Action::Quote(2));
+        assert_eq!(app.composer.reply_to, "2");
+        assert_eq!(
+            app.composer.quote,
+            "The glass workspace is ready for review."
+        );
+        // Replying to another message drops the quote; quoting again brings it back.
+        app.perform(Action::Reply(3));
+        assert_eq!(
+            (app.composer.reply_to.as_str(), app.composer.quote.as_str()),
+            ("3", "")
+        );
+        app.run_shortcut(&egui::Context::default(), Shortcut::Quote);
+        assert_eq!(
+            app.composer.quote, "",
+            "q with nothing selected changes nothing"
+        );
+        app.selected = Some(2);
+        app.run_shortcut(&egui::Context::default(), Shortcut::Quote);
+        assert_eq!(app.composer.reply_to, "2");
+        // The person trims it to the part they answer; the draft keeps it across boards.
+        app.composer.quote = "ready for review".into();
+        app.sync_composer();
+        app.state.selected_channel = Some("design".into());
+        app.sync_composer();
+        assert_eq!(app.composer.quote, "");
+        app.state.selected_channel = Some("general".into());
+        app.sync_composer();
+        assert_eq!(app.composer.quote, "ready for review");
+        // Too long a quote is refused before anything is sent.
+        app.composer.text = "Looks good".into();
+        app.composer.quote = "x".repeat(MAX_QUOTE_BYTES + 1);
+        app.perform(Action::Send);
+        assert!(app.composer.error.is_some());
+        assert!(app.state.pending_sends.is_empty());
+        app.composer.quote = "ready for review".into();
+        app.perform(Action::Send);
+        let pending: Vec<_> = app.state.pending_sends.values().collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            (pending[0].reply_to, pending[0].quote.as_deref()),
+            (Some(2), Some("ready for review"))
+        );
+        assert_eq!(
+            (app.composer.reply_to.as_str(), app.composer.quote.as_str()),
+            ("", "")
+        );
+        // Esc cancels the reply and its quote together.
+        app.perform(Action::Quote(1));
+        app.run_shortcut(&egui::Context::default(), Shortcut::Close);
+        assert_eq!(
+            (app.composer.reply_to.as_str(), app.composer.quote.as_str()),
+            ("", "")
+        );
     }
 }

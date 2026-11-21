@@ -970,3 +970,52 @@ test("explicit continuations consume the hard budget instead of looping forever"
   );
   assert.equal(f.store.claim("alice", 100, 2000), null);
 });
+
+test("a send action can quote the message it replies to; a quote without replyTo is refused (ADR 0059)", (t) => {
+  const f = fixture(t),
+    job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", {
+      actions: [{ type: "send", channel: "work", text: "Done", replyTo: 1, quote: "Then tag the CLI." }],
+    }),
+    null,
+    10,
+  );
+  const output = f.store.claimOutput("alice", 10);
+  assert.equal(output.body.replyTo, 1);
+  assert.equal(output.body.quote, "Then tag the CLI.");
+  f.store.outputResult(output, null, false, 10);
+  // An explicit replyTo without a quote is kept as given, not replaced by the triggering message.
+  const next = turn(f, "alice", 2);
+  f.store.finish(
+    next,
+    result(f.config, "alice", { actions: [{ type: "send", channel: "work", text: "Re #1", replyTo: 1 }] }),
+    // The triggering message is #2: before the fix, replyTo 1 was replaced by 2.
+    { id: 2, channel: "work", username: "human" },
+    20,
+  );
+  const explicit = f.store.claimOutput("alice", 20);
+  assert.equal(explicit.body.replyTo, 1);
+  assert.equal("quote" in explicit.body, false);
+  f.store.outputResult(explicit, null, false, 20);
+  // With no replyTo the reply still answers the triggering message.
+  const third = turn(f, "alice", 3);
+  f.store.finish(
+    third,
+    result(f.config, "alice", { actions: [{ type: "send", channel: "work", text: "ok" }] }),
+    { id: 3, channel: "work", username: "human" },
+    30,
+  );
+  assert.equal(f.store.claimOutput("alice", 30).body.replyTo, 3);
+  for (const action of [
+    { quote: "no target" },
+    { replyTo: 1, quote: " " },
+    { replyTo: 1, quote: "x".repeat(2049) },
+    { replyTo: 1, quote: 7 },
+  ])
+    assert.throws(
+      () => result(f.config, "alice", { actions: [{ type: "send", channel: "work", text: "x", ...action }] }),
+      /invalid_quote/,
+    );
+});
