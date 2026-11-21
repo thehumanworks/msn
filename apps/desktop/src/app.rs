@@ -233,6 +233,8 @@ enum Action {
     ShowQuoted(u64),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
     React(u64, &'static str, bool),
+    /// Answer question (id) with a choice (ADR 0065).
+    Answer(u64, String),
     /// Archive (`true`) or unarchive the open board (ADR 0046).
     SetArchived(bool),
     /// Mute the open board: 1h, 1d or `None` for until turned back on (ADR 0044).
@@ -1081,6 +1083,7 @@ impl MsnDesktopApp {
                                         );
                                         mark_selected(ui, &shown, selected == Some(id), reveal);
                                         render_editor(ui, id, &mut self.editing, actions);
+                                        render_choices(ui, message, &me, can_react, actions);
                                         render_reactions(ui, message, &me, can_react, actions);
                                         render_receipts(ui, message, &me, &state.receipts);
                                         render_parent(ui, state, message, actions);
@@ -1117,6 +1120,7 @@ impl MsnDesktopApp {
                                             );
                                             mark_selected(ui, &shown, selected == Some(id), reveal);
                                             render_editor(ui, id, &mut self.editing, actions);
+                                            render_choices(ui, reply, &me, can_react, actions);
                                             render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
@@ -2021,6 +2025,10 @@ impl MsnDesktopApp {
                 let commands = self.state.react(id, kind, remove);
                 self.dispatch_all(commands);
             }
+            Action::Answer(id, choice) => {
+                let commands = self.state.answer(id, choice);
+                self.dispatch_all(commands);
+            }
             Action::SetArchived(archived) => {
                 let commands = self.state.set_archived(archived);
                 self.dispatch_all(commands);
@@ -2650,6 +2658,94 @@ fn render_receipts(
     let label = egui::Label::new(egui::RichText::new(line).small().color(theme::muted()));
     let draw = |ui: &mut egui::Ui| {
         ui.add(label).on_hover_text(msn_cli::receipts::MEANING);
+    };
+    if own {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), draw);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.add_space(30.0 + ui.spacing().item_spacing.x);
+            draw(ui);
+        });
+    }
+}
+
+/// How a question's buttons show (ADR 0065).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceMode {
+    /// Answered: locked, the chosen one marked.
+    Answered,
+    /// The connected name is asked and may tap one.
+    Open,
+    /// Someone else is asked.
+    Waiting,
+}
+
+/// A message's choices when it is a question (2 or more strings), else None.
+pub fn question_choices(message: &Value) -> Option<Vec<&str>> {
+    let choices: Vec<&str> = message["choices"]
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<_>>()?;
+    (choices.len() >= 2).then_some(choices)
+}
+
+pub fn choice_mode(message: &Value, me: &str, can_post: bool) -> ChoiceMode {
+    if message["answered"].is_object() {
+        ChoiceMode::Answered
+    } else if can_post && message["to"].as_str() == Some(me) {
+        ChoiceMode::Open
+    } else {
+        ChoiceMode::Waiting
+    }
+}
+
+/// A question's buttons under its text (ADR 0065). The addressed name clicks one to answer; once
+/// answered they lock and the chosen one is marked. Choices are plain text labels.
+fn render_choices(
+    ui: &mut egui::Ui,
+    message: &Value,
+    me: &str,
+    can_post: bool,
+    actions: &mut Vec<Action>,
+) {
+    let (Some(id), Some(choices)) = (message["id"].as_u64(), question_choices(message)) else {
+        return;
+    };
+    let mode = choice_mode(message, me, can_post);
+    let chosen = message["answered"]["choice"].as_str();
+    let own = message["username"].as_str() == Some(me);
+    let mut draw = |ui: &mut egui::Ui| {
+        ui.horizontal_wrapped(|ui| {
+            for choice in &choices {
+                let selected = chosen == Some(*choice);
+                let mut text = egui::RichText::new(*choice);
+                if selected {
+                    text = text.strong().color(theme::accent());
+                }
+                let button = egui::Button::new(text)
+                    .selected(selected)
+                    .min_size(egui::vec2(56.0, 28.0));
+                let response = ui.add_enabled(mode == ChoiceMode::Open, button);
+                if mode == ChoiceMode::Open
+                    && response.on_hover_text(format!("Answer {choice}")).clicked()
+                {
+                    actions.push(Action::Answer(id, (*choice).to_string()));
+                }
+            }
+            let note = match mode {
+                ChoiceMode::Answered => format!(
+                    "{} answered {}",
+                    message["answered"]["username"].as_str().unwrap_or("?"),
+                    chosen.unwrap_or("?")
+                ),
+                ChoiceMode::Open => "Your answer".to_string(),
+                ChoiceMode::Waiting => {
+                    format!("Waiting for {}", message["to"].as_str().unwrap_or("?"))
+                }
+            };
+            ui.label(egui::RichText::new(note).small().color(theme::muted()));
+        });
     };
     if own {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), draw);
@@ -4380,5 +4476,43 @@ mod draft_tests {
             (app.composer.reply_to.as_str(), app.composer.quote.as_str()),
             ("", "")
         );
+    }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_question_offers_buttons_only_to_its_addressed_name_until_answered() {
+        // Ask a question with buttons (ADR 0065).
+        let question = json!({"id": 4, "to": "alice", "choices": ["yes", "no"]});
+        assert_eq!(question_choices(&question), Some(vec!["yes", "no"]));
+        assert_eq!(choice_mode(&question, "alice", true), ChoiceMode::Open);
+        assert_eq!(choice_mode(&question, "bob", true), ChoiceMode::Waiting);
+        // Watch-only or archived: nobody can post, so the buttons stay locked.
+        assert_eq!(choice_mode(&question, "alice", false), ChoiceMode::Waiting);
+        let mut answered = question.clone();
+        answered["answered"] = json!({"id": 5, "choice": "no", "username": "alice"});
+        assert_eq!(choice_mode(&answered, "alice", true), ChoiceMode::Answered);
+        assert_eq!(question_choices(&json!({"choices": ["one"]})), None);
+        assert_eq!(question_choices(&json!({"choices": ["a", 2]})), None);
+        assert_eq!(question_choices(&json!({"text": "plain"})), None);
+    }
+
+    #[test]
+    fn rendering_a_question_draws_without_actions_until_clicked() {
+        let ctx = egui::Context::default();
+        let question =
+            json!({"id": 4, "username": "lead", "to": "alice", "choices": ["yes", "no <b>"]});
+        let mut actions = Vec::new();
+        for me in ["alice", "bob"] {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                render_choices(ui, &question, me, true, &mut actions);
+            });
+            output.textures_delta.clear();
+        }
+        assert!(actions.is_empty());
     }
 }

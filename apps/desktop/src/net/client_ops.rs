@@ -393,6 +393,60 @@ pub fn fetch_personas(
         .unwrap_or_default())
 }
 
+/// Answers question `question` with `choice` as `username` (ADR 0065). Returns the question's
+/// `answered` record: this answer's, or the first one when someone answered before. A refusal
+/// (403 not addressed, 400 not a choice) is a plain error here, never a failed sign-in: only 401
+/// ends the session.
+#[allow(clippy::too_many_arguments)]
+pub fn answer(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    question: u64,
+    choice: &str,
+    key: &str,
+) -> Result<Value, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let base = format!("/api/tenants/{tenant}/channels/{channel}/messages");
+    let response = client.post_json(
+        &base,
+        token,
+        &[("Idempotency-Key", key)],
+        &msn_cli::ask::answer_body(username, question, choice),
+    )?;
+    if response.status == 409
+        && serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|body| body["error"]["code"].as_str().map(str::to_owned))
+            .as_deref()
+            == Some("already_answered")
+    {
+        let read = client.get(&format!("{base}/{question}"), Some(token))?;
+        classify(read.status, &read.body)?;
+        let value: Value = serde_json::from_str(&read.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?;
+        return Ok(value["message"]["answered"].clone());
+    }
+    if response.status != 401
+        && let Err(CliError::Auth(message)) = classify(response.status, &response.body)
+    {
+        return Err(CliError::generic(message));
+    }
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let reply = &value["message"];
+    Ok(serde_json::json!({
+        "id": reply["id"],
+        "choice": reply["answer"],
+        "username": reply["username"],
+        "answeredAt": reply["createdAt"],
+    }))
+}
+
 /// Adds or removes one reaction (ADR 0047) as `username`. Returns the message's reactions after
 /// the change (`Value::Null` when it has none left).
 #[allow(clippy::too_many_arguments)]

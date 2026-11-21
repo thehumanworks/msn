@@ -603,6 +603,31 @@ impl AppState {
         }]
     }
 
+    /// Answers question `question` with `choice` as the connected name (ADR 0065). Only the
+    /// addressed name is offered the buttons; the server checks it again.
+    pub fn answer(&mut self, question: u64, choice: String) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if self.is_archived(&channel) {
+            self.status = Some(format!("{channel} is archived and read only."));
+            return Vec::new();
+        }
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Vec::new();
+        };
+        vec![Command::Answer {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            question,
+            choice,
+            key: uuid::Uuid::new_v4().to_string(),
+        }]
+    }
+
     /// Reloads processed-by receipts for the open channel; the app also calls this on a timer,
     /// because a commit is not a channel event.
     pub fn receipts_command(&mut self) -> Option<Command> {
@@ -1010,6 +1035,7 @@ impl AppState {
                 self.status = Some(BUSY.into());
             }
             Command::React { .. }
+            | Command::Answer { .. }
             | Command::EditMessage { .. }
             | Command::Schedule { .. }
             | Command::ChangeScheduled { .. } => self.status = Some(BUSY.into()),
@@ -1311,6 +1337,25 @@ impl AppState {
                         "Message #{} edited.",
                         message["id"].as_u64().unwrap_or(0)
                     ));
+                }
+                Vec::new()
+            }
+            UiEvent::Answered {
+                generation,
+                channel_generation,
+                channel,
+                question,
+                answered,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && answered.is_object()
+                    && let Some(message) = self
+                        .channel
+                        .as_mut()
+                        .and_then(|state| state.messages.get_mut(&question))
+                        .and_then(Value::as_object_mut)
+                {
+                    message.insert("answered".into(), answered);
                 }
                 Vec::new()
             }
@@ -2336,6 +2381,59 @@ mod tests {
             message: json!({"id": 4, "channel": "general", "text": "a2", "editedAt": "2026-11-20T00:00:01Z"}),
         });
         assert_eq!(state.channel.as_ref().unwrap().messages[&4]["text"], "a2");
+    }
+
+    #[test]
+    fn answering_a_question_sends_the_choice_and_locks_it_locally() {
+        // Ask a question with buttons (ADR 0065).
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let mut question = msg(4, "Ship it?");
+        question["to"] = json!("alice");
+        question["choices"] = json!(["yes", "no"]);
+        synced(&mut state, vec![question], 4, 0);
+        let commands = state.answer(4, "no".into());
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Answer { question: 4, choice, username, .. }] if choice == "no" && username == "alice"
+        ));
+        let cg = state.channel_generation;
+        // An empty record (the server lost it) changes nothing; a real one marks the question.
+        state.apply(UiEvent::Answered {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            question: 4,
+            answered: Value::Null,
+        });
+        assert!(
+            state.channel.as_ref().unwrap().messages[&4]
+                .get("answered")
+                .is_none()
+        );
+        state.apply(UiEvent::Answered {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            question: 4,
+            answered: json!({"id": 5, "choice": "no", "username": "alice", "answeredAt": "t"}),
+        });
+        assert_eq!(
+            state.channel.as_ref().unwrap().messages[&4]["answered"]["choice"],
+            "no"
+        );
+        // A stale answer for an old channel generation is ignored.
+        state.apply(UiEvent::Answered {
+            generation: 1,
+            channel_generation: cg + 1,
+            channel: "general".into(),
+            question: 4,
+            answered: json!({"id": 9, "choice": "yes", "username": "x", "answeredAt": "t"}),
+        });
+        assert_eq!(
+            state.channel.as_ref().unwrap().messages[&4]["answered"]["id"],
+            5
+        );
     }
 
     #[test]
