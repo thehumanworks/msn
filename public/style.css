@@ -1669,7 +1669,8 @@ nav button.has-unread .channel-name {
   /* Touch-size actions do not fit beside a name in a reply thread; they wrap, the name does not break. */
   .message-meta {
     flex-wrap: wrap;
-    row-gap: 0;
+    /* Far enough apart that the hit areas above and below wrapped buttons never overlap. */
+    row-gap: 12px;
   }
   .message-meta strong {
     overflow-wrap: normal;
@@ -1808,6 +1809,7 @@ nav button.has-unread .channel-name {
   .message-meta .pin-toggle,
   .message-meta .copy-link,
   .message-meta .reply-button,
+  .message-meta .quote-button,
   .reaction-chip,
   .label-chip,
   .fold-toggle,
@@ -1818,7 +1820,8 @@ nav button.has-unread .channel-name {
   }
   .message-meta .pin-toggle,
   .message-meta .copy-link,
-  .message-meta .reply-button {
+  .message-meta .reply-button,
+  .message-meta .quote-button {
     padding: 0 8px;
   }
   /* Wrapped rows sit far enough apart that the hit areas above and below never overlap. */
@@ -1830,6 +1833,7 @@ nav button.has-unread .channel-name {
     .message-meta .pin-toggle,
     .message-meta .copy-link,
     .message-meta .reply-button,
+    .message-meta .quote-button,
     .reaction-chip,
     .label-chip,
     .fold-toggle,
