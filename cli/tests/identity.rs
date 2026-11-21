@@ -117,6 +117,54 @@ fn malformed_payload_does_not_even_lookup_identity() {
 }
 
 #[test]
+fn repeated_to_addresses_several_names_and_nine_fail_before_any_request() {
+    // Several names (ADR 0067): repeat --to; the body carries them as a list in order.
+    let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":1}}"#)]);
+    let run = |names: &[&str]| {
+        let mut args = vec![
+            "--url".to_string(),
+            server.url(),
+            "--tenant".into(),
+            "team".into(),
+            "--token".into(),
+            "key".into(),
+            "--username".into(),
+            "planner".into(),
+            "send".into(),
+            "general".into(),
+            "--text".into(),
+            "review".into(),
+        ];
+        for name in names {
+            args.push("--to".into());
+            args.push((*name).into());
+        }
+        Command::new(env!("CARGO_BIN_EXE_msn"))
+            .env_clear()
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["reviewer", "worker"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(body["to"], serde_json::json!(["reviewer", "worker"]));
+    for bad in [
+        vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        vec!["reviewer", "reviewer"],
+    ] {
+        let out = run(&bad);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--to"));
+    }
+    assert_eq!(server.recorded().len(), 1);
+}
+
+#[test]
 fn recipient_is_independent_of_reply_and_invalid_recipient_fails_before_lookup() {
     let server = MockServer::spawn(vec![Scripted::json(201, r#"{"message":{"id":1}}"#)]);
     let out = Command::new(env!("CARGO_BIN_EXE_msn"))

@@ -204,6 +204,12 @@ export function choiceList(value: unknown, to: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (to === undefined || to === null)
     throw new HttpError(400, "invalid_choices", "choices need to: name the person who answers.");
+  if (Array.isArray(to) && to.length > 1)
+    throw new HttpError(
+      400,
+      "invalid_choices",
+      "A question with choices goes to one name. Ask each person separately.",
+    );
   if (!Array.isArray(value) || value.length < MIN_CHOICES || value.length > MAX_CHOICES)
     throw new HttpError(
       400,
@@ -244,10 +250,51 @@ export function correlationId(value: unknown): string | undefined {
   return text(value, "correlationId", 128);
 }
 
-/** Optional `to` body field: absent/null means unset; otherwise an opaque username label. */
-export function recipient(value: unknown): string | undefined {
+/** The most names one message can be addressed to (ADR 0067). */
+export const MAX_RECIPIENTS = 8;
+
+/**
+ * Optional `to` body field (ADR 0067): absent/null means unset; otherwise one name, or a list of
+ * 1 to MAX_RECIPIENTS different names, each an opaque username label of at most 128 bytes. Returns
+ * the names in the order given; a one-name list is the same as the name alone.
+ */
+export function recipients(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
-  return text(value, "to", 128);
+  if (!Array.isArray(value)) return [text(value, "to", 128)];
+  if (value.length < 1 || value.length > MAX_RECIPIENTS)
+    throw new HttpError(
+      400,
+      "invalid_message",
+      `to must be one name or a list of 1 to ${MAX_RECIPIENTS} names.`,
+    );
+  const names = value.map((name) => text(name, "Each to name", 128));
+  // A repeat is the same name trimmed and ignoring case, as names are matched everywhere.
+  if (new Set(names.map((name) => name.trim().toLowerCase())).size !== names.length)
+    throw new HttpError(400, "invalid_message", "to must not name anyone twice.");
+  return names;
+}
+
+/** What a message stores and returns for its names: `to` is the first, `recipients` lists all when there are several. */
+export function addressFields(names: string[] | undefined): { to?: string; recipients?: string[] } {
+  if (!names?.length) return {};
+  return names.length > 1 ? { to: names[0], recipients: names } : { to: names[0] };
+}
+
+/**
+ * Every name a message is addressed to (ADR 0067): `recipients` when it lists several, else `to`
+ * alone, else none. The one place the server reads a message's addressees.
+ */
+export function addressees(message: { to?: string | null; recipients?: string[] | null }): string[] {
+  if (Array.isArray(message.recipients) && message.recipients.length) return message.recipients;
+  return typeof message.to === "string" ? [message.to] : [];
+}
+
+/** Whether `username` is one of the message's addressees, exactly or trimmed and ignoring case. */
+export function isAddressed(
+  username: string,
+  message: { to?: string | null; recipients?: string[] | null },
+): boolean {
+  return addressees(message).some((name) => addressedTo(username, name));
 }
 
 export const CONTENT_TYPES = ["text/plain", "application/json"] as const;

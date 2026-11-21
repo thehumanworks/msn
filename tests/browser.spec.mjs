@@ -951,7 +951,77 @@ test("editing an uncertain recipient creates a new logical send and retry key", 
   expect(keys).toHaveLength(2);
   expect(keys[1]).not.toBe(keys[0]);
   const result = await request.get(`${t.path}/channels/general/messages`, { headers: t.headers });
-  expect((await result.json()).messages.map((message) => message.to)).toEqual([" agent-one ", "agent-two"]);
+  // The To field's names are sent trimmed (ADR 0067); the server matches names that way anyway.
+  expect((await result.json()).messages.map((message) => message.to)).toEqual(["agent-one", "agent-two"]);
+});
+
+test("To takes several names separated by commas; the message shows them all (ADR 0067)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = "f".repeat(64);
+  const board = { Authorization: `Bearer ${credential}` };
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship the release" },
+      })
+    ).status(),
+  ).toBe(201);
+  for (const [id, displayName] of [
+    ["p1", "lead"],
+    ["p2", "reviewer"],
+    ["p3", "builder"],
+  ])
+    await request.put(`${t.path}/channels/work/personas/${id}`, { headers: board, data: { displayName } });
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: board,
+    data: { username: "lead", personaId: "p1", text: "Release branch is cut." },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const to = page.getByLabel("To", { exact: true });
+  const box = page.getByLabel("Message", { exact: true });
+
+  // Nine names cannot be sent: the draft stays and says why.
+  await to.fill(Array.from({ length: 9 }, (_, i) => `agent-${i}`).join(", "));
+  await box.fill("too many");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator("#status")).toContainText("at most 8 names");
+  await expect(box).toHaveValue("too many");
+
+  await to.fill(" reviewer , builder,");
+  await box.fill("Please both check the release notes.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(box).toHaveValue("");
+  await expect(to).toHaveValue("");
+  const shown = page.locator("#messages .message").last();
+  await expect(shown.locator(".message-to")).toHaveText("To: reviewer, builder");
+  const sent = (
+    await (await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })).json()
+  ).messages.at(-1);
+  expect(sent).toMatchObject({ to: "reviewer", recipients: ["reviewer", "builder"] });
+
+  // Both named agents reply in the one thread; each counts the message as addressed to them.
+  for (const [personaId, username] of [
+    ["p2", "reviewer"],
+    ["p3", "builder"],
+  ]) {
+    await request.post(`${t.path}/channels/work/messages`, {
+      headers: board,
+      data: { username, personaId, text: `${username}: notes look fine.`, replyTo: sent.id, to: "human" },
+    });
+    const unread = await (
+      await request.get(`${t.path}/unread?me=${username}&mark=work:0`, { headers: board })
+    ).json();
+    expect(unread.unread[0].toYou).toBe(1);
+  }
+  await expect(page.locator("#messages .message")).toHaveCount(4);
+  await to.fill("reviewer, builder");
+  await box.fill("Thanks, both.");
+  await page.screenshot({ path: testInfo.outputPath("several-names.png") });
 });
 
 for (const editedField of ["message", "recipient"]) {
@@ -4393,12 +4463,13 @@ test("typing @ suggests the board's people; a pick writes @name and fills an emp
   await expect(list).toBeHidden();
   await expect(page.locator("#status")).toContainText("the message goes to reviewer");
 
-  // A second mention only adds @name: the first pick stays the recipient.
+  // A second mention adds its name to the To that picks filled (ADR 0067).
   await box.pressSequentially("and @bu");
   await list.getByRole("option", { name: "@builder" }).click();
   await expect(box).toHaveValue("Please @reviewer and @builder ");
   await expect(box).toBeFocused();
-  await expect(to).toHaveValue("reviewer");
+  await expect(to).toHaveValue("reviewer, builder");
+  await expect(page.locator("#status")).toContainText("the message goes to reviewer, builder");
 
   // Escape closes only the list (the reply stays), and typing on does not reopen it.
   await box.pressSequentially("@l");
@@ -4425,6 +4496,7 @@ test("typing @ suggests the board's people; a pick writes @name and fills an emp
   expect(sent).toMatchObject({
     username: "human",
     to: "reviewer",
+    recipients: ["reviewer", "builder"],
     text: "Please @reviewer and @builder @le @re jk",
   });
   expect(sent.replyTo).toBeGreaterThan(0);

@@ -133,7 +133,7 @@ fn real_worker_live_flow_including_admin_deletion() {
             text,
             key,
             Correlation {
-                to: to.map(str::to_string),
+                to: to.map(str::to_string).into_iter().collect(),
                 ..Correlation::default()
             },
             &never,

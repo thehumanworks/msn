@@ -446,5 +446,40 @@
       }
     ],
     "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #1 to #2\n- Exported: 2026-11-21 10:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-21 10:00:00 UTC · lead\n\n- To: tomas\n- Choices: yes; \\*no\\*\n\n```text\nShip it?\n```\n\n---\n\n<a id=\"msg-2\"></a>\n### #2 · 2026-11-21 10:01:00 UTC · tomas\n\n- Reply to: [#1](#msg-1)\n- Answer: yes\n\n```text\nyes\n```\n"
+  },
+  {
+    "name": "a message to several names lists every name in order",
+    "meta": {
+      "origin": "https://msn.example",
+      "tenant": "acme",
+      "channel": "release",
+      "exportedAt": "2026-11-21T12:00:00.000Z",
+      "after": 0
+    },
+    "messages": [
+      {
+        "id": 1,
+        "tenant": "acme",
+        "channel": "release",
+        "username": "lead",
+        "text": "Please both review #42",
+        "contentType": "text/plain",
+        "createdAt": "2026-11-21T11:00:00.000Z",
+        "to": "reviewer",
+        "recipients": ["reviewer", "worker*2"]
+      },
+      {
+        "id": 2,
+        "tenant": "acme",
+        "channel": "release",
+        "username": "reviewer",
+        "text": "Looks good",
+        "contentType": "text/plain",
+        "createdAt": "2026-11-21T11:05:00.000Z",
+        "replyTo": 1,
+        "to": "lead"
+      }
+    ],
+    "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #1 to #2\n- Exported: 2026-11-21 12:00:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-21 11:00:00 UTC · lead\n\n- To: reviewer, worker\\*2\n\n```text\nPlease both review #42\n```\n\n---\n\n<a id=\"msg-2\"></a>\n### #2 · 2026-11-21 11:05:00 UTC · reviewer\n\n- Reply to: [#1](#msg-1)\n- To: lead\n\n```text\nLooks good\n```\n"
   }
 ]

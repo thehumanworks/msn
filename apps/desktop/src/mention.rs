@@ -60,10 +60,12 @@ pub fn people<'a>(
         }
     }
     for message in messages.rev() {
-        for field in ["username", "to"] {
-            if let Some(name) = message[field].as_str() {
-                add(name, false);
-            }
+        if let Some(name) = message["username"].as_str() {
+            add(name, false);
+        }
+        // Every name a message was addressed to (ADR 0067).
+        for name in msn_cli::address::addressees(message) {
+            add(name, false);
         }
     }
     for (name, listening) in personas {

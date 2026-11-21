@@ -1,6 +1,13 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { executeTurn } from "./process.mjs";
-import { diagnostic, HostError, turnLease, validateMessage, validateResult } from "./protocol.mjs";
+import {
+  addressees,
+  diagnostic,
+  HostError,
+  turnLease,
+  validateMessage,
+  validateResult,
+} from "./protocol.mjs";
 import { Fenced, ServerCommits, serverCommitsEnabled, unavailableHint } from "./server-commits.mjs";
 import { request, validateHostPage } from "./transport.mjs";
 
@@ -182,7 +189,7 @@ export class HostRuntime {
         if (
           !current.channels.includes(job.channel) ||
           (agent.personaId ? message.personaId === agent.personaId : message.username === agent.username) ||
-          (message.to !== undefined && message.to !== agent.username) ||
+          (addressees(message).length > 0 && !addressees(message).includes(agent.username)) ||
           diagnostic(message)
         ) {
           this.store.ignore(job);

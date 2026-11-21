@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
@@ -625,6 +626,10 @@ function appendMessage(message, target = $("messages")) {
       link.title = `Show message #${message.replyTo}, the one this replies to`;
       link.addEventListener("click", () => showParent(message, article));
       annotation.append(`${label}: `, link);
+    } else if (field === "to") {
+      // Several names (ADR 0067) show in the order they were given.
+      annotation.textContent = `${label}: ${namesText(addressees(message))}`;
+      annotation.classList.add("message-to");
     } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
   }
@@ -2922,8 +2927,11 @@ $("send-form").addEventListener("submit", async (event) => {
     status("Message must be 1–16,384 UTF-8 bytes.", true);
     return;
   }
-  if (new TextEncoder().encode(recipient).length > 128) {
-    status("Recipient must be at most 128 UTF-8 bytes.", true);
+  // To holds one name or several separated by commas (ADR 0067).
+  const names = parseNames(recipient);
+  const problem = namesProblem(names);
+  if (problem) {
+    status(problem, true);
     return;
   }
   const files = [...state.files];
@@ -2965,7 +2973,7 @@ $("send-form").addEventListener("submit", async (event) => {
       : JSON.stringify({
           username: connection.username,
           text: content,
-          ...(recipient.trim() ? { to: recipient } : {}),
+          ...(names.length ? { to: toField(names) } : {}),
           ...(replyId !== null ? { replyTo: replyId } : {}),
           ...(quote !== null ? { quote } : {}),
           ...(attachments.length ? { attachments } : {}),
@@ -4192,8 +4200,8 @@ function pickMention(index) {
   closeMentions();
   autosize();
   status(
-    address.to === person.name
-      ? `Mentioned ${person.name} · the message goes to ${person.name}`
+    address.to === address.mentionTo
+      ? `Mentioned ${person.name} · the message goes to ${address.to}`
       : `Mentioned ${person.name} · the message still goes to ${address.to}`,
   );
 }
@@ -4269,7 +4277,7 @@ function renderScheduledList(list) {
     const row = document.createElement("li");
     const when = document.createElement("span");
     when.className = "scheduled-when";
-    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${item.to ? ` → ${item.to}` : ""}`;
+    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${addressees(item).length ? ` → ${namesText(addressees(item))}` : ""}`;
     when.title = new Date(item.sendAt).toLocaleString();
     const body = document.createElement("p");
     body.className = "scheduled-text";

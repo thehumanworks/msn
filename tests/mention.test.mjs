@@ -87,12 +87,33 @@ test("hasMention finds whole @names only", () => {
   assert.equal(hasMention("x @leader @lead", "lead"), true);
 });
 
-test("the first mention picked addresses the message", () => {
+test("each mention picked addresses the message while To holds only picked names (ADR 0067)", () => {
   let address = addressAfterPick("", null, "lead");
   assert.deepEqual(address, { to: "lead", mentionTo: "lead" });
   address = addressAfterPick(address.to, address.mentionTo, "builder");
-  assert.deepEqual(address, { to: "lead", mentionTo: "lead" }, "a second pick keeps To");
+  assert.deepEqual(
+    address,
+    { to: "lead, builder", mentionTo: "lead, builder" },
+    "a second pick adds its name",
+  );
+  address = addressAfterPick(address.to, address.mentionTo, "Lead");
+  assert.deepEqual(
+    address,
+    { to: "lead, builder", mentionTo: "lead, builder" },
+    "a name already there stays once",
+  );
   assert.deepEqual(addressAfterPick("ops", null, "lead"), { to: "ops", mentionTo: null }, "a typed To stays");
+  assert.deepEqual(
+    addressAfterPick("lead, ops", "lead", "builder"),
+    { to: "lead, ops", mentionTo: "lead" },
+    "a To changed by hand stays",
+  );
+  const eight = Array.from({ length: 8 }, (_, i) => `a${i}`).join(", ");
+  assert.deepEqual(
+    addressAfterPick(eight, eight, "ninth"),
+    { to: eight, mentionTo: eight },
+    "at most 8 names",
+  );
 });
 
 test("deleting the picked @name clears To; a typed To is never cleared", () => {
@@ -100,4 +121,17 @@ test("deleting the picked @name clears To; a typed To is never cleared", () => {
   assert.deepEqual(addressAfterEdit("lead", "lead", "hi @lea"), { to: "", mentionTo: null });
   assert.deepEqual(addressAfterEdit("ops", "lead", "hi"), { to: "ops", mentionTo: null });
   assert.deepEqual(addressAfterEdit("ops", null, "hi"), { to: "ops", mentionTo: null });
+  // With several picked names, only the one whose @name went away leaves To.
+  assert.deepEqual(addressAfterEdit("lead, builder", "lead, builder", "hi @builder"), {
+    to: "builder",
+    mentionTo: "builder",
+  });
+});
+
+test("people suggests every name a message was addressed to", () => {
+  const everyone = people({ messages: [{ username: "lead", to: "rev", recipients: ["rev", "ops"] }] });
+  assert.deepEqual(
+    everyone.map((person) => person.name),
+    ["lead", "rev", "ops"],
+  );
 });

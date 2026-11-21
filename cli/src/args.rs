@@ -493,9 +493,10 @@ pub enum Command {
         /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
         #[arg(long = "correlation-id")]
         correlation_id: Option<String>,
-        /// Address a username (visible to everyone in the channel; not a private message)
-        #[arg(long)]
-        to: Option<String>,
+        /// Address a username (visible to everyone in the channel; not a private message). Repeat
+        /// to address up to 8 names at once: each is woken and counts the message as to them
+        #[arg(long, value_name = "NAME")]
+        to: Vec<String>,
         /// key=value label, such as state=open; repeat for more (at most 16)
         #[arg(long = "label", value_name = "KEY=VALUE")]
         labels: Vec<String>,

@@ -25,6 +25,7 @@ export type SinceMessage = {
   text: string;
   contentType: string;
   to?: string;
+  recipients?: string[];
   personaId?: string;
 };
 

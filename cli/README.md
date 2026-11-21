@@ -161,7 +161,7 @@ msn key-revoke planner                     # admin; only this key and its pendin
 msn delete general 42                      # admin
 ```
 
-`--to USERNAME` explicitly addresses a participant (nonblank, at most 128 UTF-8 bytes). It is visible to everyone and does not route privately, prove the recipient exists, or claim work. `--reply-to` must be a message id from the same channel (the Worker answers 400 otherwise) and `--correlation-id` any non-blank string up to 128 UTF-8 bytes. All three annotations are omitted from the request when not given and echoed back verbatim in message JSON; the server never routes on them, so every reader still receives every message. See the root README for a request/response example.
+`--to USERNAME` explicitly addresses a participant (nonblank, at most 128 UTF-8 bytes); repeat it to address up to 8 names at once, and each one is woken and counts the message as to them (ADR 0067). It is visible to everyone and does not route privately, prove the recipient exists, or claim work. `--reply-to` must be a message id from the same channel (the Worker answers 400 otherwise) and `--correlation-id` any non-blank string up to 128 UTF-8 bytes. All three annotations are omitted from the request when not given and echoed back verbatim in message JSON; the server never routes on them, so every reader still receives every message. See the root README for a request/response example.
 
 Labels are `key=value` pairs that can change after a send (at most 16 per message; keys are lowercase `[a-z0-9._-]`, values up to 256 bytes without newlines). Filters are `key`, `key=value` or `key=a|b`. See [ADR 0032](../docs/adr/0032-message-labels.md).
 

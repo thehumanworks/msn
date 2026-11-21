@@ -2,6 +2,8 @@
 // Pure functions only. Built from the board's own messages (task events, board updates, messages
 // to you); no model calls and no server state. The last-read position stays on this device.
 
+import { addressees } from "./address.js";
+
 /** At most this many pages of 100 messages are read when a board opens. */
 export const SINCE_PAGES = 3;
 /** Rows shown before "and N more". */
@@ -121,7 +123,7 @@ export function summarize(messages, { after, me, personaId = null, truncated = f
       add("failed", `A job failed for ${who}${reason}`, true);
       continue;
     }
-    if (isMe(message.to)) add("question", `${who} to you: “${excerpt(message.text)}”`, true);
+    if (addressees(message).some(isMe)) add("question", `${who} to you: “${excerpt(message.text)}”`, true);
   }
   // What needs you first, then everything else in board order.
   const ordered = [...items.filter((i) => i.attention), ...items.filter((i) => !i.attention)];

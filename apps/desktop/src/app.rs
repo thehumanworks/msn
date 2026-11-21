@@ -3302,7 +3302,7 @@ fn message_header(
     };
     let mut job = egui::text::LayoutJob::default();
     job.append(username, 0.0, format(name_color));
-    let says = match message["to"].as_str() {
+    let says = match msn_cli::address::names_line(message) {
         Some(to) => format!(" says to {to}"),
         None => " says".to_string(),
     };

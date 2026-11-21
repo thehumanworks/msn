@@ -27,7 +27,10 @@ export type Message = {
   createdAt: string;
   replyTo?: number;
   correlationId?: string;
+  /** The first name the message is addressed to. */
   to?: string;
+  /** Every name, in order, when it is addressed to several (ADR 0067). */
+  recipients?: string[];
   reactions?: Reactions;
   /** When the sender last edited the text (ADR 0052); absent when never edited. */
   editedAt?: string;
