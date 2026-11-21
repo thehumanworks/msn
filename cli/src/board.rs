@@ -5,7 +5,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::args::{BoardCommand, Cli, Command, GithubCommand, PersonaCommand, TemplateCommand};
+use crate::args::{
+    BoardCommand, Cli, Command, GithubCommand, PersonaCommand, TemplateCommand, WebhookCommand,
+};
 use crate::client::{MsnClient, RawResponse, classify};
 use crate::config::{origin_key, parse_origin, require_tenant, require_token, slug};
 use crate::cursor::CursorLock;
@@ -853,6 +855,70 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     Some(&p.token)
                 )?)?
             );
+        }
+        Command::Persona {
+            command: PersonaCommand::Webhook { command },
+        } => {
+            let hook = |channel: &str, persona: &str| -> Result<String, CliError> {
+                Ok(format!(
+                    "{base}/channels/{}/personas/{}/webhook",
+                    slug(channel)?,
+                    slug(persona)?
+                ))
+            };
+            match command {
+                WebhookCommand::Set {
+                    channel,
+                    persona,
+                    endpoint,
+                } => {
+                    let made = value(client.exchange(
+                        "PUT",
+                        &hook(channel, persona)?,
+                        Some(&p.token),
+                        &[],
+                        Some(&json!({"url": endpoint})),
+                    )?)?;
+                    println!("{made}");
+                    eprintln!(
+                        "The secret is shown only now. Give it to the receiver to check each notice: HMAC-SHA256 of \"TIMESTAMP.BODY\" must equal MSN-Webhook-Signature (v1=HEX). Run msn persona webhook test {channel} {persona} to send a ping."
+                    );
+                }
+                WebhookCommand::Show { channel, persona } => {
+                    println!(
+                        "{}",
+                        value(client.get(&hook(channel, persona)?, Some(&p.token))?)?
+                    );
+                }
+                WebhookCommand::List { channel } => {
+                    println!(
+                        "{}",
+                        value(client.get(
+                            &format!("{base}/channels/{}/webhooks", slug(channel)?),
+                            Some(&p.token)
+                        )?)?
+                    );
+                }
+                WebhookCommand::Remove { channel, persona } => {
+                    let response = client.delete(&hook(channel, persona)?, &p.token)?;
+                    classify(response.status, &response.body)?;
+                    println!("{}", json!({"removed": persona}));
+                }
+                WebhookCommand::Test { channel, persona } => {
+                    println!(
+                        "{}",
+                        value(client.post_json(
+                            &format!("{}/test", hook(channel, persona)?),
+                            &p.token,
+                            &[],
+                            &json!({})
+                        )?)?
+                    );
+                    eprintln!(
+                        "Queued. Run msn persona webhook show {channel} {persona} in a few seconds to see how it went."
+                    );
+                }
+            }
         }
         _ => unreachable!(),
     }
