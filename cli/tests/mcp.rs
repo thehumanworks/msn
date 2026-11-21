@@ -369,6 +369,25 @@ fn start_returns_identity_and_page() {
 }
 
 #[test]
+fn start_passes_the_reader_and_returns_the_board_brief() {
+    // ADR 0074: the brief leads the page, with briefChanged for this reader.
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, r#"{"tenant":"team","username":"alice"}"#),
+        Scripted::json(
+            200,
+            r#"{"brief":{"version":2,"text":"Run the tests.","bytes":14,"updatedAt":"2026-11-21T00:00:00.000Z"},"briefChanged":true,"snapshot":null,"messages":[],"nextCursor":0,"hasMore":false,"historyRevision":0,"headCursor":0}"#,
+        ),
+    ]);
+    let replies = session(&home, &server, &[call(1, "start", json!({}))]);
+    let page = ok(&replies[1]);
+    assert_eq!(page["brief"]["text"], "Run the tests.");
+    assert_eq!(page["briefChanged"], true);
+    let path = &server.recorded()[1].path;
+    assert!(path.ends_with("&reader=alice"), "{path}");
+}
+
+#[test]
 fn catch_up_rejects_a_page_from_another_channel() {
     let home = Home::new();
     let server = MockServer::spawn(vec![Scripted::json(

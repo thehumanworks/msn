@@ -235,7 +235,7 @@ fn snapshot_list_and_show_use_frozen_routes() {
 }
 
 #[test]
-fn catchup_is_raw_bounded_and_never_creates_reader_state() {
+fn catchup_is_raw_bounded_and_creates_no_local_state() {
     let initial = r#"{"snapshot":{"version":2},"messages":[],"nextCursor":42,"hasMore":false,"incomplete":false}"#;
     let continued =
         r#"{"snapshot":null,"messages":[],"nextCursor":42,"hasMore":false,"incomplete":false}"#;
@@ -272,7 +272,8 @@ fn catchup_is_raw_bounded_and_never_creates_reader_state() {
     let recorded = server.recorded();
     assert_eq!(
         recorded[0].path,
-        "/api/tenants/team/channels/swarm/catchup?limit=20&maxBytes=32768"
+        "/api/tenants/team/channels/swarm/catchup?limit=20&maxBytes=32768&reader=returning",
+        "an explicit --reader asks whether the board's brief is new to it (ADR 0074)"
     );
     assert_eq!(
         recorded[1].path,
