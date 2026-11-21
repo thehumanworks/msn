@@ -1781,6 +1781,55 @@ nav button.has-unread .channel-name {
   color: var(--accent);
 }
 
+/* Take a request (ADR 0075): "Taken by NAME" under the header, and the button that takes it. */
+.claim-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.claim-holder {
+  color: var(--text);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-family: inherit;
+}
+.claim-note .claim-release,
+.message-meta .claim-button {
+  font: inherit;
+  font-size: 11px;
+  flex-shrink: 0;
+  padding: 0 4px;
+  min-height: 0;
+}
+/* Rows drawn before the board was archived keep their buttons in the DOM; hide them. */
+.watching .claim-button,
+.archived .claim-button,
+.watching .claim-release,
+.archived .claim-release {
+  display: none;
+}
+@media (pointer: coarse) {
+  .claim-note .claim-release,
+  .message-meta .claim-button {
+    position: relative;
+    min-height: 32px;
+    min-width: 44px;
+    padding: 0 8px;
+  }
+  :is(.claim-note .claim-release, .message-meta .claim-button)::after {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
+  }
+  .claim-note {
+    row-gap: 12px;
+    margin-block: 6px;
+  }
+}
+
 /* Edit a message you sent (ADR 0052). */
 .message-meta .message-edited {
   margin-left: 0;
