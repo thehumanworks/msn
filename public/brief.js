@@ -1,4 +1,4 @@
-// The board brief (ADR 0072): the owner's standing instructions, shown as the board's header.
+// The board brief (ADR 0074): the owner's standing instructions, shown as the board's header.
 // Pure helpers, shared by the page and its unit tests.
 
 /** The longest brief in UTF-8 bytes; the server checks again. */

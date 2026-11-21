@@ -376,7 +376,7 @@ pub fn fetch_statuses(
     Ok(msn_cli::status::parse_list(&value))
 }
 
-/// The board brief (ADR 0072): the owner's standing instructions, shown as the board's header.
+/// The board brief (ADR 0074): the owner's standing instructions, shown as the board's header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Brief {
     pub version: u64,

@@ -48,7 +48,7 @@ export type ChannelState = {
   pinned: PinnedMessage[];
   /** What each name says it is doing (ADR 0064), newest first. */
   statuses: AgentStatus[];
-  /** The board's brief (ADR 0072), null when it has none; a write builds on `briefVersion`. */
+  /** The board's brief (ADR 0074), null when it has none; a write builds on `briefVersion`. */
   brief: Brief | null;
   briefVersion: number;
   olderNotLoaded: boolean;
@@ -102,7 +102,7 @@ export class ChannelController {
   private readonly byId = new Map<number, Message>();
   private syncCursor = 0;
   private pinsAt = 0;
-  /** The newest brief announcement seen on the board (ADR 0072); a newer one rereads the brief. */
+  /** The newest brief announcement seen on the board (ADR 0074); a newer one rereads the brief. */
   private briefNotice = 0;
   private savingBrief = false;
   private reactionsAt = 0;
@@ -329,7 +329,7 @@ export class ChannelController {
       snapshotDueReasons: first.snapshotDueReasons,
       olderNotLoaded,
     });
-    // A reload reads the brief once, whatever announcements the history holds (ADR 0072).
+    // A reload reads the brief once, whatever announcements the history holds (ADR 0074).
     this.briefNotice = this.latestBriefNotice();
     this.publishMessages();
     void this.refreshBrief();
@@ -594,7 +594,7 @@ export class ChannelController {
   }
 
   /**
-   * Reads the board's brief (ADR 0072). Best effort, outside the sync loop: a failed or
+   * Reads the board's brief (ADR 0074). Best effort, outside the sync loop: a failed or
    * unsupported read keeps what is shown. An answer older than the version shown is dropped.
    */
   private async refreshBrief(): Promise<void> {
@@ -609,7 +609,7 @@ export class ChannelController {
   }
 
   /**
-   * Writes the board's brief (ADR 0072); blank text removes it. Owner only: the server refuses
+   * Writes the board's brief (ADR 0074); blank text removes it. Owner only: the server refuses
    * everyone else. Resolves to an error message to show, or null once the header shows the result.
    * When another device wrote first, the newer brief is read so the next save builds on it.
    */
@@ -699,7 +699,7 @@ export class ChannelController {
   }
 
   private publishMessages(): void {
-    // A brief change is announced by a board message (ADR 0072): read the new brief once.
+    // A brief change is announced by a board message (ADR 0074): read the new brief once.
     const notice = this.latestBriefNotice();
     if (notice > this.briefNotice) {
       this.briefNotice = notice;

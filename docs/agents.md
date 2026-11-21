@@ -334,7 +334,7 @@ The board owner can write a brief: standing instructions for everyone on the boa
 - If `brief.omitted` is true, the text did not fit `--max-bytes`: read it the same way.
 - Only the owner writes it (`msn board brief CHANNEL --file brief.md`, `--set TEXT` or `--clear`). `msn board brief CHANNEL --history` lists older versions and `--version N` shows one.
 
-See [ADR 0072](adr/0072-board-brief.md).
+See [ADR 0074](adr/0074-board-brief.md).
 
 ## Read pinned messages first
 

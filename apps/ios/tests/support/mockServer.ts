@@ -75,7 +75,7 @@ export type MockServerHandle = {
   setStatus: (channel: string, name: string, text: string | null) => void;
   /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
   setPin: (id: number, pinned: boolean) => void;
-  /** Write a board's brief as its owner on another device (ADR 0072); posts the board notice. */
+  /** Write a board's brief as its owner on another device (ADR 0074); posts the board notice. */
   setBrief: (channel: string, text: string) => void;
   /** Make the token stop working, waking any pending event poll (like rotation/revocation). */
   revoke: (token?: string) => void;
@@ -115,7 +115,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
   const pins = new Set<number>();
   const statuses = new Map<string, Map<string, { text: string; setAt: string; seq: number }>>();
   let statusSeq = 0;
-  /** Board briefs (ADR 0072): every version per channel; the last is current, "" means removed. */
+  /** Board briefs (ADR 0074): every version per channel; the last is current, "" means removed. */
   const briefs = new Map<string, string[]>();
   const briefBody = (channel: string) => {
     const versions = briefs.get(channel) ?? [];

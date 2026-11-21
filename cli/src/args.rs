@@ -1153,7 +1153,7 @@ pub enum BoardCommand {
         channel: String,
     },
 }
-/// The arguments of `msn board brief` (ADR 0072), in their own struct like `GatherArgs`.
+/// The arguments of `msn board brief` (ADR 0074), in their own struct like `GatherArgs`.
 #[derive(Debug, clap::Args)]
 pub struct BriefArgs {
     /// Channel slug

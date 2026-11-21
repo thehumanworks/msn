@@ -1,4 +1,4 @@
-# ADR 0072: the board's brief
+# ADR 0074: the board's brief
 
 Date: 2026-11-21. Status: implemented (Worker routes, catch-up, CLI `msn board brief`, MCP `start` and `catch_up`, web, desktop and iOS). Schema: two new tables and one additive column, no `schema_version` step.
 

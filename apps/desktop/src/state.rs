@@ -125,7 +125,7 @@ pub struct SearchState {
     pub active: bool,
 }
 
-/// A board message that announces a new brief version (`msn.brief.v1`, ADR 0072).
+/// A board message that announces a new brief version (`msn.brief.v1`, ADR 0074).
 pub fn is_brief_notice(message: &Value) -> bool {
     message["username"].as_str() == Some("board")
         && message["contentType"].as_str() == Some("application/json")
@@ -164,7 +164,7 @@ pub struct ChannelState {
     /// What each name says it is doing (ADR 0064), newest first; re-read on `status.changed`.
     pub statuses: Vec<msn_cli::status::Status>,
     pub statuses_flight: Flight,
-    /// The board's brief (ADR 0072): the owner's standing instructions, shown above the
+    /// The board's brief (ADR 0074): the owner's standing instructions, shown above the
     /// conversation. `brief_version` is what a write builds on, and counts removed briefs too.
     pub brief: Option<crate::net::client_ops::Brief>,
     pub brief_version: u64,
@@ -740,7 +740,7 @@ impl AppState {
             })
     }
 
-    /// Reloads the open board's brief (ADR 0072): when the board opens and when a brief change
+    /// Reloads the open board's brief (ADR 0074): when the board opens and when a brief change
     /// is announced on it.
     pub fn brief_command(&mut self) -> Option<Command> {
         let generation = self.generation()?;
@@ -754,7 +754,7 @@ impl AppState {
         })
     }
 
-    /// Writes `text` as the board's new brief (ADR 0072); blank text removes it. The server
+    /// Writes `text` as the board's new brief (ADR 0074); blank text removes it. The server
     /// allows only the owner. Refused here on an archived board, a text over 4 KiB, or while a
     /// write is in flight.
     pub fn set_brief(&mut self, text: String) -> Vec<Command> {
@@ -1741,7 +1741,7 @@ impl AppState {
                     retryable,
                     key,
                 );
-                // After a refused brief write (ADR 0072), read the brief again so the next Save
+                // After a refused brief write (ADR 0074), read the brief again so the next Save
                 // builds on the version the server has now.
                 if context == "set-brief" {
                     return self.brief_command().into_iter().collect();
@@ -1809,7 +1809,7 @@ impl AppState {
         };
         let first = !state.loaded;
         state.replace_messages(messages);
-        // A brief change is announced by a board message (ADR 0072).
+        // A brief change is announced by a board message (ADR 0074).
         let brief_changed = !first
             && state
                 .messages
@@ -1851,7 +1851,7 @@ impl AppState {
         if first {
             commands.extend(self.statuses_command());
         }
-        // The brief (ADR 0072): read it when the board opens and when the board announces a change.
+        // The brief (ADR 0074): read it when the board opens and when the board announces a change.
         if first || brief_changed {
             commands.extend(self.brief_command());
         }
@@ -1992,7 +1992,7 @@ impl AppState {
                     state.receipts_flight.fail();
                 }
             }
-            // The brief too (ADR 0072): an older server or a failed load keeps what is shown.
+            // The brief too (ADR 0074): an older server or a failed load keeps what is shown.
             "brief" => {
                 if channel_generation == Some(self.channel_generation)
                     && let Some(state) = self.channel.as_mut()

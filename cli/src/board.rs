@@ -174,7 +174,7 @@ fn add_persona(
     Ok(persona)
 }
 
-/// The longest board brief in UTF-8 bytes (ADR 0072); the server checks again.
+/// The longest board brief in UTF-8 bytes (ADR 0074); the server checks again.
 pub const BRIEF_MAX_BYTES: usize = 4096;
 /// The longest goal excerpt an agent paragraph quotes; `start` returns the whole goal.
 const PARAGRAPH_GOAL_CHARS: usize = 1200;
@@ -520,7 +520,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 Some(&p.token),
                 &[],
                 Some(&match template.as_ref().and_then(|t| t.brief.as_deref()) {
-                    // A saved template carries its board's brief (ADR 0072).
+                    // A saved template carries its board's brief (ADR 0074).
                     Some(brief) => json!({"credential":agent.token,"goal":goal,"brief":brief}),
                     None => json!({"credential":agent.token,"goal":goal}),
                 }),

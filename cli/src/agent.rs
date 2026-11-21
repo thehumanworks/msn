@@ -186,7 +186,7 @@ pub fn start_page(
             CliError::usage("Increase start max-bytes to fit identity and workflow metadata.")
         })?;
     let continuation = catchup_query(after, Some(edits_after));
-    // The reader lets the first page say whether the board's brief is new to it (ADR 0072).
+    // The reader lets the first page say whether the board's brief is new to it (ADR 0074).
     let reader_query = reader_query(Some(&reader));
     let response = MsnClient::new(url)?.get(
         &format!(
@@ -222,7 +222,7 @@ pub fn start_page(
     Ok(page)
 }
 
-/// The `&reader=…` part of a catch-up query (ADR 0072): with it, a first page that carries the
+/// The `&reader=…` part of a catch-up query (ADR 0074): with it, a first page that carries the
 /// board's brief also says `briefChanged`, and the server remembers that this reader received it.
 pub(crate) fn reader_query(reader: Option<&str>) -> String {
     reader
@@ -280,7 +280,7 @@ pub(crate) fn validate_catchup(
     if previous > head {
         return Err(invalid());
     }
-    // The board's brief (ADR 0072) leads the first page only.
+    // The board's brief (ADR 0074) leads the first page only.
     if let Some(brief) = page.get("brief").filter(|value| !value.is_null()) {
         let shown = brief["text"].is_string() || brief["omitted"].as_bool() == Some(true);
         if after.is_some() || number(brief, "version")? == 0 || !shown {

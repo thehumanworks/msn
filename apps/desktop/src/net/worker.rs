@@ -95,7 +95,7 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
-    /// The open board's brief (ADR 0072): the owner's standing instructions.
+    /// The open board's brief (ADR 0074): the owner's standing instructions.
     LoadBrief {
         generation: u64,
         channel_generation: u64,
@@ -382,7 +382,7 @@ pub enum UiEvent {
         channel: String,
         statuses: Vec<msn_cli::status::Status>,
     },
-    /// The open board's brief and the version a write must build on (ADR 0072). `saved` is true
+    /// The open board's brief and the version a write must build on (ADR 0074). `saved` is true
     /// when this answers the owner's own write.
     Brief {
         generation: u64,

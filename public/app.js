@@ -958,7 +958,7 @@ function addCodeCopy(content) {
 
 /**
  * The plain line shown for a board control message: a goal or status change (`msn.board.v1`) or a
- * brief change (`msn.brief.v1`, ADR 0072). Null for every other message.
+ * brief change (`msn.brief.v1`, ADR 0074). Null for every other message.
  */
 function boardNotice(message) {
   if (message.contentType !== "application/json") return null;
@@ -1453,7 +1453,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /*
- * The board brief (ADR 0072): the owner's standing instructions, as the board's header. Folding it
+ * The board brief (ADR 0074): the owner's standing instructions, as the board's header. Folding it
  * is remembered on this device until the owner writes a newer version.
  */
 function briefClosedKey() {
@@ -2313,7 +2313,7 @@ async function poll(live = false) {
       markArchived(selected, data.archived === true);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
-      // A brief change posts a board message (ADR 0072): read the new brief when one arrives.
+      // A brief change posts a board message (ADR 0074): read the new brief when one arrives.
       if (data.messages.some((message) => message.username === "board" && boardNotice(message)))
         void loadBrief(connection, selected);
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
@@ -3072,7 +3072,7 @@ $("template-form").addEventListener("submit", async (event) => {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        // A saved template carries its board's brief (ADR 0072).
+        // A saved template carries its board's brief (ADR 0074).
         body: JSON.stringify({
           credential: randomHex(),
           goal,

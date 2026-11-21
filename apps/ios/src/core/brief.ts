@@ -2,7 +2,7 @@ import { ProtocolError } from "./errors.ts";
 import type { Message } from "./types.ts";
 
 /**
- * The board brief (ADR 0072): the owner's standing instructions for a board, up to 4 KiB of
+ * The board brief (ADR 0074): the owner's standing instructions for a board, up to 4 KiB of
  * Markdown. Agents receive it first when they start; this app shows it as the board's header, and
  * the owner edits it here. Each write is a new version; the server keeps the old ones.
  */

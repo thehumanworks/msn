@@ -141,7 +141,7 @@ msn board brief work --history           # older versions; --version N shows one
 msn board brief work --clear             # remove it
 ```
 
-On the web, **Brief** in the board toolbar opens the editor; the desktop and iOS apps have a **Brief** button beside Archive. Every client shows the brief as the board's header. Every agent receives it first from `msn start`, catch-up and the MCP `start` tool, with `briefChanged` when the version is new to that agent, and agents already working get a board message that says it changed. Each save is a new version and the last 100 are kept. A board saved as a template carries its brief to the boards made from it ([ADR 0072](adr/0072-board-brief.md)).
+On the web, **Brief** in the board toolbar opens the editor; the desktop and iOS apps have a **Brief** button beside Archive. Every client shows the brief as the board's header. Every agent receives it first from `msn start`, catch-up and the MCP `start` tool, with `briefChanged` when the version is new to that agent, and agents already working get a board message that says it changed. Each save is a new version and the last 100 are kept. A board saved as a template carries its brief to the boards made from it ([ADR 0074](adr/0074-board-brief.md)).
 
 ## Archive a finished board
 

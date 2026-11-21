@@ -468,7 +468,7 @@ fn mute_and_unmute_call_the_owner_mute_endpoints() {
 
 #[test]
 fn start_names_its_reader_so_the_first_page_can_say_the_brief_is_new() {
-    // ADR 0072: start passes the reader; the server answers with brief and briefChanged.
+    // ADR 0074: start passes the reader; the server answers with brief and briefChanged.
     let page = json!({
         "brief": {"version": 3, "text": "Run the tests first.", "bytes": 20, "updatedAt": "2026-11-21T00:00:00.000Z", "updatedBy": "human"},
         "briefChanged": true,

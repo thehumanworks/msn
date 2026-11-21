@@ -7,7 +7,7 @@ import { colors, MAX_FONT_SCALE, mono, radius, spacing } from "./theme.ts";
 import { Banner, Button, Text } from "./ui.tsx";
 
 /**
- * The board's brief above the conversation (ADR 0072): the owner's standing instructions, drawn
+ * The board's brief above the conversation (ADR 0074): the owner's standing instructions, drawn
  * as safe Markdown. It scrolls inside its own box, so a long brief leaves the messages room.
  */
 export function BriefStrip({ brief }: { brief: Brief | null }) {

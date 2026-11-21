@@ -5083,7 +5083,7 @@ test("the owner writes a board brief; everyone sees it as the board header and a
   browser,
   request,
 }, testInfo) => {
-  // ADR 0072.
+  // ADR 0074.
   const t = await provision(request, { username: "human" });
   const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
   expect(

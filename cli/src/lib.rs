@@ -2167,7 +2167,7 @@ fn catchup(
     reader: Option<&str>,
 ) -> Result<(), CliError> {
     let continuation = agent::catchup_query(after, edits_after.map(Some));
-    // With a reader, the first page says whether the board's brief is new to it (ADR 0072).
+    // With a reader, the first page says whether the board's brief is new to it (ADR 0074).
     // A continuation carries no brief, so it sends no reader.
     let reader = agent::reader_query(reader.filter(|_| after.is_none()));
     finish(&MsnClient::new(url)?.get(

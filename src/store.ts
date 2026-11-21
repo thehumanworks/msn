@@ -272,9 +272,9 @@ export const MAX_EDITS = 100000;
 const CATCHUP_EDITS = 20;
 /** Lifetime agent status changes per workspace (ADR 0064); each writes one `status.changed` event. */
 export const MAX_STATUS_CHANGES = 100000;
-/** The longest board brief, in UTF-8 bytes (ADR 0072). */
+/** The longest board brief, in UTF-8 bytes (ADR 0074). */
 export const MAX_BRIEF_BYTES = 4096;
-/** Versions of one board's brief that are kept; the oldest go first (ADR 0072). */
+/** Versions of one board's brief that are kept; the oldest go first (ADR 0074). */
 export const MAX_BRIEF_VERSIONS = 100;
 /** Readers whose last seen brief version one board remembers; the longest idle go first. */
 export const MAX_BRIEF_READERS = 1000;
@@ -760,7 +760,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           channel TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, setAt TEXT NOT NULL,
           seq INTEGER NOT NULL, PRIMARY KEY(channel, name)
         );
-        -- Board brief (ADR 0072): the owner's standing instructions, one row per version. The
+        -- Board brief (ADR 0074): the owner's standing instructions, one row per version. The
         -- highest version is current; empty text means the brief was cleared. brief_seen holds the
         -- version each reader last received from start or catch-up. New tables with no version
         -- step, so they are safe in any merge order.
@@ -834,7 +834,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Additive, so no schema_version step and safe in any merge order.
         ["messages", "replaces", "INTEGER"],
         ["messages", "replacedBy", "INTEGER"],
-        // A saved template's brief (ADR 0072): NULL for templates saved before briefs or from a
+        // A saved template's brief (ADR 0074): NULL for templates saved before briefs or from a
         // board without one. Additive, so no schema_version step.
         ["board_templates", "brief", "TEXT"],
       ]) {
@@ -1282,7 +1282,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (request.method === "PUT" && secretHash) {
         this.requireOwner(capability);
         const goal = text(input?.goal, "goal", 16384);
-        // A new board may start with a brief (ADR 0072), as one made from a saved template does.
+        // A new board may start with a brief (ADR 0074), as one made from a saved template does.
         const brief = input?.brief === undefined ? "" : briefText(input.brief);
         const existing = this.ctx.storage.sql
           .exec<{ token_hash: string }>(
@@ -1452,7 +1452,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * Writes a new brief version (ADR 0072). Call inside a transaction. Counts the text against the
+   * Writes a new brief version (ADR 0074). Call inside a transaction. Counts the text against the
    * workspace's content bytes and drops versions beyond MAX_BRIEF_VERSIONS, oldest first.
    */
   private writeBrief(channel: string, version: number, content: string, updatedBy: string | null): Brief {
@@ -1484,7 +1484,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * The board brief (ADR 0072): the owner's standing instructions for everyone on the board.
+   * The board brief (ADR 0074): the owner's standing instructions for everyone on the board.
    * `GET …/brief` returns the current one (null when none or cleared) and `?version=N` an older
    * one; `GET …/brief/versions` lists the kept versions, newest first, without text. `PUT …/brief`
    * `{text, baseVersion}` is owner only and writes a new version; blank text clears the brief.
@@ -2642,7 +2642,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         channel,
         capability.bound_username,
         new Date().toISOString(),
-        // The board's brief travels with its template (ADR 0072); NULL when it has none.
+        // The board's brief travels with its template (ADR 0074); NULL when it has none.
         this.briefRow(channel)?.text || null,
       );
       return !exists;
@@ -4842,7 +4842,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     // Pinned messages lead the first page only (ADR 0038), like the snapshot; a continuation
     // already had them. They never move nextCursor.
     const pinned = url.searchParams.has("after") ? null : this.pinned(tenant, channel);
-    // The board brief (ADR 0072) leads the first page, before pins. With `reader`, the page also
+    // The board brief (ADR 0074) leads the first page, before pins. With `reader`, the page also
     // says whether this reader has received this version before, and then remembers that it has.
     const briefRow = url.searchParams.has("after") ? null : this.briefRow(channel);
     const brief = briefRow?.text ? toBrief(briefRow) : null;

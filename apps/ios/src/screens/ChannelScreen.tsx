@@ -158,7 +158,7 @@ export function ChannelScreen({
   );
 }
 
-/** Owner only: the brief editor for the open board (ADR 0072). */
+/** Owner only: the brief editor for the open board (ADR 0074). */
 function BriefEditor({
   controller,
   onClose,

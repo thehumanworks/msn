@@ -2,7 +2,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-// Board brief (ADR 0072): the owner writes standing instructions for a board, up to 4 KiB of
+// Board brief (ADR 0074): the owner writes standing instructions for a board, up to 4 KiB of
 // Markdown. Every first catch-up page leads with it and says whether this reader has had this
 // version before. Old versions are kept.
 
@@ -65,7 +65,7 @@ const send = async (f: Fixture, text: string) => {
   return ((await response.json()) as { message: Message }).message;
 };
 
-describe("board brief (ADR 0072)", () => {
+describe("board brief (ADR 0074)", () => {
   it("lets only the owner write the brief, and every reader read it", async () => {
     const f = await fixture();
     expect(await get(f)).toMatchObject({ brief: null, currentVersion: 0 });

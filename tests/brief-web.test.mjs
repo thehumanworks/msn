@@ -10,7 +10,7 @@ import {
   startsOpen,
 } from "../public/brief.js";
 
-// The web side of the board brief (ADR 0072).
+// The web side of the board brief (ADR 0074).
 
 test("counts UTF-8 bytes, as the server does", () => {
   assert.equal(BRIEF_MAX_BYTES, 4096);

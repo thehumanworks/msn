@@ -221,7 +221,7 @@ try {
     (await cli(["--profile", "pair-reviewer", "board", "show", "pair"])).board.goal,
     /^Ship the docs\n\nTeam \(Lead and reviewer\):/,
   );
-  // Board brief (ADR 0072): the owner writes standing instructions; every agent gets them first.
+  // Board brief (ADR 0074): the owner writes standing instructions; every agent gets them first.
   assert.deepEqual(
     [(await cli(["board", "brief", "pair"])).brief, (await cli(["board", "brief", "pair"])).currentVersion],
     [null, 0],
@@ -289,7 +289,7 @@ try {
     (await cli(["--profile", "docs2-reviewer", "board", "show", "docs2"])).board.goal,
     /^Ship the docs\n\nTeam \(docs-team\):\n- lead: Plans and does the work/,
   );
-  // The template carried pair's brief (ADR 0072), so the new board starts with it.
+  // The template carried pair's brief (ADR 0074), so the new board starts with it.
   assert.equal(saved.template.brief, "Keep pull requests small.");
   const reusedStart = await cli(["--profile", "docs2-reviewer", "start", "docs2"]);
   assert.deepEqual(

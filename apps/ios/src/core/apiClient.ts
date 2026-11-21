@@ -384,7 +384,7 @@ export class ApiClient {
     return decodeStatuses(r);
   }
 
-  /** GET …/brief: the board's brief, the owner's standing instructions (ADR 0072). */
+  /** GET …/brief: the board's brief, the owner's standing instructions (ADR 0074). */
   async getBrief(channel: string, signal?: AbortSignal): Promise<BriefState> {
     const r = await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/brief`, { signal });
     return decodeBrief(r);

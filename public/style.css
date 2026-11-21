@@ -43,7 +43,7 @@
     --text: #17171c;
     --muted: #5c5c69;
     --accent: #b3008f;
-    --accent-hover: #8f0072;
+    --accent-hover: #8f0074;
     --accent-soft: #b3008f1a;
     --on-accent: #ffffff;
     --error: #c01a33;
@@ -60,7 +60,7 @@
   --text: #17171c;
   --muted: #5c5c69;
   --accent: #b3008f;
-  --accent-hover: #8f0072;
+  --accent-hover: #8f0074;
   --accent-soft: #b3008f1a;
   --on-accent: #ffffff;
   --error: #c01a33;
@@ -1321,7 +1321,7 @@ body > footer {
   min-height: 0;
 }
 
-/* Board brief (ADR 0072): the owner's standing instructions, as the board's header. It scrolls
+/* Board brief (ADR 0074): the owner's standing instructions, as the board's header. It scrolls
    inside its own box so a long brief never pushes the conversation off a phone. */
 .brief {
   padding: 6px 14px 8px;

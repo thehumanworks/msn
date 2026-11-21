@@ -370,7 +370,7 @@ fn start_returns_identity_and_page() {
 
 #[test]
 fn start_passes_the_reader_and_returns_the_board_brief() {
-    // ADR 0072: the brief leads the page, with briefChanged for this reader.
+    // ADR 0074: the brief leads the page, with briefChanged for this reader.
     let home = Home::new();
     let server = MockServer::spawn(vec![
         Scripted::json(200, r#"{"tenant":"team","username":"alice"}"#),

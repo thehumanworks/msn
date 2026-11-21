@@ -370,7 +370,7 @@ impl Server {
         }
         let edits_after = self.edits_after(args, &channel)?;
         let continuation = agent::catchup_query(after, Some(edits_after));
-        // The session's reader, when it has one, so the page can say briefChanged (ADR 0072).
+        // The session's reader, when it has one, so the page can say briefChanged (ADR 0074).
         let reader = agent::reader_query(self.reader.as_deref().or(self.username.as_deref()));
         let page = agent::fetch_json(
             &MsnClient::new(&self.url)?,

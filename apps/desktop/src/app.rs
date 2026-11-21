@@ -77,7 +77,7 @@ pub struct MsnDesktopApp {
     /// When a lone `g` was pressed; `b` within `CHORD` opens the board list.
     chord_at: Option<std::time::Instant>,
     show_keys: bool,
-    /// The owner's open brief editor (ADR 0072): the board, the text, and the count of landed
+    /// The owner's open brief editor (ADR 0074): the board, the text, and the count of landed
     /// saves when it opened, so it closes when its own save lands.
     brief_editor: Option<BriefEditor>,
     /// A field or list that takes keyboard focus on the next frame.
@@ -212,7 +212,7 @@ enum Tab {
     Tasks,
 }
 
-/// The owner's brief editor (ADR 0072).
+/// The owner's brief editor (ADR 0074).
 struct BriefEditor {
     channel: String,
     text: String,
@@ -220,7 +220,7 @@ struct BriefEditor {
 }
 
 enum Action {
-    /// Open the brief editor on the open board, or save its text (ADR 0072).
+    /// Open the brief editor on the open board, or save its text (ADR 0074).
     EditBrief,
     SaveBrief(String),
     Select(String),
@@ -899,7 +899,7 @@ impl MsnDesktopApp {
                     self.mute_menu(ui, actions);
                     // Archiving is owner only (ADR 0046).
                     let archived = self.state.is_archived(&channel);
-                    // So is writing the board's brief (ADR 0072); an archived board takes none.
+                    // So is writing the board's brief (ADR 0074); an archived board takes none.
                     if !archived {
                         let brief =
                             egui::Button::new(egui::RichText::new("Brief").color(theme::muted()))
@@ -2050,7 +2050,7 @@ impl MsnDesktopApp {
         }
     }
 
-    /// The owner's brief editor (ADR 0072): Markdown text with a byte count against the 4 KiB
+    /// The owner's brief editor (ADR 0074): Markdown text with a byte count against the 4 KiB
     /// limit. It closes when its save lands, when the board changes, or on Cancel; a refused save
     /// keeps the text and shows the reason.
     fn brief_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
@@ -2861,7 +2861,7 @@ fn brief_count(bytes: usize) -> String {
     }
 }
 
-/// The board's brief (ADR 0072): the owner's standing instructions, above pins and messages.
+/// The board's brief (ADR 0074): the owner's standing instructions, above pins and messages.
 /// Formatted like a message; it scrolls inside its own box so a long brief leaves the log room.
 fn render_brief(ui: &mut egui::Ui, brief: &crate::net::client_ops::Brief) {
     theme::card().show(ui, |ui| {
@@ -4157,7 +4157,7 @@ mod pin_tests {
 
     #[test]
     fn brief_header_shows_version_author_and_formatted_text() {
-        // ADR 0072.
+        // ADR 0074.
         use crate::net::client_ops::Brief;
         let ctx = egui::Context::default();
         let brief = Brief {

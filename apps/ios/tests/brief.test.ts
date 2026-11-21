@@ -14,7 +14,7 @@ import { track } from "./support/bounded.ts";
 import { startMockServer, TEST_TOKEN, type MockServerHandle } from "./support/mockServer.ts";
 import { nodeFetch, waitFor } from "./support/util.ts";
 
-// The board brief (ADR 0072): the owner's standing instructions, shown as the board's header.
+// The board brief (ADR 0074): the owner's standing instructions, shown as the board's header.
 
 const fast = { stream: { waitSeconds: 1, backoff: { baseMs: 5, maxMs: 20 } }, connectBackoff: { baseMs: 5, maxMs: 20 } };
 
