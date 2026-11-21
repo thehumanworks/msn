@@ -2175,14 +2175,20 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
   await expect(page.locator(".message")).toHaveCount(2);
   await expect(page.locator(".label-chip")).toHaveCount(1);
   expect(await small()).toEqual([]);
-  for (const [opener, close] of [
-    ["#board-settings", "#close-board"],
-    ["#invite-channel", "#close-invite"],
-    ["#agents", "#close-agents"],
+  // Each dialog opens only after its data loads. Measure once it is open and filled in, or the
+  // check races the open and sees no dialog controls at all.
+  for (const [opener, dialog, ready, close] of [
+    ["#board-settings", "#board-dialog", "#board-goal", "#close-board"],
+    ["#invite-channel", "#invite-dialog", "#copy-invite", "#close-invite"],
+    ["#agents", "#agents-dialog", "#agents-list li", "#close-agents"],
   ]) {
     await page.locator(opener).click();
+    await expect(page.locator(dialog)).toHaveJSProperty("open", true);
+    await expect(page.locator(ready).first()).toBeVisible();
+    await expect(page.locator(close)).toBeVisible();
     expect(await small()).toEqual([]);
     await page.locator(close).click();
+    await expect(page.locator(dialog)).toHaveJSProperty("open", false);
   }
 });
 
