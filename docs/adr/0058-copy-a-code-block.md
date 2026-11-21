@@ -13,11 +13,14 @@ Every fenced code block in a message has a **Copy** button in its top-right corn
 **Web.**
 
 - `messageContent` wraps each `pre.md-code` that `renderMarkdown` made in a `div.md-codeblock` and adds the button beside the `<pre>`, not inside it, so the block's text (and search, fold and transcript code that reads it) is unchanged. `markdown.js` and its shared fixtures are untouched. An edited message is rendered through the same path, so it gets the button too.
-- The button copies `pre.textContent` with `navigator.clipboard.writeText`. Success reads "Copied" for 2 seconds and the status line says "Code copied."; a blocked clipboard says "Clipboard unavailable. Select the code and copy it manually." as an error, and claims nothing.
-- Its accessible name is "Copy code", or "Copy sh code" when the fence names a language.
+- The button copies `pre.textContent` through the app's shared `copy()` helper. Success reads "Copied" for 2 seconds and the status line says "Code copied."; a blocked clipboard says "Clipboard unavailable. The code is selected: copy it manually." as an error, selects the code, and claims nothing.
+- Its accessible name is "Copy code", or "Copy sh code" when the fence names a language (the tag's first 32 characters only, since it is the sender's text).
+- The button's label cannot be selected (`user-select: none`), so selecting a message copies its text and never "Copied".
 - With a mouse it shows on hover or when focus is in the block, so it never covers code nobody is pointing at. On touch (`hover: none` or `pointer: coarse`) it always shows and is at least 44 by 44 px, matching the mobile rules of PR 58; a one-line block grows to 48 px so the button stays inside it.
 
-**Desktop.** The egui code block draws a small Copy button in its top-right corner while the pointer is over the block. A click puts the code on the clipboard (`copy_text`) and the button reads "Copied" for 2 seconds.
+**Desktop.** The egui code block draws a small Copy button in its top-right corner while the pointer is over the block or the button has keyboard focus. It is always in Tab order, and Enter or Space on it copies. A click puts the code on the clipboard (`copy_text`) and the button reads "Copied" for 2 seconds.
+
+Each button's id is the message's salt (message id, and whether it is drawn in the log or as a search hit) plus the code block's place in that message, counted through lists and quotes. `ui.id()` cannot be used: in egui 0.36 every child ui adds the same salt, so blocks at the same place in two messages shared one button, and one click copied both (found in review).
 
 ## Consequences
 

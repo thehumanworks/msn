@@ -564,9 +564,20 @@ test("a fenced code block has a Copy button that copies the raw code without the
       },
     });
   });
+  // A long language tag is the sender's text: the button's name keeps only its first 32 characters.
+  await request.post(`${t.path}/channels/alpha/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: [`\`\`\`${"l".repeat(40)}`, "x", "```"].join("\n") },
+  });
   await connect(page, t, "Tomas", { remember: false });
   const blocks = page.locator("#messages article .md-codeblock");
-  await expect(blocks).toHaveCount(2);
+  await expect(blocks).toHaveCount(3);
+  await expect(blocks.nth(2).locator(".copy-code")).toHaveAttribute(
+    "aria-label",
+    `Copy ${"l".repeat(32)} code`,
+  );
+  // Selecting a message's text never picks up the button's label.
+  await expect(blocks.nth(0).locator(".copy-code")).toHaveCSS("user-select", "none");
   // The <pre> still holds only the code: the button sits beside it, not inside it.
   await expect(blocks.nth(0).locator("pre.md-code")).toHaveText(script, { useInnerText: false });
   const first = blocks.nth(0).getByRole("button", { name: "Copy sh code" });
@@ -605,8 +616,9 @@ test("a fenced code block has a Copy button that copies the raw code without the
   });
   await second.click();
   await expect(page.locator("#status")).toHaveText(
-    "Clipboard unavailable. Select the code and copy it manually.",
+    "Clipboard unavailable. The code is selected: copy it manually.",
   );
+  expect(await page.evaluate(() => getSelection().toString())).toBe("msn listen");
   await expect(page.locator("#status")).toHaveClass(/error/);
   expect(await page.evaluate(() => window.copied)).toHaveLength(2);
 });

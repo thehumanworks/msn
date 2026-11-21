@@ -854,6 +854,8 @@ async function loadReceipts(connection, name, state, force = false) {
 }
 
 const COPIED_MS = 2000;
+/** A fence's language tag is the sender's text; the button's name keeps only its start. */
+const LANG_LABEL_MAX = 32;
 
 /**
  * Each fenced code block gets a Copy button (ADR 0058). It copies the code as the sender wrote
@@ -867,16 +869,16 @@ function addCodeCopy(content) {
     button.type = "button";
     button.className = "copy-code";
     button.textContent = "Copy";
-    button.setAttribute("aria-label", pre.dataset.lang ? `Copy ${pre.dataset.lang} code` : "Copy code");
+    const lang = pre.dataset.lang?.slice(0, LANG_LABEL_MAX);
+    button.setAttribute("aria-label", lang ? `Copy ${lang} code` : "Copy code");
     let timer = 0;
     button.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(pre.textContent);
-      } catch {
-        status("Clipboard unavailable. Select the code and copy it manually.", true);
+      const failed = "Clipboard unavailable. The code is selected: copy it manually.";
+      if (!(await copy(pre.textContent, "Code copied.", failed))) {
+        // Select the code so a manual copy is one keystroke away.
+        getSelection()?.selectAllChildren(pre);
         return;
       }
-      status("Code copied.");
       button.textContent = "Copied";
       clearTimeout(timer);
       timer = setTimeout(() => {
@@ -2292,12 +2294,14 @@ $("credentials-form").addEventListener("submit", async (event) => {
       : "Save the workspace / name and access key in your password manager. Automatic saving is unavailable in this browser.",
   );
 });
-async function copy(value, message) {
+async function copy(value, message, failed = "Clipboard unavailable. Select and copy the field manually.") {
   try {
     await navigator.clipboard.writeText(value);
     status(message);
+    return true;
   } catch {
-    status("Clipboard unavailable. Select and copy the field manually.", true);
+    status(failed, true);
+    return false;
   }
 }
 $("copy-access").addEventListener("click", () => copy(session.token, "Access key copied."));

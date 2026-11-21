@@ -1487,6 +1487,9 @@ body > footer {
   color: var(--muted);
   background: var(--surface);
   opacity: 0;
+  /* Selecting a message copies its text, not the button's label. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 .message .md-codeblock:hover .copy-code,
 .message .md-codeblock:focus-within .copy-code {
