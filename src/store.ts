@@ -4306,7 +4306,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     tenant: string,
     channel: string | null,
     params: URLSearchParams,
-    capability?: TenantRow,
+    capability: TenantRow,
   ): Response {
     const everyBoard = channel === null;
     const allowed = ["q", "from", "kind", "label", "before", "limit", ...(everyBoard ? ["include"] : [])];
@@ -4338,7 +4338,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     const bindings: unknown[] = [before];
     // The board filter is always built here, from the key, never from what the caller sent: a
     // scoped key cannot widen it with any parameter.
-    const scope = everyBoard ? (capability?.channel_scope ?? null) : channel;
+    const scope = everyBoard ? (capability.channel_scope ?? null) : channel;
     if (scope) {
       where.unshift("m.channel = ?");
       bindings.unshift(scope);
@@ -5928,7 +5928,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 3 && rest[2] === "search" && request.method === "GET") {
             this.requireChannel(channel);
-            return this.search(tenant, channel, url.searchParams);
+            return this.search(tenant, channel, url.searchParams, capability);
           }
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);
