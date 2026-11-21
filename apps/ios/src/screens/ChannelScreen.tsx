@@ -20,6 +20,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
+import { baseAfterSave } from "../core/brief.ts";
 import { toggled } from "../core/fold.ts";
 import { messageLink } from "../core/links.ts";
 import { seenMark } from "../core/readMarks.ts";
@@ -167,12 +168,13 @@ function BriefEditor({
   onClose: () => void;
 }) {
   const brief = useStore(controller.state).brief;
-  // The version on screen when the editor opened. After a refused save the owner has been told,
-  // so the next press builds on the newest version.
+  // The version on screen when the editor opened. After a conflict the owner has been told, so
+  // the next press builds on the newest version. Any other failure keeps the base, so a retry
+  // still cannot overwrite a change it has not shown.
   const base = useRef<number | undefined>(controller.state.get().briefVersion);
   const save = async (text: string) => {
     const failed = await controller.saveBrief(text, base.current);
-    if (failed) base.current = undefined;
+    base.current = baseAfterSave(base.current, failed);
     return failed;
   };
   return <BriefPanel brief={brief} onSave={save} onClose={onClose} />;

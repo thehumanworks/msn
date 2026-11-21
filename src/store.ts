@@ -5077,12 +5077,27 @@ export class MsnDurableObject extends DurableObject<Env> {
     return json(result);
   }
 
-  /** Whether this key may read and write per-reader state as `reader` (ADR 0074). */
-  private ownsReader(capability: TenantRow, reader: string): boolean {
+  /**
+   * The one rule for which reader names a key may use, for processing (ADR 0034), `since`
+   * (ADR 0061) and the brief's seen marker (ADR 0074): a key bound to a name may use the name
+   * itself or `name/<worker>` (for `--reader` on concurrent consumers); a prefix key any name with
+   * its prefix. Unbound and shared board keys stay cooperative (ADR 0026).
+   */
+  private requireReader(capability: TenantRow, reader: string): void {
     const bound = capability.bound_username;
-    if (bound !== null && bound !== undefined) return reader === bound || reader.startsWith(`${bound}/`);
-    const prefix = capability.bound_prefix;
-    return prefix === null || prefix === undefined || reader.startsWith(prefix);
+    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
+      this.requireBoundName(capability, reader);
+  }
+
+  /** `requireReader` as a yes or no, for a read that leaves a field out instead of refusing. */
+  private ownsReader(capability: TenantRow, reader: string): boolean {
+    try {
+      this.requireReader(capability, reader);
+      return true;
+    } catch (error) {
+      if (error instanceof HttpError) return false;
+      throw error;
+    }
   }
 
   private markBriefSeen(channel: string, reader: string, version: number): void {
@@ -5152,12 +5167,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     if (rest.length !== 2 || request.method !== "POST")
       throw new HttpError(404, "route_not_found", "Unknown processing operation.");
-    // A key bound to a name may only claim, take over or commit that name's readers, as with
-    // sends: the name itself or `name/<worker>` (for `--reader` on concurrent consumers). Prefix
-    // keys already allow any suffix. Unbound and shared board keys stay cooperative (ADR 0026).
-    const bound = capability.bound_username;
-    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
-      this.requireBoundName(capability, reader);
+    // A key bound to a name may only claim, take over or commit that name's readers.
+    this.requireReader(capability, reader);
     const input = await body(request);
     this.requireActive(channel); // After the await: an archive meanwhile still wins (ADR 0046).
     if (rest[1] === "claim") {
@@ -5248,11 +5259,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       throw new HttpError(400, "invalid_reader", "Name the reader: ?reader=NAME (the agent's display name).");
     const reader = text(named, "reader", 128, "invalid_reader");
     // The same rule as processing claims and commits (ADR 0034): a key bound to a name reads only
-    // that name's summaries (the name or `name/<worker>`). Unbound and shared board keys stay
-    // cooperative (ADR 0026).
-    const bound = capability.bound_username;
-    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
-      this.requireBoundName(capability, reader);
+    // that name's summaries.
+    this.requireReader(capability, reader);
     // Who "you" are in the rows: a board persona owns its id or display name as a reader, plus
     // `<that>/<worker>`, as receipts read it (ADR 0040); any other `name/<worker>` reader is `name`.
     const personas = this.ctx.storage.sql

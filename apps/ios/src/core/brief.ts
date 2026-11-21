@@ -78,3 +78,15 @@ export function briefNoticeVersion(message: Pick<Message, "username" | "contentT
     return null;
   }
 }
+
+/** How a refused save starts when the brief changed while the owner was editing. */
+export const BRIEF_CONFLICT = "The brief was changed somewhere else.";
+
+/**
+ * The version the editor's next save builds on. Only a conflict drops it (the owner has been
+ * told, so the next press builds on the newest version). Any other failure keeps it, so a retry
+ * after a network error still cannot overwrite a change the editor has not shown.
+ */
+export function baseAfterSave(base: number | undefined, failed: string | null): number | undefined {
+  return failed?.startsWith(BRIEF_CONFLICT) ? undefined : base;
+}

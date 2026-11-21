@@ -1,7 +1,9 @@
 import { test } from "./support/bounded.ts";
 import assert from "node:assert/strict";
 import {
+  BRIEF_CONFLICT,
   BRIEF_MAX_BYTES,
+  baseAfterSave,
   briefBytes,
   briefCount,
   briefNoticeVersion,
@@ -157,4 +159,11 @@ test("the owner saves a brief over the version shown; a conflict keeps the text 
   } finally {
     await server.close();
   }
+});
+
+test("only a conflict lets the editor's next save build on the newest version", () => {
+  assert.equal(baseAfterSave(4, `${BRIEF_CONFLICT} Your text is kept; save again.`), undefined);
+  assert.equal(baseAfterSave(4, "Network request failed"), 4);
+  assert.equal(baseAfterSave(4, "Only the board owner can change the brief."), 4);
+  assert.equal(baseAfterSave(4, null), 4);
 });

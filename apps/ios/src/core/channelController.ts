@@ -1,4 +1,4 @@
-import { BRIEF_MAX_BYTES, type Brief, briefCount, briefNoticeVersion } from "./brief.ts";
+import { BRIEF_CONFLICT, BRIEF_MAX_BYTES, type Brief, briefCount, briefNoticeVersion } from "./brief.ts";
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
@@ -638,7 +638,7 @@ export class ChannelController {
       if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
       if (error instanceof ApiError && error.code === "brief_conflict") {
         await this.refreshBrief();
-        return "The brief was changed somewhere else. Your text is kept; save again to replace the newer version.";
+        return `${BRIEF_CONFLICT} Your text is kept; save again to replace the newer version.`;
       }
       if (error instanceof ApiError && error.status === 403) return "Only the board owner can change the brief.";
       return error instanceof Error ? error.message : "Could not save the brief.";
