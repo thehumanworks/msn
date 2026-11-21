@@ -131,4 +131,24 @@ describe("quote a message in a reply (ADR 0059)", () => {
     );
     expect(stored.quote).toBeNull();
   });
+
+  it("keeps a reply's quote when its source message is edited or deleted", async () => {
+    const f = await fixture();
+    const root = await f.send({ text: "Then tag the CLI." });
+    const reply = await f.send({ text: "Tagged.", replyTo: root.id, quote: "Then tag the CLI." });
+    const edited = await call(f.tenant, `/channels/work/messages/${root.id}`, f.owner, "PATCH", {
+      username: "human",
+      text: "Then tag the CLI and the desktop app.",
+    });
+    expect(edited.status).toBe(200);
+    expect((await f.read()).find((m) => m.id === reply.id)?.quote).toBe("Then tag the CLI.");
+    const removed = await exports.default.fetch(
+      `https://msn.test/api/admin/tenants/${f.tenant}/channels/work/messages/${root.id}`,
+      { method: "DELETE", headers: { Authorization: "Bearer test-admin-secret-000000000000000000000" } },
+    );
+    expect(removed.status).toBe(204);
+    const left = await f.read();
+    expect(left.map((m) => m.id)).toEqual([reply.id]);
+    expect(left[0]).toMatchObject({ replyTo: root.id, quote: "Then tag the CLI." });
+  });
 });

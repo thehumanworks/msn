@@ -1251,12 +1251,17 @@ impl MsnDesktopApp {
                 );
                 ui.add_space(6.0);
                 ui.label(label("Reply to #"));
-                ui.add(
+                let target = ui.add(
                     egui::TextEdit::singleline(&mut self.composer.reply_to)
                         .margin(egui::Margin::symmetric(10, 5))
                         .font(egui::TextStyle::Small)
                         .desired_width(44.0),
                 );
+                // A quote belongs to the message it came from (ADR 0059): a typed change of
+                // the reply target drops it, as replying to another message does.
+                if target.changed() {
+                    self.composer.quote.clear();
+                }
             });
             // The quote (ADR 0059), above the addressing row because this layout runs upwards.
             // It starts as the whole message; cut it down to the part you answer.

@@ -2150,6 +2150,11 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
     headers: t.headers,
     data: { username: "agent", text: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n") },
   });
+  // A reply that quotes the first message (ADR 0059).
+  await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: "on it", replyTo: 1, quote: "labelled" },
+  });
   const small = () =>
     page.evaluate(() => {
       const out = [];
@@ -2172,9 +2177,16 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
   await page.getByText("Your access details").click();
   expect(await small()).toEqual([]);
   await openChannel(page, "general");
-  await expect(page.locator(".message")).toHaveCount(2);
+  await expect(page.locator(".message")).toHaveCount(3);
   await expect(page.locator(".label-chip")).toHaveCount(1);
   expect(await small()).toEqual([]);
+  // An open thread with a quoted reply, and a composer replying with a quote (ADR 0059).
+  await page.locator(".thread-toggle").first().click();
+  await expect(page.locator(".message-quote")).toBeVisible();
+  await page.getByRole("button", { name: "Quote message #1 in a reply" }).click();
+  await expect(page.locator("#quote-note")).toBeVisible();
+  expect(await small()).toEqual([]);
+  await page.locator("#reply-cancel").click();
   for (const [opener, close] of [
     ["#board-settings", "#close-board"],
     ["#invite-channel", "#close-invite"],

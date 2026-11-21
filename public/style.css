@@ -1751,6 +1751,31 @@ nav button.has-unread .channel-name {
 .quote-source:hover {
   color: var(--text);
 }
+/* The composer's ✕ buttons and a reply's quote are finger-sized on touch screens too. */
+@media (pointer: coarse) {
+  #reply-cancel,
+  #quote-remove {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  .quote-source {
+    min-height: 44px;
+    padding-block: 10px;
+  }
+  /* "Reply to: #N" gets the same hit area as the message row's buttons. */
+  .reply-link {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    min-width: 44px;
+  }
+  .reply-link::after {
+    content: "";
+    position: absolute;
+    inset: -6px 0;
+  }
+}
 .keys-list {
   display: grid;
   gap: 6px;

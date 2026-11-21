@@ -378,8 +378,9 @@ export class HostStore {
         };
         if (action.to !== undefined) body.to = action.to;
         if (action.replyTo !== undefined) body.replyTo = action.replyTo;
-        if (action.quote !== undefined) body.quote = action.quote;
         else if (message && message.channel === action.channel) body.replyTo = message.id;
+        // A quote (ADR 0059) always comes with an explicit replyTo; protocol.mjs checks that.
+        if (action.quote !== undefined) body.quote = action.quote;
         this.queueOutput(`msn-host-${this.key(job.agent, job.id, index)}`, job.agent, action.channel, body);
       }
       if (Object.hasOwn(result, "wait")) {
