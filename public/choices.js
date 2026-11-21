@@ -27,7 +27,21 @@ export function addressedTo(me, to) {
  */
 export function choiceState(message, me, { interactive = true } = {}) {
   if (message.answered) return "answered";
-  return interactive && addressedTo(me, message.to) ? "open" : "waiting";
+  return interactive && mayAnswer(message, me) ? "open" : "waiting";
+}
+
+/**
+ * Whether `me` may answer: exactly the `answerer` the server resolved when the question was asked,
+ * or, for a question stored without one, `to` matched trimmed and ignoring case.
+ */
+export function mayAnswer(message, me) {
+  if (typeof message.answerer === "string") return me === message.answerer;
+  return addressedTo(me, message.to);
+}
+
+/** The name a question waits for: its resolved answerer, else `to` as written. */
+export function awaitedName(message) {
+  return typeof message.answerer === "string" ? message.answerer : message.to;
 }
 
 /** The POST body of an answer: a reply whose text is the choice. */

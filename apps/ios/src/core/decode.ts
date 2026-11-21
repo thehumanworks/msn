@@ -141,6 +141,10 @@ export function decodeMessage(raw: unknown): Message {
     message.answer = m.answer;
   }
   if (m.answered !== undefined) message.answered = decodeAnswered(m.answered);
+  if (m.answerer !== undefined) {
+    if (typeof m.answerer !== "string") bad("message");
+    message.answerer = m.answerer;
+  }
   return message;
 }
 

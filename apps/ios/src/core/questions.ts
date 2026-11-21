@@ -14,17 +14,26 @@ export function addressedTo(me: string | undefined, to: string | undefined): boo
   return me === to || me.trim().toLowerCase() === to.trim().toLowerCase();
 }
 
+/**
+ * Whether `me` may answer: exactly the `answerer` the server resolved when the question was asked,
+ * or, for a question stored without one, `to` matched trimmed and ignoring case.
+ */
+export function mayAnswer(message: Message, me: string | undefined): boolean {
+  if (message.answerer !== undefined) return me === message.answerer;
+  return addressedTo(me, message.to);
+}
+
 export type ChoiceMode = "answered" | "open" | "waiting";
 
 /** "open" only for the addressed name on a board that takes posts, until the first answer. */
 export function choiceMode(message: Message, me: string | undefined, canAnswer: boolean): ChoiceMode {
   if (message.answered) return "answered";
-  return canAnswer && addressedTo(me, message.to) ? "open" : "waiting";
+  return canAnswer && mayAnswer(message, me) ? "open" : "waiting";
 }
 
 /** The line under the buttons. Names and choices are shown as plain text. */
 export function choiceNote(message: Message, mode: ChoiceMode): string {
   if (mode === "answered" && message.answered)
     return `${message.answered.username} answered ${message.answered.choice}`;
-  return mode === "open" ? "Your answer" : `Waiting for ${message.to ?? "someone"}`;
+  return mode === "open" ? "Your answer" : `Waiting for ${message.answerer ?? message.to ?? "someone"}`;
 }

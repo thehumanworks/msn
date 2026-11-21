@@ -2755,11 +2755,7 @@ pub fn question_choices(message: &Value) -> Option<Vec<&str>> {
 pub fn choice_mode(message: &Value, me: &str, can_post: bool) -> ChoiceMode {
     if message["answered"].is_object() {
         ChoiceMode::Answered
-    } else if can_post
-        && message["to"]
-            .as_str()
-            .is_some_and(|to| msn_cli::ask::addressed_to(me, to))
-    {
+    } else if can_post && msn_cli::ask::may_answer(message, me) {
         ChoiceMode::Open
     } else {
         ChoiceMode::Waiting
@@ -2807,7 +2803,7 @@ fn render_choices(
                 ),
                 ChoiceMode::Open => "Your answer".to_string(),
                 ChoiceMode::Waiting => {
-                    format!("Waiting for {}", message["to"].as_str().unwrap_or("?"))
+                    format!("Waiting for {}", msn_cli::ask::awaited_name(message))
                 }
             };
             ui.label(egui::RichText::new(note).small().color(theme::muted()));
@@ -4592,6 +4588,10 @@ mod choice_tests {
         assert_eq!(choice_mode(&question, "bob", true), ChoiceMode::Waiting);
         let folded = json!({"id": 3, "to": " Alice ", "choices": ["yes", "no"]});
         assert_eq!(choice_mode(&folded, "alice", true), ChoiceMode::Open);
+        // The server resolved the answerer: only that exact name, never a case variant of it.
+        let resolved = json!({"id": 6, "to": "Bob", "answerer": "Bob", "choices": ["yes", "no"]});
+        assert_eq!(choice_mode(&resolved, "Bob", true), ChoiceMode::Open);
+        assert_eq!(choice_mode(&resolved, "bob", true), ChoiceMode::Waiting);
         // Watch-only or archived: nobody can post, so the buttons stay locked.
         assert_eq!(choice_mode(&question, "alice", false), ChoiceMode::Waiting);
         let mut answered = question.clone();

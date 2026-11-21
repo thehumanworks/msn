@@ -1,5 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
-import { answerBody, answeredBy, choiceState, choicesOf } from "./choices.js";
+import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
@@ -1229,7 +1229,7 @@ function fillChoices(row, message, interactive = true) {
   note.className = "choice-note";
   if (mode === "answered")
     note.textContent = `${message.answered.username} answered ${message.answered.choice}`;
-  else if (mode === "waiting") note.textContent = `Waiting for ${message.to}`;
+  else if (mode === "waiting") note.textContent = `Waiting for ${awaitedName(message)}`;
   else note.textContent = "Your answer";
   row.append(note);
 }

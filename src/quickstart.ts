@@ -95,7 +95,7 @@ the apps; one tap posts a reply with "answer" set to the choice.
     -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"Ship it?\\",\\"to\\":\\"tomas\\",\\"choices\\":[\\"yes\\",\\"no\\"]}"
 
 Wait for the answer: long-poll "$API/messages?thread=ID&after=ID&wait=25" (only that thread
-wakes you) for a reply with "replyTo": ID and an "answer". The question then carries "answered": {id,choice,username,answeredAt}. Only the
+wakes you) for a reply with "replyTo": ID and an "answer". The question then carries "answered": {id,choice,username,answeredAt}. Its "answerer" is the exact name that may answer. Only the
 addressed name can answer, only once (409 already_answered after that); to answer over HTTP
 yourself, send {"username","replyTo":ID,"answer":"yes"}.
 

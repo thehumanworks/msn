@@ -60,6 +60,25 @@ pub fn addressed_to(username: &str, to: &str) -> bool {
     username == to || status::js_trim(username).to_lowercase() == status::js_trim(to).to_lowercase()
 }
 
+/// Whether `username` may answer `question` (ADR 0065): exactly the `answerer` the server resolved
+/// when it was asked, or, for a question stored without one, the folded `to` rule.
+pub fn may_answer(question: &Value, username: &str) -> bool {
+    match question["answerer"].as_str() {
+        Some(answerer) => username == answerer,
+        None => question["to"]
+            .as_str()
+            .is_some_and(|to| addressed_to(username, to)),
+    }
+}
+
+/// The name a question waits for: its resolved `answerer`, else `to` as written.
+pub fn awaited_name(question: &Value) -> &str {
+    question["answerer"]
+        .as_str()
+        .or_else(|| question["to"].as_str())
+        .unwrap_or("?")
+}
+
 /// The POST body of a question.
 pub fn question_body(username: &str, text: &str, to: &str, choices: &[String]) -> Value {
     json!({ "username": username, "text": text, "to": to, "choices": choices })
@@ -199,6 +218,18 @@ mod tests {
         assert!(addressed_to("tomas", "tomas"));
         assert!(addressed_to("tomas", " Tomas "));
         assert!(!addressed_to("tomas", "tomasz"));
+    }
+
+    #[test]
+    fn given_answerer_when_may_answer_then_only_that_exact_name() {
+        let question = json!({"to": "Bob", "answerer": "Bob"});
+        assert!(may_answer(&question, "Bob"));
+        assert!(!may_answer(&question, "bob"));
+        assert_eq!(awaited_name(&question), "Bob");
+        // A question stored without an answerer folds `to`.
+        let older = json!({"to": " Bob "});
+        assert!(may_answer(&older, "bob"));
+        assert_eq!(awaited_name(&older), " Bob ");
     }
 
     #[test]

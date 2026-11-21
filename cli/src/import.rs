@@ -843,6 +843,9 @@ fn import_envelope(
     if let Some(answered) = message.get("answered").filter(|value| value.is_object()) {
         provenance.insert("answered".to_string(), answered.clone());
     }
+    if let Some(answerer) = message.get("answerer").and_then(Value::as_str) {
+        provenance.insert("answerer".to_string(), json!(answerer));
+    }
     let mut origin = json!({
         "instanceId": source.instance_id,
         "origin": source.origin,

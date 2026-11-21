@@ -127,6 +127,7 @@ fn msg(id: u64, text: &str) -> Value {
     if id == 1 {
         row["to"] = json!("alice");
         row["choices"] = json!(["yes", "no"]);
+        row["answerer"] = json!("alice");
         row["answered"] =
             json!({"id": 2, "choice": "yes", "username": "alice", "answeredAt": CREATED});
     }
@@ -328,6 +329,7 @@ fn given_two_message_pages_when_export_then_archive_contains_both_and_stops_at_h
     let question = lines.iter().find(|row| row["sourceId"] == 1).unwrap();
     assert_eq!(question["choices"], json!(["yes", "no"]));
     assert_eq!(question["answered"]["id"], 2);
+    assert_eq!(question["answerer"], "alice");
     assert!(question.get("answer").is_none());
     let answer = lines.iter().find(|row| row["sourceId"] == 2).unwrap();
     assert_eq!(answer["answer"], "yes");

@@ -647,6 +647,10 @@ fn message_record(row: &Value) -> Result<MessageRecord, CliError> {
             .get("answered")
             .filter(|value| value.is_object())
             .cloned(),
+        answerer: row
+            .get("answerer")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 

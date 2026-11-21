@@ -35,8 +35,10 @@ test("decode keeps choices, answer and answered, and refuses malformed ones", ()
     to: "tomas",
     choices: ["yes", "no"],
     answered: { id: 5, choice: "no", username: "tomas", answeredAt: "t5" },
+    answerer: "tomas",
   });
   assert.deepEqual(question.choices, ["yes", "no"]);
+  assert.equal(question.answerer, "tomas");
   assert.equal(question.answered?.choice, "no");
   assert.equal(decodeMessage({ ...base, id: 5, replyTo: 4, answer: "no" }).answer, "no");
   for (const bad of [
@@ -44,6 +46,7 @@ test("decode keeps choices, answer and answered, and refuses malformed ones", ()
     { choices: ["a", 2] },
     { answer: 3 },
     { answered: { id: 5, choice: "no" } },
+    { answerer: 7 },
   ])
     assert.throws(() => decodeMessage({ ...base, ...bad }));
 });
@@ -55,6 +58,11 @@ test("buttons are open only for the addressed name until the first answer", () =
   assert.equal(choiceMode(question, "asha", true), "waiting");
   assert.equal(choiceMode({ ...question, to: " Tomas " }, "tomas", true), "open");
   assert.equal(choiceMode({ ...question, to: "tomasz" }, "tomas", true), "waiting");
+  // A resolved answerer is matched exactly: "bob" never answers a question for "Bob".
+  const resolved = { ...question, to: "Bob", answerer: "Bob" };
+  assert.equal(choiceMode(resolved, "Bob", true), "open");
+  assert.equal(choiceMode(resolved, "bob", true), "waiting");
+  assert.equal(choiceNote(resolved, "waiting"), "Waiting for Bob");
   assert.equal(choiceNote(question, "waiting"), "Waiting for tomas");
   const reply = decodeMessage({ ...base, id: 5, username: "tomas", replyTo: 4, answer: "no", createdAt: "t5" });
   const answered = answeredBy(reply);

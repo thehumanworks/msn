@@ -125,6 +125,11 @@ export type Message = {
   answer?: string;
   /** The first answer to this question (ADR 0065); absent until it is answered. */
   answered?: Answered;
+  /**
+   * The exact name that may answer this question (ADR 0065), resolved from `to` when it was
+   * asked. Clients open the buttons only for this name. Absent on other messages.
+   */
+  answerer?: string;
 };
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
 export type Answered = { id: number; choice: string; username: string; answeredAt: string };
@@ -159,9 +164,11 @@ type MessageRow = {
   answer: string | null;
   /** JSON Answered, set once by the first valid answer (ADR 0065). */
   answered: string | null;
+  /** The exact name that may answer a question, resolved when it was asked (ADR 0065). */
+  answerer: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote, choices, answer, answered";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote, choices, answer, answered, answerer";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -406,6 +413,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     choices,
     answer,
     answered,
+    answerer,
     ...rest
   } = row;
   return {
@@ -420,6 +428,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(choices == null ? {} : { choices: JSON.parse(choices) as string[] }),
     ...(answer == null ? {} : { answer }),
     ...(answered == null ? {} : { answered: JSON.parse(answered) as Answered }),
+    ...(answerer == null ? {} : { answerer }),
   };
 }
 
@@ -733,6 +742,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["messages", "choices", "TEXT"],
         ["messages", "answer", "TEXT"],
         ["messages", "answered", "TEXT"],
+        ["messages", "answerer", "TEXT"],
       ]) {
         if (
           !ctx.storage.sql
@@ -1604,6 +1614,34 @@ export class MsnDurableObject extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec<VapidKeys & { subject: string }>("SELECT publicKey, privateJwk, subject FROM push_keys")
       .toArray()[0];
+  }
+
+  /**
+   * The one exact name that may answer a question addressed to `to` (ADR 0065), fixed when it is
+   * asked. Known names are the workspace binding, every bound key, the board's personas and the
+   * board's senders. Someone holding `to` exactly wins; otherwise the one known name equal to it
+   * trimmed and ignoring case; otherwise (none, or several) `to` as written. Names are unique only
+   * by exact case, so "Bob" never lets "bob" answer.
+   */
+  private resolveAnswerer(channel: string, to: string): string {
+    const names = new Set<string>();
+    const tenant = this.tenantRow();
+    if (tenant?.bound_username) names.add(tenant.bound_username);
+    const sql = this.ctx.storage.sql;
+    for (const { name } of sql
+      .exec<{ name: string }>(
+        `SELECT bound_username AS name FROM access_keys WHERE bound_username IS NOT NULL
+         UNION SELECT displayName AS name FROM personas WHERE channel = ?
+         UNION SELECT username AS name FROM messages WHERE channel = ? AND deleted = 0`,
+        channel,
+        channel,
+      )
+      .toArray())
+      names.add(name);
+    if (names.has(to)) return to;
+    const fold = (name: string) => name.trim().toLowerCase();
+    const folded = [...names].filter((name) => fold(name) === fold(to));
+    return folded.length === 1 ? folded[0] : to;
   }
 
   /** Account names that belong to the owner: the workspace binding and every owner login. */
@@ -3761,8 +3799,13 @@ export class MsnDurableObject extends DurableObject<Env> {
       let question: { id: number; choices: string[] } | null = null;
       if (correlation.answer !== undefined) {
         const row = this.ctx.storage.sql
-          .exec<{ choices: string | null; recipient: string | null; answered: string | null }>(
-            "SELECT choices, recipient, answered FROM messages WHERE channel = ? AND id = ? AND deleted = 0",
+          .exec<{
+            choices: string | null;
+            recipient: string | null;
+            answered: string | null;
+            answerer: string | null;
+          }>(
+            "SELECT choices, recipient, answered, answerer FROM messages WHERE channel = ? AND id = ? AND deleted = 0",
             channel,
             correlation.replyTo,
           )
@@ -3776,11 +3819,13 @@ export class MsnDurableObject extends DurableObject<Env> {
             "invalid_answer",
             `answer must be one of the question's choices: ${choices.map((c) => JSON.stringify(c)).join(", ")}.`,
           );
-        if (!addressedTo(username, row.recipient))
+        // The answerer was resolved when the question was asked, so only that exact name answers;
+        // a case variant of it is someone else. A question stored without one folds `to`.
+        if (row.answerer !== null ? username !== row.answerer : !addressedTo(username, row.recipient))
           throw new HttpError(
             403,
             "not_addressed",
-            `Only ${JSON.stringify(row.recipient)} can answer this question.`,
+            `Only ${JSON.stringify(row.answerer ?? row.recipient)} can answer this question.`,
           );
         if (row.answered) {
           const first = JSON.parse(row.answered) as Answered;
@@ -3819,9 +3864,11 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
       }
       this.createChannel(channel);
+      const answerer =
+        correlation.choices === undefined ? null : this.resolveAnswerer(channel, correlation.to as string);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote, choices, answer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote, choices, answer, answerer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -3837,6 +3884,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           correlation.quote ?? null,
           choices,
           correlation.answer ?? null,
+          answerer,
         )
         .one();
       if (question)
@@ -5239,7 +5287,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, bytes = 0 WHERE id = ?",
               id,
             );
             // Deleting a question's answer reopens the question (ADR 0065): its record named the

@@ -28,6 +28,7 @@ type Message = {
   choices?: string[];
   answer?: string;
   answered?: Answered;
+  answerer?: string;
 };
 const adminDelete = (tenant: string, id: number) =>
   exports.default.fetch(`https://msn.test/api/admin/tenants/${tenant}/channels/work/messages/${id}`, {
@@ -77,7 +78,20 @@ async function fixture() {
     runInDurableObject(env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant])), (_, state) =>
       state.storage.sql.exec<{ bytes: number }>("SELECT bytes FROM usage").one(),
     );
-  return { tenant, owner: owner.token, agent: agent.token, post, send, ask, read, point, usage };
+  // A key bound to another name on the board (redeemed from a fresh invite).
+  const member = async (username: string) => {
+    const code = (
+      (await (await call(tenant, "/invites", owner.token, "POST", { channel: "work" })).json()) as {
+        code: string;
+      }
+    ).code;
+    return (
+      (await (await call(tenant, "/invites/redeem", undefined, "POST", { code, username })).json()) as {
+        token: string;
+      }
+    ).token;
+  };
+  return { tenant, owner: owner.token, agent: agent.token, post, send, ask, read, point, usage, member };
 }
 
 describe("ask a question with buttons (ADR 0065)", () => {
@@ -257,12 +271,12 @@ describe("ask a question with buttons (ADR 0065)", () => {
       env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant])),
       (_, state) => {
         const row = state.storage.sql
-          .exec<{ choices: string | null; answered: string | null }>(
-            "SELECT choices, answered FROM messages WHERE id = ?",
+          .exec<{ choices: string | null; answered: string | null; answerer: string | null }>(
+            "SELECT choices, answered, answerer FROM messages WHERE id = ?",
             question.id,
           )
           .one();
-        expect(row).toEqual({ choices: null, answered: null });
+        expect(row).toEqual({ choices: null, answered: null, answerer: null });
       },
     );
   });
@@ -301,9 +315,34 @@ describe("ask a question with buttons (ADR 0065)", () => {
     const question = await f.send({ text: "Ship?", to: " Tomas ", choices: ["yes", "no"] });
     const reply = await f.send({ username: "tomas", replyTo: question.id, answer: "yes" });
     expect((await f.point(question.id)).answered).toMatchObject({ id: reply.id, username: "tomas" });
+    expect(question.answerer).toBe("tomas");
     const other = await f.send({ text: "Merge?", to: "TOMASZ", choices: ["a", "b"] });
+    expect(other.answerer).toBe("TOMASZ");
     const refused = await f.post({ username: "tomas", replyTo: other.id, answer: "a" });
     expect(refused.status).toBe(403);
+  });
+
+  it("never lets a case variant of the name answer when someone holds the exact name", async () => {
+    const f = await fixture();
+    const upper = await f.member("Bob");
+    const lower = await f.member("bob");
+    const question = await f.send({ text: "Ship?", to: "Bob", choices: ["yes", "no"] });
+    expect(question.answerer).toBe("Bob");
+    const impostor = await f.post({ username: "bob", replyTo: question.id, answer: "yes" }, undefined, lower);
+    expect(impostor.status).toBe(403);
+    expect(((await impostor.json()) as ErrorBody).error.code).toBe("not_addressed");
+    const reply = await f.send({ username: "Bob", replyTo: question.id, answer: "no" }, undefined, upper);
+    expect((await f.point(question.id)).answered).toMatchObject({ id: reply.id, username: "Bob" });
+    // Folded, "BOB" matches two names, so it stays as written and neither of them may answer.
+    const unclear = await f.send({ text: "Tag?", to: "BOB", choices: ["yes", "no"] });
+    expect(unclear.answerer).toBe("BOB");
+    for (const [username, token] of [
+      ["Bob", upper],
+      ["bob", lower],
+    ])
+      expect((await f.post({ username, replyTo: unclear.id, answer: "yes" }, undefined, token)).status).toBe(
+        403,
+      );
   });
 
   it("refuses to change the words of an answered question or of an answer", async () => {

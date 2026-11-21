@@ -194,6 +194,9 @@ pub struct MessageRecord {
     /// A question's first answer: `{id, choice, username, answeredAt}` (ADR 0065).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered: Option<Value>,
+    /// The exact name that may answer a question, resolved when it was asked (ADR 0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answerer: Option<String>,
 }
 
 /// A snapshot. `text` is present only when `invalidated` is false.

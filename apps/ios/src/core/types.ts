@@ -37,6 +37,8 @@ export type Message = {
   answer?: string;
   /** The question's first answer (ADR 0065); absent until answered. */
   answered?: Answered;
+  /** The exact name that may answer, resolved by the server when the question was asked. */
+  answerer?: string;
 };
 
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
