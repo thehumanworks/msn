@@ -65,7 +65,7 @@ const BACKOFF_START_MS: u64 = 1000;
 const BACKOFF_MAX_MS: u64 = 15000;
 
 pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
-    if matches!(&cli.command, Command::Run { .. }) {
+    if matches!(&cli.command, Command::Run(..)) {
         return runner::execute(&cli);
     }
     if matches!(&cli.command, Command::Mcp { .. }) {
@@ -73,15 +73,15 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     if matches!(
         &cli.command,
-        Command::Login { .. }
+        Command::Login(..)
             | Command::Board { .. }
             | Command::Github { .. }
             | Command::Persona { .. }
             | Command::ConnectionExport { .. }
-            | Command::Invite {
+            | Command::Invite(crate::args::InviteArgs {
                 for_agent: true,
                 ..
-            }
+            })
     ) {
         return board::execute(&cli);
     }
@@ -89,7 +89,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     if matches!(
         &cli.command,
         Command::Workspace { .. }
-            | Command::Invite { .. }
+            | Command::Invite(..)
             | Command::Join { .. }
             | Command::InviteRevoke { .. }
     ) {
@@ -105,27 +105,27 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
     }
     let url = config::parse_origin(&cli.url)?;
     match cli.command {
-        Command::Login { .. }
+        Command::Login(..)
         | Command::Board { .. }
         | Command::Github { .. }
         | Command::Persona { .. }
         | Command::ConnectionExport { .. }
-        | Command::Run { .. }
+        | Command::Run(..)
         | Command::Mcp { .. } => unreachable!(),
         Command::Doctor { .. } => Err(CliError::generic(
             "msn doctor runs before connection setup; call doctor::run.",
         )),
         Command::Workspace { .. }
-        | Command::Invite { .. }
+        | Command::Invite(..)
         | Command::Join { .. }
         | Command::InviteRevoke { .. } => unreachable!(),
-        Command::Start {
+        Command::Start(crate::args::StartArgs {
             channel,
             after,
             edits_after,
             limit,
             max_bytes,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -170,12 +170,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             }
             agent::print_json(&agent::show(&url, &tenant, &token, channel, id)?)
         }
-        Command::Mute {
+        Command::Mute(crate::args::MuteArgs {
             channel,
             duration,
             everything,
             json,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let Some(channel) = channel else {
@@ -243,7 +243,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 Ok(())
             }
         }
-        Command::Peek {
+        Command::Peek(crate::args::PeekArgs {
             channel,
             thread,
             wait,
@@ -251,7 +251,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             cursor_file,
             resumable,
             local,
-        } => {
+        }) => {
             let thread = parse_thread(thread.as_deref())?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -294,14 +294,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 stop,
             )
         }
-        Command::Commit {
+        Command::Commit(crate::args::CommitArgs {
             channel,
             through,
             thread,
             cursor_file,
             resumable,
             local,
-        } => {
+        }) => {
             let thread = parse_thread(thread.as_deref())?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -432,7 +432,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let channel = slug(&channel)?;
             create(&url, &tenant, &token, channel)
         }
-        Command::Send {
+        Command::Send(crate::args::SendArgs {
             channel,
             text,
             json,
@@ -448,7 +448,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             until,
             tz,
             replaces,
-        } => {
+        }) => {
             let replaces = replaces.as_deref().map(parse_message_id).transpose()?;
             let later = scheduled::plan(
                 at.as_deref(),
@@ -507,7 +507,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &later,
             )
         }
-        Command::Ask {
+        Command::Ask(crate::args::AskArgs {
             channel,
             text,
             to,
@@ -515,7 +515,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             key,
             reply_to,
             wait,
-        } => {
+        }) => {
             let choices = ask::validate_choices(&choices)?;
             let to = identity::validate_username(&to).map_err(|_| {
                 CliError::usage("--to must be a non-blank username of at most 128 UTF-8 bytes.")
@@ -603,12 +603,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             };
             gather_answers(client, &tenant, &token, channel, question, timeout, &stop)
         }
-        Command::Answer {
+        Command::Answer(crate::args::AnswerArgs {
             channel,
             message_id,
             choice,
             key,
-        } => {
+        }) => {
             let question = parse_message_id(&message_id)?;
             let choice = ask::validate_answer(&choice)?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
@@ -634,12 +634,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             &url,
             command,
         ),
-        Command::Attachment {
+        Command::Attachment(crate::args::AttachmentArgs {
             channel,
             message_id,
             index,
             output,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -674,14 +674,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Command::Poll {
+        Command::Poll(crate::args::PollArgs {
             channel,
             thread,
             labels: filters,
             after,
             wait,
             limit,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -789,14 +789,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 }
             }
         }
-        Command::Label {
+        Command::Label(crate::args::LabelArgs {
             channel,
             message_id,
             set,
             unset,
             if_equal,
             if_unset,
-        } => {
+        }) => {
             let body = labels::change_body(
                 &labels::parse_labels(&set)?,
                 &unset,
@@ -939,12 +939,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 Some(&token),
             )?)
         }
-        Command::WaitLabel {
+        Command::WaitLabel(crate::args::WaitLabelArgs {
             channel,
             filters,
             message,
             timeout,
-        } => {
+        }) => {
             labels::filter_query(&filters)?;
             let message = message.as_deref().map(parse_message_id).transpose()?;
             let timeout = timeout
@@ -958,12 +958,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &url, &tenant, &token, channel, &filters, message, timeout, stop,
             )
         }
-        Command::Events {
+        Command::Events(crate::args::EventsArgs {
             channel,
             after,
             wait,
             limit,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = channel.as_deref().map(slug).transpose()?;
@@ -1040,13 +1040,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 show_snapshot(&url, &tenant, &token, channel, version)
             }
         },
-        Command::Catchup {
+        Command::Catchup(crate::args::CatchupArgs {
             channel,
             after,
             limit,
             max_bytes,
             edits_after,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -1082,14 +1082,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 cli.reader.as_deref(),
             )
         }
-        Command::Export {
+        Command::Export(crate::args::ExportArgs {
             channel,
             out,
             format,
             after,
             limit,
             force,
-        } => {
+        }) => {
             let channel = slug(&channel)?;
             if format == ExportFormat::Jsonl && out.is_none() {
                 return Err(CliError::usage(
@@ -1128,14 +1128,14 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &stop,
             )
         }
-        Command::Import {
+        Command::Import(crate::args::ImportArgs {
             file,
             channel,
             dry_run,
             trust,
             state_file,
             allow_existing,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -1153,13 +1153,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 stop: &stop,
             })
         }
-        Command::Read {
+        Command::Read(crate::args::ReadArgs {
             channel,
             after,
             wait,
             limit,
             cursor_file,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
@@ -1223,7 +1223,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &stop,
             )
         }
-        Command::Wait {
+        Command::Wait(crate::args::WaitArgs {
             channel,
             all,
             thread,
@@ -1231,7 +1231,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             wait,
             limit,
             cursor_file,
-        } => {
+        }) => {
             if all {
                 let tenant = require_tenant(cli.tenant.as_deref())?;
                 let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -1311,7 +1311,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             };
             wait_for_messages(&target, cursor_after, stop)
         }
-        Command::Follow {
+        Command::Follow(crate::args::FollowArgs {
             channel,
             thread,
             after,
@@ -1319,7 +1319,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             limit,
             cursor_file,
             once,
-        } => {
+        }) => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
