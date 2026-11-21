@@ -235,6 +235,30 @@ fn send_carries_a_quote_and_refuses_one_without_reply_to() {
 }
 
 #[test]
+fn send_carries_replaces() {
+    // Replace an instruction (ADR 0068).
+    let home = Home::new();
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"message":{"id":9,"tenant":"team","channel":"general","username":"alice","text":"new","replaces":4}}"#,
+    )]);
+    let replies = session(
+        &home,
+        &server,
+        &[call(
+            1,
+            "send",
+            json!({"text":"new","key":"r-1","replaces":4}),
+        )],
+    );
+    assert_eq!(ok(&replies[1])["message"]["replaces"], 4);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&server.recorded()[0].body).unwrap(),
+        json!({"username":"alice","text":"new","replaces":4})
+    );
+}
+
+#[test]
 fn peek_then_commit_moves_processing_progress() {
     let home = Home::local();
     let page = r#"{"messages":[{"id":5,"tenant":"team","channel":"general"},{"id":7,"tenant":"team","channel":"general"}],"nextCursor":7,"hasMore":false}"#;

@@ -661,6 +661,8 @@ fn message_record(row: &Value) -> Result<MessageRecord, CliError> {
             .get("answerer")
             .and_then(Value::as_str)
             .map(str::to_string),
+        replaces: row.get("replaces").and_then(Value::as_u64),
+        replaced_by: row.get("replacedBy").and_then(Value::as_u64),
     })
 }
 

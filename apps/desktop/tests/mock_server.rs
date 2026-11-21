@@ -426,6 +426,7 @@ fn commands_from_an_old_generation_never_execute() {
             quote: None,
             correlation_id: None,
             to: None,
+            replaces: None,
         })
         .ok()
         .unwrap();
@@ -628,6 +629,7 @@ fn a_full_command_queue_hands_the_command_back_with_its_payload() {
             quote: None,
             correlation_id: None,
             to: Some("bob".into()),
+            replaces: None,
         };
         match rig.worker.send(command) {
             Ok(()) => accepted += 1,

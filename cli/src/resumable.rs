@@ -136,6 +136,39 @@ fn kept_local_still_applies(state: &ProcessingState) -> bool {
     }
 }
 
+/// Where `peek` would start reading `channel` for `reader`, without claiming, reading or writing
+/// anything (ADR 0069, for `wait_all`): the server's `committedThrough` when progress is there,
+/// else this machine's. A reader the server has never seen starts at the larger of the two, since
+/// a first claim carries local progress forward.
+pub(crate) fn committed_progress(
+    mode: Mode,
+    client: &MsnClient,
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    reader: &str,
+) -> Result<u64, CliError> {
+    let path = resolve_path(url, tenant, reader, channel, None)?;
+    let local = load_processing(&path, &ProcessingState::fresh(url, tenant, channel, reader))?;
+    if mode == Mode::Local || (local.generation.is_none() && kept_local_still_applies(&local)) {
+        return Ok(local.committed_through);
+    }
+    let response = client.get(&base(tenant, channel, reader), Some(token))?;
+    if !(200..300).contains(&response.status) {
+        if mode == Mode::Default && matches!(response.status, 403 | 404) {
+            return Ok(local.committed_through);
+        }
+        return Err(refusal(&response, channel, reader));
+    }
+    let server = generation_of(&json_body(&response)?, "committedThrough")?;
+    Ok(if local.generation.is_some() {
+        server
+    } else {
+        server.max(local.committed_through)
+    })
+}
+
 fn note(reason: &str) {
     let _ = writeln!(io::stderr(), "msn: {reason}");
 }

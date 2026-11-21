@@ -97,6 +97,27 @@ describe("durable coordination event feed", () => {
     expect(page.nextCursor).toBe(page.events[1].id);
   });
 
+  it("GET events/head names the newest event id the key can see (ADR 0069)", async () => {
+    const t = await tenant();
+    const head = async (token: string) => {
+      const response = await call(`${t.path}/events/head`, token);
+      expect(response.status).toBe(200);
+      return (await response.json<{ head: number }>()).head;
+    };
+    expect(await head(t.token)).toBe(0);
+    await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
+    await call(`${t.path}/channels/other`, t.token, { method: "PUT" });
+    await send(t, "general", "one");
+    const member = await scopedKey(t, "general");
+    await send(t, "other", "two");
+    const all = await events(t.path, t.token);
+    expect(await head(t.token)).toBe(all.events.at(-1)?.id);
+    // A key scoped to one channel sees only that channel's head.
+    const general = all.events.filter((e) => e.channel === "general").at(-1)?.id;
+    expect(await head(member.token as string)).toBe(general);
+    expect((await call(`${t.path}/events/head`)).status).toBe(401);
+  });
+
   it("after is a strict event-id cursor, never the resourceId/message-id space", async () => {
     const t = await tenant();
     await call(`${t.path}/channels/general`, t.token, { method: "PUT" }); // event id 1

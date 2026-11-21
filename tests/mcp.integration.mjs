@@ -150,6 +150,7 @@ try {
       "wait_label",
       "ask",
       "wait_answer",
+      "wait_all",
       "gather",
       "wait_gather",
       "answer",
@@ -658,6 +659,17 @@ try {
   assert.equal(partial.complete, false);
   assert.deepEqual(partial.pending, ["quiet"]);
   assert.equal(partial.answers.reviewer.text, "2 days");
+  // Replacing an answer (ADR 0068), outside the thread: the newer message is the answer.
+  const four = await cli([
+    "--profile",
+    "reviewer",
+    "send",
+    "work",
+    "--text",
+    "4 days",
+    "--replaces",
+    String(two.message.id),
+  ]);
   const three = await cli([
     "--profile",
     "quiet",
@@ -674,7 +686,9 @@ try {
   assert.equal(gathered.complete, true);
   assert.deepEqual(gathered.pending, []);
   assert.deepEqual(gathered.names, ["reviewer", "quiet"]);
-  assert.equal(gathered.answers.reviewer.messageId, two.message.id);
+  assert.equal(gathered.answers.reviewer.messageId, four.message.id);
+  assert.equal(gathered.answers.reviewer.text, "4 days");
+  assert.deepEqual(gathered.answers.reviewer.replaced, [two.message.id]);
   assert.equal(gathered.answers.quiet.messageId, three.message.id);
   // The MCP tool sends and returns at once with wait 0; nobody has replied, so both are pending.
   const readyAsk = await gatherMcp.ok("gather", { text: "Ready?", to: ["reviewer", "quiet"] });
@@ -697,6 +711,32 @@ try {
   assert.equal(lateCode, 2, stale.errors);
   assert.deepEqual(JSON.parse(stale.output).pending, ["reviewer", "quiet"]);
   assert.match(stale.errors, /no reply yet from reviewer, quiet/);
+  // Replacing the question stops the gather with replacedBy (exit 1).
+  const newer = await cli([
+    "--profile",
+    "lead",
+    "send",
+    "work",
+    "--text",
+    "Ready now?",
+    "--to",
+    "reviewer",
+    "--replaces",
+    String(readyAsk.message.id),
+  ]);
+  const replacedRun = child(binary, [
+    "--profile",
+    "lead",
+    "gather",
+    "work",
+    "--question",
+    String(readyAsk.message.id),
+    "--timeout",
+    "5",
+  ]);
+  const [replacedCode] = await replacedRun.done;
+  assert.equal(replacedCode, 1, replacedRun.errors);
+  assert.equal(JSON.parse(replacedRun.output).replacedBy, newer.message.id);
   console.log("PASS: gather collects one reply per named agent and lists who has not replied");
 } finally {
   for (const p of children)

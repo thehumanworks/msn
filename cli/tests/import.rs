@@ -378,6 +378,8 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
                 let mut quoted = reply(11, 10, "world");
                 quoted["quote"] = json!("hello");
                 quoted["answer"] = json!("world");
+                // A replacement (ADR 0068) keeps its link to the source id as provenance.
+                quoted["replaces"] = json!(9);
                 quoted
             },
             snapshot(1, 11, false),
@@ -453,6 +455,8 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
     assert_eq!(reply_env["provenance"]["replyTo"], 10);
     assert_eq!(reply_env["provenance"]["quote"], "hello");
     assert_eq!(reply_env["provenance"]["answer"], "world");
+    assert_eq!(reply_env["provenance"]["replaces"], 9);
+    assert!(reply_body.get("replaces").is_none());
     assert!(reply_body.get("answer").is_none());
     assert!(reply_env["source"].get("editedAt").is_none());
     let snap = recorded

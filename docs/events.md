@@ -79,6 +79,11 @@ Rules a client can rely on:
   is a safety invariant rather than a limit you should plan around.
 - **Pending polls are capped at 128 per tenant** (`429 too_many_polls`). Hold one subscription and
   fan out locally instead of one per agent.
+- **Start at the head.** `GET /api/tenants/:tenant/events/head` returns `{"head": N}`, the newest event
+  id this key can see (only its channel's for a channel-scoped key; `0` when there is none). A
+  watcher reads it before catching up, then polls `events?after=N`, so nothing sent during the
+  catch-up is missed (ADR 0069). It is a separate route because released clients refuse unknown
+  fields on an events page.
 
 ### Errors
 

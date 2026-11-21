@@ -157,6 +157,8 @@ pub enum Command {
         quote: Option<String>,
         correlation_id: Option<String>,
         to: Option<String>,
+        /// Your earlier message this one replaces (ADR 0068).
+        replaces: Option<u64>,
     },
     SendTaskEvent {
         generation: u64,
@@ -1158,6 +1160,7 @@ fn handle_command(
                     quote,
                     correlation_id: None,
                     to: to.into_iter().collect(),
+                    replaces: None,
                 },
             )
             .map(|()| Some(format!("Scheduled for {send_at}.")));
@@ -1203,6 +1206,7 @@ fn handle_command(
             quote,
             correlation_id,
             to,
+            replaces,
             ..
         } => {
             let result = client_ops::send_message(
@@ -1218,6 +1222,7 @@ fn handle_command(
                     quote,
                     correlation_id,
                     to: to.into_iter().collect(),
+                    replaces,
                 },
                 &cancelled,
             );

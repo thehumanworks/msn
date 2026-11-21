@@ -16,6 +16,7 @@ const memory = (fields = {}) => ({
   recipient: "",
   replyTo: null,
   quote: null,
+  replaces: null,
   files: [],
   missingFiles: 0,
   retry: null,
@@ -41,6 +42,7 @@ test("a draft round-trips with its recipient, reply target and retry key, never 
     recipient: "worker",
     replyTo: 7,
     quote: null,
+    replaces: null,
     files: 1,
     retry,
     at: 123,
@@ -134,6 +136,7 @@ test("an unchanged uncertain send keeps its uploaded files; any change does not"
   assert.equal(unchangedRetryFiles(retry, { ...now, replyTo: null }), null);
   assert.equal(unchangedRetryFiles(retry, { ...now, username: "Tom" }), null);
   assert.equal(unchangedRetryFiles(retry, { ...now, quote: "a line" }), null);
+  assert.equal(unchangedRetryFiles(retry, { ...now, replaces: 3 }), null);
   assert.equal(unchangedRetryFiles(null, now), null);
   assert.equal(unchangedRetryFiles({ payload: "nope", key: "k" }, now), null);
   const noFiles = {
@@ -154,4 +157,18 @@ test("a reply's quote is kept with its reply target (ADR 0059)", () => {
   assert.equal(parseDrafts(JSON.stringify({ [key]: old }))[key].quote, null);
   // A quote without a reply target is dropped, not sent on its own.
   assert.equal(putDraft({}, key, memory({ content: "x", quote: "orphan" }))[key].quote, null);
+});
+
+test("a replacement draft keeps the id it replaces (ADR 0068)", () => {
+  const key = markId("Tomas", "general");
+  const stored = putDraft({}, key, memory({ replaces: 5 }));
+  // Replacing is something to come back to even before any text is typed.
+  assert.ok(stored[key]);
+  const parsed = parseDrafts(JSON.stringify(stored));
+  assert.equal(parsed[key].replaces, 5);
+  assert.equal(restoreDraft(parsed[key]).replaces, 5);
+  // Drafts kept before replacements existed have no field and still load.
+  const old = { content: "ok", recipient: "", replyTo: null, files: 0, retry: null, at: 1 };
+  assert.equal(parseDrafts(JSON.stringify({ [key]: old }))[key].replaces, null);
+  assert.deepEqual(parseDrafts(JSON.stringify({ [key]: { ...old, replaces: 0 } })), {});
 });

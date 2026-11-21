@@ -41,6 +41,9 @@ type StoredMessage = {
   choices?: string[];
   answer?: string;
   answered?: { id: number; choice: string; username: string; answeredAt: string };
+  /** Replace an instruction (ADR 0068). */
+  replaces?: number;
+  replacedBy?: number;
 };
 
 type StoredSnapshot = { channel: string; version: number; text: string; coversThrough: number; invalidated: boolean };
@@ -175,10 +178,12 @@ export async function startMockServer(): Promise<MockServerHandle> {
       ...(m.choices ? { choices: m.choices } : {}),
       ...(m.answer ? { answer: m.answer } : {}),
       ...(m.answered ? { answered: m.answered } : {}),
+      ...(m.replaces ? { replaces: m.replaces } : {}),
+      ...(m.replacedBy ? { replacedBy: m.replacedBy } : {}),
     };
   }
 
-  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number; choices?: string[]; answer?: string } = {}): StoredMessage {
+  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number; choices?: string[]; answer?: string; replaces?: number } = {}): StoredMessage {
     ensureChannel(channel);
     messageId += 1;
     const stored: StoredMessage = {
@@ -351,7 +356,10 @@ export async function startMockServer(): Promise<MockServerHandle> {
             ...(body.replyTo ? { replyTo: Number(body.replyTo) } : {}),
             ...(Array.isArray(body.choices) ? { choices: body.choices.map(String) } : {}),
             ...(body.answer !== undefined ? { answer: String(body.answer) } : {}),
+            ...(body.replaces !== undefined ? { replaces: Number(body.replaces) } : {}),
           });
+          const replaced = stored.replaces ? messages.find((m) => m.id === stored.replaces) : undefined;
+          if (replaced) replaced.replacedBy = stored.id;
           if (question)
             question.answered = { id: stored.id, choice: String(body.answer), username: stored.username, answeredAt: stored.createdAt };
           return json(res, 201, { message: toMessage(stored), replayed: false });
@@ -611,6 +619,10 @@ export async function startMockServer(): Promise<MockServerHandle> {
       message.username = "";
       // Deleting an answer reopens its question (ADR 0065).
       for (const asked of messages) if (asked.answered?.id === id) asked.answered = undefined;
+      // Deleting a replacement links what it replaced to its own replacement, if any (ADR 0068).
+      for (const old of messages) if (old.replacedBy === id) old.replacedBy = message.replacedBy;
+      message.replaces = undefined;
+      message.replacedBy = undefined;
       revision.set(message.channel, (revision.get(message.channel) ?? 0) + 1);
       for (const s of snapshots) if (s.channel === message.channel) s.invalidated = true;
       appendEvent(message.channel, "message.deleted", id);

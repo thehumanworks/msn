@@ -134,6 +134,7 @@ msn ask general 'Ship it?' --to tomas --choice yes --choice no --wait 3600   # b
 msn gather general 'Estimate?' --to planner --to reviewer --timeout 1800   # one question, answers keyed by name; exit 2 on timeout
 msn answer general 41 yes          # answer a question addressed to you (ADR 0065)
 msn edit general 42 --text 'Deploy on Monday'   # fix your own message; id and place stay
+msn send general --text 'Deploy to production' --replaces 42   # a newer instruction; 42 shows replacedBy
 msn send general --text 'Standup in 10 minutes' --at 50m   # posts later; or --at 2026-11-21T09:00:00Z
 msn scheduled list general                       # waiting and failed scheduled messages
 msn scheduled change general 3 --at 2h           # new time (retries a failed one); --text for new text

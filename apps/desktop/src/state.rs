@@ -55,6 +55,8 @@ pub struct PendingSend {
     pub quote: Option<String>,
     pub correlation_id: Option<String>,
     pub to: Option<String>,
+    /// Your earlier message this send replaces (ADR 0068).
+    pub replaces: Option<u64>,
     pub error: Option<String>,
     pub retryable: bool,
 }
@@ -307,6 +309,24 @@ impl ChannelState {
             self.messages.remove(&smallest);
         }
         self.link_answers();
+        self.link_replacements();
+    }
+
+    /// Marks each replaced message from its replacement in the cache (ADR 0068), so a message
+    /// read before it was replaced shows "replaced by" once the replacement arrives.
+    fn link_replacements(&mut self) {
+        let links: Vec<(u64, u64)> = self
+            .messages
+            .values()
+            .filter_map(|message| Some((message["replaces"].as_u64()?, message["id"].as_u64()?)))
+            .collect();
+        for (old, new) in links {
+            if let Some(message) = self.messages.get_mut(&old).and_then(Value::as_object_mut)
+                && !message.get("replacedBy").is_some_and(Value::is_u64)
+            {
+                message.insert("replacedBy".into(), new.into());
+            }
+        }
     }
 
     /// Marks each question answered from an answer reply in the cache (ADR 0065), so the buttons
@@ -2906,6 +2926,7 @@ mod tests {
                 quote: None,
                 correlation_id: None,
                 to: Some("bob".into()),
+                replaces: None,
                 error: None,
                 retryable: false,
             },
@@ -2944,6 +2965,7 @@ mod tests {
                 quote: None,
                 correlation_id: None,
                 to: None,
+                replaces: None,
                 error: None,
                 retryable: false,
             },
@@ -2959,6 +2981,7 @@ mod tests {
             quote: None,
             correlation_id: None,
             to: None,
+            replaces: None,
         });
         let pending = &state.pending_sends["k"];
         assert!(pending.retryable && pending.error.is_some());
@@ -3318,5 +3341,21 @@ mod tests {
         let channel = state.channel.as_ref().unwrap();
         assert!(!Rc::ptr_eq(&first, &channel.thread_rows()));
         assert_eq!(channel.thread_rows().len(), 2);
+    }
+
+    /// A message read before it was replaced shows its replacement once that arrives (ADR 0068).
+    #[test]
+    fn replacements_mark_the_messages_they_replace() {
+        let mut state = ChannelState::default();
+        state.replace_messages(vec![
+            json!({"id": 1, "text": "old"}),
+            json!({"id": 2, "text": "new", "replaces": 1}),
+            json!({"id": 3, "text": "kept", "replacedBy": 9}),
+            json!({"id": 4, "text": "late", "replaces": 3}),
+        ]);
+        assert_eq!(state.messages[&1]["replacedBy"], 2);
+        assert!(state.messages[&2].get("replacedBy").is_none());
+        // The server's own link wins over a cached one.
+        assert_eq!(state.messages[&3]["replacedBy"], 9);
     }
 }

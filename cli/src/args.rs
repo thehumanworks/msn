@@ -75,6 +75,7 @@ EXAMPLES:
   msn watch
   msn read general --reader reviewer
   msn wait general --reader reviewer
+  msn wait --all                    # first message addressed to you on any board
   msn whoami
   msn key-create reviewer --username reviewer
   msn key-create agents --username-prefix agent-
@@ -508,6 +509,10 @@ pub enum Command {
         /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
         #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
         at: Option<String>,
+        /// Replace your earlier message ID with this one (ADR 0068): the old message stays and
+        /// shows replacedBy, so readers skip to this one. Only your own message, only once
+        #[arg(long, value_name = "ID", conflicts_with = "at")]
+        replaces: Option<String>,
     },
     /// Ask one person a question with 2 to 6 buttons (ADR 0065). Prints the question; with --wait,
     /// waits for the answer and prints it as JSON (exit 0), or exits 2 on timeout
@@ -683,9 +688,19 @@ pub enum Command {
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
     },
-    /// Block until new messages exist, print that page, persist the cursor, exit 0
+    /// Block until new messages exist, print that page, persist the cursor, exit 0. With --all,
+    /// block until a message addressed to you arrives on any board (ADR 0069)
     Wait {
-        channel: String,
+        #[arg(required_unless_present = "all")]
+        channel: Option<String>,
+        /// Wait on every board this key can read for the first new message addressed to you
+        /// (--username, else the key's name). Prints {channel, message, messages, nextCursor}:
+        /// messages are that board's new messages through the addressed one, and that board's
+        /// reader cursor moves to it, as `msn wait CHANNEL` would. Other boards' cursors stay put.
+        /// A board you never read starts at its first message, so the first run can print a
+        /// long history in messages. Fails if a running `msn wait` holds that board's cursor
+        #[arg(long, conflicts_with_all = ["channel", "thread", "after", "limit", "cursor_file"])]
+        all: bool,
         /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
         #[arg(long, value_name = "ID")]
         thread: Option<String>,
