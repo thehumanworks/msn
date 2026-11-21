@@ -577,6 +577,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 (None, Some((text, names, reply_to))) => {
                     let username =
                         identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
+                    gather::refuse_self(&names, &username, "--to")?;
                     let key = key.unwrap_or_else(|| Uuid::new_v4().to_string());
                     eprintln!("Idempotency-Key: {key}");
                     let response = client.post_json(
@@ -1937,6 +1938,8 @@ fn gather_answers(
     stop: &AtomicBool,
 ) -> Result<(), CliError> {
     const INTERRUPTED: &str = "Interrupted before every answer arrived.";
+    let deadline = gather::deadline_in(timeout);
+    // Retries a failed read only until the deadline, then gives up as a timeout (exit 2).
     let mut get = |path: &str| -> Result<Value, CliError> {
         let mut backoff = BACKOFF_START_MS;
         loop {
@@ -1954,6 +1957,11 @@ fn gather_answers(
                     return Err(status_error(response.status, &response.body));
                 }
                 Ok(_) | Err(CliError::Network(_)) => {
+                    if std::time::Instant::now() + Duration::from_millis(backoff) >= deadline {
+                        return Err(CliError::timeout(format!(
+                            "Timed out after {timeout}s; the server could not be read."
+                        )));
+                    }
                     if interruptible_sleep(backoff, stop, "Gather read failed; retrying", 0) {
                         return Err(CliError::generic(INTERRUPTED));
                     }
@@ -1969,11 +1977,8 @@ fn gather_answers(
         gathered.pending().join(", ")
     );
     let _ = io::stderr().flush();
-    let waited = if gathered.finished() {
-        Ok(())
-    } else {
-        gather::wait(&mut get, &mut gathered, tenant, channel, timeout)
-    };
+    let waited = gather::wait(&mut get, &mut gathered, tenant, channel, deadline);
+    // Printed in every case, so no answer that was posted is lost.
     agent::print_json(&gathered.result())?;
     waited?;
     if let Some(new) = gathered.replaced_by() {

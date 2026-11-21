@@ -737,6 +737,11 @@ try {
   const [replacedCode] = await replacedRun.done;
   assert.equal(replacedCode, 1, replacedRun.errors);
   assert.equal(JSON.parse(replacedRun.output).replacedBy, newer.message.id);
+  // Your own replies never count, so naming yourself is refused before anything is sent.
+  const self = child(binary, ["--profile", "lead", "gather", "work", "Me?", "--to", "lead", "--to", "quiet"]);
+  const [selfCode] = await self.done;
+  assert.equal(selfCode, 2, self.errors);
+  assert.match(self.errors, /which is you/);
   console.log("PASS: gather collects one reply per named agent and lists who has not replied");
 } finally {
   for (const p of children)

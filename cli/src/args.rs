@@ -541,8 +541,8 @@ pub enum Command {
     /// as a normal message to every --to name, then waits until each has replied in its thread
     /// (or --timeout). Prints {question, names, complete, answers:{NAME:{username, messageId,
     /// text, createdAt}}, pending:[NAME]} as JSON: exit 0 when everyone replied, 2 on timeout with
-    /// the answers so far. Only replies actually posted count. A replaced answer (ADR 0068) is
-    /// followed to its replacement; a replaced question stops with replacedBy (exit 1)
+    /// the answers so far. Only replies actually posted count, never your own. A replaced answer
+    /// (ADR 0068) is followed to its replacement; a replaced question stops with replacedBy (exit 1)
     #[command(
         after_help = "Examples:\n  msn gather general 'Estimate for #42?' --to planner --to reviewer --to tester\n  msn gather general --question 117 --timeout 3600   # keep waiting on an earlier gather"
     )]

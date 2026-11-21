@@ -1010,6 +1010,7 @@ impl Server {
         };
         let posted = (|| {
             let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+            gather::refuse_self(&names, &username, "to")?;
             let response = MsnClient::new(&self.url)?.post_json(
                 &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
                 &token,
@@ -1025,10 +1026,17 @@ impl Server {
             key: Some(key.clone()),
             send_at: None,
         })?;
-        let question = posted["message"]["id"]
-            .as_u64()
-            .ok_or_else(|| CliError::generic("The server did not return the question's id."))?;
-        let mut result = self.gather_for(&tenant, &token, &channel, question, wait)?;
+        // The question is posted: every later failure carries the key, so a retry replays it
+        // instead of asking twice.
+        let with_key = |error: CliError| ToolError {
+            error,
+            key: Some(key.clone()),
+            send_at: None,
+        };
+        let mut gathered = gather::Gather::new(&posted["message"]).map_err(with_key)?;
+        let mut result = self
+            .gather_into(&tenant, &token, &channel, &mut gathered, wait)
+            .map_err(with_key)?;
         result["message"] = posted["message"].clone();
         result["idempotencyKey"] = json!(key);
         Ok(result)
@@ -1040,23 +1048,33 @@ impl Server {
         let channel = self.channel(args)?;
         let question = required_id(args)?;
         let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(MAX_WAIT);
-        Ok(self.gather_for(&tenant, &token, &channel, question, wait)?)
+        let client = MsnClient::new(&self.url)?;
+        let mut gathered = gather::start(
+            |path| agent::fetch_json(&client, path, &token),
+            &tenant,
+            &channel,
+            question,
+        )?;
+        Ok(self.gather_into(&tenant, &token, &channel, &mut gathered, wait)?)
     }
 
-    fn gather_for(
+    /// Reads the question's thread for up to `wait` seconds and returns what was gathered.
+    fn gather_into(
         &self,
         tenant: &str,
         token: &str,
         channel: &str,
-        question: u64,
+        gathered: &mut gather::Gather,
         wait: u64,
     ) -> Result<Value, CliError> {
         let client = MsnClient::new(&self.url)?;
-        let mut get = |path: &str| agent::fetch_json(&client, path, token);
-        let mut gathered = gather::start(&mut get, tenant, channel, question)?;
-        if !gathered.finished() {
-            gather::wait(&mut get, &mut gathered, tenant, channel, wait)?;
-        }
+        gather::wait(
+            |path| agent::fetch_json(&client, path, token),
+            gathered,
+            tenant,
+            channel,
+            gather::deadline_in(wait),
+        )?;
         Ok(gathered.result())
     }
 
@@ -1541,7 +1559,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "gather",
             "Gather answers from several agents",
-            "Ask several agents one question and collect their replies. Sends text as a normal message addressed to every name in `to` (each is woken), then waits up to `wait` seconds (default 0). An agent's answer is its first reply anywhere in the question's thread; if it replaces that reply (replaces), the replacement counts. Returns {question, names, complete, answers: {NAME: {username, messageId, text, createdAt}}, pending: [NAME], message, idempotencyKey}. pending lists who has not replied yet: only replies actually posted count, never silence. When complete is false, call wait_gather with the question id to keep waiting. If you replace the question, gathering stops with replacedBy: gather the new one with wait_gather. Retry a failed gather with the same key.",
+            "Ask several agents one question and collect their replies. Sends text as a normal message addressed to every name in `to` (each is woken), then waits up to `wait` seconds (default 0). An agent's answer is its first reply anywhere in the question's thread, as it is now: edits show, and if it replaces that reply (replaces), the newest replacement counts. Your own replies never count, so do not name yourself. Returns {question, names, complete, answers: {NAME: {username, messageId, text, createdAt}}, pending: [NAME], message, idempotencyKey}. pending lists who has not replied yet: only replies actually posted count, never silence. When complete is false, call wait_gather with the question id to keep waiting. If you replace the question, gathering stops with replacedBy: gather the new one with wait_gather. Retry a failed gather with the same key.",
             json!({
                 "text": {"type":"string","description":"The question."},
                 "to": {"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}],"description":"The names to gather answers from: 1 to 8."},
@@ -1555,7 +1573,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "wait_gather",
             "Keep gathering answers",
-            "Wait up to `wait` seconds for the remaining replies to a question sent with gather (or any message addressed to several names). Rereads the thread from the question, so it is safe to call any number of times. Returns the same {question, names, complete, answers, pending} as gather, plus replacedBy when the question was replaced.",
+            "Wait up to `wait` seconds for the remaining replies to a question sent with gather (or any message addressed to several names). Rereads the thread from the question, so it is safe to call any number of times; only replies posted before a replacement of the question count. Returns the same {question, names, complete, answers, pending} as gather, plus replacedBy when the question was replaced.",
             json!({
                 "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"The question's message id."},
                 "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait (default 25)."},
