@@ -161,7 +161,10 @@ mod tests {
     #[test]
     fn ages_read_like_the_web_app() {
         assert_eq!(unix_seconds("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(unix_seconds("2026-11-21T02:00:00.123Z"), Some(1_795_226_400));
+        assert_eq!(
+            unix_seconds("2026-11-21T02:00:00.123Z"),
+            Some(1_795_226_400)
+        );
         assert_eq!(unix_seconds("2026-11-21 02:00:00"), None);
         let at = "2026-11-21T02:00:00Z";
         let now = 1_795_226_400;
