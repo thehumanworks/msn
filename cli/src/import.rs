@@ -823,6 +823,9 @@ fn import_envelope(
     if let Some(reply) = message.get("replyTo").and_then(Value::as_u64) {
         provenance.insert("replyTo".to_string(), json!(reply));
     }
+    if let Some(quote) = message.get("quote").and_then(Value::as_str) {
+        provenance.insert("quote".to_string(), json!(quote));
+    }
     if let Some(correlation) = message.get("correlationId").and_then(Value::as_str) {
         provenance.insert("correlationId".to_string(), json!(correlation));
     }
@@ -926,8 +929,7 @@ fn send_payload(
         payload,
         &Correlation {
             reply_to,
-            correlation_id: None,
-            to: None,
+            ..Correlation::default()
         },
     );
     post_message(client, tenant, token, channel, key, &body)

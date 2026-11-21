@@ -7,6 +7,7 @@ pub mod markdown;
 mod mention;
 pub mod net;
 pub mod profile;
+pub mod quote;
 pub mod read_marks;
 pub mod smoke;
 pub mod state;

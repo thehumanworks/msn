@@ -138,6 +138,7 @@ pub enum Command {
         text: String,
         key: String,
         reply_to: Option<u64>,
+        quote: Option<String>,
         correlation_id: Option<String>,
         to: Option<String>,
     },
@@ -991,6 +992,7 @@ fn handle_command(
             text,
             key,
             reply_to,
+            quote,
             correlation_id,
             to,
             ..
@@ -1005,6 +1007,7 @@ fn handle_command(
                 &key,
                 Correlation {
                     reply_to,
+                    quote,
                     correlation_id,
                     to,
                 },

@@ -141,6 +141,15 @@ export function renderTranscript(meta, messages) {
         `- Attachments: ${files.map((file) => `${inline(file.name)} (${size(file.bytes)}, ${inline(file.mediaType)})`).join("; ")}`,
       );
     if (details.length) out.push("", ...details);
+    // A quote (ADR 0059) is the part of the replyTo message this reply answers, kept verbatim too.
+    if (typeof message.quote === "string")
+      out.push(
+        "",
+        fence(message.quote, "text")
+          .split("\n")
+          .map((line) => (line ? `> ${line}` : ">"))
+          .join("\n"),
+      );
     out.push("", fence(message.text ?? "", message.contentType === "application/json" ? "json" : "text"));
     shown.add(message.id);
   }

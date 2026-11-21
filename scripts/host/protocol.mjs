@@ -210,7 +210,7 @@ export function validateResult(result, agent, currentChannels) {
   const memberships = new Set(currentChannels);
   for (const action of result.actions) {
     if (action.type === "send") {
-      keys(action, ["type", "channel", "text", "to", "replyTo", "contentType"]);
+      keys(action, ["type", "channel", "text", "to", "replyTo", "quote", "contentType"]);
       requireValue(
         permitted(agent, action.channel) && memberships.has(action.channel),
         "send_requires_joined_channel",
@@ -228,6 +228,15 @@ export function validateResult(result, agent, currentChannels) {
       requireValue(
         action.replyTo === undefined || integer(action.replyTo, 1, Number.MAX_SAFE_INTEGER),
         "invalid_reply_reference",
+      );
+      // A quote (ADR 0059) names the message it comes from, so it needs an explicit replyTo.
+      requireValue(
+        action.quote === undefined ||
+          (action.replyTo !== undefined &&
+            typeof action.quote === "string" &&
+            action.quote.trim().length > 0 &&
+            Buffer.byteLength(action.quote) <= 2048),
+        "invalid_quote",
       );
       requireValue(
         action.contentType === undefined || ["text/plain", "application/json"].includes(action.contentType),
