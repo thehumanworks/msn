@@ -4292,13 +4292,26 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * Newest-first search of one channel (ADR 0037). `q` drives the FTS5 index, so its cost follows
-   * how many messages in the workspace match; `from`, `kind` and `label` narrow it. Without `q`
-   * the channel's own index is scanned newest first. `before` pages to older matches.
+   * Newest-first search (ADR 0037). `q` drives the FTS5 index, so its cost follows how many
+   * messages in the workspace match; `from`, `kind` and `label` narrow it. Without `q` the id
+   * index is scanned newest first. `before` pages to older matches.
+   *
+   * With a channel, only that board is searched. With `null` (ADR 0072) every board the key can
+   * read is: a channel-scoped key, which includes a board's shared key, reads only its own board,
+   * so its board is the whole answer. Archived boards are left out unless `include=archived`, as
+   * in the board list (ADR 0046); a scoped key's own board is searched either way, as its
+   * single-board search is.
    */
-  private search(tenant: string, channel: string, params: URLSearchParams): Response {
+  private search(
+    tenant: string,
+    channel: string | null,
+    params: URLSearchParams,
+    capability?: TenantRow,
+  ): Response {
+    const everyBoard = channel === null;
+    const allowed = ["q", "from", "kind", "label", "before", "limit", ...(everyBoard ? ["include"] : [])];
     for (const name of params.keys())
-      if (!["q", "from", "kind", "label", "before", "limit"].includes(name))
+      if (!allowed.includes(name))
         throw new HttpError(400, "invalid_query", `Unknown search parameter ${name}.`);
     const q = params.get("q") ?? "";
     const match = searchMatch(q);
@@ -4315,11 +4328,23 @@ export class MsnDurableObject extends DurableObject<Env> {
       : Number.MAX_SAFE_INTEGER;
     const limit = integer(params.get("limit"), 20, 100);
     if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+    const include = params.getAll("include");
+    if (include.length > 1 || (include.length && include[0] !== "archived"))
+      throw new HttpError(400, "invalid_query", "include accepts only archived.");
     const columns = MESSAGE_COLUMNS.split(", ")
       .map((column) => `m.${column}`)
       .join(", ");
-    const where: string[] = ["m.channel = ?", "m.deleted = 0", "m.id < ?"];
-    const bindings: unknown[] = [channel, before];
+    const where: string[] = ["m.deleted = 0", "m.id < ?"];
+    const bindings: unknown[] = [before];
+    // The board filter is always built here, from the key, never from what the caller sent: a
+    // scoped key cannot widen it with any parameter.
+    const scope = everyBoard ? (capability?.channel_scope ?? null) : channel;
+    if (scope) {
+      where.unshift("m.channel = ?");
+      bindings.unshift(scope);
+    } else if (!include.length) {
+      where.push("NOT EXISTS (SELECT 1 FROM channels c WHERE c.name = m.channel AND c.archivedAt IS NOT NULL)");
+    }
     if (from !== null) {
       where.push("m.username = ?");
       bindings.push(from);
@@ -4356,8 +4381,16 @@ export class MsnDurableObject extends DurableObject<Env> {
           )
           .toArray();
     const messages = rows.slice(0, limit).map((row) => toMessage(row, tenant));
+    // Labels, reactions and attachments are read per board; the newest-first order is kept.
+    const decorated = new Map<number, Message>();
+    for (const board of new Set(messages.map((message) => message.channel)))
+      for (const message of this.withSparse(
+        board,
+        messages.filter((candidate) => candidate.channel === board),
+      ))
+        decorated.set(message.id, message);
     return json({
-      messages: this.withSparse(channel, messages),
+      messages: messages.map((message) => decorated.get(message.id) ?? message),
       hasMore: rows.length > limit,
       ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
       complete: this.searchIndexed(),
@@ -5737,6 +5770,9 @@ export class MsnDurableObject extends DurableObject<Env> {
                 .head;
           return json({ head: head ?? 0 });
         }
+        // Search every board this key can read (ADR 0072). The key decides which boards.
+        if (rest.length === 1 && rest[0] === "search" && request.method === "GET")
+          return this.search(tenant, null, url.searchParams, capability);
         if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")
           return json(this.unreadCounts(url, capability));
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {

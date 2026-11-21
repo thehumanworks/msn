@@ -1,8 +1,12 @@
 //! Message search (ADR 0037): local validation and the request path. The server re-validates;
 //! checking here turns typos into usage errors (exit 2) before any network call.
 
+use serde_json::Value;
+use url::Url;
+
 use crate::error::CliError;
 use crate::labels;
+use crate::links;
 
 pub const MAX_QUERY_CHARS: usize = 256;
 pub const DEFAULT_LIMIT: u64 = 20;
@@ -18,8 +22,46 @@ pub struct Search<'a> {
     pub limit: u64,
 }
 
-/// GET path for one page of results, newest first.
+/// GET path for one page of one channel's results, newest first.
 pub fn path(tenant: &str, channel: &str, search: &Search<'_>) -> Result<String, CliError> {
+    Ok(format!(
+        "/api/tenants/{tenant}/channels/{channel}/search?{}",
+        query(search)?
+    ))
+}
+
+/// GET path for one page of results from every board the key can read (ADR 0072), newest first.
+/// The server chooses the boards from the key: a board's shared key or an invited key gets only
+/// its own board. Archived boards are left out unless `archived`.
+pub fn path_all(tenant: &str, search: &Search<'_>, archived: bool) -> Result<String, CliError> {
+    Ok(format!(
+        "/api/tenants/{tenant}/search?{}{}",
+        query(search)?,
+        if archived { "&include=archived" } else { "" }
+    ))
+}
+
+/// Adds `link` (ADR 0042) to every message of an every-board answer, so a reader can open a match
+/// without knowing which board it is on. A message without a channel or id is left as it is.
+pub fn with_links(url: &Url, tenant: &str, mut answer: Value) -> Value {
+    if let Some(messages) = answer.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            let link = match (
+                message.get("channel").and_then(Value::as_str),
+                message.get("id").and_then(Value::as_u64),
+            ) {
+                (Some(channel), Some(id)) => links::message_link(url, tenant, channel, id),
+                _ => continue,
+            };
+            if let Some(fields) = message.as_object_mut() {
+                fields.insert("link".to_owned(), Value::String(link));
+            }
+        }
+    }
+    answer
+}
+
+fn query(search: &Search<'_>) -> Result<String, CliError> {
     let text = search.text.map(str::trim).filter(|text| !text.is_empty());
     if text.is_none() && search.from.is_none() && search.kind.is_none() && search.labels.is_empty()
     {
@@ -61,7 +103,7 @@ pub fn path(tenant: &str, channel: &str, search: &Search<'_>) -> Result<String, 
     }
     query.append_pair("limit", &search.limit.to_string());
     Ok(format!(
-        "/api/tenants/{tenant}/channels/{channel}/search?{}{}",
+        "{}{}",
         query.finish(),
         labels::filter_query(search.labels)?
     ))
@@ -134,6 +176,58 @@ mod tests {
         assert_eq!(
             path,
             "/api/tenants/t/channels/general/search?from=ada+lovelace&kind=json&before=42&limit=5&label=state%3Dopen"
+        );
+    }
+
+    #[test]
+    fn given_every_board_when_path_then_no_channel_in_it() {
+        let labels = vec!["state=open".to_owned()];
+        let all = Search {
+            text: Some("deploy"),
+            labels: &labels,
+            limit: 5,
+            ..Search::default()
+        };
+        assert_eq!(
+            path_all("t", &all, false).unwrap(),
+            "/api/tenants/t/search?q=deploy&limit=5&label=state%3Dopen"
+        );
+        assert_eq!(
+            path_all("t", &all, true).unwrap(),
+            "/api/tenants/t/search?q=deploy&limit=5&label=state%3Dopen&include=archived"
+        );
+        assert_eq!(
+            path_all("t", &search(None), false).unwrap_err().exit_code(),
+            2
+        );
+    }
+
+    #[test]
+    fn given_every_board_answer_when_with_links_then_each_message_has_its_board_link() {
+        let url = Url::parse("https://msn.example/x").unwrap();
+        let answer = serde_json::json!({
+            "messages": [
+                {"id": 9, "channel": "ops", "text": "a"},
+                {"id": 4, "channel": "general", "text": "b"},
+                {"text": "no id"}
+            ],
+            "hasMore": false,
+            "complete": true
+        });
+        let linked = with_links(&url, "acme", answer);
+        assert_eq!(
+            linked["messages"][0]["link"],
+            "https://msn.example/#board=acme/ops&msg=9"
+        );
+        assert_eq!(
+            linked["messages"][1]["link"],
+            "https://msn.example/#board=acme/general&msg=4"
+        );
+        assert!(linked["messages"][2].get("link").is_none());
+        assert_eq!(linked["hasMore"], false);
+        assert_eq!(
+            with_links(&url, "acme", serde_json::json!({"x": 1}))["x"],
+            1
         );
     }
 
