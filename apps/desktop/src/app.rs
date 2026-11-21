@@ -193,6 +193,8 @@ struct Composer {
     quote: String,
     /// The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
     mention_to: Option<String>,
+    /// Your earlier message this one replaces (ADR 0067); None sends a new message.
+    replaces: Option<u64>,
     error: Option<String>,
 }
 
@@ -217,6 +219,8 @@ enum Action {
     CopyLink(u64),
     /// Open the editor on one of your messages, save it, or close it (ADR 0052).
     StartEdit(u64),
+    /// Start a message that replaces one of yours (ADR 0067).
+    Replace(u64),
     SaveEdit,
     CancelEdit,
     /// Send later (ADR 0060): schedule the composer's text, or change or cancel a scheduled one.
@@ -1300,6 +1304,29 @@ impl MsnDesktopApp {
             });
             // The quote (ADR 0059), above the addressing row because this layout runs upwards.
             // It starts as the whole message; cut it down to the part you answer.
+            // Replace (ADR 0067): this message replaces one of yours, which stays, marked.
+            if let Some(old) = self.composer.replaces {
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Replacing #{old} · it stays, marked replaced"
+                        ))
+                        .small()
+                        .strong()
+                        .color(theme::accent()),
+                    );
+                    cancel = ui
+                        .small_button("Cancel")
+                        .on_hover_text("Send as a new message instead (Esc)")
+                        .clicked();
+                });
+                if cancel {
+                    self.composer.replaces = None;
+                }
+            }
             if !self.composer.quote.is_empty() {
                 let mut remove = false;
                 // A fixed-height row: three lines, scrolling for more, so a long quote never
@@ -1713,6 +1740,8 @@ impl MsnDesktopApp {
             Shortcut::Close => {
                 if self.show_keys {
                     self.show_keys = false;
+                } else if self.composer.replaces.is_some() {
+                    self.composer.replaces = None;
                 } else if !self.composer.reply_to.trim().is_empty() {
                     self.composer.reply_to.clear();
                     self.composer.quote.clear();
@@ -1889,6 +1918,47 @@ impl MsnDesktopApp {
         self.focus = Some(FocusTarget::Composer);
     }
 
+    /// Starts a message that replaces your message `id` (ADR 0067): from its text when the
+    /// composer is empty, in its thread and to its name.
+    fn replace_message(&mut self, id: u64) {
+        let Some(message) = self
+            .state
+            .channel
+            .as_ref()
+            .and_then(|state| state.messages.get(&id))
+            .cloned()
+        else {
+            return;
+        };
+        let archived = self
+            .state
+            .selected_channel
+            .as_deref()
+            .is_some_and(|channel| self.state.is_archived(channel));
+        if archived {
+            return;
+        }
+        self.composer.replaces = Some(id);
+        if self.composer.text.trim().is_empty() {
+            self.composer.text = message["text"].as_str().unwrap_or("").to_string();
+        }
+        let thread = message["replyTo"]
+            .as_u64()
+            .map(|parent| parent.to_string())
+            .unwrap_or_default();
+        if self.composer.reply_to.trim() != thread {
+            self.composer.quote.clear();
+        }
+        self.composer.reply_to = thread;
+        if self.composer.to.trim().is_empty()
+            && let Some(to) = message["to"].as_str()
+        {
+            self.composer.to = to.to_string();
+        }
+        self.active_tab = Tab::Chat;
+        self.focus = Some(FocusTarget::Composer);
+    }
+
     /// Replies to `id` with its whole text as the quote (ADR 0059). The quote field is editable,
     /// so the person cuts it down to the part they answer.
     fn quote_message(&mut self, id: u64) {
@@ -2017,6 +2087,7 @@ impl MsnDesktopApp {
                 }
             }
             Action::CancelEdit => self.editing = None,
+            Action::Replace(id) => self.replace_message(id),
             Action::Reply(id) => self.reply_to(id),
             Action::Quote(id) => self.quote_message(id),
             Action::ShowQuoted(id) => {
@@ -2151,6 +2222,14 @@ impl MsnDesktopApp {
             }
             _ => Some(self.composer.quote.clone()),
         };
+        let replaces = self.composer.replaces;
+        if later && replaces.is_some() {
+            self.composer.error = Some(
+                "A replacement cannot be scheduled. Send it now, or cancel the replace first."
+                    .into(),
+            );
+            return;
+        }
         if later {
             match self.state.schedule(
                 text.clone(),
@@ -2177,6 +2256,7 @@ impl MsnDesktopApp {
         // A reply target is for one message (ADR 0054); the next message starts unaddressed.
         self.composer.reply_to.clear();
         self.composer.quote.clear();
+        self.composer.replaces = None;
         if later {
             return;
         }
@@ -2197,6 +2277,7 @@ impl MsnDesktopApp {
                 quote: quote.clone(),
                 correlation_id: None,
                 to: to.clone(),
+                replaces,
                 error: None,
                 retryable: false,
             },
@@ -2212,6 +2293,7 @@ impl MsnDesktopApp {
             quote,
             correlation_id: None,
             to,
+            replaces,
         });
     }
 
@@ -2235,6 +2317,7 @@ impl MsnDesktopApp {
             quote: pending.quote.clone(),
             correlation_id: pending.correlation_id.clone(),
             to: pending.to.clone(),
+            replaces: pending.replaces,
         };
         self.dispatch(command);
     }
@@ -2418,6 +2501,8 @@ impl MsnDesktopApp {
             reply_to: draft.reply_to,
             quote: draft.quote,
             mention_to: None,
+            // A replace names a message on one board; it is not kept with the draft (ADR 0067).
+            replaces: None,
             error: None,
         };
         self.drafts_board = current;
@@ -3041,6 +3126,9 @@ fn render_message(
                     link_controls(ui, id, can_post, actions);
                     if editable {
                         edit_control(ui, id, actions);
+                        if !message["replacedBy"].is_u64() {
+                            replace_control(ui, id, actions);
+                        }
                     }
                 },
             )
@@ -3093,6 +3181,13 @@ fn render_message(
             actions.push(Action::StartEdit(id));
             ui.close();
         }
+        if editable
+            && !message["replacedBy"].is_u64()
+            && ui.button("Replace with a new message").clicked()
+        {
+            actions.push(Action::Replace(id));
+            ui.close();
+        }
     });
     shown
 }
@@ -3117,6 +3212,17 @@ fn edit_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
         .clicked()
     {
         actions.push(Action::StartEdit(id));
+    }
+}
+
+/// "Replace" beside "Edit" on your own messages that nothing replaced yet (ADR 0067).
+fn replace_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+    if ui
+        .link(egui::RichText::new("Replace").small().color(theme::muted()))
+        .on_hover_text(format!("Send a new message that replaces #{id}"))
+        .clicked()
+    {
+        actions.push(Action::Replace(id));
     }
 }
 
@@ -3318,8 +3424,19 @@ fn message_header(
     if message["editedAt"].is_string() {
         meta.push_str(" · edited");
     }
+    // Replace an instruction (ADR 0067): each end names the other.
+    if let Some(old) = message["replaces"].as_u64() {
+        meta.push_str(&format!(" · replaces #{old}"));
+    }
     // Full muted, not dimmed: the time and id must meet AA in both themes (ADR 0049).
     job.append(&meta, 10.0, format(theme::muted()));
+    if let Some(new) = message["replacedBy"].as_u64() {
+        job.append(
+            &format!(" · replaced by #{new}"),
+            0.0,
+            format(theme::accent()),
+        );
+    }
     job
 }
 
@@ -4441,6 +4558,69 @@ mod layout_tests {
 mod draft_tests {
     use super::layout_tests::fixture;
     use super::*;
+
+    /// Replace (ADR 0067): the composer starts from the old message, in its thread and to its
+    /// name; the send carries `replaces`, and the composer then sends new messages again.
+    #[test]
+    fn replace_starts_from_the_old_message_and_sends_replaces() {
+        let mut app = fixture(3);
+        let old = app
+            .state
+            .channel
+            .as_mut()
+            .unwrap()
+            .messages
+            .get_mut(&3)
+            .unwrap();
+        *old = json!({"id": 3, "username": "Alex", "text": "Deploy to staging", "replyTo": 1,
+            "to": "Jamie", "createdAt": "2026-09-20T14:00:00Z"});
+        app.perform(Action::Replace(3));
+        assert_eq!(app.composer.replaces, Some(3));
+        assert_eq!(app.composer.text, "Deploy to staging");
+        assert_eq!(app.composer.reply_to, "1");
+        assert_eq!(app.composer.to, "Jamie");
+        // A replacement cannot be scheduled.
+        app.perform(Action::SendLater);
+        assert!(
+            app.composer
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("cannot be scheduled")
+        );
+        assert_eq!(app.composer.replaces, Some(3));
+        app.composer.text = "Deploy to production".into();
+        app.perform(Action::Send);
+        let pending: Vec<_> = app.state.pending_sends.values().collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            (
+                pending[0].replaces,
+                pending[0].reply_to,
+                pending[0].text.as_str()
+            ),
+            (Some(3), Some(1), "Deploy to production")
+        );
+        assert_eq!(app.composer.replaces, None);
+    }
+
+    /// A replaced message names its replacement in its header (ADR 0067).
+    #[test]
+    fn header_names_the_replacement() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let message = json!({"id": 3, "username": "Alex", "replacedBy": 5,
+                "createdAt": "2026-09-20T14:00:00Z"});
+            text = message_header(ui, &message, "Alex", true).text;
+            let message = json!({"id": 5, "username": "Alex", "replaces": 3});
+            text.push('|');
+            text.push_str(&message_header(ui, &message, "Alex", true).text);
+        });
+        output.textures_delta.clear();
+        assert!(text.contains("#3 · replaced by #5"), "{text}");
+        assert!(text.contains("#5 · replaces #3"), "{text}");
+    }
 
     /// Drafts (ADR 0057): each board keeps its own composer, sending clears only that board's,
     /// the file is written once the throttle allows, a new run reads it back, and Disconnect
