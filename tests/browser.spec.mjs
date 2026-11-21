@@ -538,6 +538,91 @@ test("message text renders as safe Markdown built from DOM nodes (ADR 0043)", as
   expect(await page.evaluate(() => window.pwned)).toBeUndefined();
 });
 
+test("a fenced code block has a Copy button that copies the raw code without the fence (ADR 0058)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/alpha`, { headers: t.headers });
+  const script = ["msn join general", 'echo "<b>$HOME</b>" | tr a-z A-Z', "", "  indented `tick`"].join("\n");
+  const text = ["Run this:", "", "```sh", script, "```", "", "Then:", "", "```", "msn listen", "```"].join(
+    "\n",
+  );
+  await request.post(`${t.path}/channels/alpha/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text },
+  });
+  // Record copies instead of touching the real clipboard; the second write fails.
+  await page.addInitScript(() => {
+    window.copied = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: async (value) => {
+          if (window.failCopy) throw new Error("denied");
+          window.copied.push(value);
+        },
+      },
+    });
+  });
+  // A long language tag is the sender's text: the button's name keeps only its first 32 characters.
+  await request.post(`${t.path}/channels/alpha/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: [`\`\`\`${"l".repeat(40)}`, "x", "```"].join("\n") },
+  });
+  await connect(page, t, "Tomas", { remember: false });
+  const blocks = page.locator("#messages article .md-codeblock");
+  await expect(blocks).toHaveCount(3);
+  await expect(blocks.nth(2).locator(".copy-code")).toHaveAttribute(
+    "aria-label",
+    `Copy ${"l".repeat(32)} code`,
+  );
+  // Selecting a message's text never picks up the button's label.
+  await expect(blocks.nth(0).locator(".copy-code")).toHaveCSS("user-select", "none");
+  // The <pre> still holds only the code: the button sits beside it, not inside it.
+  await expect(blocks.nth(0).locator("pre.md-code")).toHaveText(script, { useInnerText: false });
+  const first = blocks.nth(0).getByRole("button", { name: "Copy sh code" });
+  const second = blocks.nth(1).getByRole("button", { name: "Copy code" });
+  const mobile = testInfo.project.name === "mobile";
+  if (mobile) {
+    // Touch has no hover: the button always shows, at least 44px, and stays inside its block.
+    await expect(second).toHaveCSS("opacity", "1");
+    for (const [button, block] of [
+      [first, blocks.nth(0)],
+      [second, blocks.nth(1)],
+    ]) {
+      const box = await button.boundingBox();
+      const outer = await block.boundingBox();
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.y + box.height).toBeLessThanOrEqual(outer.y + outer.height);
+    }
+  } else {
+    // A mouse sees it on hover only, so it never covers code nobody is pointing at.
+    await expect(first).toHaveCSS("opacity", "0");
+    await blocks.nth(0).hover();
+    await expect(first).toHaveCSS("opacity", "1");
+  }
+  await page.screenshot({ path: testInfo.outputPath("copy-code.png") });
+  await first.click();
+  await expect(first).toHaveText("Copied");
+  await expect(page.locator("#status")).toHaveText("Code copied.");
+  await second.click();
+  expect(await page.evaluate(() => window.copied)).toEqual([script, "msn listen"]);
+  // The label returns to Copy after a moment.
+  await expect(first).toHaveText("Copy", { timeout: 5000 });
+  // A blocked clipboard says so instead of claiming a copy.
+  await page.evaluate(() => {
+    window.failCopy = true;
+  });
+  await second.click();
+  await expect(page.locator("#status")).toHaveText(
+    "Clipboard unavailable. The code is selected: copy it manually.",
+  );
+  expect(await page.evaluate(() => getSelection().toString())).toBe("msn listen");
+  await expect(page.locator("#status")).toHaveClass(/error/);
+  expect(await page.evaluate(() => window.copied)).toHaveLength(2);
+});
+
 test("remembered credentials reconnect on reload, restore the last channel, and are forgotten on disconnect or rejection", async ({
   page,
   request,

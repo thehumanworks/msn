@@ -2643,7 +2643,12 @@ fn render_message(
         let parsed = markdown::parse_cached(text);
         match &*parsed {
             markdown::Parsed::Plain(plain) => Body::Rich(egui::RichText::new(plain)),
-            markdown::Parsed::Blocks(_) => Body::Markdown(parsed.clone()),
+            // The salt keeps each message's copy buttons apart (ADR 0058); a search hit can show
+            // the same message as the log, so it gets its own.
+            markdown::Parsed::Blocks(_) => Body::Markdown(
+                parsed.clone(),
+                egui::Id::new(("message-markdown", id, fold.is_some())),
+            ),
         }
     };
     let header = message_header(ui, message, username, own);
@@ -2938,7 +2943,7 @@ fn message_header(
 /// it. The text is laid out first because a right-aligned bubble must know its width.
 enum Body {
     Rich(egui::RichText),
-    Markdown(std::rc::Rc<markdown::Parsed>),
+    Markdown(std::rc::Rc<markdown::Parsed>, egui::Id),
 }
 
 impl From<egui::RichText> for Body {
@@ -2996,7 +3001,7 @@ fn bubble(
                 .response
         }
         // Formatted text (ADR 0043).
-        Body::Markdown(parsed) => {
+        Body::Markdown(parsed, salt) => {
             frame
                 .show(ui, |ui| {
                     ui.set_max_width(wrap_width);
@@ -3006,7 +3011,7 @@ fn bubble(
                     long = fold_clip(ui, fold.as_deref(), |ui| {
                         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                             if let markdown::Parsed::Blocks(blocks) = &*parsed {
-                                markdown::show(ui, blocks);
+                                markdown::show(ui, salt, blocks);
                             }
                         });
                     });
