@@ -168,6 +168,44 @@ export function quoteText(value: unknown, replyTo: unknown): string | undefined 
   return text(value, "quote", MAX_QUOTE_BYTES, "invalid_quote");
 }
 
+/** Choices a question may offer (ADR 0065): 2 to 6, each at most this many UTF-8 bytes. */
+export const MIN_CHOICES = 2;
+export const MAX_CHOICES = 6;
+export const MAX_CHOICE_BYTES = 128;
+
+/**
+ * Optional `choices` body field (ADR 0065): the buttons a question offers its addressed person.
+ * Absent/null means a plain message. A question needs `to`, so exactly one name may answer it.
+ */
+export function choiceList(value: unknown, to: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (to === undefined || to === null)
+    throw new HttpError(400, "invalid_choices", "choices need to: name the person who answers.");
+  if (!Array.isArray(value) || value.length < MIN_CHOICES || value.length > MAX_CHOICES)
+    throw new HttpError(
+      400,
+      "invalid_choices",
+      `choices must be a list of ${MIN_CHOICES} to ${MAX_CHOICES} answers.`,
+    );
+  const choices = value.map((choice) => text(choice, "Each choice", MAX_CHOICE_BYTES, "invalid_choices"));
+  if (new Set(choices).size !== choices.length)
+    throw new HttpError(400, "invalid_choices", "choices must all differ.");
+  return choices;
+}
+
+/**
+ * Optional `answer` body field (ADR 0065): the choice a reply picks from its replyTo question.
+ * The store checks it against the question; here it only needs a replyTo and a choice's shape.
+ */
+export function answerChoice(value: unknown, replyTo: unknown, choices: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (replyTo === undefined || replyTo === null)
+    throw new HttpError(400, "invalid_answer", "answer needs replyTo: name the question it answers.");
+  if (choices !== undefined && choices !== null)
+    throw new HttpError(400, "invalid_answer", "A message cannot both ask and answer a question.");
+  return text(value, "answer", MAX_CHOICE_BYTES, "invalid_answer");
+}
+
 /** Optional `correlationId` body field: absent/null means unset; otherwise opaque text ≤ 128 bytes. */
 export function correlationId(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;

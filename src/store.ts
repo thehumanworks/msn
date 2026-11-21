@@ -15,12 +15,14 @@ import {
   ATTACHMENT_ORPHAN_MS,
   type AttachmentRef,
   admin,
+  answerChoice,
   attachmentRefs,
   type Binding,
   bearer,
   binding,
   body,
   type ContentType,
+  choiceList,
   contentDisposition,
   contentType,
   correlationId,
@@ -115,11 +117,28 @@ export type Message = {
   reactions?: Reactions;
   /** When the sender last edited the text (ADR 0052); absent from JSON when never edited. */
   editedAt?: string;
+  /** A question's buttons (ADR 0065); absent from JSON on other messages. Only `to` answers. */
+  choices?: string[];
+  /** The choice this reply picks from its replyTo question (ADR 0065). */
+  answer?: string;
+  /** The first answer to this question (ADR 0065); absent until it is answered. */
+  answered?: Answered;
 };
+/** Which reply answered a question, with what, by whom and when (ADR 0065). */
+export type Answered = { id: number; choice: string; username: string; answeredAt: string };
 /** Attachment metadata on a message; the bytes come from the per-message download route. */
 export type Attachment = { index: number; id: string; name: string; mediaType: string; bytes: number };
 /** Optional annotation input on send; `undefined` means "not supplied". */
-export type Correlation = { replyTo?: number; quote?: string; correlationId?: string; to?: string };
+export type Correlation = {
+  replyTo?: number;
+  quote?: string;
+  correlationId?: string;
+  to?: string;
+  /** A question's buttons (ADR 0065). */
+  choices?: string[];
+  /** The choice a reply picks from its replyTo question (ADR 0065). */
+  answer?: string;
+};
 type MessageRow = {
   id: number;
   channel: string;
@@ -133,9 +152,14 @@ type MessageRow = {
   personaId: string | null;
   editedAt: string | null;
   quote: string | null;
+  /** JSON list of a question's choices (ADR 0065). */
+  choices: string | null;
+  answer: string | null;
+  /** JSON Answered, set once by the first valid answer (ADR 0065). */
+  answered: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote, choices, answer, answered";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -325,7 +349,18 @@ function processingFence(url: URL): ProcessingFence | null {
 
 /** Old clients must keep seeing today's shape: unset annotations are omitted, not null. */
 function toMessage(row: MessageRow, tenant: string): Message {
-  const { replyTo, quote, correlationId, recipient, personaId, editedAt, ...rest } = row;
+  const {
+    replyTo,
+    quote,
+    correlationId,
+    recipient,
+    personaId,
+    editedAt,
+    choices,
+    answer,
+    answered,
+    ...rest
+  } = row;
   return {
     ...rest,
     tenant,
@@ -335,6 +370,9 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(recipient === null ? {} : { to: recipient }),
     ...(personaId == null ? {} : { personaId }),
     ...(editedAt == null ? {} : { editedAt }),
+    ...(choices == null ? {} : { choices: JSON.parse(choices) as string[] }),
+    ...(answer == null ? {} : { answer }),
+    ...(answered == null ? {} : { answered: JSON.parse(answered) as Answered }),
   };
 }
 
@@ -431,9 +469,14 @@ export function payload(username: string, text: string, type: ContentType, corre
       : [username, text, type, replyTo ?? null, correlationId ?? null];
   if (to !== undefined) fields.push(to);
   // A quote (ADR 0059) wraps the rest, so every send without one hashes exactly as before.
-  if (correlation.quote !== undefined)
-    return JSON.stringify([JSON.stringify(fields), { quote: correlation.quote }]);
-  return JSON.stringify(fields);
+  let out =
+    correlation.quote === undefined
+      ? JSON.stringify(fields)
+      : JSON.stringify([JSON.stringify(fields), { quote: correlation.quote }]);
+  // Choices and answers (ADR 0065) wrap again, only when present, for the same reason.
+  if (correlation.choices !== undefined || correlation.answer !== undefined)
+    out = JSON.stringify([out, { choices: correlation.choices ?? null, answer: correlation.answer ?? null }]);
+  return out;
 }
 
 /** One object per tenant. Channel indexes and message writes share one transaction boundary. */
@@ -629,6 +672,11 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["messages", "quote", "TEXT"],
         // A scheduled reply's quote (ADR 0059/0060), for tables made before quotes existed.
         ["scheduled_messages", "quote", "TEXT"],
+        // Questions with buttons (ADR 0065): NULL on every other message. Additive, so no
+        // schema_version step and safe in any merge order.
+        ["messages", "choices", "TEXT"],
+        ["messages", "answer", "TEXT"],
+        ["messages", "answered", "TEXT"],
       ]) {
         if (
           !ctx.storage.sql
@@ -2694,7 +2742,9 @@ export class MsnDurableObject extends DurableObject<Env> {
           "Edit limit reached (100,000 lifetime edits). Contact the administrator.",
         );
       // A quote is part of the stored content (ADR 0059); an edit keeps it.
-      const bytes = new TextEncoder().encode(row.username + edit.text + (row.quote ?? "")).length;
+      const bytes = new TextEncoder().encode(
+        row.username + edit.text + (row.quote ?? "") + (row.choices ?? "") + (row.answer ?? ""),
+      ).length;
       if (usage.bytes - oldBytes + bytes > MAX_CONTENT_BYTES)
         throw new HttpError(
           409,
@@ -3352,6 +3402,43 @@ export class MsnDurableObject extends DurableObject<Env> {
           "replyTo must be the id of an existing message in this channel.",
         );
       }
+      // An answer (ADR 0065) must pick one of its question's choices, come from the one name the
+      // question is addressed to, and be the first. Checked inside the write, so two taps that
+      // race still leave exactly one answer.
+      let question: { id: number; choices: string[] } | null = null;
+      if (correlation.answer !== undefined) {
+        const row = this.ctx.storage.sql
+          .exec<{ choices: string | null; recipient: string | null; answered: string | null }>(
+            "SELECT choices, recipient, answered FROM messages WHERE channel = ? AND id = ? AND deleted = 0",
+            channel,
+            correlation.replyTo,
+          )
+          .toArray()[0];
+        if (!row?.choices)
+          throw new HttpError(400, "not_a_question", "answer needs replyTo to name a question with choices.");
+        const choices = JSON.parse(row.choices) as string[];
+        if (!choices.includes(correlation.answer))
+          throw new HttpError(
+            400,
+            "invalid_answer",
+            `answer must be one of the question's choices: ${choices.map((c) => JSON.stringify(c)).join(", ")}.`,
+          );
+        if (username !== row.recipient)
+          throw new HttpError(
+            403,
+            "not_addressed",
+            `Only ${JSON.stringify(row.recipient)} can answer this question.`,
+          );
+        if (row.answered) {
+          const first = JSON.parse(row.answered) as Answered;
+          throw new HttpError(
+            409,
+            "already_answered",
+            `This question was already answered with ${JSON.stringify(first.choice)} in message ${first.id}.`,
+          );
+        }
+        question = { id: correlation.replyTo as number, choices };
+      }
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
@@ -3367,7 +3454,10 @@ export class MsnDurableObject extends DurableObject<Env> {
             "attachment_not_found",
             "Upload each attachment to this channel first; unused uploads expire after 24 hours.",
           );
-      const bytes = new TextEncoder().encode(username + content + (correlation.quote ?? "")).length;
+      const choices = correlation.choices === undefined ? null : JSON.stringify(correlation.choices);
+      const bytes = new TextEncoder().encode(
+        username + content + (correlation.quote ?? "") + (choices ?? "") + (correlation.answer ?? ""),
+      ).length;
       if (usage.messages >= MAX_MESSAGES || usage.bytes + bytes > MAX_CONTENT_BYTES) {
         throw new HttpError(
           409,
@@ -3378,7 +3468,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       this.createChannel(channel);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote, choices, answer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -3392,8 +3482,21 @@ export class MsnDurableObject extends DurableObject<Env> {
           correlation.to ?? null,
           personaId,
           correlation.quote ?? null,
+          choices,
+          correlation.answer ?? null,
         )
         .one();
+      if (question)
+        this.ctx.storage.sql.exec(
+          "UPDATE messages SET answered = ? WHERE id = ?",
+          JSON.stringify({
+            id: message.id,
+            choice: correlation.answer as string,
+            username,
+            answeredAt: message.createdAt,
+          } satisfies Answered),
+          question.id,
+        );
       this.ctx.storage.sql.exec(
         "UPDATE usage SET messages = messages + 1, bytes = bytes + ? WHERE singleton = 1",
         bytes,
@@ -4781,7 +4884,14 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, bytes = 0 WHERE id = ?",
+              id,
+            );
+            // Deleting a question's answer reopens the question (ADR 0065): its record named the
+            // answerer, and the answer no longer exists to point at.
+            this.ctx.storage.sql.exec(
+              "UPDATE messages SET answered = NULL WHERE channel = ? AND answered IS NOT NULL AND json_extract(answered, '$.id') = ?",
+              channel,
               id,
             );
             this.ctx.storage.sql.exec(
@@ -4871,7 +4981,14 @@ export class MsnDurableObject extends DurableObject<Env> {
             : null;
         const username = input ? text(input.username, "username", 128) : "";
         let personaId = input?.personaId === undefined ? null : slug(text(input.personaId, "personaId", 64));
-        const content = input ? text(input.text, "text", 16384) : "";
+        // An answer (ADR 0065) may leave out text: the reply then reads as the choice itself.
+        const content = input
+          ? text(
+              input.text === undefined && typeof input.answer === "string" ? input.answer : input.text,
+              "text",
+              16384,
+            )
+          : "";
         const type = input ? contentType(input.contentType, content) : "text/plain";
         const correlation: Correlation = input
           ? {
@@ -4879,6 +4996,8 @@ export class MsnDurableObject extends DurableObject<Env> {
               quote: quoteText(input.quote, input.replyTo),
               correlationId: correlationId(input.correlationId),
               to: recipient(input.to),
+              choices: choiceList(input.choices, input.to),
+              answer: answerChoice(input.answer, input.replyTo, input.choices),
             }
           : {};
         const sendLabels = input ? parseLabels(input.labels) : undefined;
@@ -4893,6 +5012,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         // The time window is checked after the idempotency lookup, so a late retry still replays.
         const sendAt =
           input?.sendAt === undefined || input.sendAt === null ? null : sendAtValue(input.sendAt);
+        // A question or an answer is about now (ADR 0065): a later post could find the question
+        // answered or the answer stale, so neither can be scheduled.
+        if (sendAt && (correlation.choices !== undefined || correlation.answer !== undefined))
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            "A question with choices, or an answer to one, cannot be scheduled. Send it now.",
+          );
         if (sendAt && files.length)
           throw new HttpError(
             400,
