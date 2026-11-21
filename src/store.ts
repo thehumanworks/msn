@@ -66,7 +66,15 @@ import {
   sendPush,
   type VapidKeys,
 } from "./push";
-import { SINCE_EVENTS, SINCE_MESSAGES, type SinceSource, sinceSummary } from "./since";
+import {
+  SINCE_EVENTS,
+  SINCE_LABEL_BATCH,
+  SINCE_LABELS,
+  SINCE_MESSAGES,
+  SINCE_TEXT_CHARS,
+  type SinceSource,
+  sinceSummary,
+} from "./since";
 import { MAX_TEMPLATES, type TemplatePersona, templateFromBoard, templateName } from "./templates";
 
 export type Message = {
@@ -3419,9 +3427,14 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (named === null)
       throw new HttpError(400, "invalid_reader", "Name the reader: ?reader=NAME (the agent's display name).");
     const reader = text(named, "reader", 128, "invalid_reader");
+    // The same rule as processing claims and commits (ADR 0034): a key bound to a name reads only
+    // that name's summaries (the name or `name/<worker>`). Unbound and shared board keys stay
+    // cooperative (ADR 0026).
+    const bound = capability.bound_username;
+    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
+      this.requireBoundName(capability, reader);
     // Who "you" are in the rows: a board persona owns its id or display name as a reader, plus
-    // `<that>/<worker>` (ADR 0034), as receipts read it; a bound key owns `name/<worker>`.
-    let name = reader;
+    // `<that>/<worker>`, as receipts read it (ADR 0040); any other `name/<worker>` reader is `name`.
     const personas = this.ctx.storage.sql
       .exec<{ id: string; displayName: string }>(
         "SELECT id, displayName FROM personas WHERE channel = ?",
@@ -3431,9 +3444,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     const persona = personas.find((row) =>
       [row.id, row.displayName].some((prefix) => reader === prefix || reader.startsWith(`${prefix}/`)),
     );
-    if (persona) name = persona.displayName;
-    else if (capability.bound_username && reader.startsWith(`${capability.bound_username}/`))
-      name = capability.bound_username;
+    const name =
+      persona?.displayName ?? (reader.includes("/") ? reader.slice(0, reader.indexOf("/")) : reader);
     const head = this.headCursor(channel);
     const requested = params.has("after") ? integer(params.get("after"), 0, Number.MAX_SAFE_INTEGER) : null;
     if (requested !== null && requested > head)
@@ -3444,9 +3456,21 @@ export class MsnDurableObject extends DurableObject<Env> {
       : requested !== null
         ? ["after", requested]
         : ["start", 0];
+    // Only what the rows read. JSON payloads (task, board and job events) come whole; plain text
+    // is only ever shown as a 120-character excerpt, so a long message is cut in SQL.
     const rows = this.ctx.storage.sql
-      .exec<MessageRow>(
-        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
+      .exec<{
+        id: number;
+        username: string;
+        text: string;
+        contentType: string;
+        recipient: string | null;
+        personaId: string | null;
+      }>(
+        `SELECT id, username, contentType, recipient, personaId,
+           CASE WHEN contentType = 'application/json' THEN text ELSE substr(text, 1, ?) END AS text
+         FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
+        SINCE_TEXT_CHARS,
         channel,
         after,
         SINCE_MESSAGES + 1,
@@ -3458,6 +3482,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       text: row.text,
       contentType: row.contentType,
       ...(row.recipient === null ? {} : { to: row.recipient }),
+      ...(row.personaId === null ? {} : { personaId: row.personaId }),
     }));
     // Label changes: walk the newest channel events back to this reader's starting point. The
     // journal stores which message changed, not who changed it or which key, so each row shows
@@ -3479,25 +3504,34 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (event.type === "message.labeled" && event.resourceId !== null)
         changed.set(event.resourceId, (changed.get(event.resourceId) ?? 0) + 1);
     }
-    const ids = [...changed.keys()];
-    const labeled = ids.length
-      ? this.ctx.storage.sql
-          .exec<{ id: number; username: string }>(
-            `SELECT id, username FROM messages WHERE channel = ? AND deleted = 0 AND id IN (${ids.map(() => "?").join(", ")})`,
-            channel,
-            ...ids,
-          )
-          .toArray()
-      : [];
+    // Every relabeled message is counted, but only the SINCE_LABELS most changed are looked up,
+    // so the IN lists stay far below the Durable Object's 100 bound parameters.
+    const ranked = [...changed.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+    const live = new Map<number, string>();
+    let queried = 0;
+    // Deleted messages drop out; read ranked ids in small batches until enough live ones are found.
+    for (let start = 0; start < ranked.length && live.size < SINCE_LABELS; start += SINCE_LABEL_BATCH) {
+      const batch = ranked.slice(start, start + SINCE_LABEL_BATCH).map(([id]) => id);
+      queried += batch.length;
+      for (const row of this.ctx.storage.sql
+        .exec<{ id: number; username: string }>(
+          `SELECT id, username FROM messages WHERE channel = ? AND deleted = 0 AND id IN (${batch.map(() => "?").join(", ")})`,
+          channel,
+          ...batch,
+        )
+        .toArray())
+        live.set(row.id, row.username);
+    }
+    const shown = ranked.filter(([id]) => live.has(id)).slice(0, SINCE_LABELS);
     const current = new Map<number, Record<string, string>>();
-    if (labeled.length)
+    if (shown.length)
       for (const row of this.ctx.storage.sql
         .exec<{ messageId: number; key: string; value: string }>(
-          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${labeled
+          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${shown
             .map(() => "?")
             .join(", ")}) ORDER BY messageId, key`,
           channel,
-          ...labeled.map((row) => row.id),
+          ...shown.map(([id]) => id),
         )
         .toArray())
         current.set(row.messageId, { ...(current.get(row.messageId) ?? {}), [row.key]: row.value });
@@ -3505,17 +3539,22 @@ export class MsnDurableObject extends DurableObject<Env> {
       channel,
       reader,
       name,
+      personaId: persona?.id ?? null,
       source,
       after,
       head,
       messages,
       truncated: rows.length > SINCE_MESSAGES,
-      labels: labeled.map((row) => ({
-        id: row.id,
-        username: row.username,
-        changes: changed.get(row.id) ?? 0,
-        labels: current.get(row.id) ?? {},
+      labels: shown.map(([id, changes]) => ({
+        id,
+        username: live.get(id) ?? "",
+        changes,
+        labels: current.get(id) ?? {},
       })),
+      // Relabeled messages beyond the shown ones, less those found deleted. Ids past the batches
+      // read are not checked, so a deleted one among them still counts.
+      labelsHidden: ranked.length - shown.length - (queried - live.size),
+      labelChanges: [...changed.values()].reduce((total, n) => total + n, 0),
       labelsTruncated: !reached,
     });
   }

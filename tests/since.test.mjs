@@ -124,3 +124,14 @@ test("messages and tasks for you match your name with spaces trimmed and case ig
     ["lead to you: “Which region?”", "lead assigned you docs"],
   );
 });
+
+test("your own messages are left out by name in any case, or by your persona id", () => {
+  const messages = [
+    { id: 1, username: " tomas ", text: "mine", contentType: "text/plain" },
+    { id: 2, username: "renamed", personaId: "p1", text: "also mine", contentType: "text/plain" },
+    { id: 3, username: "lead", text: "theirs", contentType: "text/plain" },
+  ];
+  const summary = summarize(messages, { after: 0, me: "Tomas", personaId: "p1" });
+  assert.equal(summary.count, 1);
+  assert.deepEqual(summary.authors, ["lead"]);
+});

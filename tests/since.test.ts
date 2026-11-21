@@ -183,4 +183,44 @@ describe("since you last looked for agents (ADR 0061)", () => {
     expect(bound.status).toBe(200);
     expect((await bound.json<Since>()).reader).toBe("human");
   });
+  it("counts any number of relabeled messages and looks up only the shown ones", async () => {
+    const f = await fixture();
+    const ids: number[] = [];
+    for (let i = 0; i < 105; i++) ids.push(await f.send({ username: "human", text: `m${i}` }));
+    for (const id of ids)
+      await call(f.tenant, `/channels/work/messages/${id}/labels`, f.token, "POST", {
+        set: { state: "open" },
+      });
+    // The most changed come first, so give two messages a second change.
+    for (const id of [ids[3], ids[50]])
+      await call(f.tenant, `/channels/work/messages/${id}/labels`, f.token, "POST", {
+        set: { state: "done" },
+      });
+    const result = await since(f, "reader=worker");
+    expect(result.labels.messages).toHaveLength(8);
+    expect(result.labels.messages.slice(0, 2).map((row) => [row.id, row.changes, row.labels])).toEqual([
+      [ids[50], 2, { state: "done" }],
+      [ids[3], 2, { state: "done" }],
+    ]);
+    expect(result.labels).toMatchObject({ hidden: 97, changes: 107, truncated: false });
+  });
+
+  it("a bound key reads only its own name's summaries", async () => {
+    const f = await fixture();
+    await f.send({ username: "human", text: "hi" });
+    const other = await call(f.tenant, "/channels/work/since?reader=worker", f.owner);
+    expect(other.status).toBe(403);
+    expect((await call(f.tenant, "/channels/work/since?reader=human/w1", f.owner)).status).toBe(200);
+  });
+
+  it("knows the reader by persona id, display name or name/worker", async () => {
+    const f = await fixture();
+    await call(f.tenant, "/channels/work/personas/p-rev", f.token, "PUT", { displayName: "reviewer" });
+    await f.send({ username: "reviewer", text: "my own note" });
+    await f.send({ username: "human", text: "please look", to: "Reviewer" });
+    const byId = await since(f, "reader=p-rev/w2");
+    expect(byId).toMatchObject({ reader: "p-rev/w2", name: "reviewer", count: 1, authors: ["human"] });
+    expect(byId.items.map((item) => item.text)).toEqual(["human to you: “please look”"]);
+    expect((await since(f, "reader=zed/w1")).name).toBe("zed");
+  });
 });

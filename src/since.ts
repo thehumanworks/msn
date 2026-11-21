@@ -11,6 +11,10 @@ export const SINCE_MESSAGES = SINCE_PAGES * 100;
 export const SINCE_EVENTS = 2000;
 /** Labeled messages listed before the rest are counted in `hidden`. */
 export const SINCE_LABELS = SINCE_ITEMS;
+/** Ids per IN (...) lookup; a Durable Object's SQLite takes at most 100 bound parameters. */
+export const SINCE_LABEL_BATCH = 90;
+/** Plain-text messages are read only this far: rows show a 120-character excerpt. */
+export const SINCE_TEXT_CHARS = 512;
 
 /** Where the summary starts. `processing` is the reader's server commit (ADR 0034/0053). */
 export type SinceSource = "processing" | "after" | "start";
@@ -21,6 +25,7 @@ export type SinceMessage = {
   text: string;
   contentType: string;
   to?: string;
+  personaId?: string;
 };
 
 export type LabelChange = {
@@ -35,22 +40,27 @@ export function sinceSummary(input: {
   reader: string;
   /** The display name the rows call "you": the reader's persona, or the reader itself. */
   name: string;
+  /** The reader's board persona, whose messages are the reader's own whatever their name. */
+  personaId: string | null;
   source: SinceSource;
   after: number;
   head: number;
   messages: SinceMessage[];
   truncated: boolean;
+  /** The SINCE_LABELS most changed messages, most changed first. */
   labels: LabelChange[];
+  labelsHidden: number;
+  labelChanges: number;
   labelsTruncated: boolean;
 }) {
   const summary = summarize(input.messages, {
     after: input.after,
     me: input.name,
+    personaId: input.personaId,
     truncated: input.truncated,
   });
   // The reader's own label changes are news too: the event journal does not record who changed
-  // a label, so nothing here can tell them apart. Most changed first, then newest message.
-  const labeled = [...input.labels].sort((a, b) => b.changes - a.changes || b.id - a.id);
+  // a label, so nothing here can tell them apart.
   const lastId = input.truncated ? (input.messages.at(-1)?.id ?? input.after) : input.head;
   return {
     channel: input.channel,
@@ -68,9 +78,9 @@ export function sinceSummary(input: {
     items: summary.items,
     hidden: summary.hidden,
     labels: {
-      messages: labeled.slice(0, SINCE_LABELS),
-      hidden: Math.max(0, labeled.length - SINCE_LABELS),
-      changes: labeled.reduce((total, row) => total + row.changes, 0),
+      messages: input.labels.slice(0, SINCE_LABELS),
+      hidden: Math.max(0, input.labelsHidden),
+      changes: input.labelChanges,
       truncated: input.labelsTruncated,
     },
   };
