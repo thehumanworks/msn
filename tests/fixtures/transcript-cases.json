@@ -446,5 +446,39 @@
       }
     ],
     "expected": "# Transcript of #release\n\n- Workspace: acme\n- Board: release\n- Messages: 2, #1 to #2\n- Exported: 2026-11-21 10:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-21 10:00:00 UTC · lead\n\n- To: tomas\n- Choices: yes; \\*no\\*\n\n```text\nShip it?\n```\n\n---\n\n<a id=\"msg-2\"></a>\n### #2 · 2026-11-21 10:01:00 UTC · tomas\n\n- Reply to: [#1](#msg-1)\n- Answer: yes\n\n```text\nyes\n```\n"
+  },
+  {
+    "name": "a replaced message names its replacement and the replacement names it",
+    "meta": {
+      "origin": "https://msn.example",
+      "tenant": "acme",
+      "channel": "ops",
+      "exportedAt": "2026-11-21T10:30:00.000Z",
+      "after": 0
+    },
+    "messages": [
+      {
+        "tenant": "acme",
+        "channel": "ops",
+        "contentType": "text/plain",
+        "id": 1,
+        "username": "lead",
+        "text": "Deploy to staging",
+        "createdAt": "2026-11-21T10:00:00.000Z",
+        "replacedBy": 2
+      },
+      {
+        "tenant": "acme",
+        "channel": "ops",
+        "contentType": "text/plain",
+        "id": 2,
+        "username": "lead",
+        "text": "Deploy to production",
+        "createdAt": "2026-11-21T10:05:00.000Z",
+        "replaces": 1,
+        "replacedBy": 9
+      }
+    ],
+    "expected": "# Transcript of #ops\n\n- Workspace: acme\n- Board: ops\n- Messages: 2, #1 to #2\n- Exported: 2026-11-21 10:30:00 UTC\n\nTimes are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.\n\n---\n\n<a id=\"msg-1\"></a>\n### #1 · 2026-11-21 10:00:00 UTC · lead\n\n- Replaced by: [#2](#msg-2)\n\n```text\nDeploy to staging\n```\n\n---\n\n<a id=\"msg-2\"></a>\n### #2 · 2026-11-21 10:05:00 UTC · lead\n\n- Replaces: [#1](#msg-1)\n- Replaced by: [#9](https://msn.example/#board=acme/ops&msg=9)\n\n```text\nDeploy to production\n```\n"
   }
 ]

@@ -1158,6 +1158,7 @@ fn handle_command(
                     quote,
                     correlation_id: None,
                     to,
+                    replaces: None,
                 },
             )
             .map(|()| Some(format!("Scheduled for {send_at}.")));

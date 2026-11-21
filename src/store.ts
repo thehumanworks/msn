@@ -54,6 +54,7 @@ import {
   rawBody,
   reactionChange,
   recipient,
+  replacesTarget,
   replyTarget,
   type ScheduledChange,
   scheduledChange,
@@ -130,6 +131,10 @@ export type Message = {
    * asked. Clients open the buttons only for this name. Absent on other messages.
    */
   answerer?: string;
+  /** The earlier message of the same sender this one replaces (ADR 0067); absent otherwise. */
+  replaces?: number;
+  /** The newer message that replaces this one (ADR 0067); absent until it is replaced. */
+  replacedBy?: number;
 };
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
 export type Answered = { id: number; choice: string; username: string; answeredAt: string };
@@ -145,6 +150,8 @@ export type Correlation = {
   choices?: string[];
   /** The choice a reply picks from its replyTo question (ADR 0065). */
   answer?: string;
+  /** The sender's earlier message this one replaces (ADR 0067). */
+  replaces?: number;
 };
 type MessageRow = {
   id: number;
@@ -166,9 +173,12 @@ type MessageRow = {
   answered: string | null;
   /** The exact name that may answer a question, resolved when it was asked (ADR 0065). */
   answerer: string | null;
+  /** The earlier message this one replaces, and the newer one that replaced this (ADR 0067). */
+  replaces: number | null;
+  replacedBy: number | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote, choices, answer, answered, answerer";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote, choices, answer, answered, answerer, replaces, replacedBy";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -414,6 +424,8 @@ function toMessage(row: MessageRow, tenant: string): Message {
     answer,
     answered,
     answerer,
+    replaces,
+    replacedBy,
     ...rest
   } = row;
   return {
@@ -429,6 +441,8 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(answer == null ? {} : { answer }),
     ...(answered == null ? {} : { answered: JSON.parse(answered) as Answered }),
     ...(answerer == null ? {} : { answerer }),
+    ...(replaces == null ? {} : { replaces }),
+    ...(replacedBy == null ? {} : { replacedBy }),
   };
 }
 
@@ -532,6 +546,8 @@ export function payload(username: string, text: string, type: ContentType, corre
   // Choices and answers (ADR 0065) wrap again, only when present, for the same reason.
   if (correlation.choices !== undefined || correlation.answer !== undefined)
     out = JSON.stringify([out, { choices: correlation.choices ?? null, answer: correlation.answer ?? null }]);
+  // A replacement (ADR 0067) wraps again, only when present.
+  if (correlation.replaces !== undefined) out = JSON.stringify([out, { replaces: correlation.replaces }]);
   return out;
 }
 
@@ -746,6 +762,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["messages", "answer", "TEXT"],
         ["messages", "answered", "TEXT"],
         ["messages", "answerer", "TEXT"],
+        // Replace an instruction with a newer one (ADR 0067): NULL on every other message.
+        // Additive, so no schema_version step and safe in any merge order.
+        ["messages", "replaces", "INTEGER"],
+        ["messages", "replacedBy", "INTEGER"],
       ]) {
         if (
           !ctx.storage.sql
@@ -3849,6 +3869,39 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         question = { id: correlation.replyTo as number, choices };
       }
+      // A replacement (ADR 0067) names an earlier message by the same sender that nothing has
+      // replaced yet. Checked inside the write, so two replacements that race leave exactly one.
+      if (correlation.replaces !== undefined) {
+        const old = this.ctx.storage.sql
+          .exec<{ username: string; personaId: string | null; deleted: number; replacedBy: number | null }>(
+            "SELECT username, personaId, deleted, replacedBy FROM messages WHERE channel = ? AND id = ?",
+            channel,
+            correlation.replaces,
+          )
+          .toArray()[0];
+        if (!old)
+          throw new HttpError(
+            400,
+            "invalid_replaces",
+            "replaces must be the id of an existing message in this channel.",
+          );
+        if (old.deleted) throw new HttpError(410, "message_deleted", "The message to replace was deleted.");
+        if (old.username === GITHUB_SENDER)
+          throw new HttpError(403, "github_message", "Messages from GitHub cannot be replaced.");
+        // Only the sender replaces, as only the sender edits (ADR 0052): on a shared board, only the
+        // persona that sent it.
+        if (
+          old.username !== username ||
+          (old.personaId !== null && personaId !== null && old.personaId !== personaId)
+        )
+          throw new HttpError(403, "not_sender", "Only the sender can replace a message.");
+        if (old.replacedBy !== null)
+          throw new HttpError(
+            409,
+            "already_replaced",
+            `Message ${correlation.replaces} was already replaced by message ${old.replacedBy}. Replace that one instead.`,
+          );
+      }
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
@@ -3880,7 +3933,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         correlation.choices === undefined ? null : this.resolveAnswerer(channel, correlation.to as string);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote, choices, answer, answerer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote, choices, answer, answerer, replaces) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -3897,8 +3950,15 @@ export class MsnDurableObject extends DurableObject<Env> {
           choices,
           correlation.answer ?? null,
           answerer,
+          correlation.replaces ?? null,
         )
         .one();
+      if (correlation.replaces !== undefined)
+        this.ctx.storage.sql.exec(
+          "UPDATE messages SET replacedBy = ? WHERE id = ?",
+          message.id,
+          correlation.replaces,
+        );
       if (question)
         this.ctx.storage.sql.exec(
           "UPDATE messages SET answered = ? WHERE id = ?",
@@ -5299,7 +5359,13 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, replaces = NULL, replacedBy = NULL, bytes = 0 WHERE id = ?",
+              id,
+            );
+            // Deleting a replacement makes the message it replaced current again (ADR 0067).
+            this.ctx.storage.sql.exec(
+              "UPDATE messages SET replacedBy = NULL WHERE channel = ? AND replacedBy = ?",
+              channel,
               id,
             );
             // Deleting a question's answer reopens the question (ADR 0065): its record named the
@@ -5420,6 +5486,7 @@ export class MsnDurableObject extends DurableObject<Env> {
               to: recipient(input.to),
               choices: choiceList(input.choices, input.to),
               answer: answerChoice(input.answer, input.replyTo, input.choices),
+              replaces: replacesTarget(input.replaces, input.answer),
             }
           : {};
         const sendLabels = input ? parseLabels(input.labels) : undefined;
@@ -5441,6 +5508,14 @@ export class MsnDurableObject extends DurableObject<Env> {
             400,
             "invalid_send_at",
             "A question with choices, or an answer to one, cannot be scheduled. Send it now.",
+          );
+        // A replacement (ADR 0067) is about the message as it stands now; a later post could find
+        // it already replaced.
+        if (sendAt && correlation.replaces !== undefined)
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            "A replacement cannot be scheduled. Send it now, or schedule a new message.",
           );
         if (sendAt && files.length)
           throw new HttpError(

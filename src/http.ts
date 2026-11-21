@@ -230,6 +230,20 @@ export function answerChoice(value: unknown, replyTo: unknown, choices: unknown)
 }
 
 /**
+ * Optional `replaces` body field (ADR 0067): the id of the sender's earlier message that this one
+ * replaces. The store checks the sender and that nothing replaced it yet. An answer to a question
+ * is a record of a decision, so it cannot also replace a message.
+ */
+export function replacesTarget(value: unknown, answer: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+    throw new HttpError(400, "invalid_replaces", "replaces must be a positive integer message id.");
+  if (answer !== undefined && answer !== null)
+    throw new HttpError(400, "invalid_replaces", "An answer to a question cannot replace a message.");
+  return value;
+}
+
+/**
  * Whether `username` is the name a question is addressed to (ADR 0065): exactly, or trimmed and
  * ignoring case, as unread counts and webhooks match `to`.
  */

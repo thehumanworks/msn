@@ -3,8 +3,9 @@
 //
 // One stored value per workspace: `{ [markId(username, board)]: entry }`, least recently changed
 // first, so the oldest drafts are dropped first. An entry is
-// `{ content, recipient, replyTo, quote, files, retry, at }`:
+// `{ content, recipient, replyTo, quote, replaces, files, retry, at }`:
 // - `quote` is the part of the replyTo message the reply quotes (ADR 0059), or null.
+// - `replaces` is the id of the sender's own message this draft replaces (ADR 0067), or null.
 // - `files` is only how many attachments the draft had. Files themselves are never stored.
 // - `retry` is the uncertain send's `{ payload, key }`. Keeping it means a send retried after a
 //   reload reuses the same Idempotency-Key when the payload is identical, so the server replays
@@ -27,7 +28,13 @@ const bytes = (text) => new TextEncoder().encode(text).length;
 /** A draft worth keeping: it has text, an address, a reply target, files or a pending retry. */
 export function hasContent(state) {
   return Boolean(
-    state && (state.content || state.recipient || state.replyTo !== null || state.files > 0 || state.retry),
+    state &&
+      (state.content ||
+        state.recipient ||
+        state.replyTo !== null ||
+        (state.replaces ?? null) !== null ||
+        state.files > 0 ||
+        state.retry),
   );
 }
 
@@ -41,6 +48,9 @@ function validEntry(value) {
   if (typeof content !== "string" || bytes(content) > MAX_DRAFT_BYTES) return null;
   if (typeof recipient !== "string" || bytes(recipient) > MAX_RECIPIENT_BYTES) return null;
   if (replyTo !== null && !(Number.isSafeInteger(replyTo) && replyTo >= 1)) return null;
+  // Drafts kept before ADR 0067 replace nothing.
+  const replaces = value.replaces ?? null;
+  if (replaces !== null && !(Number.isSafeInteger(replaces) && replaces >= 1)) return null;
   if (!Number.isSafeInteger(files) || files < 0 || files > 10) return null;
   let keptRetry = null;
   if (retry !== null) {
@@ -59,6 +69,7 @@ function validEntry(value) {
     recipient,
     replyTo,
     quote: replyTo === null ? null : quote,
+    replaces,
     files,
     retry: keptRetry,
     at: Number.isSafeInteger(at) ? at : 0,
@@ -101,6 +112,7 @@ export function putDraft(drafts, key, state, now = Date.now()) {
     recipient: state.recipient,
     replyTo: state.replyTo,
     quote: state.quote ?? null,
+    replaces: state.replaces ?? null,
     files: Math.max(state.files?.length ?? 0, state.missingFiles ?? 0),
     retry: state.retry,
     at: now,
@@ -116,6 +128,7 @@ export function restoreDraft(entry) {
     recipient: entry.recipient,
     replyTo: entry.replyTo,
     quote: entry.quote,
+    replaces: entry.replaces,
     files: [],
     missingFiles: entry.files,
     retry: entry.retry,
@@ -137,7 +150,10 @@ export function draftsFor(drafts, username) {
  * on the server already (keyed by content), so the send can be retried with its exact payload and
  * key instead of a new one without the files. Anything else returns null.
  */
-export function unchangedRetryFiles(retry, { username, content, recipient, replyTo, quote = null }) {
+export function unchangedRetryFiles(
+  retry,
+  { username, content, recipient, replyTo, quote = null, replaces = null },
+) {
   if (!retry) return null;
   let sent;
   try {
@@ -152,6 +168,7 @@ export function unchangedRetryFiles(retry, { username, content, recipient, reply
     sent.text === content &&
     sent.to === to &&
     (sent.replyTo ?? null) === replyTo &&
-    (sent.quote ?? null) === quote;
+    (sent.quote ?? null) === quote &&
+    (sent.replaces ?? null) === replaces;
   return same ? sent.attachments : null;
 }

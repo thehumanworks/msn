@@ -441,7 +441,9 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             labels,
             attach,
             at,
+            replaces,
         } => {
+            let replaces = replaces.as_deref().map(parse_message_id).transpose()?;
             let send_at = at
                 .as_deref()
                 .map(|raw| scheduled::parse_when(raw, scheduled::now_secs()))
@@ -498,6 +500,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                     quote,
                     correlation_id,
                     to,
+                    replaces,
                 },
                 &labels,
                 &files,
@@ -1421,6 +1424,9 @@ pub struct Correlation {
     pub quote: Option<String>,
     pub correlation_id: Option<String>,
     pub to: Option<String>,
+    /// The sender's earlier message this one replaces (ADR 0067); the old one then carries
+    /// `replacedBy`.
+    pub replaces: Option<u64>,
 }
 
 /// The POST body for a send. Unset annotation fields are omitted, so a plain send is byte-for-byte
@@ -1451,6 +1457,9 @@ pub fn send_body_with(
     }
     if let Some(to) = &correlation.to {
         body["to"] = json!(to);
+    }
+    if let Some(replaces) = correlation.replaces {
+        body["replaces"] = json!(replaces);
     }
     if !attachments.is_empty() {
         body["attachments"] = json!(attachments);

@@ -117,6 +117,9 @@ export function renderTranscript(meta, messages) {
     "Times are UTC. Each message's text is shown exactly as its sender last wrote it, inside a code block.",
   );
   const shown = new Set();
+  const ids = new Set(messages.map((message) => message.id));
+  const link = (id, here) =>
+    `[#${id}](${here ? `#msg-${id}` : `${origin}/#board=${tenant}/${channel}&msg=${id}`})`;
   for (const message of messages) {
     out.push("", "---", "");
     out.push(`<a id="msg-${message.id}"></a>`);
@@ -136,6 +139,11 @@ export function renderTranscript(meta, messages) {
     if (Array.isArray(message.choices) && message.choices.length)
       details.push(`- Choices: ${message.choices.map(inline).join("; ")}`);
     if (typeof message.answer === "string") details.push(`- Answer: ${inline(message.answer)}`);
+    // A replacement (ADR 0067) names the message it replaces; the old one names its replacement.
+    if (Number.isSafeInteger(message.replaces))
+      details.push(`- Replaces: ${link(message.replaces, shown.has(message.replaces))}`);
+    if (Number.isSafeInteger(message.replacedBy))
+      details.push(`- Replaced by: ${link(message.replacedBy, ids.has(message.replacedBy))}`);
     const labels = Object.entries(message.labels ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     if (labels.length)
       details.push(`- Labels: ${labels.map(([key, value]) => `${inline(key)}=${inline(value)}`).join(", ")}`);

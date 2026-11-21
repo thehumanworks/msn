@@ -197,6 +197,16 @@ pub struct MessageRecord {
     /// The exact name that may answer a question, resolved when it was asked (ADR 0065).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answerer: Option<String>,
+    /// The sender's earlier message this one replaces (ADR 0067).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<u64>,
+    /// The newer message that replaced this one (ADR 0067).
+    #[serde(
+        rename = "replacedBy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub replaced_by: Option<u64>,
 }
 
 /// A snapshot. `text` is present only when `invalidated` is false.

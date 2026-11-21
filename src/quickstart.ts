@@ -52,6 +52,8 @@ hasMore is true. Reading never consumes messages: every reader sees everything. 
 "to" (a name), "replyTo" (a message id), "quote" (the part of that message you answer, with
 replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely. Add "sendAt" (a time
 with a zone, like "2026-11-21T09:00:00Z") to post it later instead; GET $API/scheduled lists those.
+To replace an instruction you sent, send the new one with "replaces": ID (your own message only,
+once). The old message then carries "replacedBy": NEW_ID, so skip any message with "replacedBy".
 thread=ID reads one thread: its root message and every reply to it, at any depth (a reply's id
 means its thread); a wait ends only for a new reply there. Keep that thread's nextCursor apart.
 

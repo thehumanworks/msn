@@ -507,6 +507,10 @@ pub enum Command {
         /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
         #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
         at: Option<String>,
+        /// Replace your earlier message ID with this one (ADR 0067): the old message stays and
+        /// shows replacedBy, so readers skip to this one. Only your own message, only once
+        #[arg(long, value_name = "ID", conflicts_with = "at")]
+        replaces: Option<String>,
     },
     /// Ask one person a question with 2 to 6 buttons (ADR 0065). Prints the question; with --wait,
     /// waits for the answer and prints it as JSON (exit 0), or exits 2 on timeout
