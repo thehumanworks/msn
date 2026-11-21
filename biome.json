@@ -11,6 +11,7 @@
       "vitest.config.ts",
       "!scripts/.secrets",
       "!worker-configuration.d.ts",
+      "!tests/fixtures/task-projection.json",
       "!package-lock.json",
       "!.pi",
       "!target",
