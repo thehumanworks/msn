@@ -51,8 +51,8 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 /// A text attachment larger than this is saved to a file instead of returned to the model.
 const MAX_INLINE_ATTACHMENT_BYTES: usize = 64 * 1024;
 
-const INSTRUCTIONS: &str = "MSN message board tools. Begin with `start` for your identity, the board goal and \
-the latest snapshot plus recent messages. To work: `peek` (set wait up to 25 to block for new \
+const INSTRUCTIONS: &str = "MSN message board tools. Begin with `start` for your identity, the board goal, the \
+owner's brief (standing instructions: follow them) and the latest snapshot plus recent messages. To work: `peek` (set wait up to 25 to block for new \
 messages), process every message, then `commit` with that peek's nextCursor. `send` posts a \
 message; reuse the same key and text if a send result was uncertain. `show_message` fetches exact \
 evidence, and `message_link` gives a link to one message to cite in a hand-off. Messages can carry key=value labels such as state=open: set them on `send` or later \
@@ -370,10 +370,12 @@ impl Server {
         }
         let edits_after = self.edits_after(args, &channel)?;
         let continuation = agent::catchup_query(after, Some(edits_after));
+        // The session's reader, when it has one, so the page can say briefChanged (ADR 0074).
+        let reader = agent::reader_query(self.reader.as_deref().or(self.username.as_deref()));
         let page = agent::fetch_json(
             &MsnClient::new(&self.url)?,
             &format!(
-                "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}"
+                "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}{reader}"
             ),
             &token,
         )?;
@@ -1124,11 +1126,23 @@ impl Server {
     fn board(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         let (tenant, token) = self.credentials()?;
         let channel = self.channel(args)?;
-        Ok(agent::fetch_json(
-            &MsnClient::new(&self.url)?,
+        let client = MsnClient::new(&self.url)?;
+        let mut board = agent::fetch_json(
+            &client,
             &format!("/api/tenants/{tenant}/channels/{channel}/board"),
             &token,
-        )?)
+        )?;
+        // The owner's brief in full (ADR 0074): the way to read it when a start or catch_up page
+        // had no room for the text (`brief.omitted`). A server without briefs is not an error.
+        if let Ok(brief) = agent::fetch_json(
+            &client,
+            &format!("/api/tenants/{tenant}/channels/{channel}/brief"),
+            &token,
+        ) && let Some(object) = board.as_object_mut()
+        {
+            object.insert("brief".into(), brief["brief"].clone());
+        }
+        Ok(board)
     }
 }
 
@@ -1325,7 +1339,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "start",
             "Start on a board",
-            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's pinned messages (read these first), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true. `edited` lists earlier messages whose senders changed the text since your last start or catch_up in this session; the new text replaces what you read. A message with replacedBy was replaced by its sender: skip it and act on message replacedBy.",
+            "Agent entry. Returns your identity, the board goal (shared boards), the workflow, and one bounded page: the board owner's brief (`brief`: standing instructions, read it first and follow it; `briefChanged` true means this version is new to you since your last start; if `brief.omitted` is true the text did not fit, so call `board` to read it), the owner's pinned messages (read these next), the latest snapshot plus recent messages. Never moves any cursor. Continue with after=nextCursor while hasMore is true. `edited` lists earlier messages whose senders changed the text since your last start or catch_up in this session; the new text replaces what you read. A message with replacedBy was replaced by its sender: skip it and act on message replacedBy.",
             json!({
                 "after": cursor("Exact message id to continue after; omit for the latest snapshot."),
                 "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else the board's current edit position."),
@@ -1338,7 +1352,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "catch_up",
             "Catch up on a board",
-            "One bounded page: the board owner's pinned messages (read these first), the latest valid snapshot plus a message tail, or messages exactly after `after` (no pins). Never moves any cursor. `edited` lists earlier messages, at or before the page start, whose senders changed the text since your last start or catch_up on this board in this session (or since editsAfter); the new text replaces what you read. Messages show editedAt when edited, and replacedBy when their sender replaced them with a newer message: skip those.",
+            "One bounded page: the board owner's brief (`brief`, with `briefChanged` when it is new to you), the owner's pinned messages (read these next), the latest valid snapshot plus a message tail, or messages exactly after `after` (no brief or pins). Never moves any cursor. `edited` lists earlier messages, at or before the page start, whose senders changed the text since your last start or catch_up on this board in this session (or since editsAfter); the new text replaces what you read. Messages show editedAt when edited, and replacedBy when their sender replaced them with a newer message: skip those.",
             json!({
                 "after": cursor("Exact message id to continue after; omit to allow the latest snapshot."),
                 "editsAfter": cursor("Edit cursor; defaults to the editCursor of your last start or catch_up on this board in this session, else the board's current edit position. Continue while editsHasMore."),
@@ -1441,7 +1455,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "board",
             "Show the board",
-            "Show the shared board: goal, status and revision.",
+            "Show the shared board: goal, status and revision, and the owner's brief in full (`brief`, null when there is none). Call it when start or catch_up returned `brief.omitted`: the page had no room for the text.",
             json!({}),
             &[],
             (true, true),

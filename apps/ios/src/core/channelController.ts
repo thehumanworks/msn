@@ -1,3 +1,4 @@
+import { BRIEF_CONFLICT, BRIEF_MAX_BYTES, type Brief, briefCount, briefNoticeVersion } from "./brief.ts";
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
@@ -47,6 +48,9 @@ export type ChannelState = {
   pinned: PinnedMessage[];
   /** What each name says it is doing (ADR 0064), newest first. */
   statuses: AgentStatus[];
+  /** The board's brief (ADR 0074), null when it has none; a write builds on `briefVersion`. */
+  brief: Brief | null;
+  briefVersion: number;
   olderNotLoaded: boolean;
   snapshot: Snapshot | null;
   snapshotVersion: number;
@@ -80,6 +84,8 @@ export class ChannelController {
     messages: [],
     pinned: [],
     statuses: [],
+    brief: null,
+    briefVersion: 0,
     olderNotLoaded: false,
     snapshot: null,
     snapshotVersion: 0,
@@ -96,6 +102,9 @@ export class ChannelController {
   private readonly byId = new Map<number, Message>();
   private syncCursor = 0;
   private pinsAt = 0;
+  /** The newest brief announcement seen on the board (ADR 0074); a newer one rereads the brief. */
+  private briefNotice = 0;
+  private savingBrief = false;
   private reactionsAt = 0;
   private editsAt = 0;
   private scheduledAt = 0;
@@ -320,7 +329,19 @@ export class ChannelController {
       snapshotDueReasons: first.snapshotDueReasons,
       olderNotLoaded,
     });
+    // A reload reads the brief once, whatever announcements the history holds (ADR 0074).
+    this.briefNotice = this.latestBriefNotice();
     this.publishMessages();
+    void this.refreshBrief();
+  }
+
+  /** The id of the newest loaded board message that announces a brief change, or 0. */
+  private latestBriefNotice(): number {
+    let notice = this.briefNotice;
+    for (const message of this.byId.values()) {
+      if (message.id > notice && briefNoticeVersion(message) !== null) notice = message.id;
+    }
+    return notice;
   }
 
   private async syncForward(): Promise<void> {
@@ -572,6 +593,60 @@ export class ChannelController {
     }
   }
 
+  /**
+   * Reads the board's brief (ADR 0074). Best effort, outside the sync loop: a failed or
+   * unsupported read keeps what is shown. An answer older than the version shown is dropped.
+   */
+  private async refreshBrief(): Promise<void> {
+    try {
+      const next = await this.ctl.api.getBrief(this.channel, this.ctl.signal);
+      if (this.disposed) return;
+      if (next.currentVersion >= this.state.get().briefVersion)
+        this.state.update({ brief: next.brief, briefVersion: next.currentVersion });
+    } catch (error) {
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+    }
+  }
+
+  /**
+   * Writes the board's brief (ADR 0074); blank text removes it. Owner only: the server refuses
+   * everyone else. Resolves to an error message to show, or null once the header shows the result.
+   * When another device wrote first, the newer brief is read so the next save builds on it.
+   */
+  /**
+   * `baseVersion` is the version the editor showed when it opened. A change that arrives while
+   * the owner types is then a conflict, not a silent overwrite. Left out, the save builds on
+   * the newest version, which is what a second press after a conflict means.
+   */
+  async saveBrief(text: string, baseVersion?: number): Promise<string | null> {
+    if (this.savingBrief) return null;
+    const { over } = briefCount(text);
+    if (over) return `A brief holds at most ${BRIEF_MAX_BYTES.toLocaleString("en-US")} bytes.`;
+    this.savingBrief = true;
+    try {
+      const saved = await this.ctl.api.putBrief(
+        this.channel,
+        text,
+        baseVersion ?? this.state.get().briefVersion,
+        this.ctl.signal,
+      );
+      if (!this.disposed && saved.currentVersion >= this.state.get().briefVersion)
+        this.state.update({ brief: saved.brief, briefVersion: saved.currentVersion });
+      return null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+      if (error instanceof ApiError && error.code === "brief_conflict") {
+        await this.refreshBrief();
+        return `${BRIEF_CONFLICT} Your text is kept; save again to replace the newer version.`;
+      }
+      if (error instanceof ApiError && error.status === 403) return "Only the board owner can change the brief.";
+      return error instanceof Error ? error.message : "Could not save the brief.";
+    } finally {
+      this.savingBrief = false;
+    }
+  }
+
   /** Best effort: a failed or unsupported pins read keeps what is shown. */
   private async refreshPins(): Promise<void> {
     if (Date.now() - this.pinsAt < this.pinRefreshMs) return;
@@ -634,6 +709,12 @@ export class ChannelController {
   }
 
   private publishMessages(): void {
+    // A brief change is announced by a board message (ADR 0074): read the new brief once.
+    const notice = this.latestBriefNotice();
+    if (notice > this.briefNotice) {
+      this.briefNotice = notice;
+      void this.refreshBrief();
+    }
     // A replacement marks the loaded message it replaces (ADR 0068); one read later carries it.
     for (const message of this.byId.values()) {
       const old = message.replaces !== undefined ? this.byId.get(message.replaces) : undefined;

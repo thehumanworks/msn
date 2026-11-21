@@ -80,6 +80,7 @@
         <div class="toolbar">
           <button type="button" id="invite-channel" class="quiet" disabled>Invite</button>
           <button type="button" id="board-settings" class="quiet" disabled>Goal &amp; status</button>
+          <button type="button" id="edit-brief" class="quiet" title="Write the board’s brief: standing instructions every agent receives first" hidden>Brief</button>
           <button type="button" id="agents" class="quiet" title="Which board agents are listening now" disabled>Agents</button>
           <button type="button" id="tasks" class="quiet" title="This board’s tasks, as msn task list shows them" disabled>Tasks</button>
           <button type="button" id="download" class="quiet" title="Download this board as a Markdown transcript" disabled>Download</button>
@@ -92,6 +93,12 @@
           <button type="button" id="reread" class="quiet" title="Reset this channel’s cached history and delivery cursor" disabled>Reread</button>
           <button type="button" id="more" class="quiet" hidden>Load next page</button>
         </div>
+        <section id="brief" class="brief" aria-labelledby="brief-title" hidden>
+          <details open>
+            <summary><span id="brief-title">Brief</span><small id="brief-meta"></small></summary>
+            <div id="brief-text" class="brief-text"></div>
+          </details>
+        </section>
         <section id="pins" class="pins" aria-labelledby="pins-title" hidden>
           <details open>
             <summary id="pins-title">Pinned</summary>
@@ -288,6 +295,15 @@
       <button type="button" id="mute-clear" class="quiet" hidden>Turn notifications back on</button>
       <button type="button" id="close-mute" class="quiet">Close</button>
     </form></dialog>
+  <dialog id="brief-dialog"><form id="brief-form">
+      <h2>Board brief</h2>
+      <p>Standing instructions for everyone on this board. Every agent receives the brief first when it starts, and is told when you change it. The goal says what to achieve; the brief says how to work here.</p>
+      <label>Brief (Markdown)<textarea id="brief-input" rows="10" spellcheck="true"></textarea></label>
+      <small id="brief-count" role="status"></small>
+      <label id="brief-history-row" hidden>Earlier versions<select id="brief-history"></select></label>
+      <p id="brief-note" role="status" hidden></p>
+      <button type="submit" id="brief-save" class="primary">Save</button><button type="button" id="close-brief" class="quiet">Close</button>
+    </form></dialog>
   <dialog id="board-dialog"><form id="board-form">
       <h2>Channel goal</h2><label>Goal<textarea id="board-goal" required maxlength="16384"></textarea></label>
       <label>Status<select id="board-status"><option value="active">Active</option><option value="paused">Paused</option><option value="blocked">Blocked</option><option value="complete">Complete</option></select></label>
@@ -295,7 +311,7 @@
       <div id="save-template-row" class="archive-board save-template" hidden>
         <label>Save as template<input id="template-name" placeholder="my-team" maxlength="40" pattern="[a-z0-9][a-z0-9_-]{0,39}" autocapitalize="none" spellcheck="false"></label>
         <button type="button" id="save-template" class="quiet">Save as template</button>
-        <small>Saves this board's goal and personas, never its messages or keys. Start a new board from it with Start a board from a template.</small>
+        <small>Saves this board's goal, brief and personas, never its messages or keys. Start a new board from it with Start a board from a template.</small>
         <p id="save-template-note" role="status" hidden></p>
       </div>
       <p id="archive-board-row" class="archive-board" hidden><button type="button" id="archive-board" class="quiet">Archive board</button><small>Hides it from the board list and stops new posts. Nothing is deleted; you can unarchive it.</small></p>

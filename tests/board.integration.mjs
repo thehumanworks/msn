@@ -221,6 +221,49 @@ try {
     (await cli(["--profile", "pair-reviewer", "board", "show", "pair"])).board.goal,
     /^Ship the docs\n\nTeam \(Lead and reviewer\):/,
   );
+  // Board brief (ADR 0074): the owner writes standing instructions; every agent gets them first.
+  assert.deepEqual(
+    [(await cli(["board", "brief", "pair"])).brief, (await cli(["board", "brief", "pair"])).currentVersion],
+    [null, 0],
+  );
+  await cli(["--profile", "pair-reviewer", "board", "brief", "pair", "--set", "Agents cannot."], 3);
+  await cli(["board", "brief", "pair", "--set", "  "], 2);
+  await cli(["board", "brief", "pair", "--set", "x".repeat(4097)], 2);
+  const briefFile = join(dir, "brief.md");
+  await writeFile(briefFile, "# Rules\n\n- Run the tests before you post.\n");
+  const firstBrief = await cli(["board", "brief", "pair", "--file", briefFile]);
+  assert.deepEqual(
+    [firstBrief.changed, firstBrief.brief.version, firstBrief.brief.text],
+    [true, 1, "# Rules\n\n- Run the tests before you post.\n"],
+  );
+  const briefed = await cli(["--profile", "pair-reviewer", "start", "pair"]);
+  assert.deepEqual(
+    [briefed.brief.version, briefed.brief.text, briefed.briefChanged],
+    [1, "# Rules\n\n- Run the tests before you post.\n", true],
+  );
+  // The same reader has it now; another persona has not.
+  assert.equal((await cli(["--profile", "pair-reviewer", "start", "pair"])).briefChanged, false);
+  assert.equal((await cli(["--profile", "pair-lead", "start", "pair"])).briefChanged, true);
+  // catchup says briefChanged only for a named reader, and a profile names one.
+  assert.equal((await cli(["--profile", "pair-lead", "catchup", "pair"])).briefChanged, false);
+  await cli(["board", "brief", "pair", "--set", "Keep pull requests small."]);
+  const rebriefed = await cli(["--profile", "pair-reviewer", "start", "pair"]);
+  assert.deepEqual([rebriefed.brief.version, rebriefed.briefChanged], [2, true]);
+  // Each change posts a board message, so an agent that waits on messages wakes and reads it.
+  assert.ok(
+    rebriefed.messages.some((m) => m.username === "board" && JSON.parse(m.text).schema === "msn.brief.v1"),
+  );
+  assert.deepEqual(
+    (await cli(["--profile", "pair-reviewer", "board", "brief", "pair", "--history"])).versions.map(
+      (v) => v.version,
+    ),
+    [2, 1],
+  );
+  assert.equal(
+    (await cli(["board", "brief", "pair", "--version", "1"])).brief.text,
+    "# Rules\n\n- Run the tests before you post.\n",
+  );
+  console.log("PASS: the owner writes a board brief and each agent's start says when it is new");
   // Saved templates (ADR 0051): the owner saves pair's goal and team, then reuses it in one step.
   const saved = await cli(["board", "template", "save", "pair", "docs-team"]);
   assert.deepEqual(
@@ -246,6 +289,17 @@ try {
     (await cli(["--profile", "docs2-reviewer", "board", "show", "docs2"])).board.goal,
     /^Ship the docs\n\nTeam \(docs-team\):\n- lead: Plans and does the work/,
   );
+  // The template carried pair's brief (ADR 0074), so the new board starts with it.
+  assert.equal(saved.template.brief, "Keep pull requests small.");
+  const reusedStart = await cli(["--profile", "docs2-reviewer", "start", "docs2"]);
+  assert.deepEqual(
+    [reusedStart.brief.version, reusedStart.brief.text, reusedStart.briefChanged],
+    [1, "Keep pull requests small.", true],
+  );
+  // Clearing removes it from start; the old versions stay readable.
+  assert.equal((await cli(["board", "brief", "docs2", "--clear"])).brief, null);
+  assert.equal("brief" in (await cli(["--profile", "docs2-reviewer", "start", "docs2"])), false);
+  assert.equal((await cli(["board", "brief", "docs2", "--version", "1"])).brief.version, 1);
   assert.deepEqual(await cli(["board", "template", "delete", "docs-team"]), { deleted: "docs-team" });
   await cli(["board", "template", "delete", "docs-team"], 4);
   await cli(["board", "create", "docs3", "--template", "docs-team", "--save-as", "docs3-lead"], 2);

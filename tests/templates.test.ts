@@ -123,7 +123,7 @@ describe("saved board templates", () => {
       (_, state) => state.storage.sql.exec("SELECT * FROM board_templates").toArray(),
     );
     expect(Object.keys(stored[0]).sort()).toEqual(
-      ["createdAt", "goal", "name", "personas", "savedBy", "savedFrom"].sort(),
+      ["brief", "createdAt", "goal", "name", "personas", "savedBy", "savedFrom"].sort(),
     );
   });
 

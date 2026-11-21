@@ -5288,3 +5288,121 @@ test("people replace an instruction with a newer one; the old one stays, marked 
   await expect(article(old.id).locator(".replaced-note")).toHaveText(`Replaced by: #${next.id}`);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("the owner writes a board brief; everyone sees it as the board header and agents cannot change it", async ({
+  page,
+  browser,
+  request,
+}, testInfo) => {
+  // ADR 0074.
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  await request.put(`${t.path}/channels/work/personas/lead`, {
+    headers: shared,
+    data: { displayName: "lead" },
+  });
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: shared,
+    data: { username: "lead", text: "Ready to start." },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await expect(page.locator("#brief")).toBeHidden();
+  await page.locator("#edit-brief").click();
+  await expect(page.locator("#brief-dialog")).toBeVisible();
+  await expect(page.locator("#brief-count")).toHaveText("0 of 4,096 bytes");
+  await expect(page.locator("#brief-history-row")).toBeHidden();
+  // Too long: the count says so and Save is off, so nothing is lost to a refused request.
+  await page.locator("#brief-input").fill("x".repeat(4097));
+  await expect(page.locator("#brief-count")).toHaveText("4,097 of 4,096 bytes: too long to save");
+  await expect(page.locator("#brief-save")).toBeDisabled();
+  const first =
+    "# How we work here\n\n- Run `bun run check` before you post a result.\n- Keep pull requests **small**.\n- Ask the owner before you touch production. <img src=x onerror=alert(1)>";
+  await page.locator("#brief-input").fill(first);
+  await page.screenshot({ path: testInfo.outputPath(`brief-editor-${testInfo.project.name}.png`) });
+  await page.locator("#brief-save").click();
+  await expect(page.locator("#brief-dialog")).toBeHidden();
+  // Markdown is rendered from DOM nodes; untrusted markup stays text.
+  const header = page.locator("#brief");
+  await expect(header).toBeVisible();
+  await expect(header.locator("#brief-meta")).toContainText("Version 1 · human");
+  await expect(header.locator(".md-heading")).toHaveText("How we work here");
+  await expect(header.locator("li")).toHaveCount(3);
+  await expect(header.locator("strong")).toHaveText("small");
+  await expect(header.locator("img")).toHaveCount(0);
+  await expect(header).toContainText("<img src=x onerror=alert(1)>");
+  // The change is announced in the log in plain words, never as raw JSON.
+  await expect(page.locator("#messages")).toContainText("human changed the board's brief (version 1).");
+  await expect(page.locator("#messages")).not.toContainText("msn.brief.v1");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`brief-${testInfo.project.name}.png`) });
+  // The header keeps its place and stays inside the screen in the dark theme too.
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(header).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`brief-dark-${testInfo.project.name}.png`) });
+  await page.emulateMedia({ colorScheme: "light" });
+
+  // An agent on the shared credential sees the brief and has no way to edit it.
+  const agentContext = await browser.newContext({ viewport: page.viewportSize() ?? undefined });
+  const agent = await agentContext.newPage();
+  await connect(agent, { tenant: t.tenant, token: credential }, "lead");
+  await openChannel(agent, "work");
+  await expect(agent.locator("#brief .md-heading")).toHaveText("How we work here");
+  await expect(agent.locator("#edit-brief")).toBeHidden();
+
+  // A second version reaches the open agent page without a reload, and history keeps the first.
+  await page.locator("#edit-brief").click();
+  await expect(page.locator("#brief-input")).toHaveValue(first);
+  await page.locator("#brief-input").fill("Only one rule: be kind.");
+  await page.locator("#brief-save").click();
+  await expect(page.locator("#brief-meta")).toContainText("Version 2");
+  await expect(agent.locator("#brief-text")).toHaveText("Only one rule: be kind.");
+  await expect(agent.locator("#brief-meta")).toContainText("Version 2");
+  await agentContext.close();
+
+  // Folding the header is remembered for this version, and a newer version opens it again.
+  await page.locator("#brief summary").click();
+  await expect(page.locator("#brief-text")).toBeHidden();
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# work");
+  await expect(page.locator("#brief")).toBeVisible();
+  await expect(page.locator("#brief-text")).toBeHidden();
+
+  // Another device writes version 3 while this one edits: the text is kept and Save asks twice.
+  await page.locator("#edit-brief").click();
+  await page.locator("#brief-history").selectOption("1");
+  await expect(page.locator("#brief-input")).toHaveValue(first);
+  await expect(page.locator("#brief-note")).toContainText("Loaded version 1");
+  const elsewhere = await request.put(`${t.path}/channels/work/brief`, {
+    headers: t.headers,
+    data: { text: "Written on another device.", baseVersion: 2 },
+  });
+  expect(elsewhere.status()).toBe(201);
+  await page.locator("#brief-save").click();
+  await expect(page.locator("#brief-note")).toContainText("changed somewhere else");
+  await expect(page.locator("#brief-input")).toHaveValue(first);
+  await page.locator("#brief-save").click();
+  await expect(page.locator("#brief-dialog")).toBeHidden();
+  await expect(page.locator("#brief-meta")).toContainText("Version 4");
+  await expect(page.locator("#brief-text")).toBeVisible();
+
+  // Saving nothing removes the header; the versions stay on the server.
+  await page.locator("#edit-brief").click();
+  await page.locator("#brief-input").fill("");
+  await page.locator("#brief-save").click();
+  await expect(page.locator("#brief")).toBeHidden();
+  const versions = await (
+    await request.get(`${t.path}/channels/work/brief/versions`, { headers: shared })
+  ).json();
+  expect(versions.versions.map((v) => v.version)).toEqual([5, 4, 3, 2, 1]);
+});

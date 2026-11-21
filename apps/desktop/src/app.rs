@@ -81,6 +81,9 @@ pub struct MsnDesktopApp {
     /// When a lone `g` was pressed; `b` within `CHORD` opens the board list.
     chord_at: Option<std::time::Instant>,
     show_keys: bool,
+    /// The owner's open brief editor (ADR 0074): the board, the text, and the count of landed
+    /// saves when it opened, so it closes when its own save lands.
+    brief_editor: Option<BriefEditor>,
     /// A field or list that takes keyboard focus on the next frame.
     focus: Option<FocusTarget>,
     /// The open @ suggestions (ADR 0055), and the @ that Escape closed so typing on after it
@@ -213,7 +216,17 @@ enum Tab {
     Tasks,
 }
 
+/// The owner's brief editor (ADR 0074).
+struct BriefEditor {
+    channel: String,
+    text: String,
+    saves_at_open: u64,
+}
+
 enum Action {
+    /// Open the brief editor on the open board, or save its text (ADR 0074).
+    EditBrief,
+    SaveBrief(String),
     Select(String),
     Reload,
     Search,
@@ -326,6 +339,7 @@ impl MsnDesktopApp {
             reveal_selected: false,
             chord_at: None,
             show_keys: false,
+            brief_editor: None,
             focus: None,
             mention: None,
             mention_dismissed: None,
@@ -671,6 +685,7 @@ impl MsnDesktopApp {
             .frame(theme::glass())
             .show(ui, |ui| self.main_panel(ui, &mut actions));
         self.keys_window(ui.ctx());
+        self.brief_window(ui.ctx(), &mut actions);
         for action in actions {
             self.perform(action);
         }
@@ -915,6 +930,21 @@ impl MsnDesktopApp {
                     self.mute_menu(ui, actions);
                     // Archiving is owner only (ADR 0046).
                     let archived = self.state.is_archived(&channel);
+                    // So is writing the board's brief (ADR 0074); an archived board takes none.
+                    if !archived {
+                        let brief =
+                            egui::Button::new(egui::RichText::new("Brief").color(theme::muted()))
+                                .frame(false);
+                        if ui
+                            .add(brief)
+                            .on_hover_text(
+                                "Write the board's brief: standing instructions every agent receives first",
+                            )
+                            .clicked()
+                        {
+                            actions.push(Action::EditBrief);
+                        }
+                    }
                     let label = if archived { "Unarchive" } else { "Archive" };
                     let archive =
                         egui::Button::new(egui::RichText::new(label).color(theme::muted()))
@@ -1028,6 +1058,12 @@ impl MsnDesktopApp {
             .show_separator_line(false)
             .frame(egui::Frame::new())
             .show(ui, |ui| self.composer_panel(ui, actions));
+        if let Some(brief) = self.state.channel.as_ref().and_then(|s| s.brief.as_ref()) {
+            egui::Panel::top("board-brief")
+                .show_separator_line(false)
+                .frame(egui::Frame::new())
+                .show(ui, |ui| render_brief(ui, brief));
+        }
         if let Some(state) = self.state.channel.as_ref().filter(|s| !s.pins.is_empty()) {
             egui::Panel::top("pinned-messages")
                 .show_separator_line(false)
@@ -2076,6 +2112,83 @@ impl MsnDesktopApp {
         }
     }
 
+    /// The owner's brief editor (ADR 0074): Markdown text with a byte count against the 4 KiB
+    /// limit. It closes when its save lands, when the board changes, or on Cancel; a refused save
+    /// keeps the text and shows the reason.
+    fn brief_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(editor) = self.brief_editor.as_mut() else {
+            return;
+        };
+        let state =
+            self.state.channel.as_ref().filter(|_| {
+                self.state.selected_channel.as_deref() == Some(editor.channel.as_str())
+            });
+        let Some(state) = state else {
+            self.brief_editor = None;
+            return;
+        };
+        if state.brief_saves != editor.saves_at_open {
+            self.brief_editor = None;
+            return;
+        }
+        let mut open = true;
+        let mut close = false;
+        let bytes = editor.text.len();
+        let limit = crate::net::client_ops::BRIEF_MAX_BYTES;
+        let over = bytes > limit;
+        egui::Window::new("Board brief")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                ui.weak(BRIEF_HELP);
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("brief-editor-scroll")
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut editor.text)
+                                .id(egui::Id::new("brief-editor-text"))
+                                .hint_text("Markdown: how to work on this board")
+                                .font(egui::TextStyle::Monospace)
+                                .desired_rows(10)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+                ui.label(
+                    egui::RichText::new(brief_count(bytes))
+                        .small()
+                        .color(if over { theme::error() } else { theme::muted() }),
+                );
+                if let Some(error) = &state.brief_error {
+                    ui.colored_label(theme::error(), error);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let label = if state.brief_saving {
+                        "Saving…"
+                    } else if editor.text.trim().is_empty() && state.brief.is_some() {
+                        "Remove brief"
+                    } else {
+                        "Save"
+                    };
+                    let enabled = !over && !state.brief_saving;
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        actions.push(Action::SaveBrief(editor.text.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if !open || close {
+            self.brief_editor = None;
+        }
+    }
+
     fn keys_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_keys;
         egui::Window::new("Keyboard shortcuts")
@@ -2250,6 +2363,27 @@ impl MsnDesktopApp {
             }
             Action::SetArchived(archived) => {
                 let commands = self.state.set_archived(archived);
+                self.dispatch_all(commands);
+            }
+            Action::EditBrief => {
+                if let (Some(channel), Some(text)) = (
+                    self.state.selected_channel.clone(),
+                    self.state.open_brief_editor(),
+                ) {
+                    let saves_at_open = self
+                        .state
+                        .channel
+                        .as_ref()
+                        .map_or(0, |state| state.brief_saves);
+                    self.brief_editor = Some(BriefEditor {
+                        channel,
+                        text,
+                        saves_at_open,
+                    });
+                }
+            }
+            Action::SaveBrief(text) => {
+                let commands = self.state.set_brief(text);
                 self.dispatch_all(commands);
             }
             Action::Mute(duration) => {
@@ -2803,6 +2937,57 @@ fn render_pins(ui: &mut egui::Ui, pins: &[Value]) {
                 });
         });
     });
+}
+
+const BRIEF_HELP: &str = "Standing instructions for everyone on this board. Every agent receives \
+the brief first when it starts, and is told when you change it. The goal says what to achieve; \
+the brief says how to work here.";
+
+/// "173 of 4096 bytes", and that it is too long to save when it is.
+fn brief_count(bytes: usize) -> String {
+    let limit = crate::net::client_ops::BRIEF_MAX_BYTES;
+    if bytes > limit {
+        format!("{bytes} of {limit} bytes: too long to save")
+    } else {
+        format!("{bytes} of {limit} bytes")
+    }
+}
+
+/// The board's brief (ADR 0074): the owner's standing instructions, above pins and messages.
+/// Formatted like a message; it scrolls inside its own box so a long brief leaves the log room.
+fn render_brief(ui: &mut egui::Ui, brief: &crate::net::client_ops::Brief) {
+    theme::card().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        egui::CollapsingHeader::new(egui::RichText::new(brief_title(brief)).color(theme::accent()))
+            .id_salt("brief-header")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("brief-text")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        match &*markdown::parse_cached(&brief.text) {
+                            markdown::Parsed::Plain(plain) => {
+                                ui.label(plain);
+                            }
+                            markdown::Parsed::Blocks(blocks) => markdown::show(
+                                ui,
+                                egui::Id::new(("brief-markdown", brief.version)),
+                                blocks,
+                            ),
+                        }
+                    });
+            });
+    });
+}
+
+/// "Brief · version 3 · human".
+fn brief_title(brief: &crate::net::client_ops::Brief) -> String {
+    match &brief.updated_by {
+        Some(by) => format!("Brief · version {} · {by}", brief.version),
+        None => format!("Brief · version {}", brief.version),
+    }
 }
 
 /// What each name on the board says it is doing (ADR 0064): name, the status as said, and how
@@ -4103,6 +4288,44 @@ mod pin_tests {
     }
 
     #[test]
+    fn brief_header_shows_version_author_and_formatted_text() {
+        // ADR 0074.
+        use crate::net::client_ops::Brief;
+        let ctx = egui::Context::default();
+        let brief = Brief {
+            version: 3,
+            text: "# Rules\n\n- Run the tests before you post.\n- Keep changes **small**.".into(),
+            updated_by: Some("human".into()),
+            updated_at: "2026-11-21T17:00:00.000Z".into(),
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::render_brief(ui, &brief);
+        });
+        output.textures_delta.clear();
+        let shapes = format!("{:?}", output.shapes);
+        for expected in [
+            "Brief · version 3 · human",
+            "Rules",
+            "Run the tests before you post.",
+            "small",
+        ] {
+            assert!(shapes.contains(expected), "missing {expected}");
+        }
+        // Markdown markers are formatting, not text.
+        assert!(!shapes.contains("**small**"));
+        let unsigned = Brief {
+            updated_by: None,
+            ..brief
+        };
+        assert_eq!(super::brief_title(&unsigned), "Brief · version 3");
+        assert_eq!(super::brief_count(173), "173 of 4096 bytes");
+        assert_eq!(
+            super::brief_count(4097),
+            "4097 of 4096 bytes: too long to save"
+        );
+    }
+
+    #[test]
     fn pin_line_shows_id_author_and_a_short_first_line() {
         let pin = json!({"id": 7, "username": "lead", "text": "Rules\nsecond line"});
         assert_eq!(pin_line(&pin), "#7 lead: Rules…");
@@ -4176,6 +4399,7 @@ mod layout_tests {
             reveal_selected: false,
             chord_at: None,
             show_keys: false,
+            brief_editor: None,
             focus: None,
             mention: None,
             mention_dismissed: None,
