@@ -1300,6 +1300,11 @@ setInterval(() => {
   if (Date.now() - (state.statusesAt ?? 0) > STATUS_REFRESH_MS) void loadStatuses(session, channel);
 }, 5000);
 
+// Coming back to the page reads statuses at once instead of waiting for the next tick.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && session && channel) void loadStatuses(session, channel);
+});
+
 /** Reads the board's statuses. Failure keeps what is shown, like pins. */
 async function loadStatuses(connection = session, name = channel) {
   const state = connection?.channels.get(name);

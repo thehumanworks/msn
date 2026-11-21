@@ -10,7 +10,8 @@ pub const MAX_STATUS_CHARS: usize = 80;
 /// Trims and checks a status text the way the server does, so mistakes fail before a request.
 pub fn parse_text(raw: &str) -> Result<String, CliError> {
     // Trim what the server's String.prototype.trim does: Unicode whitespace and U+FEFF.
-    let text = raw.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    // U+0085 is whitespace to Rust but not to JavaScript; the server refuses it, so keep it here.
+    let text = raw.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     if text.is_empty() {
         return Err(CliError::usage(
             "A status must not be blank; use --clear to remove it.",
@@ -30,8 +31,9 @@ pub fn parse_text(raw: &str) -> Result<String, CliError> {
 }
 
 /// The characters the server refuses in a status: controls, line and paragraph separators,
-/// direction marks, embeddings, overrides and isolates, and invisible ones. Zero-width joiner and
-/// non-joiner stay allowed for emoji sequences and scripts that need them.
+/// the Arabic letter mark, embeddings, overrides and isolates, and invisible ones. Zero-width
+/// joiner and non-joiner, and the LRM and RLM marks, stay allowed for emoji, scripts and mixed
+/// right-to-left text.
 fn forbidden(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -39,8 +41,6 @@ fn forbidden(c: char) -> bool {
             '\u{2028}'
                 | '\u{2029}'
                 | '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
                 | '\u{202a}'..='\u{202e}'
                 | '\u{2066}'..='\u{2069}'
                 | '\u{200b}'
@@ -153,6 +153,11 @@ mod tests {
             parse_text("👨\u{200d}💻 coding").unwrap(),
             "👨\u{200d}💻 coding"
         );
+        assert_eq!(
+            parse_text("PR 54 \u{200f}שלום").unwrap(),
+            "PR 54 \u{200f}שלום"
+        );
+        assert!(parse_text("\u{85}lead").is_err());
         for bad in [
             "",
             "   ",

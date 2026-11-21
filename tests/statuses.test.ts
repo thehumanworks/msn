@@ -175,14 +175,15 @@ describe("agent status (ADR 0064)", () => {
       "a\u2029b",
       "evil\u202Etxt",
       "iso\u2066late",
-      "mark\u200Fhere",
+      "\u0085lead",
       "zero\u200Bwidth",
       "mid\uFEFFbom",
     ])
       expect(
         (await call(f.tenant, "/channels/work/status", f.agent, "PUT", { username: "lead", text })).status,
       ).toBe(400);
-    // Emoji sequences keep their zero-width joiner; a leading byte order mark is trimmed.
+    // Emoji sequences keep their zero-width joiner and mixed text its RLM; a leading BOM is trimmed.
+    expect((await set(f, f.agent, "lead", "PR 54 \u200Fשלום")).status).toBe(200);
     expect((await set(f, f.agent, "lead", "👨\u200D💻 coding")).status).toBe(200);
     const trimmed = (await (await set(f, f.agent, "lead", "\uFEFFok")).json()) as { status: Status };
     expect(trimmed.status.text).toBe("ok");

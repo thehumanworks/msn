@@ -364,6 +364,15 @@ test("CLI follows JSON lines and resumes an atomically written context-bound cur
     const wrong = harness(["follow", "general", "--cursor-file", file]);
     await assert.rejects(wrong.execute(), /different server/);
     assert.equal(wrong.calls.length, 0);
+    // A thread cursor written by the Rust CLI (ADR 0063) is never read or rewritten as a board cursor.
+    await writeFile(
+      file,
+      JSON.stringify({ server: "https://msn.test", tenant: "team", channel: "general", after: 9, thread: 4 }),
+    );
+    const thread = harness(["follow", "general", "--cursor-file", file]);
+    await assert.rejects(thread.execute(), /follows one thread/);
+    assert.equal(thread.calls.length, 0);
+    assert.equal(JSON.parse(await readFile(file, "utf8")).thread, 4);
   } finally {
     await rm(dir, { recursive: true });
   }

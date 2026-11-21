@@ -73,6 +73,10 @@ pub struct ProcessingState {
         skip_serializing_if = "Option::is_none"
     )]
     pub kept_local_at: Option<u64>,
+    /// The thread this progress follows (ADR 0063): `peek --thread ID` reads only that thread and
+    /// keeps its progress in a file of its own, always on this machine. Absent for the whole board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<u64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -93,11 +97,21 @@ impl ProcessingState {
             edits_fetched: 0,
             kept_local: None,
             kept_local_at: None,
+            thread: None,
         }
     }
 
+    #[cfg(test)]
     fn expected(url: &Url, tenant: &str, channel: &str, reader: &str) -> Self {
         Self::fresh(url, tenant, channel, reader)
+    }
+
+    /// The expected state for one thread's progress (ADR 0063); `None` is the whole board.
+    fn scoped(url: &Url, tenant: &str, channel: &str, reader: &str, thread: Option<u64>) -> Self {
+        Self {
+            thread,
+            ..Self::fresh(url, tenant, channel, reader)
+        }
     }
 }
 
@@ -126,7 +140,7 @@ pub fn default_processing_path(
         .join(tenant)
         .join("processing")
         .join(reader_hash)
-        .join(format!("{channel}.json")))
+        .join(crate::cursor::state_file_name(channel, None)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -187,14 +201,45 @@ pub(crate) fn peek_to(
     limit: u64,
     stop: &AtomicBool,
 ) -> Result<(), CliError> {
+    peek_scoped(
+        out,
+        url,
+        tenant,
+        token,
+        channel,
+        None,
+        reader,
+        cursor_file,
+        wait,
+        limit,
+        stop,
+    )
+}
+
+/// Local peek of the whole board (`thread` None) or of one thread (ADR 0063). A thread's progress
+/// has its own file and never moves the board's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn peek_scoped(
+    out: &mut dyn Write,
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    thread: Option<u64>,
+    reader: &str,
+    cursor_file: Option<&Path>,
+    wait: u64,
+    limit: u64,
+    stop: &AtomicBool,
+) -> Result<(), CliError> {
     validate_bounds(wait, limit)?;
     reader_hash(reader)?;
-    let path = resolve_path(url, tenant, reader, channel, cursor_file)?;
+    let path = resolve_scoped_path(url, tenant, reader, channel, thread, cursor_file)?;
     let lock = CursorLock::acquire(&path)?;
     let path = lock.cursor_path();
     let state = load_processing(
         path,
-        &ProcessingState::expected(url, tenant, channel, reader),
+        &ProcessingState::scoped(url, tenant, channel, reader, thread),
     )?;
     refuse_resumable(&state)?;
     if stop.load(Ordering::SeqCst) {
@@ -202,8 +247,9 @@ pub(crate) fn peek_to(
     }
     let client = Arc::new(MsnClient::new(url)?);
     let request = format!(
-        "/api/tenants/{tenant}/channels/{channel}/messages?after={}&wait={wait}&limit={limit}{}",
+        "/api/tenants/{tenant}/channels/{channel}/messages?after={}&wait={wait}&limit={limit}{}{}",
         state.committed_through,
+        thread_query(thread),
         edits_query(&state)
     );
     let Some(response) = get_interruptible(client, request, token.to_string(), stop)? else {
@@ -249,16 +295,40 @@ pub(crate) fn commit_to(
     cursor_file: Option<&Path>,
     through: u64,
 ) -> Result<(), CliError> {
+    commit_scoped(
+        out,
+        url,
+        tenant,
+        channel,
+        None,
+        reader,
+        cursor_file,
+        through,
+    )
+}
+
+/// Local commit of the board's progress (`thread` None) or one thread's (ADR 0063).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_scoped(
+    out: &mut dyn Write,
+    url: &Url,
+    tenant: &str,
+    channel: &str,
+    thread: Option<u64>,
+    reader: &str,
+    cursor_file: Option<&Path>,
+    through: u64,
+) -> Result<(), CliError> {
     if through > MAX_SAFE_INTEGER {
         return Err(CliError::usage(format!("Invalid integer: {through}")));
     }
     reader_hash(reader)?;
-    let path = resolve_path(url, tenant, reader, channel, cursor_file)?;
+    let path = resolve_scoped_path(url, tenant, reader, channel, thread, cursor_file)?;
     let lock = CursorLock::acquire(&path)?;
     let path = lock.cursor_path();
     let mut state = load_processing(
         path,
-        &ProcessingState::expected(url, tenant, channel, reader),
+        &ProcessingState::scoped(url, tenant, channel, reader, thread),
     )?;
     refuse_resumable(&state)?;
     if through < state.committed_through {
@@ -318,9 +388,28 @@ pub(crate) fn resolve_path(
     channel: &str,
     cursor_file: Option<&Path>,
 ) -> Result<PathBuf, CliError> {
+    resolve_scoped_path(url, tenant, reader, channel, None, cursor_file)
+}
+
+/// `&thread=ID` for a thread read (ADR 0063), empty for the whole board.
+pub(crate) fn thread_query(thread: Option<u64>) -> String {
+    thread.map(|id| format!("&thread={id}")).unwrap_or_default()
+}
+
+fn resolve_scoped_path(
+    url: &Url,
+    tenant: &str,
+    reader: &str,
+    channel: &str,
+    thread: Option<u64>,
+    cursor_file: Option<&Path>,
+) -> Result<PathBuf, CliError> {
     let path = match cursor_file {
         Some(path) => path.to_path_buf(),
-        None => default_processing_path(url, tenant, reader, channel)?,
+        None => {
+            let board = default_processing_path(url, tenant, reader, channel)?;
+            board.with_file_name(crate::cursor::state_file_name(channel, thread))
+        }
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -346,13 +435,18 @@ pub(crate) fn load_processing(
         ));
     }
     let saved: ProcessingFile = serde_json::from_value(value).map_err(|_| corrupt_state())?;
+    let thread = match &saved.thread {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(parse_watermark(value, "thread")?),
+    };
     if saved.server != expected.server
         || saved.tenant != expected.tenant
         || saved.channel != expected.channel
         || saved.reader != expected.reader
+        || thread != expected.thread
     {
         return Err(CliError::usage(
-            "Processing file belongs to a different server, tenant, channel or reader.",
+            "Processing file belongs to a different server, tenant, channel, thread or reader.",
         ));
     }
     let committed_through = parse_watermark(&saved.committed_through, "committedThrough")?;
@@ -392,6 +486,7 @@ pub(crate) fn load_processing(
         edits_fetched: edits_fetched.max(edits_committed.unwrap_or(0)),
         kept_local,
         kept_local_at,
+        thread,
     })
 }
 
@@ -445,6 +540,8 @@ struct ProcessingFile {
     kept_local: Option<Value>,
     #[serde(default, rename = "keptLocalAt")]
     kept_local_at: Option<Value>,
+    #[serde(default)]
+    thread: Option<Value>,
 }
 
 /// The `&editsAfter=` tail of a peek request (ADR 0052): `latest` until the reader has an edit
@@ -1071,6 +1168,87 @@ mod tests {
         assert_eq!(read_state(&file)["committedThrough"], 0);
         assert_eq!(read_state(&file)["highestFetched"], 7);
         assert!(recorded.lock().unwrap()[1].contains("after=0"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn thread_progress_has_its_own_file_and_never_moves_the_boards() {
+        // ADR 0063: peek --thread reads only the thread and keeps progress apart from the board's.
+        const PAGE: &str = r#"{"messages":[{"id":4,"tenant":"team","channel":"general","replyTo":2}],"nextCursor":4,"hasMore":false,"thread":2}"#;
+        let (url, recorded) = spawn_scripted(vec![(200, PAGE)]);
+        let dir = tmp_dir();
+        let board = with_env(&[("XDG_STATE_HOME", Some(dir.to_str().unwrap()))], || {
+            default_processing_path(&url, "team", "alice", "general").unwrap()
+        });
+        let thread_file = board.with_file_name("general.thread-2.json");
+        with_env(&[("XDG_STATE_HOME", Some(dir.to_str().unwrap()))], || {
+            let mut printed = Vec::new();
+            peek_scoped(
+                &mut printed,
+                &url,
+                "team",
+                "tenant-secret",
+                "general",
+                Some(2),
+                "alice",
+                None,
+                0,
+                100,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let envelope: Value = serde_json::from_slice(&printed).unwrap();
+            assert_eq!(envelope["thread"], 2);
+            assert_eq!(envelope["highestFetched"], 4);
+            commit_scoped(
+                &mut Vec::new(),
+                &url,
+                "team",
+                "general",
+                Some(2),
+                "alice",
+                None,
+                4,
+            )
+            .unwrap();
+        });
+        let request = recorded.lock().unwrap()[0].clone();
+        assert!(
+            request.contains("after=0") && request.contains("&thread=2"),
+            "{request}"
+        );
+        assert!(
+            !board.exists(),
+            "the board's progress file must not be touched"
+        );
+        let saved = read_state(&thread_file);
+        assert_eq!(saved["committedThrough"], 4);
+        assert_eq!(saved["thread"], 2);
+        assert!(saved.get("generation").is_none());
+        // A board commit cannot use the thread's progress, and another thread cannot either.
+        let err = commit_to(
+            &mut Vec::new(),
+            &url,
+            "team",
+            "general",
+            "alice",
+            Some(&thread_file),
+            4,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("thread"), "{err}");
+        let err = commit_scoped(
+            &mut Vec::new(),
+            &url,
+            "team",
+            "general",
+            Some(3),
+            "alice",
+            Some(&thread_file),
+            4,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("thread"), "{err}");
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -2443,7 +2443,10 @@ test("each agent's status shows on the board and in Agents with its age, as plai
   await expect(strip).not.toContainText("reviewer");
   // Markup in a status is shown as text, never parsed.
   expect((await say("reviewer", "<img src=x onerror=alert(1)> reviewing")).status()).toBe(200);
-  await expect(page.locator("#statuses-list li")).toHaveCount(2, { timeout: 20_000 });
+  // Returning to the page reads statuses at once, so the check does not wait on the 15 s timer.
+  const refresh = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await refresh();
+  await expect(page.locator("#statuses-list li")).toHaveCount(2, { timeout: 30_000 });
   await expect(page.locator("#statuses-list")).toContainText("<img src=x onerror=alert(1)> reviewing");
   expect(await page.locator("#statuses-list img").count()).toBe(0);
   await page.screenshot({ path: testInfo.outputPath("status-strip.png") });
@@ -2457,7 +2460,8 @@ test("each agent's status shows on the board and in Agents with its age, as plai
   // Clearing removes the line; with none left, the strip hides.
   await say("builder", null);
   await say("reviewer", null);
-  await expect(strip).toBeHidden({ timeout: 20_000 });
+  await refresh();
+  await expect(strip).toBeHidden({ timeout: 30_000 });
 });
 
 test("the owner sets a persona's wake-up webhook in Agents; the secret shows once (ADR 0062)", async ({

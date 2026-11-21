@@ -16,6 +16,9 @@ pub struct CursorBinding {
     pub after: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader: Option<String>,
+    /// The thread this cursor follows (ADR 0063); absent for the whole board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<u64>,
 }
 
 impl CursorBinding {
@@ -26,12 +29,27 @@ impl CursorBinding {
             channel: channel.to_string(),
             after,
             reader: None,
+            thread: None,
         }
     }
 
     pub fn with_reader(mut self, reader: Option<&str>) -> Self {
         self.reader = reader.map(str::to_string);
         self
+    }
+
+    pub fn with_thread(mut self, thread: Option<u64>) -> Self {
+        self.thread = thread;
+        self
+    }
+}
+
+/// A board's state file name, or one thread's (ADR 0063): `general.json`, `general.thread-42.json`.
+/// Channel slugs have no dots, so a thread file never collides with a board's.
+pub fn state_file_name(channel: &str, thread: Option<u64>) -> String {
+    match thread {
+        None => format!("{channel}.json"),
+        Some(id) => format!("{channel}.thread-{id}.json"),
     }
 }
 
@@ -60,7 +78,7 @@ pub fn default_cursor_path(
         .join(tenant)
         .join("readers")
         .join(reader_hash)
-        .join(format!("{channel}.json")))
+        .join(state_file_name(channel, None)))
 }
 
 /// FNV-1a 64 of the ASCII origin, as 16 lowercase hex digits. Stable across releases,
@@ -175,9 +193,10 @@ pub fn load_cursor(path: &Path, expected: &CursorBinding) -> Result<u64, CliErro
         || saved.tenant != expected.tenant
         || saved.channel != expected.channel
         || (expected.reader.is_some() && saved.reader != expected.reader)
+        || saved.thread != expected.thread
     {
         return Err(CliError::usage(
-            "Cursor file belongs to a different server, tenant, channel or reader.",
+            "Cursor file belongs to a different server, tenant, channel, thread or reader.",
         ));
     }
     parse_after_value(&saved.after)
@@ -218,6 +237,8 @@ fn sibling_tmp(path: &Path) -> PathBuf {
 struct CursorFile {
     #[serde(default)]
     reader: Option<String>,
+    #[serde(default)]
+    thread: Option<u64>,
     server: String,
     tenant: String,
     channel: String,
@@ -238,6 +259,52 @@ fn parse_after_value(value: &serde_json::Value) -> Result<u64, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_cursors_have_their_own_file_and_binding() {
+        // ADR 0063: a thread's cursor never moves, or is moved by, the board's.
+        assert_eq!(state_file_name("general", None), "general.json");
+        assert_eq!(
+            state_file_name("general", Some(42)),
+            "general.thread-42.json"
+        );
+        let url = Url::parse("https://msn.example").unwrap();
+        let dir = std::env::temp_dir().join(format!("msn-thread-cursor-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("general.thread-42.json");
+        let thread = CursorBinding::new(&url, "team", "general", 7).with_thread(Some(42));
+        write_cursor(&path, &thread).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"thread\":42"), "{raw}");
+        assert_eq!(
+            load_cursor(
+                &path,
+                &CursorBinding::new(&url, "team", "general", 0).with_thread(Some(42))
+            )
+            .unwrap(),
+            7
+        );
+        for other in [None, Some(43)] {
+            let err = load_cursor(
+                &path,
+                &CursorBinding::new(&url, "team", "general", 0).with_thread(other),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("thread"), "{err}");
+        }
+        // A board cursor written before threads has no thread key and stays a board cursor.
+        let board = dir.join("general.json");
+        write_cursor(&board, &CursorBinding::new(&url, "team", "general", 3)).unwrap();
+        assert!(!fs::read_to_string(&board).unwrap().contains("thread"));
+        assert!(
+            load_cursor(
+                &board,
+                &CursorBinding::new(&url, "team", "general", 0).with_thread(Some(42))
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_path() -> PathBuf {

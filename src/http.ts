@@ -603,12 +603,12 @@ export function statusChange(input: Record<string, unknown>): StatusChange {
 
 /**
  * Characters a status may not hold (ADR 0064): controls (newlines, tabs), line and paragraph
- * separators, direction marks, embeddings, overrides and isolates, which could reorder the name or
+ * separators, the Arabic letter mark, embeddings, overrides and isolates, which could reorder the name or
  * time beside the status, and invisible ones (zero-width space, word joiner, byte order mark).
- * Zero-width joiner and non-joiner stay allowed: emoji sequences and some scripts need them.
+ * Zero-width joiner and non-joiner, and the left-to-right and right-to-left marks, stay allowed:
+ * emoji sequences, some scripts and mixed right-to-left text need them.
  */
-const STATUS_FORBIDDEN =
-  /[\p{Cc}\p{Zl}\p{Zp}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/u;
+const STATUS_FORBIDDEN = /[\p{Cc}\p{Zl}\p{Zp}\u061C\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/u;
 
 /** A status text, or null to clear. Control characters (newlines, tabs) are refused. */
 export function statusText(value: unknown): string | null {
