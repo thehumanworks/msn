@@ -1866,3 +1866,75 @@ nav button.has-unread .channel-name {
     min-height: 44px;
   }
 }
+
+/* Send a message later (ADR 0060): a bar above the composer opens the board's schedule. */
+.scheduled-bar {
+  margin: 0;
+  padding: 0 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+#scheduled-bar button {
+  width: 100%;
+  text-align: left;
+  font: 12px var(--mono);
+}
+#scheduled-bar.failed button {
+  color: var(--error);
+}
+.schedule-presets {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#schedule-error {
+  margin: 0;
+  color: var(--error);
+}
+.scheduled-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+#scheduled-list > li {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+}
+.scheduled-list .scheduled-when {
+  font: 12px var(--mono);
+  color: var(--muted);
+}
+.scheduled-list .scheduled-text {
+  margin: 0;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 8.5em;
+  overflow: hidden;
+}
+.scheduled-list .scheduled-error {
+  margin: 0;
+  color: var(--error);
+  font-size: 13px;
+}
+.scheduled-list .scheduled-actions {
+  display: flex;
+  gap: 8px;
+}
+.watching .scheduled-bar,
+.archived #send-later {
+  display: none;
+}
+#schedule-submit {
+  min-height: 44px;
+}
