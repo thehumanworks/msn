@@ -890,9 +890,47 @@ async function loadReceipts(connection, name, state, force = false) {
   }
 }
 
+const COPIED_MS = 2000;
+/** A fence's language tag is the sender's text; the button's name keeps only its start. */
+const LANG_LABEL_MAX = 32;
+
+/**
+ * Each fenced code block gets a Copy button (ADR 0058). It copies the code as the sender wrote
+ * it, without the fence or language tag; the <pre> keeps only the code, so its text is unchanged.
+ */
+function addCodeCopy(content) {
+  for (const pre of content.querySelectorAll("pre.md-code")) {
+    const block = document.createElement("div");
+    block.className = "md-codeblock";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "copy-code";
+    button.textContent = "Copy";
+    const lang = pre.dataset.lang?.slice(0, LANG_LABEL_MAX);
+    button.setAttribute("aria-label", lang ? `Copy ${lang} code` : "Copy code");
+    let timer = 0;
+    button.addEventListener("click", async () => {
+      const failed = "Clipboard unavailable. The code is selected: copy it manually.";
+      if (!(await copy(pre.textContent, "Code copied.", failed))) {
+        // Select the code so a manual copy is one keystroke away.
+        getSelection()?.selectAllChildren(pre);
+        return;
+      }
+      button.textContent = "Copied";
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        button.textContent = "Copy";
+      }, COPIED_MS);
+    });
+    pre.replaceWith(block);
+    block.append(pre, button);
+  }
+  return content;
+}
+
 /** Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043). */
 function messageContent(message, boardUpdate, structured) {
-  if (!boardUpdate && !structured) return renderMarkdown(message.text);
+  if (!boardUpdate && !structured) return addCodeCopy(renderMarkdown(message.text));
   const content = document.createElement(structured ? "pre" : "p");
   content.textContent = boardUpdate
     ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
@@ -2295,12 +2333,14 @@ $("credentials-form").addEventListener("submit", async (event) => {
       : "Save the workspace / name and access key in your password manager. Automatic saving is unavailable in this browser.",
   );
 });
-async function copy(value, message) {
+async function copy(value, message, failed = "Clipboard unavailable. Select and copy the field manually.") {
   try {
     await navigator.clipboard.writeText(value);
     status(message);
+    return true;
   } catch {
-    status("Clipboard unavailable. Select and copy the field manually.", true);
+    status(failed, true);
+    return false;
   }
 }
 $("copy-access").addEventListener("click", () => copy(session.token, "Access key copied."));

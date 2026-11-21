@@ -1321,7 +1321,87 @@ fn show_inline(ui: &mut egui::Ui, nodes: &[Inline], size: f32, base: egui::Color
     }
 }
 
-fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color32) {
+/// How long the copy button reads "Copied" after a click.
+const COPIED_SECS: f64 = 2.0;
+
+/// Names each code block's copy button: the message's salt plus the block's place in that
+/// message, counted in drawing order through lists and quotes. `ui.id()` is not unique here
+/// (every child ui adds the same salt), so two messages would share a button state.
+struct CodeIds {
+    salt: egui::Id,
+    next: usize,
+}
+
+impl CodeIds {
+    fn next(&mut self) -> egui::Id {
+        let id = copy_id(self.salt, self.next);
+        self.next += 1;
+        id
+    }
+}
+
+/// The id of the copy button on the `n`th code block of the message drawn with `salt`.
+fn copy_id(salt: egui::Id, n: usize) -> egui::Id {
+    salt.with(("md-code-copy", n))
+}
+
+/// ADR 0058: a small Copy button in a code block's top-right corner. It shows while the pointer
+/// is over the block or the button has keyboard focus, and copies the code exactly as written,
+/// without the fence or language. It always takes part in Tab order, even while not drawn.
+fn copy_button(ui: &mut egui::Ui, id: egui::Id, block: egui::Rect, text: &str) {
+    let now = ui.input(|i| i.time);
+    let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(id));
+    let copied = copied_at.is_some_and(|at| now - at < COPIED_SECS);
+    let focused = ui.memory(|m| m.has_focus(id));
+    let visible = copied || focused || ui.rect_contains_pointer(block);
+    let label = if copied { "Copied" } else { "Copy" };
+    let font = egui::FontId::proportional(11.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, egui::Color32::PLACEHOLDER);
+    let size = galley.size() + egui::vec2(12.0, 6.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(block.right() - size.x - 4.0, block.top() + 4.0),
+        size,
+    );
+    let response = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Copy code");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copy code"));
+    if response.clicked() {
+        ui.ctx().copy_text(text.to_string());
+        ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(COPIED_SECS));
+    }
+    if !visible {
+        return;
+    }
+    let visuals = ui.style().interact(&response);
+    let color = if response.hovered() {
+        ui.visuals().hyperlink_color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().rect(
+        rect,
+        4,
+        ui.visuals().extreme_bg_color,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
+}
+
+fn show_blocks(
+    ui: &mut egui::Ui,
+    blocks: &[Block],
+    size: f32,
+    base: egui::Color32,
+    code: &mut CodeIds,
+) {
     for block in blocks {
         match block {
             Block::Paragraph { children } => show_inline(ui, children, size, base),
@@ -1336,7 +1416,7 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
             }
             Block::CodeBlock { text, .. } => {
                 // Long lines scroll sideways instead of wrapping.
-                egui::Frame::new()
+                let frame = egui::Frame::new()
                     .fill(ui.visuals().code_bg_color)
                     .corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(8, 6))
@@ -1355,6 +1435,7 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
                                 );
                             });
                     });
+                copy_button(ui, code.next(), frame.response.rect, text);
             }
             Block::Quote { children } => {
                 ui.horizontal_top(|ui| {
@@ -1363,7 +1444,7 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
                     ui.painter()
                         .rect_filled(rect, 1.0, ui.visuals().weak_text_color());
                     ui.vertical(|ui| {
-                        show_blocks(ui, children, size, ui.visuals().weak_text_color());
+                        show_blocks(ui, children, size, ui.visuals().weak_text_color(), code);
                     });
                 });
             }
@@ -1383,7 +1464,7 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
                             egui::vec2(18.0, size * 1.3),
                             egui::Label::new(egui::RichText::new(marker).size(size).color(base)),
                         );
-                        ui.vertical(|ui| show_blocks(ui, item, size, base));
+                        ui.vertical(|ui| show_blocks(ui, item, size, base, code));
                     });
                 }
             }
@@ -1413,12 +1494,13 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
     }
 }
 
-/// Draws parsed message text inside the current (bubble) ui.
-pub fn show(ui: &mut egui::Ui, blocks: &[Block]) {
+/// Draws parsed message text inside the current (bubble) ui. `salt` names this message's
+/// widgets (its code blocks' copy buttons); it must differ between messages drawn together.
+pub fn show(ui: &mut egui::Ui, salt: egui::Id, blocks: &[Block]) {
     let size = egui::TextStyle::Body.resolve(ui.style()).size;
     let base = ui.visuals().text_color();
     ui.spacing_mut().item_spacing.y = 4.0;
-    show_blocks(ui, blocks, size, base);
+    show_blocks(ui, blocks, size, base, &mut CodeIds { salt, next: 0 });
 }
 
 #[cfg(test)]
@@ -1484,6 +1566,146 @@ mod tests {
                 Block::CodeBlock { .. } => {}
             }
         }
+    }
+
+    /// Draws `messages` one under another, each in its own child ui as the board does, and
+    /// returns what each frame put on the clipboard.
+    fn copy_frame(
+        ctx: &egui::Context,
+        messages: &[(egui::Id, Vec<Block>)],
+        events: Vec<egui::Event>,
+    ) -> Vec<String> {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                for (salt, blocks) in messages {
+                    ui.vertical(|ui| show(ui, *salt, blocks));
+                }
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn click(
+        ctx: &egui::Context,
+        messages: &[(egui::Id, Vec<Block>)],
+        id: egui::Id,
+    ) -> Vec<String> {
+        let pos = ctx.read_response(id).expect("button drawn").rect.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        copy_frame(ctx, messages, vec![egui::Event::PointerMoved(pos)]);
+        copy_frame(ctx, messages, vec![press(true)]);
+        copy_frame(ctx, messages, vec![press(false)])
+    }
+
+    fn copied(ctx: &egui::Context, id: egui::Id) -> bool {
+        ctx.data(|d| d.get_temp::<f64>(id)).is_some()
+    }
+
+    /// ADR 0058: a click copies only that block's code, without the fence, and only that
+    /// button reads Copied, even with the same block place in two messages and blocks
+    /// nested in list items.
+    #[test]
+    fn the_copy_button_copies_only_its_own_code_block() {
+        let ctx = egui::Context::default();
+        let (a, b, c) = (
+            egui::Id::new("m1"),
+            egui::Id::new("m2"),
+            egui::Id::new("m3"),
+        );
+        let messages = [
+            (
+                a,
+                parse("Run this:\n\n```sh\nmsn join general\nmsn listen\n```"),
+            ),
+            (b, parse("Or:\n\n```\ntwo\n```")),
+            (
+                c,
+                parse("- first\n\n  ```\nin a list\n  ```\n- second\n\n  ```\nalso listed\n  ```"),
+            ),
+        ];
+        let nested = messages[2]
+            .1
+            .iter()
+            .filter(|block| matches!(block, Block::List { .. }))
+            .count();
+        assert_eq!(
+            nested, 1,
+            "the third message is one list holding code blocks"
+        );
+        copy_frame(&ctx, &messages, vec![]);
+        copy_frame(&ctx, &messages, vec![]);
+        assert_eq!(
+            click(&ctx, &messages, copy_id(a, 0)),
+            ["msn join general\nmsn listen"]
+        );
+        assert!(copied(&ctx, copy_id(a, 0)));
+        assert!(
+            !copied(&ctx, copy_id(b, 0)),
+            "the other message's button is untouched"
+        );
+        assert_eq!(click(&ctx, &messages, copy_id(b, 0)), ["two"]);
+        assert_eq!(click(&ctx, &messages, copy_id(c, 1)), ["also listed"]);
+        assert_eq!(click(&ctx, &messages, copy_id(c, 0)), ["in a list"]);
+    }
+
+    /// ADR 0058: the button is in Tab order while hidden, and Enter on it copies.
+    #[test]
+    fn the_copy_button_works_from_the_keyboard() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("m1");
+        let messages = [(id, parse("```\nmsn listen\n```"))];
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        copy_frame(&ctx, &messages, vec![]);
+        let button = copy_id(id, 0);
+        let mut tabs = 0;
+        while !ctx.memory(|m| m.has_focus(button)) {
+            tabs += 1;
+            assert!(tabs < 10, "Tab never reaches the copy button");
+            copy_frame(
+                &ctx,
+                &messages,
+                vec![key(egui::Key::Tab, true), key(egui::Key::Tab, false)],
+            );
+        }
+        let out = copy_frame(
+            &ctx,
+            &messages,
+            vec![key(egui::Key::Enter, true), key(egui::Key::Enter, false)],
+        );
+        let out = if out.is_empty() {
+            copy_frame(&ctx, &messages, vec![])
+        } else {
+            out
+        };
+        assert_eq!(out, ["msn listen"]);
     }
 
     #[test]
@@ -1596,7 +1818,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| show(ui, &blocks),
+                |ui| show(ui, egui::Id::new("message"), &blocks),
             );
             output.textures_delta.clear();
             output
