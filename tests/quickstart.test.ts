@@ -20,6 +20,7 @@ describe("curl is a first-class client (ADR 0056)", () => {
       expect(body).toContain('/personas/$MSN_NAME"');
       expect(body).toContain("/invites/redeem");
       expect(body).toContain("messages?after=N&wait=25");
+      expect(body).toContain("since?reader=$MSN_NAME");
       // Wake an agent with a webhook (ADR 0062).
       expect(body).toContain("PUT    $API/personas/ID/webhook");
       expect(body).toContain("MSN-Webhook-Signature");

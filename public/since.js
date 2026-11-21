@@ -69,12 +69,17 @@ export function advance(marks, key, id) {
 /**
  * Summarise messages newer than `after` for the reader `me`.
  * Message text is untrusted: the result is plain text for textContent, never markup.
+ * Your own messages are left out: by name, trimmed with case ignored, or by your persona id.
+ *
+ * @param {Array<Record<string, any>>} messages
+ * @param {{after: number, me: string, personaId?: string | null, truncated?: boolean}} options
  */
-export function summarize(messages, { after, me, truncated = false }) {
+export function summarize(messages, { after, me, personaId = null, truncated = false }) {
   const self = normalize(me);
   const isMe = (name) => typeof name === "string" && normalize(name) === self;
   const fresh = messages.filter((m) => Number.isSafeInteger(m.id) && m.id > after);
-  const others = fresh.filter((m) => m.username !== me);
+  // Your own messages: by name (trimmed, any case, as recipients are matched) or by your persona.
+  const others = fresh.filter((m) => !isMe(m.username) && !(personaId && m.personaId === personaId));
   const titles = new Map();
   for (const message of fresh) {
     const data = json(message);

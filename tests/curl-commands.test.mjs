@@ -22,6 +22,7 @@ test("board commands register a persona, then read, wait and send", () => {
     '"$API/board"',
     "after=0&limit=100",
     "after=N&wait=25",
+    "since?reader=$MSN_NAME&after=N",
     '-X POST "$API/messages"',
   ];
   const at = order.map((part) => script.indexOf(part));

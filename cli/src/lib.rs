@@ -23,6 +23,7 @@ pub mod receipts;
 pub mod resumable;
 pub mod runner;
 pub mod search;
+pub mod since;
 pub mod task_client;
 pub mod tasks;
 pub mod templates;
@@ -531,6 +532,37 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let channel = slug(&channel)?;
             let path = receipts::message_path(&tenant, channel, id);
             finish(&MsnClient::new(&url)?.get(&path, Some(&token))?)
+        }
+        Command::Since {
+            channel,
+            after,
+            format,
+        } => {
+            let after = after
+                .as_deref()
+                .map(|value| parse_int(value, MAX_SAFE_INTEGER))
+                .transpose()?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let reader = identity::resolve_username(
+                &url,
+                &tenant,
+                &token,
+                cli.reader.as_deref().or(cli.username.as_deref()),
+            )?;
+            let start = match after {
+                Some(after) => since::Start::Given(after),
+                None => since::local_start(&url, &tenant, channel, &reader),
+            };
+            let value = since::fetch(&url, &tenant, &token, channel, &reader, start)?;
+            if format == "text" {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{}", since::render(&value))?;
+                Ok(())
+            } else {
+                agent::print_json(&value)
+            }
         }
         Command::Search {
             channel,

@@ -756,6 +756,19 @@ pub enum Command {
         #[arg(long)]
         limit: Option<String>,
     },
+    /// Summarise what changed on a board since you last looked, as JSON (or --format text)
+    #[command(
+        long_about = "Summarise what changed on a board since you last looked, without moving anything.\n\nLists tasks opened, claimed, assigned, blocked, marked ready, closed or cancelled; board status changes; failed jobs; messages sent to you; and messages whose labels changed, with their labels now. Rows that need you come first. The same rules as the web app's \"Since you last looked\" panel (ADR 0033), built by the server (ADR 0061).\n\nStarts after your processing commit on the server (msn peek/commit, MCP, msn run). With none, it starts after your progress on this machine (msn peek --local), then your msn read cursor, then the start of the board. --after N starts after message N instead when you have no server commit. Reads at most 300 messages and lists at most 8 rows of each kind, with counts for the rest. Never moves a cursor, progress or receipt.\n\nJSON: {channel, reader, name, from:{source, after}, head, lastId, headline, count, truncated, authors, firstId, items:[{id, kind, text, attention}], hidden, labels:{messages:[{id, username, changes, labels}], hidden, changes, truncated}}."
+    )]
+    Since {
+        channel: String,
+        /// Start after this message id when you have no processing commit on the server
+        #[arg(long)]
+        after: Option<String>,
+        /// json (default) or text, a short list for people
+        #[arg(long, value_parser = ["json", "text"], default_value = "json")]
+        format: String,
+    },
     /// Show which readers have explicitly committed past a message on the server, as JSON
     #[command(
         long_about = "Show which readers have processed a message, as JSON: {processed, notYet, noServerCommit}.\n\nOnly commits sent to the server count: msn commit and the MCP commit tool send them by default (ADR 0053); --local or MSN_RESUMABLE=0 keeps them off the board. processed: the reader committed past this message. notYet: the reader has a server cursor but has not committed this far; it may still have seen the message. noServerCommit: board personas that never committed to the server, so their progress is unknown. The sender's own readers are left out. A shared board key can commit under any persona's name, so a receipt proves only that a key holder committed under that name."
