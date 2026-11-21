@@ -1715,6 +1715,8 @@ nav button.has-unread .channel-name {
    grow to that; the small inline ones in a message row keep their look and get an invisible
    hit area above and below instead, so the conversation stays as dense as before. */
 @media (pointer: coarse) {
+  /* Plain and primary buttons (Save, Close, Copy invitation) sit at 42px from their padding. */
+  button,
   .quiet,
   .toolbar .quiet,
   .compose-fields #recipient,
