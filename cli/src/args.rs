@@ -491,7 +491,8 @@ pub enum Command {
         #[arg(long = "attach", value_name = "PATH")]
         attach: Vec<String>,
         /// Post later instead of now: a delay like 10m, 2h or 1d, or a time with a zone like
-        /// 2026-11-21T09:00:00Z. Prints {"scheduled":…}; see msn scheduled
+        /// 2026-11-21T09:00:00Z. Prints {"scheduled":…}; see msn scheduled. The absolute time is
+        /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
         #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
         at: Option<String>,
     },

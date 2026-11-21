@@ -1320,7 +1320,12 @@ impl MsnDesktopApp {
                             for item in &state.scheduled {
                                 let id = item["id"].as_u64().unwrap_or(0);
                                 let who = item["username"].as_str().unwrap_or("?");
-                                let at = item["sendAt"].as_str().unwrap_or("");
+                                // Message times on the desktop are UTC; say so instead of showing ISO.
+                                let at = item["sendAt"]
+                                    .as_str()
+                                    .and_then(|at| at.get(0..16))
+                                    .map(|at| format!("{} UTC", at.replace('T', " ")))
+                                    .unwrap_or_default();
                                 let failed = item["status"].as_str() == Some("failed");
                                 let when = if failed { "Was due" } else { "Posts" };
                                 ui.label(

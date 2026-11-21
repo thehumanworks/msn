@@ -1309,6 +1309,10 @@ fn send(
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     eprintln!("Idempotency-Key: {key}");
+    // A delay like 10m resolves once (ADR 0060); a retry passes this absolute time with the key.
+    if let Some(send_at) = send_at {
+        eprintln!("sendAt: {send_at}");
+    }
     let _ = io::stderr().flush();
     // Uploads are content-addressed, so a retry with the same files and key replays one message.
     let uploaded = attachments::upload(&client, tenant, token, channel, files)?;

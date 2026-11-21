@@ -74,7 +74,9 @@ async function fixture() {
         Date.now() - 1,
       );
     });
-    await runInDurableObject(stub(), (_, state) => state.storage.setAlarm(Date.now()));
+    // A far alarm that only runDurableObjectAlarm fires: an alarm set to now could also fire on
+    // its own and race the reads that follow.
+    await runInDurableObject(stub(), (_, state) => state.storage.setAlarm(Date.now() + 3600_000));
     await runDurableObjectAlarm(stub());
   };
   const alarm = () => runInDurableObject(stub(), (_, state) => state.storage.getAlarm());
@@ -97,12 +99,74 @@ describe("sendAtTime", () => {
       new Date(now + MAX_SCHEDULE_AHEAD_MS + 1000).toISOString(),
       "tomorrow",
       42,
+      // Real calendar dates only: Date.parse would roll these over into the next month or day.
+      "2027-02-30T09:00:00Z",
+      "2027-04-31T09:00:00Z",
+      "2027-01-01T24:00:00Z",
+      "2027-01-01T09:60:00Z",
     ])
       expect(() => sendAtTime(bad, now)).toThrow(/sendAt/);
   });
 });
 
 describe("send a message later (ADR 0060)", () => {
+  it("replays a retry that arrives after its sendAt has passed", async () => {
+    const f = await fixture();
+    const input = { username: "lead", text: "late retry", sendAt: later(1500) };
+    const headers = { "Idempotency-Key": "sched-late" };
+    expect((await call(f.tenant, "/channels/work/messages", f.agent, "POST", input, headers)).status).toBe(
+      201,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+    // The time is now in the past. The retry replays (the scheduled message, or the message it
+    // became if the alarm already ran) instead of refusing the time.
+    const retry = await call(f.tenant, "/channels/work/messages", f.agent, "POST", input, headers);
+    expect(retry.status).toBe(200);
+    const body = (await retry.json()) as { scheduled?: Scheduled; message?: Message };
+    expect((body.scheduled ?? body.message)?.text).toBe("late retry");
+    // A new request with the same past time is refused.
+    const fresh = await call(f.tenant, "/channels/work/messages", f.agent, "POST", input);
+    expect(fresh.status).toBe(400);
+    expect(((await fresh.json()) as { error: { code: string } }).error.code).toBe("invalid_send_at");
+  });
+
+  it("refuses an immediate send under a key that a scheduled message holds", async () => {
+    const f = await fixture();
+    const headers = { "Idempotency-Key": "sched-held" };
+    const input = { username: "lead", text: "held", sendAt: later() };
+    expect((await call(f.tenant, "/channels/work/messages", f.agent, "POST", input, headers)).status).toBe(
+      201,
+    );
+    const now = await call(
+      f.tenant,
+      "/channels/work/messages",
+      f.agent,
+      "POST",
+      { username: "lead", text: "held" },
+      headers,
+    );
+    expect(now.status).toBe(409);
+    expect(((await now.json()) as { error: { code: string } }).error.code).toBe("idempotency_conflict");
+    expect(await f.messages()).toEqual([]);
+    await f.arrive();
+    expect((await f.messages()).map((m) => m.text)).toEqual(["held"]);
+    expect(await f.list()).toEqual([]);
+  });
+
+  it("keeps the alarm set when one alarm job throws", async () => {
+    const f = await fixture();
+    const scheduled = await f.schedule("still armed");
+    await runInDurableObject(f.stub(), async (instance, state) => {
+      await state.storage.deleteAlarm();
+      const object = instance as unknown as { postDue: () => number; alarm: () => Promise<void> };
+      object.postDue = () => {
+        throw new Error("boom");
+      };
+      await object.alarm();
+      expect(await state.storage.getAlarm()).toBe(Date.parse(scheduled.sendAt));
+    });
+  });
+
   it("schedules instead of posting, lists it, and the alarm posts it as a normal message", async () => {
     const f = await fixture();
     const first = (await (
@@ -163,7 +227,7 @@ describe("send a message later (ADR 0060)", () => {
       );
       state.storage.sql.exec("UPDATE scheduled_messages SET dueMs = ? WHERE id = ?", Date.now() - 2, next.id);
     });
-    await runInDurableObject(f.stub(), (_, state) => state.storage.setAlarm(Date.now()));
+    await runInDurableObject(f.stub(), (_, state) => state.storage.setAlarm(Date.now() + 3600_000));
     await runDurableObjectAlarm(f.stub());
     // The earlier due time posts first, whatever order they were scheduled in.
     expect((await f.messages()).map((m) => m.text)).toEqual(["next", "soon"]);
@@ -431,5 +495,46 @@ describe("send a message later (ADR 0060)", () => {
     });
     expect(response.status).toBe(409);
     expect(((await response.json()) as { error: { code: string } }).error.code).toBe("scheduled_quota");
+  });
+
+  it("caps waiting messages per sender, leaves failed ones out, and expires failed ones after 7 days", async () => {
+    const f = await fixture();
+    const insert = (failedAt: string | null) =>
+      runInDurableObject(f.stub(), (_, state) => {
+        state.storage.sql.exec(
+          `INSERT INTO scheduled_messages(tenant, channel, username, text, contentType, sendAt, dueMs, createdAt,
+             updatedAt, digest, tokenHash, notify, failedAt, error, errorMessage)
+           VALUES (?, 'work', 'lead', 'x', 'text/plain', ?, ?, ?, ?, '', '', 1, ?, ?, ?)`,
+          f.tenant,
+          later(),
+          Date.now() + 3600_000,
+          new Date().toISOString(),
+          new Date().toISOString(),
+          failedAt,
+          failedAt ? "board_archived" : null,
+          failedAt ? "x" : null,
+        );
+      });
+    for (let i = 0; i < 25; i++) await insert(null);
+    const post = (username: string) =>
+      call(f.tenant, "/channels/work/messages", f.agent, "POST", { username, text: "more", sendAt: later() });
+    const refused = await post("lead");
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("scheduled_quota");
+    // Another sender on the same board is not held back.
+    expect((await post("dev")).status).toBe(201);
+    // Failed messages do not count toward the sender's cap.
+    await runInDurableObject(f.stub(), (_, state) => {
+      state.storage.sql.exec(
+        "UPDATE scheduled_messages SET failedAt = ?, error = 'board_archived', errorMessage = 'x' WHERE username = 'lead'",
+        new Date().toISOString(),
+      );
+    });
+    expect((await post("lead")).status).toBe(201);
+    // A failed message older than 7 days is removed the next time the schedule changes.
+    await insert(new Date(Date.now() - 8 * 24 * 3600_000).toISOString());
+    expect((await f.list()).filter((item) => item.status === "failed").length).toBe(26);
+    expect((await post("lead")).status).toBe(201);
+    expect((await f.list()).filter((item) => item.status === "failed").length).toBe(25);
   });
 });

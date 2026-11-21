@@ -580,22 +580,48 @@ export const MAX_SCHEDULE_AHEAD_MS = 366 * 86400_000;
  * client and the Worker would read it in different zones. Returns the time in UTC.
  */
 export function sendAtTime(value: unknown, now = Date.now()): string {
-  const valid =
-    typeof value === "string" &&
-    value.length <= 64 &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/i.test(value) &&
-    Number.isFinite(Date.parse(value));
-  if (!valid)
+  return sendAtWindow(sendAtValue(value), now);
+}
+
+/**
+ * The format half of `sendAtTime`: an RFC 3339 time with a zone and a real calendar date (no
+ * 02-30), as an ISO string in UTC. The send path checks the window only after an idempotency
+ * lookup, so a retry that arrives after its time still replays.
+ */
+export function sendAtValue(value: unknown): string {
+  const parts =
+    typeof value === "string" && value.length <= 64
+      ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(:(\d{2})(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/i.exec(value)
+      : null;
+  const [year, month, day, hour, minute, second] = parts
+    ? [parts[1], parts[2], parts[3], parts[4], parts[5], parts[7] ?? "0"].map(Number)
+    : [];
+  const real =
+    parts !== null &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= new Date(Date.UTC(year, month, 0)).getUTCDate() &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    Number.isFinite(Date.parse(value as string));
+  if (!real)
     throw new HttpError(
       400,
       "invalid_send_at",
       "sendAt must be an RFC 3339 time with a zone, like 2026-11-21T09:00:00Z or 2026-11-21T10:00:00+01:00.",
     );
-  const at = Date.parse(value);
+  return new Date(Date.parse(value as string)).toISOString();
+}
+
+/** The time half of `sendAtTime`: in the future and at most 366 days ahead. */
+export function sendAtWindow(iso: string, now = Date.now()): string {
+  const at = Date.parse(iso);
   if (at <= now) throw new HttpError(400, "invalid_send_at", "sendAt must be in the future.");
   if (at - now > MAX_SCHEDULE_AHEAD_MS)
     throw new HttpError(400, "invalid_send_at", "sendAt must be at most 366 days ahead.");
-  return new Date(at).toISOString();
+  return iso;
 }
 
 /**

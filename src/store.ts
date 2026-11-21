@@ -54,7 +54,8 @@ import {
   type ScheduledChange,
   scheduledChange,
   searchMatch,
-  sendAtTime,
+  sendAtValue,
+  sendAtWindow,
   sha256,
   slug,
   snapshotInteger,
@@ -138,8 +139,11 @@ export const MAX_REACTORS = 100;
 /** Reactions stored per workspace at once (ADR 0047); removing one frees its place. */
 export const MAX_REACTIONS = 100000;
 /** Scheduled messages waiting per board, and per workspace (ADR 0060). */
+export const MAX_SCHEDULED_PER_SENDER = 25;
 export const MAX_SCHEDULED_PER_BOARD = 100;
 export const MAX_SCHEDULED = 1000;
+/** A scheduled message that failed to post is kept this long for its sender to see, then removed. */
+export const FAILED_SCHEDULED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Due scheduled messages posted per alarm run; the alarm runs again at once while more are due. */
 const SCHEDULED_BATCH = 50;
 /** Pinned messages per board (ADR 0038). */
@@ -741,9 +745,21 @@ export class MsnDurableObject extends DurableObject<Env> {
    * for the earliest remaining work.
    */
   async alarm(): Promise<void> {
-    this.backfillSearch();
-    this.postDue();
-    await this.armAlarm();
+    // Each job runs on its own: a failure in one never stops the other or leaves the alarm unset.
+    try {
+      try {
+        this.backfillSearch();
+      } catch (error) {
+        console.error("alarm: search backfill failed", error);
+      }
+      try {
+        this.postDue();
+      } catch (error) {
+        console.error("alarm: scheduled delivery failed", error);
+      }
+    } finally {
+      await this.armAlarm();
+    }
   }
 
   /** Sets the alarm to now while backfill remains, else to the next pending scheduled message. */
@@ -769,6 +785,7 @@ export class MsnDurableObject extends DurableObject<Env> {
    * schedule commit together. One that cannot post stays listed as failed, with the reason.
    */
   postDue(now = Date.now()): number {
+    this.expireFailedScheduled(now);
     const due = this.ctx.storage.sql
       .exec<ScheduledRow>(
         "SELECT * FROM scheduled_messages WHERE failedAt IS NULL AND dueMs <= ? ORDER BY dueMs, id LIMIT ?",
@@ -841,6 +858,14 @@ export class MsnDurableObject extends DurableObject<Env> {
       }
     }
     return posted;
+  }
+
+  /** Removes scheduled messages that failed more than `FAILED_SCHEDULED_TTL_MS` ago. */
+  private expireFailedScheduled(now = Date.now()): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM scheduled_messages WHERE failedAt IS NOT NULL AND failedAt < ?",
+      new Date(now - FAILED_SCHEDULED_TTL_MS).toISOString(),
+    );
   }
 
   async accountSession(tenant: string, username: string) {
@@ -2678,6 +2703,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           };
         }
       }
+      // Only a new schedule needs a future time; a retry above replays whenever it arrives.
+      sendAtWindow(message.sendAt);
       if (
         message.correlation.replyTo !== undefined &&
         !this.ctx.storage.sql
@@ -2689,17 +2716,29 @@ export class MsnDurableObject extends DurableObject<Env> {
           "invalid_reply_to",
           "replyTo must be the id of an existing message in this channel.",
         );
+      this.expireFailedScheduled();
+      // The sender and board caps count waiting messages only, so failed ones never block new
+      // ones; the workspace cap counts both, and failed ones expire after 7 days.
       const counts = this.ctx.storage.sql
-        .exec<{ board: number; all: number }>(
-          'SELECT COUNT(*) AS "all", COALESCE(SUM(channel = ?), 0) AS board FROM scheduled_messages',
+        .exec<{ sender: number; board: number; all: number }>(
+          `SELECT COUNT(*) AS "all",
+             COALESCE(SUM(channel = ? AND failedAt IS NULL), 0) AS board,
+             COALESCE(SUM(channel = ? AND username = ? AND failedAt IS NULL), 0) AS sender
+           FROM scheduled_messages`,
           channel,
+          channel,
+          message.username,
         )
         .one();
-      if (counts.board >= MAX_SCHEDULED_PER_BOARD || counts.all >= MAX_SCHEDULED)
+      if (
+        counts.sender >= MAX_SCHEDULED_PER_SENDER ||
+        counts.board >= MAX_SCHEDULED_PER_BOARD ||
+        counts.all >= MAX_SCHEDULED
+      )
         throw new HttpError(
           409,
           "scheduled_quota",
-          `Too many scheduled messages (${MAX_SCHEDULED_PER_BOARD} per board, ${MAX_SCHEDULED} per workspace). Cancel one or wait for one to post.`,
+          `Too many scheduled messages (${MAX_SCHEDULED_PER_SENDER} per sender and ${MAX_SCHEDULED_PER_BOARD} per board waiting, ${MAX_SCHEDULED} per workspace). Cancel one or wait for one to post.`,
         );
       this.createChannel(channel);
       const now = new Date().toISOString();
@@ -2857,6 +2896,19 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (scheduledId !== null)
         this.ctx.storage.sql.exec("DELETE FROM scheduled_messages WHERE id = ?", scheduledId);
       if (key) {
+        // A key that is waiting on the schedule belongs to that message (ADR 0060). Posting under
+        // it now would make the scheduled one fail later as a duplicate.
+        if (
+          scheduledId === null &&
+          this.ctx.storage.sql
+            .exec("SELECT id FROM scheduled_messages WHERE channel = ? AND key = ?", channel, key)
+            .toArray().length
+        )
+          throw new HttpError(
+            409,
+            "idempotency_conflict",
+            "This idempotency key belongs to a scheduled message. Retry with its sendAt, or use a new key.",
+          );
         const old = this.ctx.storage.sql
           .exec<MessageRow & { digest: string; deleted: number }>(
             `SELECT ${MESSAGE_COLUMNS}, digest, deleted FROM messages WHERE channel = ? AND key = ?`,
@@ -4275,7 +4327,16 @@ export class MsnDurableObject extends DurableObject<Env> {
         const files = input ? attachmentRefs(input.attachments) : [];
         // `sendAt` schedules the send instead (ADR 0060). Uploads expire unused after 24 hours, so a
         // scheduled message cannot carry files.
-        const sendAt = input?.sendAt === undefined || input.sendAt === null ? null : sendAtTime(input.sendAt);
+        // The time window is checked after the idempotency lookup, so a late retry still replays.
+        const sendAt =
+          input?.sendAt === undefined || input.sendAt === null ? null : sendAtValue(input.sendAt);
+        // Quoted replies (ADR 0059) are not carried by the schedule yet.
+        if (sendAt && input?.quote !== undefined && input.quote !== null)
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            "A scheduled message cannot quote another message yet. Send the quote now, or schedule it without the quote.",
+          );
         if (sendAt && files.length)
           throw new HttpError(
             400,
