@@ -230,6 +230,13 @@ export const MAX_PINS = 10;
 /** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
 export const UNREAD_BOARDS = 100;
 export const UNREAD_CAP = 99;
+/** Durable Object SQLite binds at most 100 parameters per statement; id lists go in chunks. */
+const SQL_ID_CHUNK = 90;
+/**
+ * A search of every board without words reads at most this many message ids per request
+ * (ADR 0073). A page that ends at the edge of the window says hasMore, so paging continues.
+ */
+export const SEARCH_SCAN_WINDOW = 20_000;
 /** Older messages indexed per backfill step after the v17 migration (ADR 0037). */
 export const SEARCH_BACKFILL_BATCH = 500;
 /** `kind` search filter values and the content type each one matches. */
@@ -894,6 +901,9 @@ export class MsnDurableObject extends DurableObject<Env> {
     ctx.storage.transactionSync(() => this.coverSearchGap());
     if (!this.searchIndexed()) void ctx.storage.setAlarm(Date.now());
   }
+
+  /** Ids one wordless every-board search may read; a field so tests can make it small. */
+  searchScanWindow = SEARCH_SCAN_WINDOW;
 
   /** True once every message that existed at the v17 migration is in the search index. */
   private searchIndexed(): boolean {
@@ -2936,15 +2946,23 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   /** Who reacted to these messages, by message id. Kinds in REACTIONS order. */
   private reactionsOf(channel: string, ids: number[]) {
-    const rows = this.ctx.storage.sql
-      .exec<{ messageId: number; kind: string; name: string }>(
-        `SELECT messageId, kind, name FROM reactions WHERE channel = ? AND messageId IN (${ids
-          .map(() => "?")
-          .join(", ")}) ORDER BY messageId, createdAt, name`,
-        channel,
-        ...ids,
-      )
-      .toArray();
+    // In id order, so the chunks together keep the ORDER BY of one statement.
+    const sorted = [...ids].sort((a, b) => a - b);
+    const rows: { messageId: number; kind: string; name: string }[] = [];
+    for (let start = 0; start < sorted.length; start += SQL_ID_CHUNK) {
+      const chunk = sorted.slice(start, start + SQL_ID_CHUNK);
+      rows.push(
+        ...this.ctx.storage.sql
+          .exec<{ messageId: number; kind: string; name: string }>(
+            `SELECT messageId, kind, name FROM reactions WHERE channel = ? AND messageId IN (${chunk
+              .map(() => "?")
+              .join(", ")}) ORDER BY messageId, createdAt, name`,
+            channel,
+            ...chunk,
+          )
+          .toArray(),
+      );
+    }
     return this.groupReactions(rows);
   }
 
@@ -3307,15 +3325,18 @@ export class MsnDurableObject extends DurableObject<Env> {
    * labels and reactions by id; attachments (ADR 0035) by id range, which works in any order.
    */
   private withSparse(channel: string, messages: Message[]): Message[] {
-    if (messages.length) {
-      const byId = new Map(messages.map((message) => [message.id, message]));
+    const byId = new Map(messages.map((message) => [message.id, message]));
+    const ids = [...byId.keys()];
+    // A full page is 100 ids, more than one statement may bind.
+    for (let start = 0; start < ids.length; start += SQL_ID_CHUNK) {
+      const chunk = ids.slice(start, start + SQL_ID_CHUNK);
       for (const row of this.ctx.storage.sql
         .exec<{ messageId: number; key: string; value: string }>(
-          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${messages
+          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${chunk
             .map(() => "?")
             .join(", ")}) ORDER BY messageId, key`,
           channel,
-          ...byId.keys(),
+          ...chunk,
         )
         .toArray()) {
         const message = byId.get(row.messageId);
@@ -4363,6 +4384,19 @@ export class MsnDurableObject extends DurableObject<Env> {
       );
       bindings.push(filter.key, ...(filter.values ?? []));
     }
+    // Without words there is no index to drive an every-board search, so it walks message ids
+    // newest first. The walk is bounded: one request reads at most searchScanWindow ids.
+    let floor = 0;
+    if (everyBoard && !scope && !match) {
+      const top =
+        before === Number.MAX_SAFE_INTEGER
+          ? (this.ctx.storage.sql.exec<{ top: number | null }>("SELECT MAX(id) AS top FROM messages").one()
+              .top ?? 0) + 1
+          : before;
+      floor = Math.max(0, top - this.searchScanWindow);
+      where.push("m.id >= ?");
+      bindings.push(floor);
+    }
     const rows = match
       ? this.ctx.storage.sql
           .exec<MessageRow>(
@@ -4391,10 +4425,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         messages.filter((candidate) => candidate.channel === board),
       ))
         decorated.set(message.id, message);
+    // A window that ended above the oldest message has more to read below it, even when this
+    // page is short or empty: the next page starts at the window's lower edge.
+    const more = rows.length > limit;
+    const below = !more && floor > 1;
     return json({
       messages: messages.map((message) => decorated.get(message.id) ?? message),
-      hasMore: rows.length > limit,
-      ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
+      hasMore: more || below,
+      ...(more ? { nextBefore: messages.at(-1)?.id } : below ? { nextBefore: floor } : {}),
       complete: this.searchIndexed(),
     });
   }

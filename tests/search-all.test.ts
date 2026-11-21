@@ -1,5 +1,7 @@
-import { exports } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import type { MsnDurableObject } from "../src/store";
 
 // Search every board at once (ADR 0073): GET /api/tenants/:t/search answers from every board the
 // key can read, newest first. The key decides which boards; no parameter widens it.
@@ -75,7 +77,7 @@ async function found(f: Fixture, query: string, token = f.owner): Promise<Result
 }
 const where = (result: Result) => result.messages.map((message) => `${message.channel}:${message.id}`);
 
-/** A key for one channel from an invitation; `readOnly` makes it watch-only (ADR 0041). */
+/** A key for one channel from an invitation; `readOnly` makes it watch-only (ADR 0039). */
 async function invited(f: Fixture, channel: string, readOnly = false) {
   const created = await call(`${f.api}/invites`, f.owner, {
     method: "POST",
@@ -218,6 +220,73 @@ describe("search every board (ADR 0073)", () => {
     expect(where(await found(f, "q=retro", f.keys.next))).toEqual([`next:${live.id}`]);
     expect((await call(`${f.api}/channels/work/archive`, f.owner, { method: "DELETE" })).status).toBe(200);
     expect(where(await found(f, "q=retro"))).toEqual([`next:${live.id}`, `work:${old.id}`]);
+  });
+
+  it("answers a full page of 100 hits, on one board and on every board", async () => {
+    const f = await fixture();
+    const sent: Message[] = [];
+    for (let index = 0; index < 105; index++)
+      sent.push(
+        await send(f, index % 7 === 0 ? "next" : "work", `bulk entry ${index}`, {
+          ...(index % 10 === 0 ? { labels: { n: String(index) } } : {}),
+        }),
+      );
+    const newest = sent.slice(-100).reverse();
+    for (const query of ["q=bulk&limit=100", "from=human&limit=100"]) {
+      const page = await found(f, query);
+      expect(page.messages.map((message) => message.id)).toEqual(newest.map((message) => message.id));
+      expect(page).toMatchObject({ hasMore: true, nextBefore: newest[99].id });
+      expect(page.messages.find((message) => message.id === sent[100].id)?.labels).toEqual({ n: "100" });
+    }
+    // One board with 90 of the matches: 90 ids and the channel in one statement.
+    const one = await call(`${f.api}/channels/work/search?q=bulk&limit=100`, f.owner);
+    expect(one.status).toBe(200);
+    expect((await one.json<Result>()).messages).toHaveLength(90);
+    // A hundred hits on one board: the page that failed before.
+    for (let index = 0; index < 12; index++) await send(f, "work", `bulk extra ${index}`);
+    const full = await call(`${f.api}/channels/work/search?q=bulk&limit=100`, f.owner);
+    expect(full.status).toBe(200);
+    expect((await full.json<Result>()).messages).toHaveLength(100);
+  });
+
+  it("reads a bounded window of ids for a search without words, and pages through the rest", async () => {
+    const f = await fixture();
+    const rare = await send(f, "work", "only one from this board", { labels: { rare: "yes" } });
+    for (let index = 0; index < 9; index++) await send(f, "next", `filler ${index}`);
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    await runInDurableObject(stub, (instance: MsnDurableObject) => {
+      instance.searchScanWindow = 4;
+    });
+    // Each request reads 4 ids. Pages may be empty, but hasMore leads to the match.
+    const seen: number[] = [];
+    let query = "label=rare";
+    let pages = 0;
+    for (;;) {
+      const page = await found(f, query);
+      pages++;
+      seen.push(...page.messages.map((message) => message.id));
+      if (!page.hasMore) break;
+      expect(page.nextBefore).toBeDefined();
+      query = `label=rare&before=${page.nextBefore}`;
+      expect(pages).toBeLessThan(10);
+    }
+    expect(seen).toEqual([rare.id]);
+    expect(pages).toBe(3);
+    // A full window never hides or repeats a match.
+    const all: number[] = [];
+    query = "from=human&limit=3";
+    for (;;) {
+      const page = await found(f, query);
+      all.push(...page.messages.map((message) => message.id));
+      if (!page.hasMore) break;
+      query = `from=human&limit=3&before=${page.nextBefore}`;
+    }
+    expect(all).toHaveLength(10);
+    expect(all).toEqual([...all].sort((a, b) => b - a));
+    expect(new Set(all).size).toBe(10);
+    // Words use the index, so they are not windowed; a scoped key reads its own board's index.
+    expect(where(await found(f, "q=only"))).toEqual([`work:${rare.id}`]);
+    expect(where(await found(f, "label=rare", f.keys.work))).toEqual([`work:${rare.id}`]);
   });
 
   it("drops deleted messages and rejects bad input and bad keys", async () => {
