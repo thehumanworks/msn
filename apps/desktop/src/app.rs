@@ -2885,11 +2885,20 @@ fn render_hit(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Vec<Ac
     let board = message["channel"].as_str().unwrap_or("").to_string();
     // egui 0.36 repeats ui.id() across rows; salt every hit's widgets with its message id.
     ui.push_id(("search-hit", id), |ui| {
-        if ui
-            .link(egui::RichText::new(format!("#{board}")).small().strong())
-            .on_hover_text(format!("Open message #{id} on board #{board}"))
-            .clicked()
-        {
+        // The name sits on the side of its bubble: your own messages are on the right.
+        let side = if message["username"].as_str() == Some(me) {
+            egui::Align::Max
+        } else {
+            egui::Align::Min
+        };
+        let opened = ui
+            .with_layout(egui::Layout::top_down(side), |ui| {
+                ui.link(egui::RichText::new(format!("#{board}")).small().strong())
+                    .on_hover_text(format!("Open message #{id} on board #{board}"))
+                    .clicked()
+            })
+            .inner;
+        if opened {
             actions.push(Action::OpenHit(board.clone(), id));
         }
         let mut own = Vec::new();

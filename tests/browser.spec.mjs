@@ -3587,9 +3587,12 @@ test("All boards searches every board at once, names each hit's board and opens 
   await expect(page.locator("#search-results .label-chip")).toHaveText(["state=open"]);
   await expect(page.locator("#search-results .label-chip")).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath("search-all.png") });
-  await page.emulateMedia({ colorScheme: "light" });
-  await page.screenshot({ path: testInfo.outputPath("search-all-light.png") });
+  // The hits read in both themes.
+  for (const colorScheme of ["dark", "light"]) {
+    await page.emulateMedia({ colorScheme });
+    await expect(page.locator("#search-results .search-board").first()).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`search-all-${colorScheme}.png`) });
+  }
   await page.emulateMedia({ colorScheme: null });
   // The sender filter works across boards too.
   await page.locator("#search").fill("rollout from:reviewer");
