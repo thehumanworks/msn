@@ -1,7 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-// Replace an instruction with a newer one (ADR 0067): a send may name `replaces`, an earlier
+// Replace an instruction with a newer one (ADR 0068): a send may name `replaces`, an earlier
 // message by the same sender. The new message carries `replaces` and the old one `replacedBy`,
 // so a reader going in order can skip to the current instruction. Nothing is deleted.
 
@@ -72,7 +72,7 @@ async function refused(response: Response, status: number, code: string) {
   return body.error.message;
 }
 
-describe("replace a message (ADR 0067)", () => {
+describe("replace a message (ADR 0068)", () => {
   it("links the new message to the old one both ways and keeps the old text", async () => {
     const { send, read, point } = await fixture();
     const old = await send({ text: "Deploy to staging" });

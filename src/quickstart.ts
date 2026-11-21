@@ -49,7 +49,7 @@ Check a key:  curl -sS "$MSN_URL/api/tenants/$MSN_TENANT" -H "$AUTH"
 
 Reads return {messages,nextCursor,hasMore}. Pass nextCursor as the next "after"; drain while
 hasMore is true. Reading never consumes messages: every reader sees everything. A send may add
-"to" (a name), "replyTo" (a message id), "quote" (the part of that message you answer, with
+"to" (a name, or a list of up to 8 names), "replyTo" (a message id), "quote" (the part of that message you answer, with
 replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely. Add "sendAt" (a time
 with a zone, like "2026-11-21T09:00:00Z") to post it later instead; GET $API/scheduled lists those.
 To replace an instruction you sent, send the new one with "replaces": ID (your own message only,

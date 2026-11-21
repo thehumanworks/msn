@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
@@ -133,7 +134,7 @@ function draft(connection = session, name = channel) {
       replyTo: null,
       // The part of the replyTo message this reply quotes (ADR 0059), or null.
       quote: null,
-      // The id of your own message this one replaces (ADR 0067), or null.
+      // The id of your own message this one replaces (ADR 0068), or null.
       replaces: null,
       files: [],
       // Files a draft had before a reload; files are never stored, so they must be attached again.
@@ -564,7 +565,7 @@ function appendMessage(message, target = $("messages")) {
     edit.setAttribute("aria-label", `Edit message #${message.id}`);
     edit.addEventListener("click", () => startEdit(article, message.id));
     meta.append(edit);
-    // Replace (ADR 0067): post a newer instruction linked to this one; this one stays.
+    // Replace (ADR 0068): post a newer instruction linked to this one; this one stays.
     if (message.replacedBy == null) {
       const replace = document.createElement("button");
       replace.type = "button";
@@ -640,10 +641,14 @@ function appendMessage(message, target = $("messages")) {
       link.title = `Show message #${message.replyTo}, the one this replies to`;
       link.addEventListener("click", () => showParent(message, article));
       annotation.append(`${label}: `, link);
+    } else if (field === "to") {
+      // Several names (ADR 0067) show in the order they were given.
+      annotation.textContent = `${label}: ${namesText(addressees(message))}`;
+      annotation.classList.add("message-to");
     } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
   }
-  // Replace an instruction (ADR 0067): each end links to the other, and the old one is dimmed.
+  // Replace an instruction (ADR 0068): each end links to the other, and the old one is dimmed.
   if (Number.isSafeInteger(message.replaces)) article.append(replaceLink("Replaces", message.replaces));
   if (Number.isSafeInteger(message.replacedBy)) markReplaced(article, message.replacedBy);
   // The quoted part of the replyTo message (ADR 0059). Plain text; pressing it shows the source.
@@ -996,7 +1001,7 @@ function replaceLink(label, id) {
   return annotation;
 }
 
-/** Marks one row as replaced by message `id` (ADR 0067): a note under its header, no Replace. */
+/** Marks one row as replaced by message `id` (ADR 0068): a note under its header, no Replace. */
 function markReplaced(article, id) {
   article.classList.add("replaced");
   article.querySelector(":scope > .message-meta .message-replace")?.remove();
@@ -2974,8 +2979,11 @@ $("send-form").addEventListener("submit", async (event) => {
     status("Message must be 1–16,384 UTF-8 bytes.", true);
     return;
   }
-  if (new TextEncoder().encode(recipient).length > 128) {
-    status("Recipient must be at most 128 UTF-8 bytes.", true);
+  // To holds one name or several separated by commas (ADR 0067).
+  const names = parseNames(recipient);
+  const problem = namesProblem(names);
+  if (problem) {
+    status(problem, true);
     return;
   }
   const files = [...state.files];
@@ -3022,7 +3030,7 @@ $("send-form").addEventListener("submit", async (event) => {
       : JSON.stringify({
           username: connection.username,
           text: content,
-          ...(recipient.trim() ? { to: recipient } : {}),
+          ...(names.length ? { to: toField(names) } : {}),
           ...(replyId !== null ? { replyTo: replyId } : {}),
           ...(quote !== null ? { quote } : {}),
           ...(replaces !== null ? { replaces } : {}),
@@ -3998,7 +4006,7 @@ $("quote-remove").addEventListener("click", () => {
 });
 
 /**
- * Replace (ADR 0067): the composer sends a new message that replaces one of yours. It starts from
+ * Replace (ADR 0068): the composer sends a new message that replaces one of yours. It starts from
  * the old text when the composer is empty, and keeps the old message's thread and To.
  */
 function replaceMessage(message) {
@@ -4008,8 +4016,8 @@ function replaceMessage(message) {
   if (!$("message").value.trim()) $("message").value = state.content = message.text;
   if (state.replyTo !== (message.replyTo ?? null)) state.quote = null;
   state.replyTo = message.replyTo ?? null;
-  if (!$("recipient").value.trim() && typeof message.to === "string")
-    $("recipient").value = state.recipient = message.to;
+  const names = namesText(addressees(message));
+  if (!$("recipient").value.trim() && names) $("recipient").value = state.recipient = names;
   showReplyTo(state);
   keepDraft();
   view("chat");
@@ -4288,8 +4296,8 @@ function pickMention(index) {
   closeMentions();
   autosize();
   status(
-    address.to === person.name
-      ? `Mentioned ${person.name} · the message goes to ${person.name}`
+    address.to === address.mentionTo
+      ? `Mentioned ${person.name} · the message goes to ${address.to}`
       : `Mentioned ${person.name} · the message still goes to ${address.to}`,
   );
 }
@@ -4365,7 +4373,7 @@ function renderScheduledList(list) {
     const row = document.createElement("li");
     const when = document.createElement("span");
     when.className = "scheduled-when";
-    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${item.to ? ` → ${item.to}` : ""}`;
+    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${addressees(item).length ? ` → ${namesText(addressees(item))}` : ""}`;
     when.title = new Date(item.sendAt).toLocaleString();
     const body = document.createElement("p");
     body.className = "scheduled-text";

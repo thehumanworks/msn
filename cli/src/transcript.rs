@@ -201,8 +201,10 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
             };
             details.push(format!("- Reply to: [#{parent}]({target})"));
         }
-        if let Some(to) = message.get("to").and_then(Value::as_str) {
-            details.push(format!("- To: {}", inline(to)));
+        let to = crate::address::addressees(message);
+        if !to.is_empty() {
+            let shown: Vec<String> = to.iter().map(|name| inline(name)).collect();
+            details.push(format!("- To: {}", shown.join(", ")));
         }
         // A question (ADR 0065) lists its choices; an answer names the choice it picked.
         if let Some(choices) = message.get("choices").and_then(Value::as_array)
@@ -217,7 +219,7 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
         if let Some(answer) = message.get("answer").and_then(Value::as_str) {
             details.push(format!("- Answer: {}", inline(answer)));
         }
-        // A replacement (ADR 0067) names the message it replaces; the old one names its replacement.
+        // A replacement (ADR 0068) names the message it replaces; the old one names its replacement.
         if let Some(old) = message.get("replaces").and_then(Value::as_u64) {
             details.push(format!("- Replaces: {}", link(old, shown.contains(&old))));
         }

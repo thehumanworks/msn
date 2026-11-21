@@ -493,9 +493,10 @@ pub enum Command {
         /// Opaque client correlation string, ≤128 bytes (sent as correlationId)
         #[arg(long = "correlation-id")]
         correlation_id: Option<String>,
-        /// Address a username (visible to everyone in the channel; not a private message)
-        #[arg(long)]
-        to: Option<String>,
+        /// Address a username (visible to everyone in the channel; not a private message). Repeat
+        /// to address up to 8 names at once: each is woken and counts the message as to them
+        #[arg(long, value_name = "NAME")]
+        to: Vec<String>,
         /// key=value label, such as state=open; repeat for more (at most 16)
         #[arg(long = "label", value_name = "KEY=VALUE")]
         labels: Vec<String>,
@@ -507,7 +508,7 @@ pub enum Command {
         /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
         #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
         at: Option<String>,
-        /// Replace your earlier message ID with this one (ADR 0067): the old message stays and
+        /// Replace your earlier message ID with this one (ADR 0068): the old message stays and
         /// shows replacedBy, so readers skip to this one. Only your own message, only once
         #[arg(long, value_name = "ID", conflicts_with = "at")]
         replaces: Option<String>,

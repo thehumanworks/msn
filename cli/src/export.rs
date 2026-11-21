@@ -632,6 +632,16 @@ fn message_record(row: &Value) -> Result<MessageRecord, CliError> {
             .and_then(Value::as_str)
             .map(str::to_string),
         to: row.get("to").and_then(Value::as_str).map(str::to_string),
+        recipients: row
+            .get("recipients")
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }),
         choices: row.get("choices").and_then(Value::as_array).map(|choices| {
             choices
                 .iter()

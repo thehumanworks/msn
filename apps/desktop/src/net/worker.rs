@@ -157,7 +157,7 @@ pub enum Command {
         quote: Option<String>,
         correlation_id: Option<String>,
         to: Option<String>,
-        /// Your earlier message this one replaces (ADR 0067).
+        /// Your earlier message this one replaces (ADR 0068).
         replaces: Option<u64>,
     },
     SendTaskEvent {
@@ -1159,7 +1159,7 @@ fn handle_command(
                     reply_to,
                     quote,
                     correlation_id: None,
-                    to,
+                    to: to.into_iter().collect(),
                     replaces: None,
                 },
             )
@@ -1221,7 +1221,7 @@ fn handle_command(
                     reply_to,
                     quote,
                     correlation_id,
-                    to,
+                    to: to.into_iter().collect(),
                     replaces,
                 },
                 &cancelled,

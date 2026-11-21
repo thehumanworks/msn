@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
+import { namesLine } from "../core/address.ts";
 import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
 import { REACTION_KINDS, type Message, type ReactionKind } from "../core/types.ts";
@@ -45,7 +46,7 @@ type Props = {
   onReact?: (message: Message, kind: ReactionKind) => void;
   /** Opens the editor on this message (ADR 0052); only passed for your own, writable messages. */
   onEditMessage?: (message: Message) => void;
-  /** Starts a message that replaces this one (ADR 0067); only for your own, writable messages. */
+  /** Starts a message that replaces this one (ADR 0068); only for your own, writable messages. */
   onReplaceMessage?: (message: Message) => void;
   /** Answers a question (ADR 0065); absent where nothing can be posted (archived boards, search). */
   onAnswer?: (message: Message, choice: string) => void;
@@ -127,7 +128,7 @@ function MessageRowImpl({
   const choices = message.choices && message.choices.length >= 2 ? message.choices : null;
   const mode = choices ? choiceMode(message, me, onAnswer !== undefined) : null;
   const canTap = mode === "open" && !answering;
-  // Replace (ADR 0067): only a message nothing has replaced yet.
+  // Replace (ADR 0068): only a message nothing has replaced yet.
   const replaceable = onReplaceMessage !== undefined && message.replacedBy === undefined;
   const canLoadParent =
     message.replyTo !== undefined &&
@@ -138,7 +139,7 @@ function MessageRowImpl({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
+      accessibilityLabel={`${who}${namesLine(message) ? ` to ${namesLine(message)}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
       }${message.editedAt ? ", edited" : ""}${message.replacedBy ? `, replaced by message ${message.replacedBy}` : ""}${
         message.replaces ? `, replaces message ${message.replaces}` : ""
@@ -194,9 +195,9 @@ function MessageRowImpl({
         <Text style={[styles.author, own && { color: colors.accent }]} numberOfLines={1}>
           {who}
         </Text>
-        {message.to ? (
+        {namesLine(message) ? (
           <Text style={styles.to} numberOfLines={1}>
-            → {message.to}
+            → {namesLine(message)}
           </Text>
         ) : null}
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>

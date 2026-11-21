@@ -832,6 +832,10 @@ fn import_envelope(
     if let Some(to) = message.get("to").and_then(Value::as_str) {
         provenance.insert("to".to_string(), json!(to));
     }
+    // Several names (ADR 0067) are provenance too: the import posts as the importer, to no one.
+    if let Some(recipients) = message.get("recipients").filter(|value| value.is_array()) {
+        provenance.insert("recipients".to_string(), recipients.clone());
+    }
     // A question's choices, an answer and a question's first answer (ADR 0065) are kept as
     // provenance only: the import posts plain messages, so it never asks or answers again.
     if let Some(choices) = message.get("choices").filter(|value| value.is_array()) {
@@ -846,7 +850,7 @@ fn import_envelope(
     if let Some(answerer) = message.get("answerer").and_then(Value::as_str) {
         provenance.insert("answerer".to_string(), json!(answerer));
     }
-    // Replacement links (ADR 0067) name source ids, so they are kept as provenance only.
+    // Replacement links (ADR 0068) name source ids, so they are kept as provenance only.
     if let Some(replaces) = message.get("replaces").and_then(Value::as_u64) {
         provenance.insert("replaces".to_string(), json!(replaces));
     }

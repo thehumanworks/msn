@@ -41,7 +41,7 @@ type StoredMessage = {
   choices?: string[];
   answer?: string;
   answered?: { id: number; choice: string; username: string; answeredAt: string };
-  /** Replace an instruction (ADR 0067). */
+  /** Replace an instruction (ADR 0068). */
   replaces?: number;
   replacedBy?: number;
 };

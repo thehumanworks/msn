@@ -1773,7 +1773,7 @@ nav button.has-unread .channel-name {
   outline: none;
 }
 
-/* Replace an instruction with a newer one (ADR 0067): the old message stays, dimmed. */
+/* Replace an instruction with a newer one (ADR 0068): the old message stays, dimmed. */
 #messages article.replaced > .message-body {
   opacity: 0.6;
 }

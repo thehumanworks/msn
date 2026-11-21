@@ -7,7 +7,7 @@ import { track } from "./support/bounded.ts";
 import { startMockServer, TEST_TOKEN, type MockServerHandle } from "./support/mockServer.ts";
 import { nodeFetch, waitFor } from "./support/util.ts";
 
-// Replace an instruction with a newer one (ADR 0067).
+// Replace an instruction with a newer one (ADR 0068).
 
 const fast = { stream: { waitSeconds: 1, backoff: { baseMs: 5, maxMs: 20 } }, connectBackoff: { baseMs: 5, maxMs: 20 } };
 

@@ -159,7 +159,7 @@ test("a reply's quote is kept with its reply target (ADR 0059)", () => {
   assert.equal(putDraft({}, key, memory({ content: "x", quote: "orphan" }))[key].quote, null);
 });
 
-test("a replacement draft keeps the id it replaces (ADR 0067)", () => {
+test("a replacement draft keeps the id it replaces (ADR 0068)", () => {
   const key = markId("Tomas", "general");
   const stored = putDraft({}, key, memory({ replaces: 5 }));
   // Replacing is something to come back to even before any text is typed.

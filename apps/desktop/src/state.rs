@@ -55,7 +55,7 @@ pub struct PendingSend {
     pub quote: Option<String>,
     pub correlation_id: Option<String>,
     pub to: Option<String>,
-    /// Your earlier message this send replaces (ADR 0067).
+    /// Your earlier message this send replaces (ADR 0068).
     pub replaces: Option<u64>,
     pub error: Option<String>,
     pub retryable: bool,
@@ -312,7 +312,7 @@ impl ChannelState {
         self.link_replacements();
     }
 
-    /// Marks each replaced message from its replacement in the cache (ADR 0067), so a message
+    /// Marks each replaced message from its replacement in the cache (ADR 0068), so a message
     /// read before it was replaced shows "replaced by" once the replacement arrives.
     pub fn link_replacements(&mut self) {
         let links: Vec<(u64, u64)> = self
@@ -3343,7 +3343,7 @@ mod tests {
         assert_eq!(channel.thread_rows().len(), 2);
     }
 
-    /// A message read before it was replaced shows its replacement once that arrives (ADR 0067).
+    /// A message read before it was replaced shows its replacement once that arrives (ADR 0068).
     #[test]
     fn replacements_mark_the_messages_they_replace() {
         let mut state = ChannelState::default();

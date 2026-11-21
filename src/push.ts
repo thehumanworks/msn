@@ -1,6 +1,6 @@
 // Web Push for owner notifications (ADR 0029): VAPID (RFC 8292) and aes128gcm payload
 // encryption (RFC 8291, RFC 8188), using only WebCrypto. No third-party SDK.
-import { HttpError } from "./http";
+import { addressees, HttpError } from "./http";
 
 /** Push services the Worker may call. The owner supplies the URL, so it is never arbitrary. */
 const PUSH_HOSTS = [
@@ -214,7 +214,7 @@ function excerpt(value: string, limit = 140): string {
  * Message text is untrusted: it only ever becomes notification text, never markup or a URL.
  */
 export function needsOwner(
-  message: { username: string; text: string; contentType: string; to?: string },
+  message: { username: string; text: string; contentType: string; to?: string; recipients?: string[] },
   owners: Set<string>,
 ): Attention | null {
   if (owners.has(message.username)) return null;
@@ -242,7 +242,7 @@ export function needsOwner(
         summary: `A job failed${typeof data.reason === "string" ? `: ${excerpt(data.reason, 64)}` : ""}`,
       };
   }
-  if (message.to !== undefined && owners.has(message.to))
+  if (addressees(message).some((name) => owners.has(name)))
     return { reason: "question", summary: excerpt(message.text) };
   return null;
 }

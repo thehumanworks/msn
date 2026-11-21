@@ -5,18 +5,20 @@
 // first, so the oldest drafts are dropped first. An entry is
 // `{ content, recipient, replyTo, quote, replaces, files, retry, at }`:
 // - `quote` is the part of the replyTo message the reply quotes (ADR 0059), or null.
-// - `replaces` is the id of the sender's own message this draft replaces (ADR 0067), or null.
+// - `replaces` is the id of the sender's own message this draft replaces (ADR 0068), or null.
 // - `files` is only how many attachments the draft had. Files themselves are never stored.
 // - `retry` is the uncertain send's `{ payload, key }`. Keeping it means a send retried after a
 //   reload reuses the same Idempotency-Key when the payload is identical, so the server replays
 //   it instead of posting it twice.
 
+import { MAX_TO_TEXT_BYTES, parseNames, toField } from "./address.js";
+
 /** Drafts kept per workspace on this device; the least recently changed go first. */
 export const MAX_DRAFTS = 50;
 /** The server's message limit. A longer draft cannot be sent, so it is kept in memory only. */
 export const MAX_DRAFT_BYTES = 16384;
-/** The server's recipient limit. */
-export const MAX_RECIPIENT_BYTES = 128;
+/** The To field's limit: up to 8 names, separated by commas (ADR 0067). */
+export const MAX_RECIPIENT_BYTES = MAX_TO_TEXT_BYTES;
 /** The server's quote limit (ADR 0059). */
 export const MAX_QUOTE_BYTES = 2048;
 /** A retry payload holds the text plus a few fields and at most 10 attachment references. */
@@ -48,7 +50,7 @@ function validEntry(value) {
   if (typeof content !== "string" || bytes(content) > MAX_DRAFT_BYTES) return null;
   if (typeof recipient !== "string" || bytes(recipient) > MAX_RECIPIENT_BYTES) return null;
   if (replyTo !== null && !(Number.isSafeInteger(replyTo) && replyTo >= 1)) return null;
-  // Drafts kept before ADR 0067 replace nothing.
+  // Drafts kept before ADR 0068 replace nothing.
   const replaces = value.replaces ?? null;
   if (replaces !== null && !(Number.isSafeInteger(replaces) && replaces >= 1)) return null;
   if (!Number.isSafeInteger(files) || files < 0 || files > 10) return null;
@@ -162,11 +164,12 @@ export function unchangedRetryFiles(
     return null;
   }
   if (!sent || !Array.isArray(sent.attachments) || !sent.attachments.length) return null;
-  const to = recipient.trim() ? recipient : undefined;
+  // The To field as the send wrote it (ADR 0067): one name as text, several as a list.
+  const to = toField(parseNames(recipient));
   const same =
     sent.username === username &&
     sent.text === content &&
-    sent.to === to &&
+    JSON.stringify(sent.to) === JSON.stringify(to) &&
     (sent.replyTo ?? null) === replyTo &&
     (sent.quote ?? null) === quote &&
     (sent.replaces ?? null) === replaces;

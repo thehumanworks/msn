@@ -21,7 +21,7 @@ type Props = {
   channel: ChannelController;
   replyTo: Message | null;
   onClearReply: () => void;
-  /** Your message this one replaces (ADR 0067), or null for a new message. */
+  /** Your message this one replaces (ADR 0068), or null for a new message. */
   replacing?: Message | null;
   onClearReplace?: () => void;
   bottomInset: number;

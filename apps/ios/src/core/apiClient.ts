@@ -45,7 +45,7 @@ export type SendMessageInput = {
   correlationId?: string;
   /** The choice a reply picks from its replyTo question (ADR 0065). */
   answer?: string;
-  /** Your earlier message this one replaces (ADR 0067). */
+  /** Your earlier message this one replaces (ADR 0068). */
   replaces?: number;
 };
 

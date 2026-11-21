@@ -193,7 +193,7 @@ struct Composer {
     quote: String,
     /// The name an @ pick put in To (ADR 0055); To clears again if that @name is deleted.
     mention_to: Option<String>,
-    /// Your earlier message this one replaces (ADR 0067); None sends a new message.
+    /// Your earlier message this one replaces (ADR 0068); None sends a new message.
     replaces: Option<u64>,
     error: Option<String>,
 }
@@ -219,7 +219,7 @@ enum Action {
     CopyLink(u64),
     /// Open the editor on one of your messages, save it, or close it (ADR 0052).
     StartEdit(u64),
-    /// Start a message that replaces one of yours (ADR 0067).
+    /// Start a message that replaces one of yours (ADR 0068).
     Replace(u64),
     SaveEdit,
     CancelEdit,
@@ -979,7 +979,7 @@ impl MsnDesktopApp {
                     // The quote row (ADR 0059): three small lines and the field's margins.
                     QUOTE_ROW_HEIGHT
                 } + if self.composer.replaces.is_some() {
-                    // The "Replacing #N" row (ADR 0067).
+                    // The "Replacing #N" row (ADR 0068).
                     28.0
                 } else {
                     0.0
@@ -1309,7 +1309,7 @@ impl MsnDesktopApp {
             });
             // The quote (ADR 0059), above the addressing row because this layout runs upwards.
             // It starts as the whole message; cut it down to the part you answer.
-            // Replace (ADR 0067): this message replaces one of yours, which stays, marked.
+            // Replace (ADR 0068): this message replaces one of yours, which stays, marked.
             if let Some(old) = self.composer.replaces {
                 let mut cancel = false;
                 ui.horizontal(|ui| {
@@ -1923,7 +1923,7 @@ impl MsnDesktopApp {
         self.focus = Some(FocusTarget::Composer);
     }
 
-    /// Starts a message that replaces your message `id` (ADR 0067): from its text when the
+    /// Starts a message that replaces your message `id` (ADR 0068): from its text when the
     /// composer is empty, in its thread and to its name.
     fn replace_message(&mut self, id: u64) {
         let Some(message) = self
@@ -2506,7 +2506,7 @@ impl MsnDesktopApp {
             reply_to: draft.reply_to,
             quote: draft.quote,
             mention_to: None,
-            // A replace names a message on one board; it is not kept with the draft (ADR 0067).
+            // A replace names a message on one board; it is not kept with the draft (ADR 0068).
             replaces: None,
             error: None,
         };
@@ -3220,7 +3220,7 @@ fn edit_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     }
 }
 
-/// "Replace" beside "Edit" on your own messages that nothing replaced yet (ADR 0067).
+/// "Replace" beside "Edit" on your own messages that nothing replaced yet (ADR 0068).
 fn replace_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     if ui
         .link(egui::RichText::new("Replace").small().color(theme::muted()))
@@ -3413,7 +3413,7 @@ fn message_header(
     };
     let mut job = egui::text::LayoutJob::default();
     job.append(username, 0.0, format(name_color));
-    let says = match message["to"].as_str() {
+    let says = match msn_cli::address::names_line(message) {
         Some(to) => format!(" says to {to}"),
         None => " says".to_string(),
     };
@@ -3429,7 +3429,7 @@ fn message_header(
     if message["editedAt"].is_string() {
         meta.push_str(" · edited");
     }
-    // Replace an instruction (ADR 0067): each end names the other.
+    // Replace an instruction (ADR 0068): each end names the other.
     if let Some(old) = message["replaces"].as_u64() {
         meta.push_str(&format!(" · replaces #{old}"));
     }
@@ -4564,7 +4564,7 @@ mod draft_tests {
     use super::layout_tests::fixture;
     use super::*;
 
-    /// Replace (ADR 0067): the composer starts from the old message, in its thread and to its
+    /// Replace (ADR 0068): the composer starts from the old message, in its thread and to its
     /// name; the send carries `replaces`, and the composer then sends new messages again.
     #[test]
     fn replace_starts_from_the_old_message_and_sends_replaces() {
@@ -4609,7 +4609,7 @@ mod draft_tests {
         assert_eq!(app.composer.replaces, None);
     }
 
-    /// A replaced message names its replacement in its header (ADR 0067).
+    /// A replaced message names its replacement in its header (ADR 0068).
     #[test]
     fn header_names_the_replacement() {
         let ctx = egui::Context::default();

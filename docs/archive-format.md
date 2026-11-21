@@ -108,7 +108,7 @@ defended against.
 }
 ```
 
-`replyTo`, `quote` ([ADR 0059](adr/0059-quote-in-reply.md)), `correlationId`, `to`, and a question's `choices`, an answer's `answer`, a question's first answer `answered` (`{id, choice, username, answeredAt}`) and its resolved `answerer` ([ADR 0065](adr/0065-ask-a-question-with-buttons.md)), and `replaces` and `replacedBy` ([ADR 0067](adr/0067-replace-an-instruction.md)) are omitted when unset, exactly as the API omits them. `text` is
+`replyTo`, `quote` ([ADR 0059](adr/0059-quote-in-reply.md)), `correlationId`, `to`, and a question's `choices`, an answer's `answer`, a question's first answer `answered` (`{id, choice, username, answeredAt}`) and its resolved `answerer` ([ADR 0065](adr/0065-ask-a-question-with-buttons.md)), and `replaces` and `replacedBy` ([ADR 0068](adr/0068-replace-an-instruction.md)) are omitted when unset, exactly as the API omits them. `text` is
 the verbatim payload; when `contentType` is `application/json` it is still transported as a string.
 Records appear in strictly ascending `sourceId`, each `> boundary.after` and `<= boundary.headCursor`.
 
@@ -214,7 +214,7 @@ A source message's `quote` (ADR 0059), when it has one, is kept as `provenance.q
 `choices`, `answer`, `answered` and `answerer` (ADR 0065), when present, are kept as
 `provenance.choices`, `provenance.answer`, `provenance.answered` and `provenance.answerer`. The import posts plain messages, so it never asks
 or answers a question again on the destination. A replacement's `replaces` and a replaced
-message's `replacedBy` (ADR 0067) are kept as `provenance.replaces` and `provenance.replacedBy`;
+message's `replacedBy` (ADR 0068) are kept as `provenance.replaces` and `provenance.replacedBy`;
 they name source ids, so the import never links messages on the destination.
 
 * The original author survives as `source.username`; the destination message's `username` is the

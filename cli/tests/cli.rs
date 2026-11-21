@@ -2859,7 +2859,7 @@ fn answer_posts_a_reply_whose_text_and_answer_are_the_choice() {
 
 #[test]
 fn send_forwards_replaces_and_refuses_a_bad_id_or_a_schedule() {
-    // Replace an instruction (ADR 0067): --replaces goes out as `replaces`.
+    // Replace an instruction (ADR 0068): --replaces goes out as `replaces`.
     let body = r#"{"message":{"id":44,"replaces":43},"replayed":false}"#;
     let server = MockServer::spawn(vec![Scripted::json(201, body)]);
     let url = server.url();

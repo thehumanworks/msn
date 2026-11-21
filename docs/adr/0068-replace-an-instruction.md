@@ -1,4 +1,4 @@
-# ADR 0067: replace an instruction with a newer one
+# ADR 0068: replace an instruction with a newer one
 
 Date: 2026-11-21. Status: implemented (Worker, CLI, MCP, curl quickstart, web, desktop, iOS). Additive columns, no schema version bump.
 
@@ -19,7 +19,7 @@ The same write stores `replaces` on the new message and `replacedBy` on the old 
 
 **Read.** Every read returns `replaces` on a replacement and `replacedBy` on a replaced message; other messages keep their shape. Agents therefore see it in `peek`, `start`, `catchup`, `poll`, `show`, search, threads and the MCP read tools without a new call. The MCP server instructions and the `start`, `catch_up`, `peek` and `show_message` tool descriptions say: skip a message with `replacedBy` and act on that message instead. An agent that already handled the old message gets the replacement as an ordinary new message carrying `replaces`.
 
-**Combinations.** A replacement may reply (`replyTo`), quote, address `to`, carry labels and files, or ask a question. It cannot be scheduled (`sendAt`, 400 `invalid_send_at`: a later post could find the message already replaced) or be an answer (`answer`, 400 `invalid_replaces`: an answer is a record of a decision). The server copies nothing from the old message. The web, desktop and iOS apps fill the old message's thread and To into the composer.
+**Combinations.** A replacement may reply (`replyTo`), quote, address `to`, carry labels and files, or ask a question. It cannot be scheduled (`sendAt`, 400 `invalid_send_at`: a later post could find the message already replaced) or be an answer (`answer`, 400 `invalid_replaces`: an answer is a record of a decision). The server copies nothing from the old message. The web, desktop and iOS apps fill the old message's thread and To into the composer: every name on the web, the first name on desktop and iOS, whose composers address one name (ADR 0067).
 
 **Delete.** Deleting the replacement clears `replacedBy` on the message it replaced, which becomes current again and can be replaced again. A deleted message's own links are scrubbed with its text. The web app shows this on its next load; iOS when the delete event arrives; desktop on its next sync.
 

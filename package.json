@@ -9,7 +9,7 @@
     "start": "wrangler dev",
     "cf-typegen": "wrangler types",
     "onboarding-check": "node scripts/onboarding-check.mjs",
-    "test": "vitest run && node --test tests/cli.test.mjs tests/onboarding-check.test.mjs tests/event-runner.test.mjs tests/host-*.test.mjs tests/agent-runner.test.mjs tests/push-sw.test.mjs tests/since.test.mjs tests/unread-web.test.mjs tests/install-script.test.mjs tests/markdown.test.mjs tests/transcript.test.mjs tests/theme.test.mjs tests/keys.test.mjs tests/mention.test.mjs tests/curl-commands.test.mjs tests/drafts.test.mjs tests/quote.test.mjs tests/choices.test.mjs tests/webhook-web.test.mjs tests/scheduled-web.test.mjs",
+    "test": "vitest run && node --test tests/cli.test.mjs tests/onboarding-check.test.mjs tests/event-runner.test.mjs tests/host-*.test.mjs tests/agent-runner.test.mjs tests/push-sw.test.mjs tests/since.test.mjs tests/unread-web.test.mjs tests/install-script.test.mjs tests/markdown.test.mjs tests/transcript.test.mjs tests/theme.test.mjs tests/keys.test.mjs tests/mention.test.mjs tests/curl-commands.test.mjs tests/drafts.test.mjs tests/quote.test.mjs tests/choices.test.mjs tests/webhook-web.test.mjs tests/scheduled-web.test.mjs tests/address.test.mjs",
     "test:participants": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/participants.integration.mjs",
     "test:swarm": "cargo build --manifest-path cli/Cargo.toml --locked && node tests/swarm.integration.mjs",
     "test:browser": "cargo build --manifest-path cli/Cargo.toml --locked && playwright test --config tests/playwright.config.mjs",

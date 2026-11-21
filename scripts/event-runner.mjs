@@ -7,6 +7,7 @@ import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { addressees, validAddress } from "./host/protocol.mjs";
 import { Fenced, ServerCommits, serverCommitsEnabled, unavailableHint } from "./host/server-commits.mjs";
 import { loadProfile, normalizeOrigin } from "./onboarding-check.mjs";
 
@@ -405,13 +406,14 @@ async function dispatch(event, connection, binding, options, signal) {
     typeof message.text !== "string" ||
     Buffer.byteLength(message.text) > 65536 ||
     !["text/plain", "application/json"].includes(message.contentType) ||
-    (message.to !== undefined && !validName(message.to)) ||
+    !validAddress(message) ||
     (event.type === "message.edited" && typeof message.editedAt !== "string")
   )
     throw new RunnerError("Canonical message identity or content is invalid.");
   if (message.username === connection.username) return false;
-  if (message.to !== connection.username && !(options.includeBroadcast && message.to === undefined))
-    return false;
+  // Several names (ADR 0067): the message wakes every agent it names, by exact name.
+  const names = addressees(message);
+  if (!names.includes(connection.username) && !(options.includeBroadcast && names.length === 0)) return false;
   const envelope = {
     schema: "msn.dispatch.v1",
     event,

@@ -165,6 +165,42 @@ fn send_returns_key_and_posts_once() {
 }
 
 #[test]
+fn send_addresses_a_list_of_names() {
+    // Several names (ADR 0067): `to` may be a list; it is sent as given.
+    let home = Home::new();
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"message":{"id":9,"to":"bob","recipients":["bob","carol"]}}"#,
+    )]);
+    let replies = session(
+        &home,
+        &server,
+        &[
+            call(
+                1,
+                "send",
+                json!({"text":"hi","key":"k-1","to":["bob","carol"]}),
+            ),
+            call(2, "send", json!({"text":"hi","to":[]})),
+            call(
+                3,
+                "send",
+                json!({"text":"hi","to":["a","b","c","d","e","f","g","h","i"]}),
+            ),
+        ],
+    );
+    assert_eq!(
+        ok(&replies[1])["message"]["recipients"],
+        json!(["bob", "carol"])
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&server.recorded()[0].body).unwrap(),
+        json!({"username":"alice","text":"hi","to":["bob","carol"]})
+    );
+    assert_eq!(server.recorded().len(), 1);
+}
+
+#[test]
 fn send_carries_a_quote_and_refuses_one_without_reply_to() {
     // Quote in a reply (ADR 0059).
     let home = Home::new();
@@ -200,7 +236,7 @@ fn send_carries_a_quote_and_refuses_one_without_reply_to() {
 
 #[test]
 fn send_carries_replaces() {
-    // Replace an instruction (ADR 0067).
+    // Replace an instruction (ADR 0068).
     let home = Home::new();
     let server = MockServer::spawn(vec![Scripted::json(
         201,

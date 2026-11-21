@@ -27,7 +27,10 @@ export type Message = {
   createdAt: string;
   replyTo?: number;
   correlationId?: string;
+  /** The first name the message is addressed to. */
   to?: string;
+  /** Every name, in order, when it is addressed to several (ADR 0067). */
+  recipients?: string[];
   reactions?: Reactions;
   /** When the sender last edited the text (ADR 0052); absent when never edited. */
   editedAt?: string;
@@ -39,9 +42,9 @@ export type Message = {
   answered?: Answered;
   /** The exact name that may answer, resolved by the server when the question was asked. */
   answerer?: string;
-  /** Your earlier message this one replaces (ADR 0067). */
+  /** Your earlier message this one replaces (ADR 0068). */
   replaces?: number;
-  /** The newer message that replaced this one (ADR 0067); absent until replaced. */
+  /** The newer message that replaced this one (ADR 0068); absent until replaced. */
   replacedBy?: number;
 };
 

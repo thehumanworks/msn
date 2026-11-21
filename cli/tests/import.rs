@@ -378,7 +378,7 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
                 let mut quoted = reply(11, 10, "world");
                 quoted["quote"] = json!("hello");
                 quoted["answer"] = json!("world");
-                // A replacement (ADR 0067) keeps its link to the source id as provenance.
+                // A replacement (ADR 0068) keeps its link to the source id as provenance.
                 quoted["replaces"] = json!(9);
                 quoted
             },

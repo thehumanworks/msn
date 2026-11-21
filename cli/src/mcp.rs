@@ -23,6 +23,7 @@ use serde_json::{Map, Value, json};
 use url::Url;
 use uuid::Uuid;
 
+use crate::address;
 use crate::agent;
 use crate::args::{Cli, Command};
 use crate::ask;
@@ -417,12 +418,7 @@ impl Server {
                         "correlationId must be non-blank text of at most 128 UTF-8 bytes.",
                     )
                 })?,
-            to: optional_str(args, "to")?
-                .map(validate_username)
-                .transpose()
-                .map_err(|_| {
-                    CliError::usage("to must be a non-blank username of at most 128 UTF-8 bytes.")
-                })?,
+            to: address::from_argument(args.get("to"))?,
             replaces: optional_int(args, "replaces", MAX_SAFE_INTEGER)?,
         };
         let labels = label_map(args, "labels")?;
@@ -1202,7 +1198,7 @@ pub fn tools() -> Vec<Value> {
                 "replyTo": cursor("Id of the same-channel message this one answers."),
                 "quote": {"type":"string","maxLength":2048,"description":"The part of the replyTo message you answer, shown above your reply as a quote. Needs replyTo."},
                 "correlationId": {"type":"string","maxLength":128,"description":"Opaque correlation string."},
-                "to": {"type":"string","description":"Address a username. Visible to everyone; not private."},
+                "to": {"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}],"description":"Address a username, or a list of up to 8 names: each named agent is woken and counts the message as addressed to it. Visible to everyone; not private."},
                 "attach": {"type":"array","maxItems":4,"items":{"type":"string"},"description":"Local file paths to attach (up to 4, 1 MiB each), e.g. a log, screenshot or patch."},
                 "labels": label_object("Labels to put on the message, such as {\"state\":\"open\"}. At most 16."),
                 "sendAt": {"type":"string","description":"Post later: a delay like 10m, 2h or 1d, or a time with a zone like 2026-11-21T09:00:00Z. No attachments."},

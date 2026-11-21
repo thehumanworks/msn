@@ -1,3 +1,4 @@
+pub mod address;
 pub mod agent;
 pub mod archive;
 pub mod args;
@@ -461,16 +462,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 .as_deref()
                 .map(require_correlation_id)
                 .transpose()?;
-            let to = to
-                .as_deref()
-                .map(|value| {
-                    identity::validate_username(value).map_err(|_| {
-                        CliError::usage(
-                            "--to must be a non-blank username of at most 128 UTF-8 bytes.",
-                        )
-                    })
-                })
-                .transpose()?;
+            let to = address::validate_names(&to, "--to")?;
             let payload = match (text, json) {
                 (Some(text), None) => Payload {
                     text: read_text(&text)?,
@@ -1423,8 +1415,9 @@ pub struct Correlation {
     /// The part of the `reply_to` message this reply quotes (ADR 0059); needs `reply_to`.
     pub quote: Option<String>,
     pub correlation_id: Option<String>,
-    pub to: Option<String>,
-    /// The sender's earlier message this one replaces (ADR 0067); the old one then carries
+    /// The names the message is addressed to (ADR 0067); empty for everyone.
+    pub to: Vec<String>,
+    /// The sender's earlier message this one replaces (ADR 0068); the old one then carries
     /// `replacedBy`.
     pub replaces: Option<u64>,
 }
@@ -1455,8 +1448,8 @@ pub fn send_body_with(
     if let Some(correlation_id) = &correlation.correlation_id {
         body["correlationId"] = json!(correlation_id);
     }
-    if let Some(to) = &correlation.to {
-        body["to"] = json!(to);
+    if let Some(to) = address::to_field(&correlation.to) {
+        body["to"] = to;
     }
     if let Some(replaces) = correlation.replaces {
         body["replaces"] = json!(replaces);

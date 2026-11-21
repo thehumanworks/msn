@@ -58,7 +58,7 @@ export type ChannelState = {
   scheduled: ScheduledMessage[];
 };
 
-/** `replaces` is your earlier message this one replaces (ADR 0067). */
+/** `replaces` is your earlier message this one replaces (ADR 0068). */
 export type Draft = { text: string; to?: string; replyTo?: number; replaces?: number };
 
 function byteLength(value: string): number {
@@ -178,7 +178,7 @@ export class ChannelController {
           const removed = this.byId.delete(event.resourceId);
           // Deleting an answer reopens its question (ADR 0065).
           const reopened = this.reopenQuestions(event.resourceId);
-          // Deleting a replacement makes the message it replaced current again (ADR 0067).
+          // Deleting a replacement makes the message it replaced current again (ADR 0068).
           const current = this.unreplace(event.resourceId);
           if (removed || reopened || current) this.publishMessages();
         }
@@ -629,7 +629,7 @@ export class ChannelController {
   }
 
   private publishMessages(): void {
-    // A replacement marks the loaded message it replaces (ADR 0067); one read later carries it.
+    // A replacement marks the loaded message it replaces (ADR 0068); one read later carries it.
     for (const message of this.byId.values()) {
       const old = message.replaces !== undefined ? this.byId.get(message.replaces) : undefined;
       if (old && old.replacedBy === undefined) this.byId.set(old.id, { ...old, replacedBy: message.id });

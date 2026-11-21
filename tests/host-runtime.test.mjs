@@ -49,6 +49,22 @@ test("one-slot host delivers a durable budget continuation to a real executable,
   assert.equal(f.messages.filter((m) => m.text.startsWith("budget:")).length, 1);
   assert.equal(f.status().failures.length, 0);
 });
+test("a message addressed to two agents wakes both and no one else (ADR 0067)", async (t) => {
+  const f = await hostFixture(t, { maxConcurrent: 2 });
+  f.post({ to: "alice", recipients: ["alice", "bob"], text: "both" });
+  await f.message((m) => m.username === "alice" && m.text === "done:both");
+  await f.message((m) => m.username === "bob" && m.text === "done:both");
+  f.post({ to: "carol", recipients: ["carol", "dave"], text: "others" });
+  f.post({ to: "bob", text: "after" });
+  await f.message((m) => m.username === "bob" && m.text === "done:after");
+  const records = await f.records();
+  assert.deepEqual(records.map((r) => `${r.who}:${r.input.message.text}`).sort(), [
+    "alice:both",
+    "bob:after",
+    "bob:both",
+  ]);
+  assert.equal(f.status().failures.length, 0);
+});
 test("hung peer cannot block ingestion/execution of another peer; later input still runs", async (t) => {
   const f = await hostFixture(t, { timeoutMs: 500, maxConcurrent: 2 });
   f.post({ to: "alice", text: "hang" });

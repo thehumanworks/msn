@@ -270,7 +270,7 @@ function ChannelBody({
     setEditError(null);
     setEditing(message);
   }, []);
-  // Replace (ADR 0067): the composer starts from the old message, in its thread and to its name.
+  // Replace (ADR 0068): the composer starts from the old message, in its thread and to its name.
   const [replacing, setReplacing] = useState<Message | null>(null);
   const onReplaceMessage = useCallback(
     (message: Message) => {
