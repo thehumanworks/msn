@@ -30,6 +30,7 @@ import { MessageRow } from "../components/MessageRow.tsx";
 import { MutePanel, muteButtonLabel, useMutes } from "../components/MutePanel.tsx";
 import { OutboxRow } from "../components/OutboxRow.tsx";
 import { PinnedStrip } from "../components/PinnedStrip.tsx";
+import { ScheduledPanel } from "../components/ScheduledPanel.tsx";
 import { SearchView } from "../components/SearchView.tsx";
 import { SnapshotView } from "../components/SnapshotView.tsx";
 import { TaskActivityView } from "../components/TaskActivityView.tsx";
@@ -395,6 +396,9 @@ function ChannelBody({
           <Text style={styles.pointerText}>New reply in thread #{pointer.root} · Show</Text>
         </Pressable>
       ) : null}
+      {editing ? null : (
+        <ScheduledPanel channel={controller} scheduled={state.scheduled} me={me} owner={!!session.owner} />
+      )}
       {archived ? (
         <View style={[styles.archived, { paddingBottom: bottomInset + spacing.md }]}>
           <Text style={styles.archivedText}>Archived · this board is read only. Unarchive it to post again.</Text>

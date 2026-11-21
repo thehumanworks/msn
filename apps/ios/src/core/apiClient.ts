@@ -32,6 +32,7 @@ import { ProtocolError } from "./errors.ts";
 import { decodeUnread, type MarkList, type Unread } from "./readMarks.ts";
 import { decodeMute, decodeMutes, type Mute } from "./mutes.ts";
 import { decodePersonas, type Persona } from "./mention.ts";
+import { decodeScheduledList, type ScheduledMessage } from "./scheduled.ts";
 
 export type SendMessageInput = {
   username: string;
@@ -239,6 +240,52 @@ export class ApiClient {
     if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
       throw new ProtocolError("Reaction response named a different message.");
     return message;
+  }
+
+  /** GET …/scheduled (ADR 0060): the board's scheduled messages, soonest first. */
+  async listScheduled(channel: string, signal?: AbortSignal): Promise<ScheduledMessage[]> {
+    return decodeScheduledList(
+      await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/scheduled`, { signal }),
+      channel,
+    );
+  }
+
+  /** POST …/messages with sendAt (ADR 0060): the message waits on the server until then. */
+  async scheduleMessage(
+    channel: string,
+    input: SendMessageInput & { sendAt: string },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/messages`, {
+      method: "POST",
+      body: input,
+      idempotencyKey,
+      signal,
+    });
+  }
+
+  /** PATCH …/scheduled/{id} (ADR 0060): new text and/or time; a new time retries a failed one. */
+  async changeScheduled(
+    channel: string,
+    id: number,
+    change: { username: string; text?: string; sendAt?: string },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/scheduled/${id}`, {
+      method: "PATCH",
+      body: change,
+      signal,
+    });
+  }
+
+  /** DELETE …/scheduled/{id} (ADR 0060) as `username`. */
+  async cancelScheduled(channel: string, id: number, username: string, signal?: AbortSignal): Promise<void> {
+    await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/scheduled/${id}`, {
+      method: "DELETE",
+      query: { username },
+      signal,
+    });
   }
 
   /** PATCH …/messages/{id} (ADR 0052): replaces the text of a message `username` sent. */

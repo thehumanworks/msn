@@ -4450,3 +4450,142 @@ test("the Invite dialog's curl commands join, read and send with plain curl", as
   await expect(page.locator("#invite-link")).not.toHaveValue("");
   await expect(page.locator("#copy-curl")).toBeHidden();
 });
+
+test("a message scheduled from the composer waits, can be changed and cancelled, and posts on time (ADR 0060)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  await openChannel(page, "general");
+  // Nothing to schedule yet: the button asks for the message first.
+  await page.getByRole("button", { name: "Send later" }).click();
+  await expect(page.locator("#status")).toContainText("Write the message first");
+  await expect(page.locator("#schedule-dialog")).not.toBeVisible();
+  await page.getByLabel("Message", { exact: true }).fill("Standup notes are due");
+  await page.getByRole("button", { name: "Send later" }).click();
+  const dialog = page.locator("#schedule-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Tomorrow, 9:00" }).click();
+  const tomorrow = await page.evaluate(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T09:00`;
+  });
+  await expect(dialog.getByLabel("Post at")).toHaveValue(tomorrow);
+  if (testInfo.project.name === "mobile") {
+    const small = await dialog.locator("button, input, textarea").evaluateAll((els) =>
+      els
+        .filter((el) => el.getBoundingClientRect().height > 0)
+        .filter((el) => el.getBoundingClientRect().height < 43.5)
+        .map((el) => el.id || el.textContent),
+    );
+    expect(small).toEqual([]);
+  }
+  await page.screenshot({ path: testInfo.outputPath("schedule-dialog.png") });
+  await dialog.getByRole("button", { name: "Schedule" }).click();
+  await expect(page.locator("#status")).toContainText("Scheduled for tomorrow 09:00");
+  // The composer is free again and nothing posted.
+  await expect(page.locator("#message")).toHaveValue("");
+  await expect(page.locator("#messages .message")).toHaveCount(0);
+  const bar = page.locator("#scheduled-open");
+  await expect(bar).toHaveText("1 scheduled · show");
+  const stored = await (
+    await request.get(`${t.path}/channels/general/scheduled`, { headers: t.headers })
+  ).json();
+  expect(stored.scheduled).toHaveLength(1);
+  expect(stored.scheduled[0]).toMatchObject({ text: "Standup notes are due", username: "Tomas" });
+  expect(new Date(stored.scheduled[0].sendAt).getTime()).toBe(
+    await page.evaluate((value) => new Date(value).getTime(), tomorrow),
+  );
+  // Change its text from the list.
+  await bar.click();
+  const list = page.locator("#scheduled-dialog");
+  await expect(list.locator("li")).toHaveCount(1);
+  await expect(list).toContainText("Posts tomorrow 09:00 · Tomas");
+  await page.screenshot({ path: testInfo.outputPath("scheduled-list.png") });
+  await list.getByRole("button", { name: "Change" }).click();
+  await expect(dialog.getByLabel("Text", { exact: true })).toHaveValue("Standup notes are due");
+  await dialog.getByLabel("Text", { exact: true }).fill("Standup notes are due at 10");
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(list.locator(".scheduled-text")).toHaveText("Standup notes are due at 10");
+  // Cancel it.
+  await list.getByRole("button", { name: "Cancel message" }).click();
+  await expect(list).toContainText("Nothing scheduled on this board.");
+  await list.getByRole("button", { name: "Close" }).click();
+  await expect(page.locator("#scheduled-bar")).toBeHidden();
+  // One scheduled a few seconds ahead posts as a normal message, without a reload.
+  const soon = await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: {
+      username: "Tomas",
+      text: "Posted by the alarm",
+      sendAt: new Date(Date.now() + 2500).toISOString(),
+    },
+  });
+  expect(soon.status()).toBe(201);
+  await expect(page.locator("#messages .message")).toHaveCount(1, { timeout: 15000 });
+  await expect(page.locator("#messages .message")).toContainText("Posted by the alarm");
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`${t.path}/channels/general/scheduled`, { headers: t.headers })).json())
+          .scheduled,
+    )
+    .toEqual([]);
+});
+
+test("files cannot be scheduled, and a failed scheduled message says why (ADR 0060)", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  const scheduled = await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "Tomas", text: "after archive", sendAt: new Date(Date.now() + 1500).toISOString() },
+  });
+  expect(scheduled.status()).toBe(201);
+  expect((await request.put(`${t.path}/channels/general/archive`, { headers: t.headers })).status()).toBe(
+    200,
+  );
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(`${t.path}/channels/general/scheduled`, { headers: t.headers })).json())
+          .scheduled[0]?.status,
+      { timeout: 15000 },
+    )
+    .toBe("failed");
+  await connect(page, t);
+  await channelsPane(page);
+  await page.getByText("Show archived").click();
+  await page.getByRole("button", { name: "# general · archived" }).click();
+  await expect(page.locator("#channel-title")).toHaveText("# general");
+  await expect(page.locator("#scheduled-open")).toHaveText("1 failed to post · show");
+  await page.locator("#scheduled-open").click();
+  await expect(page.locator("#scheduled-list")).toContainText("Not posted:");
+  await expect(page.locator("#scheduled-list")).toContainText("archived");
+  // On an archived board it can only be cancelled.
+  await expect(page.locator("#scheduled-list").getByRole("button", { name: "Pick a new time" })).toHaveCount(
+    0,
+  );
+  await page.locator("#scheduled-list").getByRole("button", { name: "Cancel message" }).click();
+  await expect(page.locator("#scheduled-list")).toContainText("Nothing scheduled");
+  await page.locator("#close-scheduled").click();
+  // Unarchive and try to schedule a file.
+  expect((await request.delete(`${t.path}/channels/general/archive`, { headers: t.headers })).status()).toBe(
+    200,
+  );
+  await page.reload();
+  await expect(page.locator("#channel-title")).toHaveText("# general");
+  await page
+    .locator("#attach-input")
+    .setInputFiles({ name: "a.txt", mimeType: "text/plain", buffer: Buffer.from("hi") });
+  await page.getByLabel("Message", { exact: true }).fill("with a file");
+  await page.getByRole("button", { name: "Send later" }).click();
+  await expect(page.locator("#status")).toContainText("cannot carry files");
+  await expect(page.locator("#schedule-dialog")).not.toBeVisible();
+});

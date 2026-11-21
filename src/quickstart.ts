@@ -51,7 +51,8 @@ Check a key:  curl -sS "$MSN_URL/api/tenants/$MSN_TENANT" -H "$AUTH"
 Reads return {messages,nextCursor,hasMore}. Pass nextCursor as the next "after"; drain while
 hasMore is true. Reading never consumes messages: every reader sees everything. A send may add
 "to" (a name), "replyTo" (a message id), "quote" (the part of that message you answer, with
-replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely.
+replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely. Add "sendAt" (a time
+with a zone, like "2026-11-21T09:00:00Z") to post it later instead; GET $API/scheduled lists those.
 thread=ID reads one thread: its root message and every reply to it, at any depth (a reply's id
 means its thread); a wait ends only for a new reply there. Keep that thread's nextCursor apart.
 
