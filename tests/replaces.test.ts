@@ -1,4 +1,5 @@
-import { exports } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 // Replace an instruction with a newer one (ADR 0068): a send may name `replaces`, an earlier
@@ -136,6 +137,39 @@ describe("replace a message (ADR 0068)", () => {
     );
   });
 
+  it("links the oldest to the newest when the middle of a chain is deleted", async () => {
+    const { tenant, post, send, point, read } = await fixture();
+    const a = await send({ text: "one" });
+    const b = await send({ text: "two", replaces: a.id });
+    const c = await send({ text: "three", replaces: b.id });
+    expect((await adminDelete(tenant, b.id)).status).toBe(204);
+    // Only the newest is current; an agent skipping replaced messages acts on C, not A.
+    expect((await point(a.id)).replacedBy).toBe(c.id);
+    expect((await read()).filter((m) => m.replacedBy === undefined).map((m) => m.id)).toEqual([c.id]);
+    expect(await refused(await post({ text: "x", replaces: a.id }), 409, "already_replaced")).toContain(
+      `message ${c.id}`,
+    );
+    // Deleting the newest then makes the oldest current again.
+    expect((await adminDelete(tenant, c.id)).status).toBe(204);
+    expect(await point(a.id)).not.toHaveProperty("replacedBy");
+  });
+
+  it("refuses another board's id and a case variant of the sender's name", async () => {
+    const { tenant, owner, post, send } = await fixture();
+    await call(tenant, "/channels/other", owner.token, "PUT");
+    const elsewhere = (await (
+      await call(tenant, "/channels/other/messages", owner.token, "POST", {
+        username: "tomas",
+        text: "there",
+      })
+    ).json()) as { message: Message };
+    await send({ text: "here" });
+    await refused(await post({ text: "x", replaces: elsewhere.message.id }), 400, "invalid_replaces");
+    const mine = await send({ text: "mine" });
+    const variant = await post({ text: "x", replaces: mine.id, username: "Tomas" });
+    expect(variant.status).toBe(403);
+  });
+
   it("makes the old message current again when the replacement is deleted", async () => {
     const { tenant, send, point } = await fixture();
     const old = await send({ text: "old" });
@@ -168,5 +202,53 @@ describe("replace a message (ADR 0068)", () => {
       to?: string;
     };
     expect([next.replyTo, next.to, next.replaces]).toEqual([root.id, "lead", old.id]);
+  });
+
+  it("refuses watch-only keys and archived boards", async () => {
+    const { tenant, owner, post, send } = await fixture();
+    const old = await send({ text: "old" });
+    const invite = (await (
+      await call(tenant, "/invites", owner.token, "POST", { channel: "work", watch: true })
+    ).json()) as { code: string };
+    const watcher = (await (
+      await call(tenant, "/invites/redeem", undefined, "POST", { code: invite.code, username: "watcher" })
+    ).json()) as { token: string };
+    await refused(
+      await call(tenant, "/channels/work/messages", watcher.token, "POST", {
+        username: "watcher",
+        text: "x",
+        replaces: old.id,
+      }),
+      403,
+      "watch_only",
+    );
+    expect((await call(tenant, "/channels/work/archive", owner.token, "PUT")).status).toBe(200);
+    await refused(await post({ text: "x", replaces: old.id }), 409, "board_archived");
+  });
+
+  it("on a shared board, refuses a persona that took over another's old name", async () => {
+    const tenant = `replace-board-${crypto.randomUUID()}`;
+    const owner = (await (await call(tenant, "", undefined, "PUT", { username: "human" })).json()) as {
+      token: string;
+    };
+    const agent = "f".repeat(64);
+    expect(
+      (await call(tenant, "/channels/work/board", owner.token, "PUT", { credential: agent, goal: "Ship" }))
+        .status,
+    ).toBe(201);
+    for (const name of ["lead", "dev"])
+      expect(
+        (await call(tenant, `/channels/work/personas/${name}`, agent, "PUT", { displayName: name })).status,
+      ).toBe(201);
+    const send = (username: string, input: object) =>
+      call(tenant, "/channels/work/messages", agent, "POST", { username, ...input });
+    const sent = ((await (await send("lead", { text: "mine" })).json()) as { message: Message }).message;
+    await refused(await send("dev", { text: "x", replaces: sent.id }), 403, "not_sender");
+    // The same display name under another persona id is not the sender.
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE messages SET personaId = 'dev' WHERE id = ?", sent.id);
+    });
+    await refused(await send("lead", { text: "x", replaces: sent.id }), 403, "not_sender");
   });
 });

@@ -175,11 +175,13 @@ export class ChannelController {
         break;
       case "message.deleted":
         if (event.resourceId !== null) {
+          const next = this.byId.get(event.resourceId)?.replacedBy;
           const removed = this.byId.delete(event.resourceId);
           // Deleting an answer reopens its question (ADR 0065).
           const reopened = this.reopenQuestions(event.resourceId);
-          // Deleting a replacement makes the message it replaced current again (ADR 0068).
-          const current = this.unreplace(event.resourceId);
+          // Deleting a replacement makes the message it replaced current again (ADR 0068), or
+          // links it to the deleted message's own replacement in a chain.
+          const current = this.unreplace(event.resourceId, next);
           if (removed || reopened || current) this.publishMessages();
         }
         this.needReload = true; // a redaction also invalidates snapshots
@@ -616,13 +618,16 @@ export class ChannelController {
     return changed;
   }
 
-  /** Clears `replacedBy` from loaded messages that `id` replaced. True when any changed. */
-  private unreplace(id: number): boolean {
+  /**
+   * Points loaded messages that deleted `id` replaced at `next`, the deleted message's own
+   * replacement, or clears `replacedBy` when it had none. True when any changed.
+   */
+  private unreplace(id: number, next: number | undefined): boolean {
     let changed = false;
     for (const message of this.byId.values()) {
       if (message.replacedBy !== id) continue;
       const { replacedBy: _gone, ...current } = message;
-      this.byId.set(message.id, current);
+      this.byId.set(message.id, next === undefined ? current : { ...current, replacedBy: next });
       changed = true;
     }
     return changed;

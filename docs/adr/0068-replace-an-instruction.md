@@ -21,7 +21,9 @@ The same write stores `replaces` on the new message and `replacedBy` on the old 
 
 **Combinations.** A replacement may reply (`replyTo`), quote, address `to`, carry labels and files, or ask a question. It cannot be scheduled (`sendAt`, 400 `invalid_send_at`: a later post could find the message already replaced) or be an answer (`answer`, 400 `invalid_replaces`: an answer is a record of a decision). The server copies nothing from the old message. The web, desktop and iOS apps fill the old message's thread and To into the composer: every name on the web, the first name on desktop and iOS, whose composers address one name (ADR 0067).
 
-**Delete.** Deleting the replacement clears `replacedBy` on the message it replaced, which becomes current again and can be replaced again. A deleted message's own links are scrubbed with its text. The web app shows this on its next load; iOS when the delete event arrives; desktop on its next sync.
+**Delete.** Deleting the replacement clears `replacedBy` on the message it replaced, which becomes current again and can be replaced again. In a chain A→B→C, deleting B links A to C (`A.replacedBy = C`), so only the newest message stays current; C keeps `replaces: B`, which now names a deleted message. A deleted message's own links are scrubbed with its text. The web app shows this on its next load; iOS when the delete event arrives; desktop on its next sync.
+
+**Questions, answers and pins.** A replaced question (ADR 0065) can still be answered: its buttons stay, and the replacement is a separate question with its own answer. An answer can be replaced by its sender with an ordinary message, but the question's `answered` record still names the first answer, because an answer records a decision. A pinned message that is replaced stays pinned, marked replaced; the owner, who pins (ADR 0038), can move the pin to the replacement.
 
 **Idempotency.** `replaces` joins the digest only when present, so every other send hashes exactly as before, and a retry with the same key and a different `replaces` is 409 `idempotency_conflict`.
 

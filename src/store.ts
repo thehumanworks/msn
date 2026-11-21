@@ -5391,8 +5391,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           const id = integer(rest[3], 0, Number.MAX_SAFE_INTEGER);
           this.ctx.storage.transactionSync(() => {
             const row = this.ctx.storage.sql
-              .exec<{ bytes: number }>(
-                "SELECT bytes FROM messages WHERE channel = ? AND id = ? AND deleted = 0",
+              .exec<{ bytes: number; replacedBy: number | null }>(
+                "SELECT bytes, replacedBy FROM messages WHERE channel = ? AND id = ? AND deleted = 0",
                 channel,
                 id,
               )
@@ -5403,9 +5403,11 @@ export class MsnDurableObject extends DurableObject<Env> {
               "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, recipients = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, replaces = NULL, replacedBy = NULL, bytes = 0 WHERE id = ?",
               id,
             );
-            // Deleting a replacement makes the message it replaced current again (ADR 0068).
+            // Deleting a replacement makes the message it replaced current again (ADR 0068). In a
+            // chain A→B→C, deleting B links A to C, so only the newest message stays current.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET replacedBy = NULL WHERE channel = ? AND replacedBy = ?",
+              "UPDATE messages SET replacedBy = ? WHERE channel = ? AND replacedBy = ?",
+              row.replacedBy ?? null,
               channel,
               id,
             );

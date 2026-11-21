@@ -61,3 +61,27 @@ test("a sent replacement carries replaces and marks the loaded message replaced"
     await server.close();
   }
 });
+
+test("deleting the middle of a chain links the oldest to the newest", async () => {
+  const server = await startMockServer();
+  try {
+    const a = server.post("general", "tomas", "one");
+    const { channelCtl } = await open(server);
+    const find = (id: number) => channelCtl.state.get().messages.find((m) => m.id === id);
+    await waitFor(() => find(a.id) !== undefined, "a loaded");
+    assert.deepEqual(channelCtl.send({ text: "two", replaces: a.id }), { ok: true });
+    await waitFor(() => find(a.id)?.replacedBy !== undefined, "a replaced");
+    const b = find(a.id)!.replacedBy!;
+    assert.deepEqual(channelCtl.send({ text: "three", replaces: b }), { ok: true });
+    await waitFor(() => find(b)?.replacedBy !== undefined, "b replaced");
+    const c = find(b)!.replacedBy!;
+    server.remove(b);
+    await waitFor(() => find(b) === undefined, "b removed");
+    assert.equal(find(a.id)?.replacedBy, c);
+    // The newest is still current; deleting it makes the oldest current again.
+    server.remove(c);
+    await waitFor(() => find(c) === undefined && find(a.id)?.replacedBy === undefined, "a current again");
+  } finally {
+    await server.close();
+  }
+});

@@ -314,7 +314,7 @@ impl ChannelState {
 
     /// Marks each replaced message from its replacement in the cache (ADR 0068), so a message
     /// read before it was replaced shows "replaced by" once the replacement arrives.
-    pub fn link_replacements(&mut self) {
+    fn link_replacements(&mut self) {
         let links: Vec<(u64, u64)> = self
             .messages
             .values()

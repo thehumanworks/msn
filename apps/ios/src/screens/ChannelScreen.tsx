@@ -157,7 +157,7 @@ function ChannelBody({
 }) {
   const state = useStore(controller.state);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
-  const [restored, setRestored] = useState<{ draft: Draft; n: number } | null>(null);
+  const [restored, setRestored] = useState<{ draft: Draft; n: number; fill?: boolean } | null>(null);
   const me = session.session.username;
   // @ suggestions (ADR 0055) ask for the board's personas the first time @ is typed.
   const loadPersonas = useCallback(
@@ -279,6 +279,8 @@ function ChannelBody({
       setRestored((prev) => ({
         draft: { text: message.text, ...(message.to ? { to: message.to } : {}) },
         n: (prev?.n ?? 0) + 1,
+        // Typed text and To are kept; only empty fields start from the old message.
+        fill: true,
       }));
     },
     [byId],

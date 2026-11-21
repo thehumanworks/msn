@@ -345,9 +345,9 @@ fn given_two_message_pages_when_export_then_archive_contains_both_and_stops_at_h
     let replaced = lines.iter().find(|row| row["sourceId"] == 3).unwrap();
     assert_eq!(replaced["replacedBy"], 4);
     assert!(replaced.get("replaces").is_none());
-    if let Some(newer) = lines.iter().find(|row| row["sourceId"] == 4) {
-        assert_eq!(newer["replaces"], 3);
-    }
+    let newer = lines.iter().find(|row| row["sourceId"] == 4).unwrap();
+    assert_eq!(newer["replaces"], 3);
+    assert!(newer.get("replacedBy").is_none());
     assert!(answer.get("replaces").is_none() && answer.get("replacedBy").is_none());
     assert!(
         lines

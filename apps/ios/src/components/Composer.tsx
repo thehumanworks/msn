@@ -25,8 +25,11 @@ type Props = {
   replacing?: Message | null;
   onClearReplace?: () => void;
   bottomInset: number;
-  /** A rejected message returned for editing; `n` changes each time so the same text can be restored twice. */
-  restored: { draft: Draft; n: number } | null;
+  /**
+   * A rejected message returned for editing; `n` changes each time so the same text can be restored
+   * twice. With `fill`, it only fills an empty text or To, so typed words are kept (ADR 0068).
+   */
+  restored: { draft: Draft; n: number; fill?: boolean } | null;
   /** Called with each draft the controller accepted for sending. */
   onSent?: (draft: Draft) => void;
   /** Loaded messages and my name, for @ suggestions (ADR 0055). */
@@ -116,9 +119,16 @@ export function Composer({
 
   useEffect(() => {
     if (!restored) return;
-    setText(restored.draft.text);
-    setTo(restored.draft.to ?? "");
-    setShowTo(!!restored.draft.to);
+    const { draft, fill } = restored;
+    if (fill) {
+      setText((typed) => (typed.trim() ? typed : draft.text));
+      setTo((typed) => (typed.trim() ? typed : (draft.to ?? "")));
+      setShowTo((shown) => shown || !!draft.to);
+    } else {
+      setText(draft.text);
+      setTo(draft.to ?? "");
+      setShowTo(!!draft.to);
+    }
     setMentionTo(null);
     setError(null);
   }, [restored]);
@@ -130,8 +140,17 @@ export function Composer({
     setAsked(false);
   }, [channel.channel]);
 
-  // A replacement stays in the old message's thread, even when that thread's root is not loaded.
-  const thread = replyTo?.id ?? replacing?.replyTo;
+  // A replacement stays in the old message's thread, even when that thread's root is not loaded,
+  // until the reader cancels the reply.
+  const [threadCancelled, setThreadCancelled] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new replacement is the trigger.
+  useEffect(() => setThreadCancelled(false), [replacing?.id]);
+  const replaceThread = threadCancelled ? undefined : replacing?.replyTo;
+  const thread = replyTo?.id ?? replaceThread;
+  function cancelReply() {
+    setThreadCancelled(true);
+    onClearReply();
+  }
   function send() {
     const draft: Draft = {
       text,
@@ -201,7 +220,14 @@ export function Composer({
           <Text style={{ flex: 1, color: colors.muted, fontSize: 13 }} numberOfLines={1}>
             Replying to {replyTo.username}: {replyTo.text.replace(/\s+/g, " ").slice(0, 60)}
           </Text>
-          <Button label="Cancel reply" variant="ghost" onPress={onClearReply} />
+          <Button label="Cancel reply" variant="ghost" onPress={cancelReply} />
+        </View>
+      ) : replaceThread !== undefined ? (
+        <View style={styles.reply}>
+          <Text style={{ flex: 1, color: colors.muted, fontSize: 13 }} numberOfLines={1}>
+            In the thread of #{replaceThread}
+          </Text>
+          <Button label="Cancel reply" variant="ghost" onPress={cancelReply} />
         </View>
       ) : null}
       {showTo ? (
