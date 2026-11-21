@@ -2240,6 +2240,11 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
     headers: t.headers,
     data: { username: "agent", text: "on it", replyTo: 1, quote: "labelled" },
   });
+  // A question with buttons for this person (ADR 0065).
+  await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: "Ship it?", to: "Tomas", choices: ["yes", "no"] },
+  });
   // An agent status strip (ADR 0064) with its summary.
   expect(
     (
@@ -2271,8 +2276,9 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
   await page.getByText("Your access details").click();
   expect(await small()).toEqual([]);
   await openChannel(page, "general");
-  await expect(page.locator(".message")).toHaveCount(3);
+  await expect(page.locator(".message")).toHaveCount(4);
   await expect(page.locator(".label-chip")).toHaveCount(1);
+  await expect(page.locator(".choice-button")).toHaveCount(2);
   await expect(page.locator("#statuses")).toBeVisible();
   expect(await small()).toEqual([]);
   // An open thread with a quoted reply, and a composer replying with a quote (ADR 0059).
@@ -4663,4 +4669,73 @@ test("files cannot be scheduled, and a failed scheduled message says why (ADR 00
   await page.getByRole("button", { name: "Send later" }).click();
   await expect(page.locator("#status")).toContainText("cannot carry files");
   await expect(page.locator("#schedule-dialog")).not.toBeVisible();
+});
+
+test("the addressed person answers a question with one tap; the buttons then lock for everyone (ADR 0065)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  const ask = async (data) =>
+    (
+      await (
+        await request.post(`${t.path}/channels/work/messages`, {
+          headers: t.headers,
+          data: { username: "lead", ...data },
+        })
+      ).json()
+    ).message.id;
+  const mine = await ask({ text: "Ship v0.2 now?", to: "human", choices: ["yes", "no <b>wait</b>"] });
+  const theirs = await ask({ text: "Merge #66?", to: "reviewer", choices: ["merge", "hold"] });
+  const later = await ask({ text: "Tag the CLI?", to: "human", choices: ["tag", "skip"] });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const choices = (id) => page.locator(`#messages article[data-id="${id}"] > .message-choices`);
+  // Choice text is untrusted and shows as text, never markup.
+  const no = choices(mine).getByRole("button", { name: "no <b>wait</b>" });
+  await expect(no).toBeEnabled();
+  await expect(choices(mine).locator("b")).toHaveCount(0);
+  await expect(choices(mine)).toContainText("Your answer");
+  // A question to someone else shows its choices locked, and who is asked.
+  await expect(choices(theirs).getByRole("button", { name: "merge" })).toBeDisabled();
+  await expect(choices(theirs)).toContainText("Waiting for reviewer");
+  await page.screenshot({ path: testInfo.outputPath(`ask-open-${testInfo.project.name}.png`) });
+
+  await no.click();
+  await expect(no).toHaveAttribute("aria-pressed", "true");
+  await expect(no).toBeDisabled();
+  await expect(choices(mine).getByRole("button", { name: "yes" })).toBeDisabled();
+  await expect(choices(mine)).toContainText("human answered no <b>wait</b>");
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages?after=0`, { headers: t.headers })
+  ).json();
+  const reply = history.messages.find((m) => m.replyTo === mine);
+  expect(reply).toMatchObject({ username: "human", text: "no <b>wait</b>", answer: "no <b>wait</b>" });
+  expect(history.messages.find((m) => m.id === mine).answered).toMatchObject({
+    id: reply.id,
+    username: "human",
+  });
+
+  // An answer from another device locks the buttons here as it arrives.
+  expect(
+    (
+      await request.post(`${t.path}/channels/work/messages`, {
+        headers: t.headers,
+        data: { username: "human", replyTo: later, answer: "skip" },
+      })
+    ).status(),
+  ).toBe(201);
+  await expect(choices(later).getByRole("button", { name: "skip" })).toHaveAttribute("aria-pressed", "true");
+  await expect(choices(later).getByRole("button", { name: "tag" })).toBeDisabled();
+  // After a reload the server's record keeps them locked.
+  await page.reload();
+  await expect(page.locator("#channel-title")).toBeVisible();
+  await openChannel(page, "work");
+  await expect(choices(mine).getByRole("button", { name: "no <b>wait</b>" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(choices(mine).getByRole("button", { name: "yes" })).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`ask-answered-${testInfo.project.name}.png`) });
 });

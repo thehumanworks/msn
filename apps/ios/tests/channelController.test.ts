@@ -135,6 +135,8 @@ test("a failed canonical read backs off and self-heals; stale flag reflects it",
     channelCtl.start();
     await waitFor(() => channelCtl.state.get().phase === "error" || channelCtl.state.get().phase === "ready", "first result");
     await waitFor(() => channelCtl.state.get().phase === "ready", "self-heal", 5000);
+    // The history read sets "ready"; the statuses read after it (ADR 0064) then clears stale.
+    await waitFor(() => !channelCtl.state.get().stale, "stale cleared", 5000);
     assert.equal(channelCtl.state.get().stale, false);
     channelCtl.dispose();
     ctl.dispose();

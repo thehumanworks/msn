@@ -350,3 +350,83 @@ fn uncertain_send_returns_its_key_and_a_retry_reuses_it() {
     assert_eq!(requests[0].headers["idempotency-key"], key);
     assert_eq!(requests[1].headers["idempotency-key"], key);
 }
+
+#[test]
+fn ask_posts_a_question_and_wait_answer_finds_the_reply() {
+    // Ask a question with buttons (ADR 0065).
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            201,
+            r#"{"message":{"id":5,"username":"alice","text":"Ship it?","to":"tomas","choices":["yes","no"]}}"#,
+        ),
+        // wait_answer: the question, not yet answered, then a page with the answer.
+        Scripted::json(
+            200,
+            r#"{"message":{"id":5,"to":"tomas","choices":["yes","no"]}}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"messages":[{"id":6,"replyTo":5,"answer":"yes","username":"tomas","createdAt":"t6"}],"nextCursor":6}"#,
+        ),
+    ]);
+    let replies = session(
+        &home,
+        &server,
+        &[
+            call(
+                1,
+                "ask",
+                json!({"text":"Ship it?","to":"tomas","choices":["yes","no"],"key":"ask-1"}),
+            ),
+            call(2, "wait_answer", json!({"id":5,"wait":5})),
+            call(
+                3,
+                "ask",
+                json!({"text":"Ship?","to":"tomas","choices":["only"]}),
+            ),
+        ],
+    );
+    let asked = ok(&replies[1]);
+    assert_eq!(asked["answered"], false);
+    assert_eq!(asked["idempotencyKey"], "ask-1");
+    assert_eq!(asked["message"]["choices"], json!(["yes", "no"]));
+    assert_eq!(
+        *ok(&replies[2]),
+        json!({"question":5,"answered":true,"answer":{"question":5,"answer":"yes","username":"tomas","messageId":6,"answeredAt":"t6"}})
+    );
+    assert_eq!(replies[3]["result"]["isError"], true);
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        json!({"username":"alice","text":"Ship it?","to":"tomas","choices":["yes","no"]})
+    );
+    assert!(requests[1].path.ends_with("/channels/general/messages/5"));
+    assert!(
+        requests[2]
+            .path
+            .contains("messages?thread=5&after=5&wait=5"),
+        "{}",
+        requests[2].path
+    );
+}
+
+#[test]
+fn answer_posts_the_choice_as_a_reply() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"message":{"id":6,"replyTo":5,"answer":"no"}}"#,
+    )]);
+    let replies = session(
+        &home,
+        &server,
+        &[call(1, "answer", json!({"id":5,"choice":"no"}))],
+    );
+    assert_eq!(ok(&replies[1])["message"]["answer"], "no");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&server.recorded()[0].body).unwrap(),
+        json!({"username":"alice","text":"no","replyTo":5,"answer":"no"})
+    );
+}

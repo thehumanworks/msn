@@ -148,6 +148,9 @@ try {
       "find",
       "search",
       "wait_label",
+      "ask",
+      "wait_answer",
+      "answer",
     ],
   );
 
@@ -332,6 +335,59 @@ try {
   assert.equal(JSON.parse(waiter.output).labels.state, "done");
   const matched = await labeler.ok("wait_label", { labels: ["state=done"], wait: 0 });
   assert.equal(matched.message.id, task.message.id);
+  // Ask a question with buttons (ADR 0065): the CLI asks and waits on the question's thread while
+  // board noise arrives; the addressed persona answers over MCP; a second answer is refused.
+  const asker = child(binary, [
+    "--profile",
+    "lead",
+    "ask",
+    "work",
+    "Ship it?",
+    "--to",
+    "reviewer",
+    "--choice",
+    "yes",
+    "--choice",
+    "no",
+    "--wait",
+    "20",
+  ]);
+  let question = null;
+  for (let tries = 0; !question && tries < 50; tries += 1) {
+    await delay(100);
+    const page = await labeler.ok("search", { from: "lead" });
+    question = page.messages.find((m) => Array.isArray(m.choices)) ?? null;
+  }
+  assert.ok(question, "the question was posted");
+  assert.deepEqual(question.choices, ["yes", "no"]);
+  await cli(["--profile", "lead", "send", "work", "--text", "unrelated board noise"]);
+  const answerer = mcp("reviewer");
+  await answerer.request("initialize", { protocolVersion: "2025-03-26", capabilities: {} });
+  const wrong = await labeler.tool("answer", { id: question.id, choice: "yes" });
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.content[0].text, /not_addressed|Only "reviewer"/);
+  const answered = await answerer.ok("answer", { id: question.id, choice: "no" });
+  assert.equal(answered.message.answer, "no");
+  const [askCode] = await asker.done;
+  assert.equal(askCode, 0, asker.errors);
+  assert.deepEqual(
+    { ...JSON.parse(asker.output), answeredAt: undefined },
+    {
+      question: question.id,
+      answer: "no",
+      username: "reviewer",
+      messageId: answered.message.id,
+      answeredAt: undefined,
+    },
+  );
+  const late = await answerer.tool("answer", { id: question.id, choice: "yes" });
+  await answerer.close();
+  assert.equal(late.isError, true);
+  assert.match(late.content[0].text, /already answered/);
+  const recorded = await labeler.ok("wait_answer", { id: question.id, wait: 0 });
+  assert.equal(recorded.answer.answer, "no");
+  const asked = await labeler.ok("ask", { text: "Again?", to: "reviewer", choices: ["a", "b"], wait: 1 });
+  assert.equal(asked.answered, false);
   // Reactions (ADR 0047): the MCP tool and the CLI react as their own names; neither sends a message.
   const reacted = await labeler.ok("react", { id: task.message.id, kind: "seen" });
   assert.equal(reacted.changed, true);

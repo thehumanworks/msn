@@ -1,6 +1,7 @@
 import { ProtocolError } from "./errors.ts";
 import type {
   AgentStatus,
+  Answered,
   CatchupResult,
   ChannelListResult,
   ChannelSummary,
@@ -129,7 +130,35 @@ export function decodeMessage(raw: unknown): Message {
     if (typeof m.editedAt !== "string") bad("message");
     message.editedAt = m.editedAt;
   }
+  // Questions with buttons (ADR 0065).
+  if (m.choices !== undefined) {
+    if (!Array.isArray(m.choices) || m.choices.length < 2 || m.choices.some((c) => typeof c !== "string"))
+      bad("message");
+    message.choices = m.choices as string[];
+  }
+  if (m.answer !== undefined) {
+    if (typeof m.answer !== "string") bad("message");
+    message.answer = m.answer;
+  }
+  if (m.answered !== undefined) message.answered = decodeAnswered(m.answered);
+  if (m.answerer !== undefined) {
+    if (typeof m.answerer !== "string") bad("message");
+    message.answerer = m.answerer;
+  }
   return message;
+}
+
+/** A question's answer record (ADR 0065). */
+export function decodeAnswered(raw: unknown): Answered {
+  const a = obj(raw, "answered");
+  if (
+    !safeInt(a.id, 1) ||
+    typeof a.choice !== "string" ||
+    typeof a.username !== "string" ||
+    typeof a.answeredAt !== "string"
+  )
+    bad("answered");
+  return { id: a.id, choice: a.choice, username: a.username, answeredAt: a.answeredAt };
 }
 
 /** Reactions (ADR 0047): known kinds only, each a list of names. A kind added later is ignored. */

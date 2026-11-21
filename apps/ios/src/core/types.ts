@@ -31,7 +31,18 @@ export type Message = {
   reactions?: Reactions;
   /** When the sender last edited the text (ADR 0052); absent when never edited. */
   editedAt?: string;
+  /** A question's buttons (ADR 0065); only `to` may answer. */
+  choices?: string[];
+  /** The choice this reply picks from its replyTo question (ADR 0065). */
+  answer?: string;
+  /** The question's first answer (ADR 0065); absent until answered. */
+  answered?: Answered;
+  /** The exact name that may answer, resolved by the server when the question was asked. */
+  answerer?: string;
 };
+
+/** Which reply answered a question, with what, by whom and when (ADR 0065). */
+export type Answered = { id: number; choice: string; username: string; answeredAt: string };
 
 /** One page of message search (ADR 0037), newest first. */
 export type SearchPage = {

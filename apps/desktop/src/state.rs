@@ -306,6 +306,41 @@ impl ChannelState {
             };
             self.messages.remove(&smallest);
         }
+        self.link_answers();
+    }
+
+    /// Marks each question answered from an answer reply in the cache (ADR 0065), so the buttons
+    /// lock when someone else answers even if the question was read before the answer. The first
+    /// answer (lowest id) wins, as on the server; a question that already records one keeps it.
+    fn link_answers(&mut self) {
+        let answers: Vec<(u64, Value)> = self
+            .messages
+            .values()
+            .filter_map(|reply| {
+                let question = reply["replyTo"].as_u64()?;
+                let choice = reply["answer"].as_str()?;
+                Some((
+                    question,
+                    serde_json::json!({
+                        "id": reply["id"],
+                        "choice": choice,
+                        "username": reply["username"],
+                        "answeredAt": reply["createdAt"],
+                    }),
+                ))
+            })
+            .collect();
+        for (question, answered) in answers {
+            if let Some(message) = self
+                .messages
+                .get_mut(&question)
+                .and_then(Value::as_object_mut)
+                && message.get("choices").is_some_and(Value::is_array)
+                && !message.get("answered").is_some_and(Value::is_object)
+            {
+                message.insert("answered".into(), answered);
+            }
+        }
     }
 }
 
@@ -603,6 +638,31 @@ impl AppState {
             id,
             kind: kind.into(),
             remove,
+        }]
+    }
+
+    /// Answers question `question` with `choice` as the connected name (ADR 0065). Only the
+    /// addressed name is offered the buttons; the server checks it again.
+    pub fn answer(&mut self, question: u64, choice: String) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if self.is_archived(&channel) {
+            self.status = Some(format!("{channel} is archived and read only."));
+            return Vec::new();
+        }
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Vec::new();
+        };
+        vec![Command::Answer {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            question,
+            choice,
+            key: uuid::Uuid::new_v4().to_string(),
         }]
     }
 
@@ -1030,6 +1090,7 @@ impl AppState {
                 self.status = Some(BUSY.into());
             }
             Command::React { .. }
+            | Command::Answer { .. }
             | Command::EditMessage { .. }
             | Command::Schedule { .. }
             | Command::ChangeScheduled { .. } => self.status = Some(BUSY.into()),
@@ -1359,6 +1420,25 @@ impl AppState {
                         "Message #{} edited.",
                         message["id"].as_u64().unwrap_or(0)
                     ));
+                }
+                Vec::new()
+            }
+            UiEvent::Answered {
+                generation,
+                channel_generation,
+                channel,
+                question,
+                answered,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && answered.is_object()
+                    && let Some(message) = self
+                        .channel
+                        .as_mut()
+                        .and_then(|state| state.messages.get_mut(&question))
+                        .and_then(Value::as_object_mut)
+                {
+                    message.insert("answered".into(), answered);
                 }
                 Vec::new()
             }
@@ -2400,6 +2480,98 @@ mod tests {
             message: json!({"id": 4, "channel": "general", "text": "a2", "editedAt": "2026-11-20T00:00:01Z"}),
         });
         assert_eq!(state.channel.as_ref().unwrap().messages[&4]["text"], "a2");
+    }
+
+    #[test]
+    fn answering_a_question_sends_the_choice_and_locks_it_locally() {
+        // Ask a question with buttons (ADR 0065).
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let mut question = msg(4, "Ship it?");
+        question["to"] = json!("alice");
+        question["choices"] = json!(["yes", "no"]);
+        synced(&mut state, vec![question], 4, 0);
+        let commands = state.answer(4, "no".into());
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Answer { question: 4, choice, username, .. }] if choice == "no" && username == "alice"
+        ));
+        let cg = state.channel_generation;
+        // An empty record (the server lost it) changes nothing; a real one marks the question.
+        state.apply(UiEvent::Answered {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            question: 4,
+            answered: Value::Null,
+        });
+        assert!(
+            state.channel.as_ref().unwrap().messages[&4]
+                .get("answered")
+                .is_none()
+        );
+        state.apply(UiEvent::Answered {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            question: 4,
+            answered: json!({"id": 5, "choice": "no", "username": "alice", "answeredAt": "t"}),
+        });
+        assert_eq!(
+            state.channel.as_ref().unwrap().messages[&4]["answered"]["choice"],
+            "no"
+        );
+        // A stale answer for an old channel generation is ignored.
+        state.apply(UiEvent::Answered {
+            generation: 1,
+            channel_generation: cg + 1,
+            channel: "general".into(),
+            question: 4,
+            answered: json!({"id": 9, "choice": "yes", "username": "x", "answeredAt": "t"}),
+        });
+        assert_eq!(
+            state.channel.as_ref().unwrap().messages[&4]["answered"]["id"],
+            5
+        );
+    }
+
+    #[test]
+    fn someone_elses_answer_locks_the_question_on_the_next_sync() {
+        // Ask a question with buttons (ADR 0065): the answer arrives as a reply from another client.
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let mut question = msg(4, "Ship it?");
+        question["to"] = json!("alice");
+        question["choices"] = json!(["yes", "no"]);
+        synced(&mut state, vec![question.clone()], 4, 0);
+        assert!(
+            state.channel.as_ref().unwrap().messages[&4]
+                .get("answered")
+                .is_none()
+        );
+        // The sync returns the question without its record (read first) and the answer reply.
+        let mut answer = msg(5, "yes");
+        answer["username"] = json!("alice");
+        answer["replyTo"] = json!(4);
+        answer["answer"] = json!("yes");
+        let mut late = msg(6, "no");
+        late["replyTo"] = json!(4);
+        late["answer"] = json!("no");
+        synced(&mut state, vec![question, answer, late], 6, 0);
+        let answered = &state.channel.as_ref().unwrap().messages[&4]["answered"];
+        assert_eq!(answered["choice"], "yes");
+        assert_eq!(answered["id"], 5);
+        assert_eq!(answered["username"], "alice");
+        // A plain reply never marks a question, and a message without choices is never marked.
+        let mut plain = msg(7, "hm");
+        plain["replyTo"] = json!(8);
+        plain["answer"] = json!("x");
+        synced(&mut state, vec![plain, msg(8, "not a question")], 8, 0);
+        assert!(
+            state.channel.as_ref().unwrap().messages[&8]
+                .get("answered")
+                .is_none()
+        );
     }
 
     #[test]

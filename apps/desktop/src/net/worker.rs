@@ -126,6 +126,16 @@ pub enum Command {
         /// The `editedAt` the editor started from; None for a never-edited message.
         base: Option<String>,
     },
+    /// Answers a question with one of its choices as `username` (ADR 0065).
+    Answer {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        question: u64,
+        choice: String,
+        key: String,
+    },
     /// Adds (`remove: false`) or removes one reaction as `username` (ADR 0047).
     React {
         generation: u64,
@@ -238,6 +248,7 @@ impl Command {
             | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
+            | Command::Answer { generation, .. }
             | Command::LoadEdits { generation, .. }
             | Command::EditMessage { generation, .. }
             | Command::SendMessage { generation, .. }
@@ -382,6 +393,14 @@ pub enum UiEvent {
         channel_generation: u64,
         channel: String,
         message: Value,
+    },
+    /// A question's first answer after the user's tap (ADR 0065).
+    Answered {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        question: u64,
+        answered: Value,
     },
     /// One message's reactions after the user's own change (`Null` when none are left).
     Reacted {
@@ -930,6 +949,39 @@ fn handle_command(
                 generation,
                 Some(channel_generation),
                 "edit",
+                err,
+                true,
+                None,
+            ),
+        },
+        Command::Answer {
+            channel_generation,
+            channel,
+            username,
+            question,
+            choice,
+            key,
+            ..
+        } => match client_ops::answer(
+            &cc.client, &cc.tenant, &cc.token, &channel, &username, question, &choice, &key,
+        ) {
+            Ok(answered) => emit(
+                tx,
+                wake,
+                UiEvent::Answered {
+                    generation,
+                    channel_generation,
+                    channel,
+                    question,
+                    answered,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "answer",
                 err,
                 true,
                 None,

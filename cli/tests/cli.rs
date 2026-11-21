@@ -2689,3 +2689,170 @@ fn help_lists_events_and_watch() {
         assert!(text.contains(needle), "help missing {needle}\n{text}");
     }
 }
+
+#[test]
+fn ask_posts_a_question_with_choices_and_prints_it() {
+    // Ask a question with buttons (ADR 0065): --to and each --choice go out in order.
+    let body = r#"{"message":{"id":5,"to":"tomas","choices":["yes","no"]},"replayed":false}"#;
+    let server = MockServer::spawn(vec![Scripted::json(201, body)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "agent",
+        "ask",
+        "general",
+        "Ship it?",
+        "--to",
+        "tomas",
+        "--choice",
+        "yes",
+        "--choice",
+        "no",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(r#""choices":["yes","no"]"#));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({"username": "agent", "text": "Ship it?", "to": "tomas", "choices": ["yes", "no"]})
+    );
+    // Bad choices or a missing --to fail before the network.
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    let long = "x".repeat(129);
+    for extra in [
+        vec!["--to", "tomas", "--choice", "only"],
+        vec!["--to", "tomas", "--choice", "a", "--choice", "a"],
+        vec!["--to", "tomas", "--choice", "a", "--choice", &long],
+        vec!["--choice", "a", "--choice", "b"],
+        vec![
+            "--to", "tomas", "--choice", "a", "--choice", "b", "--wait", "0",
+        ],
+    ] {
+        let mut args = tenant_args(&url).to_vec();
+        args.extend(["--username", "u", "ask", "general", "Q?"]);
+        args.extend(extra.iter().copied());
+        let out = output_of(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{extra:?}: {}",
+            stderr_str(&out)
+        );
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
+fn ask_wait_prints_the_answer_once_the_addressed_name_replies() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            201,
+            r#"{"message":{"id":5,"to":"tomas","choices":["yes","no"]},"replayed":false}"#,
+        ),
+        // An unrelated reply and a plain reply to the question do not count.
+        Scripted::json(
+            200,
+            r#"{"messages":[{"id":6,"replyTo":2,"answer":"x"},{"id":7,"replyTo":5,"text":"hmm"}],"nextCursor":7,"hasMore":false}"#,
+        ),
+        Scripted::json(
+            200,
+            r#"{"messages":[{"id":8,"replyTo":5,"answer":"no","text":"no","username":"tomas","createdAt":"2026-11-21T02:00:00Z"}],"nextCursor":8,"hasMore":false}"#,
+        ),
+    ]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "agent",
+        "ask",
+        "general",
+        "Ship it?",
+        "--to",
+        "tomas",
+        "--choice",
+        "yes",
+        "--choice",
+        "no",
+        "--wait",
+        "60",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let printed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        printed,
+        serde_json::json!({"question": 5, "answer": "no", "username": "tomas", "messageId": 8, "answeredAt": "2026-11-21T02:00:00Z"})
+    );
+    let recorded = server.recorded();
+    assert!(
+        recorded[1]
+            .path
+            .contains("/channels/general/messages?thread=5&after=5&wait=25"),
+        "{}",
+        recorded[1].path
+    );
+    assert!(
+        recorded[2].path.contains("messages?thread=5&after=7&"),
+        "{}",
+        recorded[2].path
+    );
+}
+
+#[test]
+fn ask_wait_exits_2_with_answered_false_on_timeout() {
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            201,
+            r#"{"message":{"id":5,"to":"tomas","choices":["yes","no"]},"replayed":false}"#,
+        ),
+        Scripted::json(200, r#"{"messages":[],"nextCursor":5,"hasMore":false}"#)
+            .delayed(Duration::from_millis(1200)),
+    ]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "agent",
+        "ask",
+        "general",
+        "Ship it?",
+        "--to",
+        "tomas",
+        "--choice",
+        "yes",
+        "--choice",
+        "no",
+        "--wait",
+        "1",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_str(&out));
+    let printed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        printed,
+        serde_json::json!({"question": 5, "answered": false})
+    );
+    assert!(stderr_str(&out).contains("Timed out after 1s"));
+    assert!(server.recorded()[1].path.contains("wait=1"));
+}
+
+#[test]
+fn answer_posts_a_reply_whose_text_and_answer_are_the_choice() {
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"message":{"id":8},"replayed":false}"#,
+    )]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "tomas", "answer", "general", "5", "no"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({"username": "tomas", "text": "no", "replyTo": 5, "answer": "no"})
+    );
+}

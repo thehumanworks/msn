@@ -245,6 +245,24 @@ function ChannelBody({
     },
     [controller],
   );
+  // Questions with buttons (ADR 0065): a failed answer shows in a banner until the next one.
+  // While an answer is in flight its question's buttons stay locked, so a second tap sends nothing.
+  const [answerError, setAnswerError] = useState<string | null>(null);
+  const [answering, setAnswering] = useState<ReadonlySet<number>>(() => new Set());
+  const onAnswer = useCallback(
+    (message: Message, choice: string) => {
+      setAnswering((current) => new Set(current).add(message.id));
+      void controller.answer(message.id, choice).then((error) => {
+        setAnswerError(error);
+        setAnswering((current) => {
+          const next = new Set(current);
+          next.delete(message.id);
+          return next;
+        });
+      });
+    },
+    [controller],
+  );
   // Edits (ADR 0052): one message at a time, in a panel where the composer was.
   const [editing, setEditing] = useState<Message | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
@@ -286,6 +304,10 @@ function ChannelBody({
     ) : editError ? (
       <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setEditError(null) }}>
         Message not edited: {editError}
+      </Banner>
+    ) : answerError ? (
+      <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setAnswerError(null) }}>
+        Not answered: {answerError}
       </Banner>
     ) : reactError ? (
       <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setReactError(null) }}>
@@ -378,6 +400,8 @@ function ChannelBody({
                 unfolded={unfolded.has(item.id)}
                 me={me}
                 onReact={archived ? undefined : onReact}
+                onAnswer={archived ? undefined : onAnswer}
+                answering={answering.has(item.id)}
                 onEditMessage={!archived && item.username === me && me !== "github" ? onEditMessage : undefined}
               />
             );

@@ -14,6 +14,9 @@ pub enum CliError {
     Conflict(String),
     #[error("{0}")]
     Network(String),
+    /// A bounded wait ended with nothing to report (ADR 0065: `msn ask --wait`).
+    #[error("{0}")]
+    Timeout(String),
 }
 
 impl CliError {
@@ -37,6 +40,10 @@ impl CliError {
         Self::Conflict(message.into())
     }
 
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::Timeout(message.into())
+    }
+
     pub fn network(message: impl Into<String>) -> Self {
         Self::Network(message.into())
     }
@@ -49,6 +56,7 @@ impl CliError {
             Self::NotFound(_) => 4,
             Self::Conflict(_) => 5,
             Self::Network(_) => 6,
+            Self::Timeout(_) => 2,
         }
     }
 }

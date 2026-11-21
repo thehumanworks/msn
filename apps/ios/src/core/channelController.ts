@@ -1,6 +1,7 @@
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
-import { createPendingSend } from "./composer.ts";
+import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
+import { answeredBy } from "./questions.ts";
 import type { ScheduledMessage } from "./scheduled.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
@@ -107,6 +108,7 @@ export class ChannelController {
   private running = false;
   private outboxRunning = false;
   private disposed = false;
+  private readonly answering = new Set<number>();
   private outboxSeq = 0;
   private retryAttempt = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -171,7 +173,12 @@ export class ChannelController {
         this.needSync = true;
         break;
       case "message.deleted":
-        if (event.resourceId !== null && this.byId.delete(event.resourceId)) this.publishMessages();
+        if (event.resourceId !== null) {
+          const removed = this.byId.delete(event.resourceId);
+          // Deleting an answer reopens its question (ADR 0065).
+          const reopened = this.reopenQuestions(event.resourceId);
+          if (removed || reopened) this.publishMessages();
+        }
         this.needReload = true; // a redaction also invalidates snapshots
         break;
       case "snapshot.published":
@@ -501,6 +508,53 @@ export class ChannelController {
     }
   }
 
+  /**
+   * Answers a loaded question with one of its choices (ADR 0065). Resolves to an error message,
+   * or null once the board shows the answer. When someone answered first, shows theirs.
+   */
+  async answer(id: number, choice: string): Promise<string | null> {
+    const question = this.byId.get(id);
+    if (!question?.choices) return "That question is no longer loaded.";
+    // One answer at a time per question: a second tap while the first is in flight sends nothing.
+    if (this.answering.has(id)) return null;
+    this.answering.add(id);
+    try {
+      return await this.sendAnswer(id, choice);
+    } finally {
+      this.answering.delete(id);
+    }
+  }
+
+  private async sendAnswer(id: number, choice: string): Promise<string | null> {
+    const username = this.ctl.session.username;
+    try {
+      const result = await this.ctl.api.answer(
+        this.channel,
+        id,
+        { username, choice },
+        generateIdempotencyKey(),
+        this.ctl.signal,
+      );
+      if (this.disposed) return null;
+      this.byId.set(result.message.id, result.message);
+      this.publishMessages();
+      return null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+      if (error instanceof ApiError && error.code === "already_answered") {
+        try {
+          const { message } = await this.ctl.api.getMessage(this.channel, id, this.ctl.signal);
+          if (!this.disposed && message.answered) {
+            this.byId.set(id, message);
+            this.publishMessages();
+          }
+        } catch {}
+      }
+      return error instanceof Error ? error.message : "Could not send the answer.";
+    }
+  }
+
   /** Best effort, like pins: a failed or unsupported read keeps what is shown (ADR 0064). */
   private async refreshStatuses(): Promise<void> {
     try {
@@ -546,7 +600,25 @@ export class ChannelController {
     }
   }
 
+  /** Clears `answered` from loaded questions whose answer was `id`. True when any changed. */
+  private reopenQuestions(id: number): boolean {
+    let changed = false;
+    for (const message of this.byId.values()) {
+      if (message.answered?.id !== id) continue;
+      const { answered: _gone, ...open } = message;
+      this.byId.set(message.id, open);
+      changed = true;
+    }
+    return changed;
+  }
+
   private publishMessages(): void {
+    // An answer locks its loaded question (ADR 0065); a question read later carries `answered`.
+    for (const message of this.byId.values()) {
+      const answered = answeredBy(message);
+      const question = answered && message.replyTo !== undefined ? this.byId.get(message.replyTo) : undefined;
+      if (answered && question?.choices && !question.answered) this.byId.set(question.id, { ...question, answered });
+    }
     let olderNotLoaded = this.state.get().olderNotLoaded;
     if (this.byId.size > MAX_MESSAGES) {
       const ids = [...this.byId.keys()].sort((a, b) => a - b);

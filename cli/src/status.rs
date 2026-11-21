@@ -9,9 +9,7 @@ pub const MAX_STATUS_CHARS: usize = 80;
 
 /// Trims and checks a status text the way the server does, so mistakes fail before a request.
 pub fn parse_text(raw: &str) -> Result<String, CliError> {
-    // Trim what the server's String.prototype.trim does: Unicode whitespace and U+FEFF.
-    // U+0085 is whitespace to Rust but not to JavaScript; the server refuses it, so keep it here.
-    let text = raw.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
+    let text = js_trim(raw);
     if text.is_empty() {
         return Err(CliError::usage(
             "A status must not be blank; use --clear to remove it.",
@@ -30,11 +28,17 @@ pub fn parse_text(raw: &str) -> Result<String, CliError> {
     Ok(text.to_owned())
 }
 
+/// Trims what the server's `String.prototype.trim` does: Unicode whitespace and U+FEFF.
+/// U+0085 is whitespace to Rust but not to JavaScript; the server refuses it, so keep it here.
+pub fn js_trim(raw: &str) -> &str {
+    raw.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
+}
+
 /// The characters the server refuses in a status: controls, line and paragraph separators,
 /// the Arabic letter mark, embeddings, overrides and isolates, and invisible ones. Zero-width
 /// joiner and non-joiner, and the LRM and RLM marks, stay allowed for emoji, scripts and mixed
 /// right-to-left text.
-fn forbidden(c: char) -> bool {
+pub fn forbidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::agent;
 use crate::args::{Cli, Command};
+use crate::ask;
 use crate::attachments;
 use crate::client::{MsnClient, classify};
 use crate::config::{
@@ -234,6 +235,9 @@ impl Server {
                     "find" => self.find(args),
                     "search" => self.search(args),
                     "wait_label" => self.wait_label(args),
+                    "ask" => self.ask(args),
+                    "wait_answer" => self.wait_answer(args),
+                    "answer" => self.answer(args),
                     _ => unreachable!("every listed tool is dispatched"),
                 }
             };
@@ -861,6 +865,112 @@ impl Server {
         })
     }
 
+    /// Asks the addressed name a question with buttons (ADR 0065), then waits up to `wait` seconds.
+    fn ask(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let text = match args.get("text") {
+            Some(Value::String(text)) if !text.trim().is_empty() => text.clone(),
+            _ => return Err(CliError::usage("text must be the non-blank question.").into()),
+        };
+        let to = optional_str(args, "to")?
+            .ok_or_else(|| CliError::usage("to is required: the one name that may answer."))?;
+        let to = validate_username(to).map_err(|_| {
+            CliError::usage("to must be a non-blank username of at most 128 UTF-8 bytes.")
+        })?;
+        let choices = ask::validate_choices(&string_list(args, "choices")?)?;
+        let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(0);
+        let key = match optional_str(args, "key")? {
+            Some(key) => require_idempotency_key(key)?.to_owned(),
+            None => Uuid::new_v4().to_string(),
+        };
+        let posted = (|| {
+            let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+            let response = MsnClient::new(&self.url)?.post_json(
+                &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+                &token,
+                &[("Idempotency-Key", key.as_str())],
+                &ask::question_body(&username, &text, &to, &choices),
+            )?;
+            classify(response.status, &response.body)?;
+            serde_json::from_str::<Value>(&response.body)
+                .map_err(|_| CliError::generic("Response was not JSON."))
+        })()
+        .map_err(|error| ToolError {
+            error,
+            key: Some(key.clone()),
+            send_at: None,
+        })?;
+        let question = posted["message"]["id"]
+            .as_u64()
+            .ok_or_else(|| CliError::generic("The server did not return the question's id."))?;
+        // A replayed ask may already be answered; otherwise wait=0 reads nothing more.
+        let answer = match ask::recorded_answer(&posted["message"]) {
+            Some(found) => Some(found),
+            None if wait == 0 => None,
+            None => self.wait_for(&tenant, &token, &channel, question, wait)?,
+        };
+        Ok(json!({
+            "message": posted["message"],
+            "idempotencyKey": key,
+            "answered": answer.is_some(),
+            "answer": answer,
+        }))
+    }
+
+    /// Waits up to `wait` seconds for the answer to question `id` (ADR 0065).
+    fn wait_answer(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let question = required_id(args)?;
+        let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(MAX_WAIT);
+        let answer = self.wait_for(&tenant, &token, &channel, question, wait)?;
+        Ok(json!({ "question": question, "answered": answer.is_some(), "answer": answer }))
+    }
+
+    fn wait_for(
+        &self,
+        tenant: &str,
+        token: &str,
+        channel: &str,
+        question: u64,
+        wait: u64,
+    ) -> Result<Option<Value>, CliError> {
+        let client = MsnClient::new(&self.url)?;
+        ask::wait_answer(
+            |path| agent::fetch_json(&client, path, token),
+            tenant,
+            channel,
+            question,
+            wait,
+        )
+    }
+
+    /// Answers question `id` with one of its choices, as this session's name (ADR 0065).
+    fn answer(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let question = required_id(args)?;
+        let choice = match args.get("choice") {
+            Some(Value::String(choice)) => ask::validate_answer(choice)?,
+            _ => {
+                return Err(
+                    CliError::usage("choice must be one of the question's choices.").into(),
+                );
+            }
+        };
+        let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+        let response = MsnClient::new(&self.url)?.post_json(
+            &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+            &token,
+            &[("Idempotency-Key", Uuid::new_v4().to_string().as_str())],
+            &ask::answer_body(&username, question, &choice),
+        )?;
+        classify(response.status, &response.body)?;
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?)
+    }
+
     fn board(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         let (tenant, token) = self.credentials()?;
         let channel = self.channel(args)?;
@@ -899,6 +1009,7 @@ fn kind(error: &CliError) -> &'static str {
         CliError::NotFound(_) => "not found",
         CliError::Conflict(_) => "conflict",
         CliError::Network(_) => "network",
+        CliError::Timeout(_) => "timeout",
     }
 }
 
@@ -1270,6 +1381,42 @@ pub fn tools() -> Vec<Value> {
             &["labels"],
             (true, true),
         ),
+        tool(
+            "ask",
+            "Ask a question with buttons",
+            "Ask one person a question they answer with one tap. They see the choices as buttons in the web, desktop and iOS apps; a tap posts a reply whose answer is the choice. Only the name in `to` can answer, and only the first answer counts. Waits up to `wait` seconds (default 0) and returns answered with the answer, or answered false: then call wait_answer with the message id to keep waiting. Retry a failed ask with the same key.",
+            json!({
+                "text": {"type":"string","description":"The question."},
+                "to": {"type":"string","description":"The one name that may answer."},
+                "choices": {"type":"array","minItems":2,"maxItems":6,"items":{"type":"string","minLength":1,"maxLength":128},"description":"2 to 6 answers, in the order to show them. Each is trimmed, then must be one line of plain text (no control, direction or invisible characters), at most 128 UTF-8 bytes, and different from the others."},
+                "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for the answer (default 0)."},
+                "key": {"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Idempotency key; generated when omitted."},
+            }),
+            &["text", "to", "choices"],
+            (false, false),
+        ),
+        tool(
+            "wait_answer",
+            "Wait for an answer",
+            "Wait up to `wait` seconds for the answer to a question asked with ask. Returns answered true with {answer, username, messageId, answeredAt}, or answered false on timeout; call again to keep waiting.",
+            json!({
+                "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"The question's message id."},
+                "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait (default 25)."},
+            }),
+            &["id"],
+            (true, true),
+        ),
+        tool(
+            "answer",
+            "Answer a question",
+            "Answer a question addressed to you (a message whose to is your name and that has choices) with one of its choices, exactly as listed. Only the first answer counts; a later one fails with already_answered.",
+            json!({
+                "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"The question's message id."},
+                "choice": {"type":"string","maxLength":128,"description":"One of the question's choices (trimmed, at most 128 UTF-8 bytes)."},
+            }),
+            &["id", "choice"],
+            (false, true),
+        ),
     ]
 }
 
@@ -1408,7 +1555,10 @@ mod tests {
                 "status",
                 "find",
                 "search",
-                "wait_label"
+                "wait_label",
+                "ask",
+                "wait_answer",
+                "answer"
             ]
         );
         for tool in tools {

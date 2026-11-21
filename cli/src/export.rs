@@ -632,6 +632,25 @@ fn message_record(row: &Value) -> Result<MessageRecord, CliError> {
             .and_then(Value::as_str)
             .map(str::to_string),
         to: row.get("to").and_then(Value::as_str).map(str::to_string),
+        choices: row.get("choices").and_then(Value::as_array).map(|choices| {
+            choices
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        }),
+        answer: row
+            .get("answer")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        answered: row
+            .get("answered")
+            .filter(|value| value.is_object())
+            .cloned(),
+        answerer: row
+            .get("answerer")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 

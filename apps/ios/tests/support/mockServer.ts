@@ -37,6 +37,10 @@ type StoredMessage = {
   /** Edits (ADR 0052): when, and the edit's place in the workspace's edit order. */
   editedAt?: string;
   editSeq?: number;
+  /** Questions with buttons (ADR 0065). */
+  choices?: string[];
+  answer?: string;
+  answered?: { id: number; choice: string; username: string; answeredAt: string };
 };
 
 type StoredSnapshot = { channel: string; version: number; text: string; coversThrough: number; invalidated: boolean };
@@ -49,6 +53,10 @@ export type MockServerHandle = {
   requests: Array<{ method: string; path: string; query: string }>;
   /** Insert a message as another participant (emits message.created). */
   post: (channel: string, username: string, text: string, contentType?: string) => StoredMessage;
+  /** Ask `to` a question with buttons (ADR 0065). */
+  ask: (channel: string, username: string, text: string, to: string, choices: string[]) => StoredMessage;
+  /** Answer a question as `username`, as another device would. */
+  answer: (channel: string, username: string, question: number, choice: string) => StoredMessage;
   /** Redact a message (emits message.deleted, invalidates snapshots). */
   remove: (id: number) => void;
   publishSnapshot: (channel: string, text: string) => StoredSnapshot;
@@ -164,10 +172,13 @@ export async function startMockServer(): Promise<MockServerHandle> {
       ...(m.to ? { to: m.to } : {}),
       ...(reactions.has(m.id) ? { reactions: reactions.get(m.id) } : {}),
       ...(m.editedAt ? { editedAt: m.editedAt } : {}),
+      ...(m.choices ? { choices: m.choices } : {}),
+      ...(m.answer ? { answer: m.answer } : {}),
+      ...(m.answered ? { answered: m.answered } : {}),
     };
   }
 
-  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number } = {}): StoredMessage {
+  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number; choices?: string[]; answer?: string } = {}): StoredMessage {
     ensureChannel(channel);
     messageId += 1;
     const stored: StoredMessage = {
@@ -324,10 +335,25 @@ export async function startMockServer(): Promise<MockServerHandle> {
             }
             return json(res, 200, { message: toMessage(existing), replayed: true });
           }
+          // Answers (ADR 0065): only the addressed name, only a listed choice, only once.
+          const question =
+            body.answer !== undefined ? messages.find((m) => m.id === Number(body.replyTo) && m.channel === channel) : undefined;
+          if (body.answer !== undefined) {
+            if (!question?.choices?.includes(String(body.answer)))
+              return json(res, 400, { error: { code: "invalid_answer", message: "Not one of the choices." } });
+            if (question.to !== body.username)
+              return json(res, 403, { error: { code: "not_addressed", message: `Only "${question.to}" can answer this question.` } });
+            if (question.answered)
+              return json(res, 409, { error: { code: "already_answered", message: "This question was already answered." } });
+          }
           const stored = insert(channel, String(body.username), String(body.text), String(body.contentType ?? "text/plain"), key, digest, {
             ...(body.to ? { to: String(body.to) } : {}),
             ...(body.replyTo ? { replyTo: Number(body.replyTo) } : {}),
+            ...(Array.isArray(body.choices) ? { choices: body.choices.map(String) } : {}),
+            ...(body.answer !== undefined ? { answer: String(body.answer) } : {}),
           });
+          if (question)
+            question.answered = { id: stored.id, choice: String(body.answer), username: stored.username, answeredAt: stored.createdAt };
           return json(res, 201, { message: toMessage(stored), replayed: false });
         }
         if (method === "GET") {
@@ -367,6 +393,11 @@ export async function startMockServer(): Promise<MockServerHandle> {
           .sort((a, b) => (a.editSeq ?? 0) - (b.editSeq ?? 0));
         const cursor = Math.max(after, ...rows.map((m) => m.editSeq ?? 0));
         return json(res, 200, { edits: rows.map(toMessage), editCursor: cursor, hasMore: false });
+      }
+      if (rest[2] === "messages" && rest.length === 4 && method === "GET") {
+        const message = messages.find((m) => m.id === Number(rest[3]) && m.channel === channel && !m.deleted);
+        if (!message) return json(res, 404, { error: { code: "message_not_found", message: "Message not found." } });
+        return json(res, 200, { message: toMessage(message), historyRevision: revision.get(channel) ?? 0 });
       }
       if (rest[2] === "messages" && rest.length === 4 && method === "PATCH") {
         const body = await readBody(req);
@@ -564,12 +595,22 @@ export async function startMockServer(): Promise<MockServerHandle> {
       else pins.delete(id);
     },
     post: (channel, username, text, contentType = "text/plain") => insert(channel, username, text, contentType, null, ""),
+    ask: (channel, username, text, to, choices) => insert(channel, username, text, "text/plain", null, "", { to, choices }),
+    answer: (channel, username, question, choice) => {
+      const stored = insert(channel, username, choice, "text/plain", null, "", { replyTo: question, answer: choice });
+      const asked = messages.find((m) => m.id === question);
+      if (asked && !asked.answered)
+        asked.answered = { id: stored.id, choice, username, answeredAt: stored.createdAt };
+      return stored;
+    },
     remove: (id) => {
       const message = messages.find((m) => m.id === id);
       if (!message) return;
       message.deleted = true;
       message.text = "";
       message.username = "";
+      // Deleting an answer reopens its question (ADR 0065).
+      for (const asked of messages) if (asked.answered?.id === id) asked.answered = undefined;
       revision.set(message.channel, (revision.get(message.channel) ?? 0) + 1);
       for (const s of snapshots) if (s.channel === message.channel) s.invalidated = true;
       appendEvent(message.channel, "message.deleted", id);

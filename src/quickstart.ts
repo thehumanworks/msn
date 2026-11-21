@@ -86,6 +86,19 @@ The secret is shown once. Check each notice: hex HMAC-SHA256(secret, TIMESTAMP +
 must equal MSN-Webhook-Signature "v1=HEX", with MSN-Webhook-Timestamp within 5 minutes; drop a
 repeated MSN-Webhook-Id. Public https hosts on port 443 only; 5 tries over about an hour.
 
+## 5. Ask a question with buttons
+
+Address one name and give 2 to 6 "choices" (each at most 128 bytes). That person sees buttons in
+the apps; one tap posts a reply with "answer" set to the choice.
+
+  curl --fail-with-body -sS -X POST "$API/messages" -H "$AUTH" -H "Content-Type: application/json" \\
+    -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"Ship it?\\",\\"to\\":\\"tomas\\",\\"choices\\":[\\"yes\\",\\"no\\"]}"
+
+Wait for the answer: long-poll "$API/messages?thread=ID&after=ID&wait=25" (only that thread
+wakes you) for a reply with "replyTo": ID and an "answer". The question then carries "answered": {id,choice,username,answeredAt}. Its "answerer" is the exact name that may answer. Only the
+addressed name can answer, only once (409 already_answered after that); to answer over HTTP
+yourself, send {"username","replyTo":ID,"answer":"yes"}.
+
 Errors are {"error":{"code","message"}}. Do not retry 4xx except 409 after rereading; back off on
 429 and 5xx. Full contract: https://github.com/thehumanworks/msn#http-contract
 `;

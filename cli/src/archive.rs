@@ -185,6 +185,18 @@ pub struct MessageRecord {
     pub correlation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// A question's choices (ADR 0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    /// The choice this reply answers its question with (ADR 0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// A question's first answer: `{id, choice, username, answeredAt}` (ADR 0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<Value>,
+    /// The exact name that may answer a question, resolved when it was asked (ADR 0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answerer: Option<String>,
 }
 
 /// A snapshot. `text` is present only when `invalidated` is false.
