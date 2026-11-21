@@ -1259,18 +1259,22 @@ export class MsnDurableObject extends DurableObject<Env> {
    */
   private queueAddressedNotice(message: Message, eventId: number): boolean {
     if (message.to === undefined) return false;
-    // Names match trimmed and ignoring case, as unread counts do: "@Reviewer" wakes "reviewer".
+    // An exact name wins; otherwise names match trimmed and ignoring case, as unread counts do
+    // ("@Reviewer" wakes "reviewer"). Names are unique only by exact case, so the exact match
+    // decides between "Reviewer" and "reviewer", and the folded fallback takes the oldest persona.
     const fold = (name: string) => name.trim().toLowerCase();
-    const to = fold(message.to);
-    const hook = this.ctx.storage.sql
+    const hooks = this.ctx.storage.sql
       .exec<{ personaId: string; origin: string; displayName: string }>(
         `SELECT w.personaId, w.origin, p.displayName FROM webhooks w JOIN personas p ON p.channel = w.channel AND p.id = w.personaId
-         WHERE w.channel = ?`,
+         WHERE w.channel = ? ORDER BY p.createdAt, p.id`,
         message.channel,
       )
-      .toArray()
-      .find((row) => fold(row.displayName) === to);
-    if (!hook || message.personaId === hook.personaId || fold(message.username) === to) return false;
+      .toArray();
+    const hook =
+      hooks.find((row) => row.displayName === message.to) ??
+      hooks.find((row) => fold(row.displayName) === fold(message.to as string));
+    // A persona's own message never wakes it: same persona id, or sent under its exact name.
+    if (!hook || message.personaId === hook.personaId || message.username === hook.displayName) return false;
     const path = `/api/tenants/${message.tenant}/channels/${message.channel}/messages/${message.id}`;
     return this.queueNotice(message.channel, hook.personaId, {
       schema: "msn.webhook.v1",

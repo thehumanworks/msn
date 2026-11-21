@@ -355,6 +355,26 @@ describe("persona webhooks", () => {
     expect(JSON.parse(f.sent[0].body).persona).toBe("rev");
   });
 
+  it("an exact name wins over a name that differs only in case, and other-case senders still wake it", async () => {
+    const f = await fixture();
+    expect(
+      (await call(f.tenant, "/channels/work/personas/rev2", f.agent, "PUT", { displayName: "Reviewer" }))
+        .status,
+    ).toBe(201);
+    await f.register("rev");
+    await f.register("rev2", "https://other.example.com/wake");
+    expect((await say(f, "to the lower one", { to: "reviewer" })).status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(JSON.parse(f.sent[0].body).persona).toBe("rev");
+    expect((await say(f, "to the upper one", { to: "Reviewer" })).status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+    expect(JSON.parse(f.sent[1].body).persona).toBe("rev2");
+    // "Reviewer" writing to "reviewer" is someone else, so it wakes "reviewer".
+    expect((await say(f, "from the upper one", { to: "reviewer" }, "Reviewer")).status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(3));
+    expect(JSON.parse(f.sent[2].body).persona).toBe("rev");
+  });
+
   it("an owner key reset removes every webhook and waiting notice", async () => {
     const f = await fixture();
     f.answerWith(() => new Response(null, { status: 500 }));
