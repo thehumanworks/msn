@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { namesLine } from "../core/address.ts";
+import { claimControl, claimNote } from "../core/claims.ts";
 import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
 import { REACTION_KINDS, type Message, type ReactionKind } from "../core/types.ts";
@@ -48,6 +49,13 @@ type Props = {
   onEditMessage?: (message: Message) => void;
   /** Starts a message that replaces this one (ADR 0068); only for your own, writable messages. */
   onReplaceMessage?: (message: Message) => void;
+  /**
+   * Takes this message (`release` false) or gives it back (ADR 0075); absent where nothing can
+   * change (archived boards, search). The row offers it only where the server would allow it.
+   */
+  onClaim?: (message: Message, release: boolean) => void;
+  /** The workspace owner's key: it may release anyone's claim (ADR 0075). */
+  owner?: boolean;
   /** Answers a question (ADR 0065); absent where nothing can be posted (archived boards, search). */
   onAnswer?: (message: Message, choice: string) => void;
   /** An answer to this question is in flight: its buttons stay locked until it settles. */
@@ -108,6 +116,8 @@ function MessageRowImpl({
   onReact,
   onEditMessage,
   onReplaceMessage,
+  onClaim,
+  owner = false,
   onAnswer,
   answering = false,
 }: Props) {
@@ -130,6 +140,9 @@ function MessageRowImpl({
   const canTap = mode === "open" && !answering;
   // Replace (ADR 0068): only a message nothing has replaced yet.
   const replaceable = onReplaceMessage !== undefined && message.replacedBy === undefined;
+  // Take a request (ADR 0075): "Taking this" on a free message, "Release" for its holder or owner.
+  const claimAction = onClaim ? claimControl(message, me, owner) : null;
+  const claimLabel = claimAction === "take" ? "Taking this" : "Release";
   const canLoadParent =
     message.replyTo !== undefined &&
     onLoadParent !== undefined &&
@@ -143,7 +156,7 @@ function MessageRowImpl({
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
       }${message.editedAt ? ", edited" : ""}${message.replacedBy ? `, replaced by message ${message.replacedBy}` : ""}${
         message.replaces ? `, replaces message ${message.replaces}` : ""
-      }${
+      }${message.claim ? `, ${claimNote(message.claim, me)}` : ""}${
         choices && mode ? `. Choices: ${choices.join(", ")}. ${choiceNote(message, mode)}` : ""
       }${summary ? `. Reactions: ${summary}` : ""}`}
       accessibilityHint={`${replyable ? "Double tap to reply. " : ""}Swipe up or down for more actions.`}
@@ -158,6 +171,9 @@ function MessageRowImpl({
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
         ...(onEditMessage ? [{ name: "editMessage", label: "Edit" }] : []),
         ...(replaceable ? [{ name: "replaceMessage", label: "Replace with a new message" }] : []),
+        ...(claimAction
+          ? [{ name: "claimMessage", label: claimAction === "take" ? "Taking this, so others skip it" : "Release" }]
+          : []),
         ...(choices && canTap
           ? choices.map((choice, index) => ({ name: `answer${index}`, label: `Answer ${choice}` }))
           : []),
@@ -178,6 +194,8 @@ function MessageRowImpl({
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
         else if (nativeEvent.actionName === "editMessage") onEditMessage?.(message);
         else if (nativeEvent.actionName === "replaceMessage" && replaceable) onReplaceMessage?.(message);
+        else if (nativeEvent.actionName === "claimMessage" && claimAction)
+          onClaim?.(message, claimAction === "release");
         else if (nativeEvent.actionName.startsWith("answer") && choices && canTap) {
           const choice = choices[Number(nativeEvent.actionName.slice("answer".length))];
           if (choice !== undefined) onAnswer?.(message, choice);
@@ -226,6 +244,20 @@ function MessageRowImpl({
             <Text style={styles.linkAction}>Replace</Text>
           </Pressable>
         ) : null}
+        {claimAction ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={
+              claimAction === "take"
+                ? `Take message ${message.id}: tell everyone you are handling it`
+                : `Release message ${message.id}`
+            }
+            onPress={() => onClaim?.(message, claimAction === "release")}
+            hitSlop={12}
+          >
+            <Text style={styles.linkAction}>{claimLabel}</Text>
+          </Pressable>
+        ) : null}
         {onShareLink ? (
           // An explicit control: touch and hold stays free for selecting the text.
           <Pressable
@@ -242,6 +274,12 @@ function MessageRowImpl({
         <Text style={styles.replacedNote}>Replaced by #{message.replacedBy}</Text>
       ) : null}
       {message.replaces !== undefined ? <Text style={styles.replacesNote}>Replaces #{message.replaces}</Text> : null}
+      {message.claim ? (
+        // The name is untrusted and drawn as plain text.
+        <View style={styles.claimNote}>
+          <Text style={styles.claimText}>{claimNote(message.claim, me)}</Text>
+        </View>
+      ) : null}
       {message.replyTo !== undefined ? (
         canLoadParent && onLoadParent ? (
           <Pressable
@@ -434,4 +472,14 @@ const styles = StyleSheet.create({
   edited: { color: colors.muted, fontSize: 12, fontStyle: "italic" },
   replacedNote: { color: colors.accent, fontSize: 12, fontWeight: "600", marginBottom: 2 },
   replacesNote: { color: colors.muted, fontSize: 12, marginBottom: 2 },
+  claimNote: {
+    alignSelf: "flex-start",
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 1,
+    marginBottom: 4,
+  },
+  claimText: { color: colors.text, fontSize: 12, fontWeight: "600" },
 });
