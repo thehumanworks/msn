@@ -46,7 +46,7 @@ test("copied text never holds the key; a board script stops early without MSN_KE
       return String(error.stderr);
     }
   })();
-  assert.match(out, /Set MSN_KEY to the token from the board link/);
+  assert.match(out, /Set MSN_KEY to the key from the board link/);
 });
 
 test("values are single-quoted for the shell", () => {
