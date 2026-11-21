@@ -555,7 +555,7 @@ try {
   );
   const noJson = await cli(["--profile", "lead", "search", "work", "parser", "--kind", "json"]);
   assert.deepEqual(noJson.messages, []);
-  // Search every board (ADR 0072). The owner's key reads both boards; the board's shared key
+  // Search every board (ADR 0073). The owner's key reads both boards; the board's shared key
   // (profile lead) reads only `work`, over the CLI and over MCP.
   await cli(["send", "other", "--username", "human", "--text", "parser notes kept elsewhere"]);
   const everywhere = await cli(["search", "--all", "parser"]);

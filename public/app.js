@@ -526,7 +526,7 @@ function appendMessage(message, target = $("messages")) {
   const label = document.createElement("span");
   label.textContent = `#${message.id}`;
   label.title = `#${message.channel} · message ${message.id}`;
-  // A hit from "All boards" (ADR 0072) names its board first; pressing it opens the message there.
+  // A hit from "All boards" (ADR 0073) names its board first; pressing it opens the message there.
   // A hit on another board shows what it has, but its links act on that board, not this one.
   const hit = target === $("search-results") && Boolean(searchState?.all);
   const elsewhere = hit && message.channel !== channel;
@@ -1548,7 +1548,7 @@ async function runSearch(older = false) {
   const { q, from } = older && searchState ? searchState : parseSearch($("search").value);
   if (!q && !from) return clearSearch();
   if (!older) {
-    // All boards (ADR 0072): one request for every board this key can read. The server picks the
+    // All boards (ADR 0073): one request for every board this key can read. The server picks the
     // boards from the key. Archived boards are searched only while the board list shows them.
     const all = $("search-all").checked && !$("search-all-label").hidden;
     searchState = { q, from, count: 0, before: null, all, archived: all && $("show-archived").checked };
@@ -2476,7 +2476,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     }
     connection.sharedChannel = identity.sharedChannel === true;
     // A key for one board (a shared board key or an invitation) reads only that board, so "All
-    // boards" would be the same search; the choice is hidden (ADR 0072).
+    // boards" would be the same search; the choice is hidden (ADR 0073).
     $("search-all-label").hidden = typeof identity.channel === "string";
     $("search-all").checked = false;
     // Watch-only keys (ADR 0039) read live; the server refuses every write, so hide the controls.

@@ -1,7 +1,7 @@
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-// Search every board at once (ADR 0072): GET /api/tenants/:t/search answers from every board the
+// Search every board at once (ADR 0073): GET /api/tenants/:t/search answers from every board the
 // key can read, newest first. The key decides which boards; no parameter widens it.
 
 type Message = {
@@ -91,7 +91,7 @@ async function invited(f: Fixture, channel: string, readOnly = false) {
   return (await redeemed.json<{ token: string }>()).token;
 }
 
-describe("search every board (ADR 0072)", () => {
+describe("search every board (ADR 0073)", () => {
   it("answers from every board, newest first, with each message's board", async () => {
     const f = await fixture();
     const a = await send(f, "work", "We decided to deploy on Friday.");

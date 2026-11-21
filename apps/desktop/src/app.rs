@@ -28,7 +28,7 @@ pub struct MsnDesktopApp {
     new_channel_name: String,
     active_tab: Tab,
     search_input: String,
-    /// The Search tab's "All boards" box (ADR 0072): search every board the key can read.
+    /// The Search tab's "All boards" box (ADR 0073): search every board the key can read.
     search_all: bool,
     /// A search hit on another board being opened: shown once that board has loaded.
     pending_hit: Option<(String, u64)>,
@@ -218,7 +218,7 @@ enum Action {
     Reload,
     Search,
     SearchOlder,
-    /// Open a hit of an every-board search on its own board (ADR 0072).
+    /// Open a hit of an every-board search on its own board (ADR 0073).
     OpenHit(String, u64),
     /// Copy the link of a hit of an every-board search; the link names the hit's board.
     CopyHitLink(String, u64),
@@ -2877,7 +2877,7 @@ fn pin_line(pin: &Value) -> String {
     format!("#{id} {name}: {line}")
 }
 
-/// One hit of an every-board search (ADR 0072): the board's name, which opens the message on
+/// One hit of an every-board search (ADR 0073): the board's name, which opens the message on
 /// that board, then the message. The message's own controls would act on the open board, so only
 /// its link is kept, and it names the hit's board.
 fn render_hit(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Vec<Action>) {

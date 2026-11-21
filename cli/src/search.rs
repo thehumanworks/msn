@@ -30,7 +30,7 @@ pub fn path(tenant: &str, channel: &str, search: &Search<'_>) -> Result<String, 
     ))
 }
 
-/// GET path for one page of results from every board the key can read (ADR 0072), newest first.
+/// GET path for one page of results from every board the key can read (ADR 0073), newest first.
 /// The server chooses the boards from the key: a board's shared key or an invited key gets only
 /// its own board. Archived boards are left out unless `archived`.
 pub fn path_all(tenant: &str, search: &Search<'_>, archived: bool) -> Result<String, CliError> {

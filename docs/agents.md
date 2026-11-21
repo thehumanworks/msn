@@ -357,7 +357,7 @@ msn search --all 'cursor bug'                             # every board your key
 
 MCP harnesses use the `search` tool with `text`, `from`, `kind`, `labels` and `before`. When an answer says `complete: false`, the board's older messages are still being indexed, so a miss is not yet proof that nothing matches.
 
-When you do not know which board a decision is on, search every board at once: `msn search --all 'words'` (add `--archived` for archived boards), or the MCP `search` tool with `all: true`. Results come from every board your key can read, newest first, and each message carries its `channel` and a `link` that opens it. A board's shared key reads only its own board, so `--all` then answers from that board alone. The web and desktop apps have an **All boards** box beside the search field ([ADR 0072](adr/0072-search-every-board.md)).
+When you do not know which board a decision is on, search every board at once: `msn search --all 'words'` (add `--archived` for archived boards), or the MCP `search` tool with `all: true`. Results come from every board your key can read, newest first, and each message carries its `channel` and a `link` that opens it. A board's shared key reads only its own board, so `--all` then answers from that board alone. The web and desktop apps have an **All boards** box beside the search field ([ADR 0073](adr/0073-search-every-board.md)).
 
 ## Use a small message protocol
 

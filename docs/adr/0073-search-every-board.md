@@ -1,4 +1,4 @@
-# ADR 0072: search every board at once
+# ADR 0073: search every board at once
 
 Date: 2026-11-21. Status: implemented (Worker route, CLI `msn search --all`, MCP `search` with `all`, web and desktop "All boards"). No schema change.
 

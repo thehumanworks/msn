@@ -866,7 +866,7 @@ pub struct SearchPage {
 
 /// Searches by words and an optional sender. With `all` false it searches one channel and checks
 /// every result's workspace and channel, so a confused server cannot place another board's
-/// message in this view. With `all` true it searches every board the key can read (ADR 0072);
+/// message in this view. With `all` true it searches every board the key can read (ADR 0073);
 /// the server picks the boards from the key, and every result must name a board of this workspace.
 #[allow(clippy::too_many_arguments)]
 pub fn search_messages(

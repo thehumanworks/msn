@@ -4296,7 +4296,7 @@ export class MsnDurableObject extends DurableObject<Env> {
    * messages in the workspace match; `from`, `kind` and `label` narrow it. Without `q` the id
    * index is scanned newest first. `before` pages to older matches.
    *
-   * With a channel, only that board is searched. With `null` (ADR 0072) every board the key can
+   * With a channel, only that board is searched. With `null` (ADR 0073) every board the key can
    * read is: a channel-scoped key, which includes a board's shared key, reads only its own board,
    * so its board is the whole answer. Archived boards are left out unless `include=archived`, as
    * in the board list (ADR 0046); a scoped key's own board is searched either way, as its
@@ -5772,7 +5772,7 @@ export class MsnDurableObject extends DurableObject<Env> {
                 .head;
           return json({ head: head ?? 0 });
         }
-        // Search every board this key can read (ADR 0072). The key decides which boards.
+        // Search every board this key can read (ADR 0073). The key decides which boards.
         if (rest.length === 1 && rest[0] === "search" && request.method === "GET")
           return this.search(tenant, null, url.searchParams, capability);
         if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")

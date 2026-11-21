@@ -850,7 +850,7 @@ impl Server {
         };
         let client = MsnClient::new(&self.url)?;
         if all {
-            // Every board this key can read (ADR 0072); the server picks the boards from the key.
+            // Every board this key can read (ADR 0073); the server picks the boards from the key.
             let path = search::path_all(&tenant, &query, archived)?;
             let answer = agent::fetch_json(&client, &path, &token)?;
             return Ok(search::with_links(&self.url, &tenant, answer));

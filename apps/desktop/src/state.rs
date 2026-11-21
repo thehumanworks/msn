@@ -123,7 +123,7 @@ pub struct SearchState {
     pub error: Option<String>,
     /// A search has been asked for since the channel opened (or the view was cleared).
     pub active: bool,
-    /// The search covers every board the key can read (ADR 0072); results can be from any board.
+    /// The search covers every board the key can read (ADR 0073); results can be from any board.
     pub all: bool,
 }
 
@@ -928,7 +928,7 @@ impl AppState {
         self.search_in(input, false)
     }
 
-    /// As `search`; with `all`, every board the key can read is searched (ADR 0072).
+    /// As `search`; with `all`, every board the key can read is searched (ADR 0073).
     pub fn search_in(&mut self, input: &str, all: bool) -> Vec<Command> {
         let (text, from) = msn_cli::search::split_from(input);
         let Some(state) = self.channel.as_mut() else {

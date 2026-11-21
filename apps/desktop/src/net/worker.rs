@@ -178,7 +178,7 @@ pub enum Command {
         text: String,
         from: Option<String>,
         before: Option<u64>,
-        /// Every board the key can read, not only `channel` (ADR 0072).
+        /// Every board the key can read, not only `channel` (ADR 0073).
         all: bool,
     },
     /// Point-read of one message: the parent of a reply whose parent is not loaded (ADR 0041).
