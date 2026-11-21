@@ -225,7 +225,18 @@
       <p id="schedule-note">The message waits on the server and posts as a normal message at this time, even if this device is off.</p>
       <label id="schedule-text-row" hidden>Text<textarea id="schedule-text" rows="4" maxlength="16384"></textarea></label>
       <fieldset id="schedule-presets" class="schedule-presets"><legend class="sr-only">Quick times</legend></fieldset>
-      <label>Post at<input type="datetime-local" id="schedule-at" required></label>
+      <label><span id="schedule-at-label">Post at</span><input type="datetime-local" id="schedule-at" required></label>
+      <div id="schedule-repeat-rows">
+        <label>Repeat<select id="schedule-repeat">
+          <option value="">Does not repeat</option>
+          <option value="daily">Every day at this time</option>
+          <option value="weekdays">Monday to Friday at this time</option>
+          <option value="hours">Every few hours</option>
+        </select></label>
+        <label id="schedule-hours-row" hidden>Hours between copies<input type="number" id="schedule-hours" min="1" max="168" step="1" value="6" inputmode="numeric"></label>
+        <label id="schedule-until-row" hidden>Last day (optional, at most a year ahead)<input type="date" id="schedule-until"></label>
+      </div>
+      <p id="schedule-repeat-note" class="schedule-repeat-note" hidden></p>
       <p id="schedule-error" class="error" role="alert" hidden></p>
       <button type="submit" id="schedule-submit" class="primary">Schedule</button>
       <button type="button" id="close-schedule" class="quiet">Close</button>

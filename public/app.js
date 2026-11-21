@@ -9,7 +9,17 @@ import { renderMarkdown } from "./markdown.js";
 import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { quoteOf, quotePreview } from "./quote.js";
-import { localInput, presets, SCHEDULED_REFRESH_MS, sendAtFrom, summary, whenText } from "./scheduled.js";
+import {
+  deviceZone,
+  localInput,
+  presets,
+  repeatFrom,
+  repeatText,
+  SCHEDULED_REFRESH_MS,
+  sendAtFrom,
+  summary,
+  whenText,
+} from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
 import { renderTranscript } from "./transcript.js";
@@ -3148,7 +3158,9 @@ $("send-form").addEventListener("submit", async (event) => {
   const state = draft();
   if (state.sending) return;
   // Set by the Send later dialog for this one submit (ADR 0060).
-  const sendAt = scheduleRequest;
+  const sendAt = scheduleRequest?.sendAt ?? null;
+  // A repeat (ADR 0072) rides on the same submit; sendAt is then the first copy.
+  const repeat = scheduleRequest?.repeat ?? null;
   scheduleRequest = null;
   const content = $("message").value;
   const recipient = $("recipient").value;
@@ -3218,6 +3230,7 @@ $("send-form").addEventListener("submit", async (event) => {
           ...(replaces !== null ? { replaces } : {}),
           ...(attachments.length ? { attachments } : {}),
           ...(sendAt ? { sendAt } : {}),
+          ...(sendAt && repeat ? { repeat } : {}),
         });
     if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
     const attempt = state.retry;
@@ -3255,7 +3268,11 @@ $("send-form").addEventListener("submit", async (event) => {
     showReplyTo(state);
     autosize();
     if (sendAt) {
-      status(`Scheduled for ${whenText(sendAt)}. It posts as a normal message then.`);
+      status(
+        repeat
+          ? `Repeating from ${whenText(sendAt)}. Each copy posts as a normal message; stop it in the scheduled list.`
+          : `Scheduled for ${whenText(sendAt)}. It posts as a normal message then.`,
+      );
       void loadScheduled(connection, selected);
       return;
     }
@@ -4752,12 +4769,18 @@ function renderScheduledList(list) {
     const row = document.createElement("li");
     const when = document.createElement("span");
     when.className = "scheduled-when";
-    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${addressees(item).length ? ` → ${namesText(addressees(item))}` : ""}`;
+    when.textContent = `${item.status === "failed" ? "Was due" : item.repeat ? "Next" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${addressees(item).length ? ` → ${namesText(addressees(item))}` : ""}`;
     when.title = new Date(item.sendAt).toLocaleString();
     const body = document.createElement("p");
     body.className = "scheduled-text";
     body.textContent = item.text;
     row.append(when, body);
+    if (item.repeat) {
+      const rule = document.createElement("p");
+      rule.className = "scheduled-repeat";
+      rule.textContent = repeatText(item.repeat);
+      row.append(rule);
+    }
     if (item.status === "failed") {
       const reason = document.createElement("p");
       reason.className = "scheduled-error";
@@ -4779,7 +4802,7 @@ function renderScheduledList(list) {
       const cancel = document.createElement("button");
       cancel.type = "button";
       cancel.className = "quiet";
-      cancel.textContent = "Cancel message";
+      cancel.textContent = item.repeat ? "Stop repeating" : "Cancel message";
       cancel.addEventListener("click", () => void cancelScheduled(item, cancel));
       actions.append(cancel);
       row.append(actions);
@@ -4804,7 +4827,11 @@ async function cancelScheduled(item, button) {
       { method: "DELETE" },
       connection,
     );
-    status(`Cancelled the message scheduled for ${whenText(item.sendAt)}.`);
+    status(
+      item.repeat
+        ? "Stopped the repeating message. Copies already posted stay on the board."
+        : `Cancelled the message scheduled for ${whenText(item.sendAt)}.`,
+    );
   } catch (error) {
     status(error.message, true);
   } finally {
@@ -4846,6 +4873,18 @@ function openSchedule(item = null) {
   const due = item && item.status === "pending" ? new Date(item.sendAt) : choices[0].at;
   $("schedule-at").min = localInput(now);
   $("schedule-at").value = localInput(due);
+  // Repeat (ADR 0072) is chosen when scheduling. A change keeps the rule and moves the next copy.
+  $("schedule-repeat-rows").hidden = Boolean(item);
+  $("schedule-repeat").value = "";
+  $("schedule-until").value = "";
+  $("schedule-until").min = localInput(now).slice(0, 10);
+  // The server takes an end at most 366 days ahead; 365 days is inside that in every zone.
+  $("schedule-until").max = localInput(new Date(now.getTime() + 365 * 86400000)).slice(0, 10);
+  $("schedule-at-label").textContent = item?.repeat ? "Next copy posts at" : "Post at";
+  $("schedule-repeat-note").textContent = item?.repeat
+    ? `${repeatText(item.repeat)}. A new time moves the next copy only. To change the rule, stop it and schedule a new one.`
+    : "";
+  showRepeatFields();
   const legend = document.createElement("legend");
   legend.className = "sr-only";
   legend.textContent = "Quick times";
@@ -4867,6 +4906,25 @@ function openSchedule(item = null) {
   (item ? $("schedule-text") : $("schedule-at")).focus();
 }
 
+/** Shows the repeat fields that fit the chosen rule, and says which zone the times are in. */
+function showRepeatFields() {
+  const every = $("schedule-repeat").value;
+  const changing = $("schedule-repeat-rows").hidden;
+  $("schedule-hours-row").hidden = every !== "hours";
+  $("schedule-until-row").hidden = !every;
+  if (!changing)
+    $("schedule-repeat-note").textContent = every
+      ? every === "hours"
+        ? "Each copy posts as a normal message and counts toward the workspace's 100,000 messages: every hour is 8,784 a year. Without a last day it repeats for a year."
+        : `Each copy posts as a normal message at this time in ${deviceZone()} time, also after a clock change. Without a last day it repeats for a year.`
+      : "";
+  $("schedule-repeat-note").hidden = !$("schedule-repeat-note").textContent;
+}
+$("schedule-repeat").addEventListener("change", () => {
+  showRepeatFields();
+  scheduleError(null);
+});
+
 $("send-later").addEventListener("click", () => openSchedule());
 $("close-schedule").addEventListener("click", () => $("schedule-dialog").close());
 $("schedule-form").addEventListener("submit", async (event) => {
@@ -4878,8 +4936,18 @@ $("schedule-form").addEventListener("submit", async (event) => {
   }
   const item = scheduleTarget;
   if (!item) {
+    const rule = repeatFrom({
+      every: $("schedule-repeat").value,
+      hours: $("schedule-hours").value,
+      until: $("schedule-until").value,
+      first: $("schedule-at").value,
+    });
+    if (rule.error) {
+      scheduleError(rule.error);
+      return;
+    }
     $("schedule-dialog").close();
-    scheduleRequest = sendAt;
+    scheduleRequest = { sendAt, repeat: rule.repeat };
     $("send-form").requestSubmit();
     return;
   }

@@ -61,13 +61,75 @@ export function whenText(iso, now = new Date()) {
   return `${date} ${time}`;
 }
 
+/** This device's IANA time zone, or "UTC" when the browser does not say. */
+export function deviceZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
+ * The `repeat` a send carries (ADR 0072), from the Send later form: `every` is "", "daily",
+ * "weekdays" or "hours"; `hours` and `until` (a date, may be empty) are the fields' text; `first`
+ * is the datetime-local value of the first copy. Returns `{ repeat }` (null for no repeat) or
+ * `{ error }` with a sentence for the person.
+ */
+export function repeatFrom({ every, hours, until, first }, timeZone = deviceZone()) {
+  if (!every) return { repeat: null };
+  const repeat = { every, timeZone };
+  if (every === "hours") {
+    const n = Number(hours);
+    if (!/^\d{1,3}$/.test(String(hours ?? "").trim()) || n < 1 || n > 168)
+      return { error: "Give a whole number of hours from 1 to 168." };
+    repeat.hours = n;
+  } else if (every === "weekdays") {
+    const day = new Date(first).getDay();
+    if (day === 0 || day === 6) return { error: "Pick a weekday for the first copy." };
+  } else if (every !== "daily") return { error: "Pick how often it repeats." };
+  if (until) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(until)) return { error: "Pick the last day as a date." };
+    if (until < String(first ?? "").slice(0, 10)) return { error: "The last day is before the first copy." };
+    repeat.until = until;
+  }
+  return { repeat };
+}
+
+/** "Repeats every day at 09:00 (Europe/Lisbon time) · until 31 Dec 2026", for the list. */
+export function repeatText(repeat) {
+  if (!repeat) return "";
+  const at = (repeat.at ?? "").slice(0, 5);
+  const zoned = `${at ? ` at ${at}` : ""} (${repeat.timeZone} time)`;
+  const how =
+    repeat.every === "hours"
+      ? repeat.hours === 1
+        ? "every hour"
+        : `every ${repeat.hours} hours`
+      : repeat.every === "weekdays"
+        ? `Monday to Friday${zoned}`
+        : `every day${zoned}`;
+  let end = "";
+  const until = new Date(repeat.until ?? "");
+  if (Number.isFinite(until.getTime())) {
+    const options = { day: "numeric", month: "short", year: "numeric" };
+    try {
+      end = until.toLocaleDateString(undefined, { ...options, timeZone: repeat.timeZone });
+    } catch {
+      end = until.toLocaleDateString(undefined, options);
+    }
+  }
+  return `Repeats ${how}${end ? ` · until ${end}` : ""}`;
+}
+
 /** The bar above the composer: how many are waiting and how many failed, or "" for none. */
 export function summary(list) {
   if (!list?.length) return "";
   const failed = list.filter((item) => item.status === "failed").length;
   const waiting = list.length - failed;
   const parts = [];
-  if (waiting) parts.push(`${waiting} scheduled`);
+  const repeating = list.filter((item) => item.status !== "failed" && item.repeat).length;
+  if (waiting) parts.push(`${waiting} scheduled${repeating ? ` (${repeating} repeating)` : ""}`);
   if (failed) parts.push(`${failed} failed to post`);
   return parts.join(" · ");
 }

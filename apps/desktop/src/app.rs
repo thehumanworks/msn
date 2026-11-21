@@ -1499,7 +1499,15 @@ impl MsnDesktopApp {
                                     .map(|at| format!("{} UTC", at.replace('T', " ")))
                                     .unwrap_or_default();
                                 let failed = item["status"].as_str() == Some("failed");
-                                let when = if failed { "Was due" } else { "Posts" };
+                                // A repeating message (ADR 0072) stays listed with its next copy.
+                                let repeats = item["repeat"].is_object();
+                                let when = if failed {
+                                    "Was due"
+                                } else if repeats {
+                                    "Repeats, next"
+                                } else {
+                                    "Posts"
+                                };
                                 ui.label(
                                     egui::RichText::new(format!("{when} {at} · {who}"))
                                         .small()
@@ -1561,7 +1569,12 @@ impl MsnDesktopApp {
                                         {
                                             actions.push(Action::StartScheduledEdit(id));
                                         }
-                                        if ui.small_button("Cancel message").clicked() {
+                                        let cancel = if repeats {
+                                            "Stop repeating"
+                                        } else {
+                                            "Cancel message"
+                                        };
+                                        if ui.small_button(cancel).clicked() {
                                             actions.push(Action::CancelScheduled(id));
                                         }
                                     });

@@ -2265,6 +2265,20 @@ nav button.has-unread .channel-name {
   display: flex;
   gap: 8px;
 }
+/* Repeat a scheduled message (ADR 0072): the rule fields in Send later, and the rule in the list. */
+#schedule-repeat-rows {
+  display: grid;
+  gap: 12px;
+}
+#schedule-repeat-rows[hidden] {
+  display: none;
+}
+.schedule-repeat-note,
+.scheduled-list .scheduled-repeat {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
 .watching .scheduled-bar,
 .archived #send-later {
   display: none;
