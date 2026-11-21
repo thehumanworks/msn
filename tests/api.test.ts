@@ -50,6 +50,8 @@ function rewind(state: DurableObjectState, version: 1 | 2 | 3 | 4 | 5): void {
     }
     if (version < 3) state.storage.sql.exec("ALTER TABLE messages DROP COLUMN contentType");
     if (version < 2) {
+      // The reply index (ADR 0063) came later than replyTo; an old database has neither.
+      state.storage.sql.exec("DROP INDEX message_replies");
       state.storage.sql.exec("ALTER TABLE messages DROP COLUMN replyTo");
       state.storage.sql.exec("ALTER TABLE messages DROP COLUMN correlationId");
     }

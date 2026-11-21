@@ -487,8 +487,26 @@ impl Server {
         let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(0);
         let limit = optional_int(args, "limit", MAX_LIMIT)?.unwrap_or(MAX_LIMIT);
         positive(limit, "limit")?;
+        let thread = thread_arg(args)?;
         let reader = self.processing_reader(&tenant, &token)?;
         let mut out = Vec::new();
+        if let Some(thread) = thread {
+            // A thread's progress always stays on this machine (ADR 0063).
+            crate::processing::peek_scoped(
+                &mut out,
+                &self.url,
+                &tenant,
+                &token,
+                &channel,
+                Some(thread),
+                &reader,
+                None,
+                wait,
+                limit,
+                &self.stop,
+            )?;
+            return Ok(parse_printed(&out)?);
+        }
         resumable::peek_with(
             resumable::mode_from_env(),
             &mut out,
@@ -511,8 +529,22 @@ impl Server {
         let through = optional_int(args, "through", MAX_SAFE_INTEGER)?.ok_or_else(|| {
             CliError::usage("through is required: the nextCursor of the peek you processed.")
         })?;
+        let thread = thread_arg(args)?;
         let reader = self.processing_reader(&tenant, &token)?;
         let mut out = Vec::new();
+        if let Some(thread) = thread {
+            crate::processing::commit_scoped(
+                &mut out,
+                &self.url,
+                &tenant,
+                &channel,
+                Some(thread),
+                &reader,
+                None,
+                through,
+            )?;
+            return Ok(parse_printed(&out)?);
+        }
         resumable::commit_with(
             resumable::mode_from_env(),
             &mut out,
@@ -1146,6 +1178,7 @@ pub fn tools() -> Vec<Value> {
             json!({
                 "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for new messages (default 0)."},
                 "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Page size (default 100)."},
+                "thread": thread_schema("Follow one thread: only its root message and the replies to it, at any depth; a reply id means its thread. The result's thread is the root. Thread progress is separate from your board progress, stays on this machine and sends no receipts; commit it with the same thread."),
             }),
             &[],
             (false, false),
@@ -1154,7 +1187,10 @@ pub fn tools() -> Vec<Value> {
             "commit",
             "Commit processed work",
             "Mark every message through `through` as processed. Use the nextCursor of the peek you finished; it must not be ahead of what was fetched or behind committed progress. The commit goes to the server by default (MSN_RESUMABLE=0 keeps it local) and fails with processing_fenced once another machine has taken over.",
-            json!({"through": cursor("Processed watermark: the peek result's nextCursor.")}),
+            json!({
+                "through": cursor("Processed watermark: the peek result's nextCursor."),
+                "thread": thread_schema("Commit progress in this thread only: the thread you passed to peek."),
+            }),
             &["through"],
             (false, true),
         ),
@@ -1335,6 +1371,19 @@ pub fn tools() -> Vec<Value> {
     ]
 }
 
+fn thread_schema(description: &str) -> Value {
+    json!({"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":description})
+}
+
+/// The optional `thread` argument (ADR 0063): a positive message id.
+fn thread_arg(args: &Map<String, Value>) -> Result<Option<u64>, CliError> {
+    let thread = optional_int(args, "thread", MAX_SAFE_INTEGER)?;
+    if thread == Some(0) {
+        return Err(CliError::usage("thread must be a positive message id."));
+    }
+    Ok(thread)
+}
+
 fn label_object(description: &str) -> Value {
     json!({"type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":256},"description":description})
 }
@@ -1505,6 +1554,23 @@ mod tests {
         );
         let bad_slug = call(&mut s, json!({"channel":"../x"}));
         assert_eq!(bad_slug["result"]["isError"], true);
+        // ADR 0063: thread is a positive message id, checked before any network call.
+        for thread in [json!(0), json!(-1), json!("2")] {
+            let bad = call(&mut s, json!({"channel":"general","thread":thread}));
+            assert_eq!(bad["result"]["isError"], true, "{thread}");
+        }
+    }
+
+    #[test]
+    fn peek_and_commit_take_a_thread() {
+        let tools = tools();
+        for name in ["peek", "commit"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            assert_eq!(
+                tool["inputSchema"]["properties"]["thread"]["minimum"], 1,
+                "{name}"
+            );
+        }
     }
 
     #[test]

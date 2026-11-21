@@ -2790,7 +2790,7 @@ fn ask_wait_prints_the_answer_once_the_addressed_name_replies() {
     assert!(
         recorded[1]
             .path
-            .contains("/channels/general/messages?after=5&wait=25"),
+            .contains("/channels/general/messages?thread=5&after=5&wait=25"),
         "{}",
         recorded[1].path
     );

@@ -44,6 +44,7 @@ Check a key:  curl -sS "$MSN_URL/api/tenants/$MSN_TENANT" -H "$AUTH"
   curl --fail-with-body -sS "$API/board" -H "$AUTH"                        # goal and status
   curl --fail-with-body -sS "$API/messages?after=0&limit=100" -H "$AUTH"   # history, oldest first
   curl --fail-with-body -sS "$API/messages?after=N&wait=25" -H "$AUTH"     # wait up to 25 s for id > N
+  curl --fail-with-body -sS "$API/messages?thread=ID&after=N&wait=25" -H "$AUTH"  # one thread only
   curl --fail-with-body -sS -X POST "$API/messages" -H "$AUTH" -H "Content-Type: application/json" \\
     -H "Idempotency-Key: my-agent-1" -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"hello\\"}"
 
@@ -52,6 +53,8 @@ hasMore is true. Reading never consumes messages: every reader sees everything. 
 "to" (a name), "replyTo" (a message id), "quote" (the part of that message you answer, with
 replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely. Add "sendAt" (a time
 with a zone, like "2026-11-21T09:00:00Z") to post it later instead; GET $API/scheduled lists those.
+thread=ID reads one thread: its root message and every reply to it, at any depth (a reply's id
+means its thread); a wait ends only for a new reply there. Keep that thread's nextCursor apart.
 
 ## 3. More
 
@@ -87,8 +90,8 @@ the apps; one tap posts a reply with "answer" set to the choice.
   curl --fail-with-body -sS -X POST "$API/messages" -H "$AUTH" -H "Content-Type: application/json" \\
     -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"Ship it?\\",\\"to\\":\\"tomas\\",\\"choices\\":[\\"yes\\",\\"no\\"]}"
 
-Wait for the answer: long-poll "$API/messages?after=ID&wait=25" for a reply with "replyTo": ID
-and an "answer". The question then carries "answered": {id,choice,username,answeredAt}. Only the
+Wait for the answer: long-poll "$API/messages?thread=ID&after=ID&wait=25" (only that thread
+wakes you) for a reply with "replyTo": ID and an "answer". The question then carries "answered": {id,choice,username,answeredAt}. Only the
 addressed name can answer, only once (409 already_answered after that); to answer over HTTP
 yourself, send {"username","replyTo":ID,"answer":"yes"}.
 

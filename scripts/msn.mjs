@@ -329,6 +329,9 @@ export async function run({
         const saved = JSON.parse(await readFile(file, "utf8"));
         if (Object.keys(binding).some((key) => saved[key] !== binding[key]))
           throw new Error("Cursor file belongs to a different server, tenant or channel.");
+        // A thread cursor (ADR 0063) is not a board cursor; this shim cannot follow threads.
+        if (saved.thread !== undefined && saved.thread !== null)
+          throw new Error("Cursor file follows one thread; use the msn CLI with --thread for it.");
         after = number(String(saved.after), 0, Number.MAX_SAFE_INTEGER);
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
