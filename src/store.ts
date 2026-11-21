@@ -15,6 +15,8 @@ import {
   ATTACHMENT_ORPHAN_MS,
   type AttachmentRef,
   addressedTo,
+  addressees,
+  addressFields,
   admin,
   answerChoice,
   attachmentRefs,
@@ -34,6 +36,7 @@ import {
   INLINE_MEDIA_TYPES,
   idempotencyKey,
   integer,
+  isAddressed,
   json,
   type LabelChange,
   type LabelFilter,
@@ -53,7 +56,7 @@ import {
   type Reactions,
   rawBody,
   reactionChange,
-  recipient,
+  recipients,
   replyTarget,
   type ScheduledChange,
   scheduledChange,
@@ -109,7 +112,10 @@ export type Message = {
   /** The part of the replyTo message this reply quotes (ADR 0059); absent when it quotes nothing. */
   quote?: string;
   correlationId?: string;
+  /** The first name the message is addressed to; the only one unless `recipients` is present. */
   to?: string;
+  /** Every name, in order, when the message is addressed to several (ADR 0067); else absent. */
+  recipients?: string[];
   personaId?: string;
   /** key=value labels (ADR 0032); absent from JSON when the message has none. */
   labels?: Labels;
@@ -141,6 +147,8 @@ export type Correlation = {
   quote?: string;
   correlationId?: string;
   to?: string;
+  /** Every name when the send names several (ADR 0067); `to` is then the first. */
+  recipients?: string[];
   /** A question's buttons (ADR 0065). */
   choices?: string[];
   /** The choice a reply picks from its replyTo question (ADR 0065). */
@@ -156,6 +164,8 @@ type MessageRow = {
   replyTo: number | null;
   correlationId: string | null;
   recipient: string | null;
+  /** JSON list of every name when a message is addressed to several (ADR 0067), else NULL. */
+  recipients: string | null;
   personaId: string | null;
   editedAt: string | null;
   quote: string | null;
@@ -168,7 +178,7 @@ type MessageRow = {
   answerer: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, personaId, editedAt, quote, choices, answer, answered, answerer";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, recipients, personaId, editedAt, quote, choices, answer, answered, answerer";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -408,6 +418,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     quote,
     correlationId,
     recipient,
+    recipients,
     personaId,
     editedAt,
     choices,
@@ -423,6 +434,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(quote == null ? {} : { quote }),
     ...(correlationId === null ? {} : { correlationId }),
     ...(recipient === null ? {} : { to: recipient }),
+    ...(recipients == null ? {} : { recipients: JSON.parse(recipients) as string[] }),
     ...(personaId == null ? {} : { personaId }),
     ...(editedAt == null ? {} : { editedAt }),
     ...(choices == null ? {} : { choices: JSON.parse(choices) as string[] }),
@@ -449,6 +461,7 @@ type ScheduledRow = {
   quote: string | null;
   correlationId: string | null;
   recipient: string | null;
+  recipients: string | null;
   personaId: string | null;
   labels: string | null;
   key: string | null;
@@ -473,6 +486,7 @@ export type Scheduled = {
   quote?: string;
   correlationId?: string;
   to?: string;
+  recipients?: string[];
   personaId?: string;
   labels?: Labels;
   /** `pending` until it posts (then it is a message and leaves the list); `failed` if it could not. */
@@ -495,6 +509,7 @@ function toScheduled(row: ScheduledRow, tenant: string): Scheduled {
     ...(row.quote == null ? {} : { quote: row.quote }),
     ...(row.correlationId === null ? {} : { correlationId: row.correlationId }),
     ...(row.recipient === null ? {} : { to: row.recipient }),
+    ...(row.recipients == null ? {} : { recipients: JSON.parse(row.recipients) as string[] }),
     ...(row.personaId === null ? {} : { personaId: row.personaId }),
     ...(row.labels === null ? {} : { labels: JSON.parse(row.labels) as Labels }),
     status: row.failedAt === null ? "pending" : "failed",
@@ -519,11 +534,13 @@ function messageId(value: string): number {
  */
 export function payload(username: string, text: string, type: ContentType, correlation: Correlation): string {
   const { replyTo, correlationId, to } = correlation;
-  const fields =
+  const fields: (string | number | null | string[])[] =
     type === "text/plain" && replyTo === undefined && correlationId === undefined
       ? [username, text]
       : [username, text, type, replyTo ?? null, correlationId ?? null];
-  if (to !== undefined) fields.push(to);
+  // Several names (ADR 0067) hash as the list, so one name hashes exactly as before.
+  if (correlation.recipients !== undefined) fields.push(correlation.recipients);
+  else if (to !== undefined) fields.push(to);
   // A quote (ADR 0059) wraps the rest, so every send without one hashes exactly as before.
   let out =
     correlation.quote === undefined
@@ -746,6 +763,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["messages", "answer", "TEXT"],
         ["messages", "answered", "TEXT"],
         ["messages", "answerer", "TEXT"],
+        // Several names (ADR 0067): a JSON list when a message names more than one, else NULL;
+        // `recipient` keeps the first, so older reads and indexes see one name. Additive, no step.
+        ["messages", "recipients", "TEXT"],
+        ["scheduled_messages", "recipients", "TEXT"],
       ]) {
         if (
           !ctx.storage.sql
@@ -1035,6 +1056,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             ...(row.quote == null ? {} : { quote: row.quote }),
             ...(row.correlationId === null ? {} : { correlationId: row.correlationId }),
             ...(row.recipient === null ? {} : { to: row.recipient }),
+            ...(row.recipients == null ? {} : { recipients: JSON.parse(row.recipients) as string[] }),
           },
           row.key,
           row.digest,
@@ -1691,7 +1713,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             new Date(now).toISOString(),
           )
           .toArray()[0];
-        value = mute !== undefined && (mute.everything === 1 || message.to !== person);
+        value = mute !== undefined && (mute.everything === 1 || !addressees(message).includes(person));
         muted.set(person, value);
       }
       return value;
@@ -1754,7 +1776,8 @@ export class MsnDurableObject extends DurableObject<Env> {
    * notice was queued, so the caller arms the alarm after the commit.
    */
   private queueAddressedNotice(message: Message, eventId: number): boolean {
-    if (message.to === undefined) return false;
+    const names = addressees(message);
+    if (!names.length) return false;
     // An exact name wins; otherwise names match trimmed and ignoring case, as unread counts do
     // ("@Reviewer" wakes "reviewer"). Names are unique only by exact case, so the exact match
     // decides between "Reviewer" and "reviewer", and the folded fallback takes the oldest persona.
@@ -1766,24 +1789,33 @@ export class MsnDurableObject extends DurableObject<Env> {
         message.channel,
       )
       .toArray();
-    const hook =
-      hooks.find((row) => row.displayName === message.to) ??
-      hooks.find((row) => fold(row.displayName) === fold(message.to as string));
-    // A persona's own message never wakes it: same persona id, or sent under its exact name.
-    if (!hook || message.personaId === hook.personaId || message.username === hook.displayName) return false;
+    // Each addressed name wakes its persona (ADR 0067); two names that find one persona wake it once.
+    const woken = new Map<string, (typeof hooks)[number]>();
+    for (const name of names) {
+      const hook =
+        hooks.find((row) => row.displayName === name) ??
+        hooks.find((row) => fold(row.displayName) === fold(name));
+      // A persona's own message never wakes it: same persona id, or sent under its exact name.
+      if (!hook || message.personaId === hook.personaId || message.username === hook.displayName) continue;
+      woken.set(hook.personaId, hook);
+    }
     const path = `/api/tenants/${message.tenant}/channels/${message.channel}/messages/${message.id}`;
-    return this.queueNotice(message.channel, hook.personaId, {
-      schema: "msn.webhook.v1",
-      type: "message.addressed",
-      id: crypto.randomUUID(),
-      tenant: message.tenant,
-      channel: message.channel,
-      persona: hook.personaId,
-      messageId: message.id,
-      eventId,
-      messageUrl: `${hook.origin}${path}`,
-      createdAt: message.createdAt,
-    });
+    let queued = false;
+    for (const hook of woken.values())
+      queued =
+        this.queueNotice(message.channel, hook.personaId, {
+          schema: "msn.webhook.v1",
+          type: "message.addressed",
+          id: crypto.randomUUID(),
+          tenant: message.tenant,
+          channel: message.channel,
+          persona: hook.personaId,
+          messageId: message.id,
+          eventId,
+          messageUrl: `${hook.origin}${path}`,
+          createdAt: message.createdAt,
+        }) || queued;
+    return queued;
   }
 
   /** Stores one notice, due now. A full backlog drops it and records the drop on the webhook. */
@@ -3598,8 +3630,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       const row = this.ctx.storage.sql
         .exec<ScheduledRow>(
           `INSERT INTO scheduled_messages(tenant, channel, username, text, contentType, sendAt, dueMs, createdAt,
-             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify, quote)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify, quote, recipients)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           tenant,
           channel,
           message.username,
@@ -3620,6 +3652,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           // The owner's own messages never notify the owner, as for a send.
           capability.owner_access ? 0 : 1,
           message.correlation.quote ?? null,
+          message.correlation.recipients ? JSON.stringify(message.correlation.recipients) : null,
         )
         .one();
       return { body: { scheduled: toScheduled(row, tenant), replayed: false }, status: 201 };
@@ -3880,7 +3913,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         correlation.choices === undefined ? null : this.resolveAnswerer(channel, correlation.to as string);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, personaId, quote, choices, answer, answerer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -3892,6 +3925,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           correlation.replyTo ?? null,
           correlation.correlationId ?? null,
           correlation.to ?? null,
+          correlation.recipients ? JSON.stringify(correlation.recipients) : null,
           personaId,
           correlation.quote ?? null,
           choices,
@@ -4833,9 +4867,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         text: string;
         contentType: string;
         recipient: string | null;
+        recipients: string | null;
         personaId: string | null;
       }>(
-        `SELECT id, username, contentType, recipient, personaId,
+        `SELECT id, username, contentType, recipient, recipients, personaId,
            CASE WHEN contentType = 'application/json' THEN text ELSE substr(text, 1, ?) END AS text
          FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
         SINCE_TEXT_CHARS,
@@ -4850,6 +4885,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       text: row.text,
       contentType: row.contentType,
       ...(row.recipient === null ? {} : { to: row.recipient }),
+      ...(row.recipients == null ? {} : { recipients: JSON.parse(row.recipients) as string[] }),
       ...(row.personaId === null ? {} : { personaId: row.personaId }),
     }));
     // Label changes: walk the newest channel events back to this reader's starting point. The
@@ -4962,8 +4998,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     const self = me.trim().toLowerCase();
     const unread = pairs.map(({ channel, after }) => {
       const rows = this.ctx.storage.sql
-        .exec<{ username: string; recipient: string | null }>(
-          "SELECT username, recipient FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?",
+        .exec<{ username: string; recipient: string | null; recipients: string | null }>(
+          "SELECT username, recipient, recipients FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?",
           channel,
           after,
           UNREAD_CAP + 1,
@@ -4973,7 +5009,12 @@ export class MsnDurableObject extends DurableObject<Env> {
       // Your own messages are not news, as in "since you last looked" (ADR 0033).
       const others = rows.slice(0, UNREAD_CAP).filter((row) => row.username !== me);
       const toYou = self
-        ? others.filter((row) => row.recipient !== null && row.recipient.trim().toLowerCase() === self).length
+        ? others.filter((row) =>
+            isAddressed(me, {
+              to: row.recipient,
+              recipients: row.recipients === null ? null : (JSON.parse(row.recipients) as string[]),
+            }),
+          ).length
         : 0;
       return { channel, after, count: others.length, toYou, ...(capped ? { capped: true } : {}) };
     });
@@ -5299,7 +5340,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, recipients = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, bytes = 0 WHERE id = ?",
               id,
             );
             // Deleting a question's answer reopens the question (ADR 0065): its record named the
@@ -5417,7 +5458,7 @@ export class MsnDurableObject extends DurableObject<Env> {
               replyTo: replyTarget(input.replyTo),
               quote: quoteText(input.quote, input.replyTo),
               correlationId: correlationId(input.correlationId),
-              to: recipient(input.to),
+              ...addressFields(recipients(input.to)),
               choices: choiceList(input.choices, input.to),
               answer: answerChoice(input.answer, input.replyTo, input.choices),
             }

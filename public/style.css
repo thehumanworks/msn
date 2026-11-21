@@ -2193,7 +2193,7 @@ nav button.has-unread .channel-name {
 #schedule-submit {
   min-height: 44px;
 }
-/* The board's tasks (ADR 0067): sections of task cards, read only. */
+/* The board's tasks (ADR 0070): sections of task cards, read only. */
 .tasks-dialog {
   width: min(560px, calc(100vw - 32px - var(--safe-left) - var(--safe-right)));
 }
@@ -2313,6 +2313,13 @@ nav button.has-unread .channel-name {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+  /* Refresh and Close stay in reach while a long list scrolls; -24px covers the dialog padding. */
+  position: sticky;
+  bottom: -24px;
+  margin-bottom: -24px;
+  padding: 8px 0 24px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
 }
 @media (pointer: coarse) {
   #tasks-dialog .task-links button,

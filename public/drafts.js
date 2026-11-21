@@ -10,12 +10,14 @@
 //   reload reuses the same Idempotency-Key when the payload is identical, so the server replays
 //   it instead of posting it twice.
 
+import { MAX_TO_TEXT_BYTES, parseNames, toField } from "./address.js";
+
 /** Drafts kept per workspace on this device; the least recently changed go first. */
 export const MAX_DRAFTS = 50;
 /** The server's message limit. A longer draft cannot be sent, so it is kept in memory only. */
 export const MAX_DRAFT_BYTES = 16384;
-/** The server's recipient limit. */
-export const MAX_RECIPIENT_BYTES = 128;
+/** The To field's limit: up to 8 names, separated by commas (ADR 0067). */
+export const MAX_RECIPIENT_BYTES = MAX_TO_TEXT_BYTES;
 /** The server's quote limit (ADR 0059). */
 export const MAX_QUOTE_BYTES = 2048;
 /** A retry payload holds the text plus a few fields and at most 10 attachment references. */
@@ -146,11 +148,12 @@ export function unchangedRetryFiles(retry, { username, content, recipient, reply
     return null;
   }
   if (!sent || !Array.isArray(sent.attachments) || !sent.attachments.length) return null;
-  const to = recipient.trim() ? recipient : undefined;
+  // The To field as the send wrote it (ADR 0067): one name as text, several as a list.
+  const to = toField(parseNames(recipient));
   const same =
     sent.username === username &&
     sent.text === content &&
-    sent.to === to &&
+    JSON.stringify(sent.to) === JSON.stringify(to) &&
     (sent.replyTo ?? null) === replyTo &&
     (sent.quote ?? null) === quote;
   return same ? sent.attachments : null;

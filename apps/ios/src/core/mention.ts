@@ -1,6 +1,7 @@
 // Mention someone with @ (ADR 0055). Pure rules, matching public/mention.js on the web and
 // apps/desktop/src/mention.rs: which @ is being typed, who it suggests, and how a pick fills
 // the To field. The first mention picked addresses the message; later picks only add @name.
+import { addressees } from "./address.ts";
 import type { Message } from "./types.ts";
 
 /** How many suggestions the list shows at most. */
@@ -54,7 +55,8 @@ export function people(personas: Persona[], messages: readonly Message[], me: st
   for (const persona of personas) if (persona.listening) add(persona.displayName, true);
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     add(messages[i]?.username);
-    add(messages[i]?.to);
+    const message = messages[i];
+    if (message) for (const name of addressees(message)) add(name);
   }
   for (const persona of personas) add(persona.displayName, persona.listening);
   return out;

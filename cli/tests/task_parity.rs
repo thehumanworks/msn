@@ -1,4 +1,4 @@
-//! Parity corpus for the web copy of the reducer (ADR 0067).
+//! Parity corpus for the web copy of the reducer (ADR 0070).
 //!
 //! `tests/fixtures/task-projection.json` holds message logs and the board this reducer projects
 //! from each. The web app's `public/tasks.js` is tested against the same file

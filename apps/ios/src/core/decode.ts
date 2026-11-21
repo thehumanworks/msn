@@ -122,6 +122,9 @@ export function decodeMessage(raw: unknown): Message {
     if (typeof m.to !== "string") bad("message");
     message.to = m.to;
   }
+  // Several names (ADR 0067). A malformed list is dropped: `to` still names the first.
+  if (Array.isArray(m.recipients) && m.recipients.length > 1 && m.recipients.every((n) => typeof n === "string"))
+    message.recipients = m.recipients as string[];
   if (m.reactions !== undefined) {
     const reactions = decodeReactions(m.reactions);
     if (Object.keys(reactions).length) message.reactions = reactions;

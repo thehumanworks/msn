@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
@@ -9,7 +10,7 @@ import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } 
 import { quoteOf, quotePreview } from "./quote.js";
 import { localInput, presets, SCHEDULED_REFRESH_MS, sendAtFrom, summary, whenText } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
-import { conflictText, groupTasks, scanTasks, stateText } from "./tasks.js";
+import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -628,6 +629,10 @@ function appendMessage(message, target = $("messages")) {
       link.title = `Show message #${message.replyTo}, the one this replies to`;
       link.addEventListener("click", () => showParent(message, article));
       annotation.append(`${label}: `, link);
+    } else if (field === "to") {
+      // Several names (ADR 0067) show in the order they were given.
+      annotation.textContent = `${label}: ${namesText(addressees(message))}`;
+      annotation.classList.add("message-to");
     } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
   }
@@ -1074,6 +1079,8 @@ function showEdit(state, edited) {
   if (!message || (message.text === edited.text && message.editedAt === edited.editedAt)) return;
   message.text = edited.text;
   message.editedAt = edited.editedAt;
+  // An edited task message changes the board (ADR 0070).
+  tasksChanged([message], state);
   let boardUpdate = null;
   if (message.contentType === "application/json")
     try {
@@ -2927,8 +2934,11 @@ $("send-form").addEventListener("submit", async (event) => {
     status("Message must be 1–16,384 UTF-8 bytes.", true);
     return;
   }
-  if (new TextEncoder().encode(recipient).length > 128) {
-    status("Recipient must be at most 128 UTF-8 bytes.", true);
+  // To holds one name or several separated by commas (ADR 0067).
+  const names = parseNames(recipient);
+  const problem = namesProblem(names);
+  if (problem) {
+    status(problem, true);
     return;
   }
   const files = [...state.files];
@@ -2970,7 +2980,7 @@ $("send-form").addEventListener("submit", async (event) => {
       : JSON.stringify({
           username: connection.username,
           text: content,
-          ...(recipient.trim() ? { to: recipient } : {}),
+          ...(names.length ? { to: toField(names) } : {}),
           ...(replyId !== null ? { replyTo: replyId } : {}),
           ...(quote !== null ? { quote } : {}),
           ...(attachments.length ? { attachments } : {}),
@@ -3603,11 +3613,12 @@ $("agents-dialog").addEventListener("close", () => {
 });
 $("close-agents").addEventListener("click", () => $("agents-dialog").close());
 
-// The board's tasks (ADR 0067). Read only: the page reads the whole history like `msn task list`
+// The board's tasks (ADR 0070). Read only: the page reads the whole history like `msn task list`
 // and works the board out with the same reducer (public/tasks.js). It never posts a task event.
 let tasksChannel = null;
 let tasksRun = 0;
 let tasksTimer = null;
+let tasksReadAt = 0;
 function tasksState(text, error = false) {
   $("tasks-state").textContent = text;
   $("tasks-state").classList.toggle("error", error);
@@ -3618,6 +3629,7 @@ async function showTasks() {
   if (!connection || !target) return;
   clearTimeout(tasksTimer);
   const run = ++tasksRun;
+  tasksReadAt = Date.now();
   const current = () =>
     run === tasksRun && session === connection && tasksChannel === target && $("tasks-dialog").open;
   $("tasks-refresh").disabled = true;
@@ -3643,8 +3655,9 @@ function renderTasks(board, target) {
   const list = $("tasks-list");
   list.replaceChildren();
   const read = `Read ${plural(board.messages, "message")} up to #${board.headCursor}.`;
-  const skipped = board.warnings.length
-    ? ` Skipped ${board.warnings.length === 1 ? "1 message that was" : `${board.warnings.length} messages that were`} deleted or broke the task rules; msn task list ${target} says why.`
+  const unused = skippedCount(board.warnings);
+  const skipped = unused
+    ? ` Skipped ${unused === 1 ? "1 task message that breaks" : `${unused} task messages that break`} the task rules; msn task list ${target} says why.`
     : "";
   if (!board.tasks.length) {
     tasksState(`No tasks on #${target} yet. ${read}${skipped}`);
@@ -3769,6 +3782,7 @@ function focusTask(id) {
   card.querySelector("button")?.focus({ preventScroll: true });
 }
 const SCHEMA_TAG = "msn.task.v1";
+const TASKS_MIN_MS = 8000;
 /** A task event arrived on the open board while its list shows: read it again, once. */
 function tasksChanged(messages, state) {
   if (!$("tasks-dialog").open || session?.channels.get(tasksChannel) !== state) return;
@@ -3778,8 +3792,9 @@ function tasksChanged(messages, state) {
     )
   )
     return;
+  // At most one read every TASKS_MIN_MS: a busy board must not start a full scan per event.
   clearTimeout(tasksTimer);
-  tasksTimer = setTimeout(showTasks, 800);
+  tasksTimer = setTimeout(showTasks, Math.max(800, tasksReadAt + TASKS_MIN_MS - Date.now()));
 }
 $("tasks").addEventListener("click", () => {
   tasksChannel = channel;
@@ -4389,8 +4404,8 @@ function pickMention(index) {
   closeMentions();
   autosize();
   status(
-    address.to === person.name
-      ? `Mentioned ${person.name} · the message goes to ${person.name}`
+    address.to === address.mentionTo
+      ? `Mentioned ${person.name} · the message goes to ${address.to}`
       : `Mentioned ${person.name} · the message still goes to ${address.to}`,
   );
 }
@@ -4466,7 +4481,7 @@ function renderScheduledList(list) {
     const row = document.createElement("li");
     const when = document.createElement("span");
     when.className = "scheduled-when";
-    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${item.to ? ` → ${item.to}` : ""}`;
+    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${addressees(item).length ? ` → ${namesText(addressees(item))}` : ""}`;
     when.title = new Date(item.sendAt).toLocaleString();
     const body = document.createElement("p");
     body.className = "scheduled-text";

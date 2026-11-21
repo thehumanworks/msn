@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { conflictText, groupTasks, parseJson, projectTasks, scanTasks, stateText } from "../public/tasks.js";
+import {
+  conflictText,
+  groupTasks,
+  parseJson,
+  projectTasks,
+  scanTasks,
+  skippedCount,
+  stateText,
+} from "../public/tasks.js";
 
-// The parity corpus (ADR 0067): expected boards come from cli/src/tasks.rs. See tests/task-fixtures.mjs.
+// The parity corpus (ADR 0070): expected boards come from cli/src/tasks.rs. See tests/task-fixtures.mjs.
 const corpusPath =
   process.env.MSN_TASK_FIXTURES ?? new URL("./fixtures/task-projection.json", import.meta.url);
 const corpus = JSON.parse(readFileSync(corpusPath, "utf8"));
@@ -157,5 +165,33 @@ test("the scan refuses a board when history changes, or rows belong elsewhere", 
   assert.equal(
     await scanTasks(fakeApi(rows).api, { tenant: "acme", channel: "work", current: () => false }),
     null,
+  );
+});
+
+test("a page with a missing or odd cursor field fails closed instead of showing an empty board", async () => {
+  const rows = [event(1, "a", { task: "t1", action: "open", title: "T", reviewer: "b" })];
+  for (const broken of [
+    { headCursor: undefined },
+    { historyRevision: "1" },
+    { nextCursor: 1.5 },
+    { hasMore: "no" },
+    { messages: null },
+  ]) {
+    const fake = fakeApi(rows);
+    const api = async (path) => ({ ...(await fake.api(path)), ...broken });
+    await assert.rejects(scanTasks(api, { tenant: "acme", channel: "work" }), /malformed/);
+  }
+});
+
+test("skipped task messages count each message once, without deleted rows or missing evidence", () => {
+  assert.equal(
+    skippedCount([
+      { code: "deleted-or-redacted", messageId: 4 },
+      { code: "unknown-evidence", messageId: 9, task: "t" },
+      { code: "unauthorized", messageId: 5 },
+      { code: "malformed-event", messageId: 5 },
+      { code: "malformed-event", messageId: null },
+    ]),
+    2,
   );
 });

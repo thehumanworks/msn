@@ -1,9 +1,14 @@
 // Mention someone with @ (ADR 0055). Pure functions only: app.js owns the page. Typing @ in the
 // message suggests the board's people; a pick puts @name in the text and, if the To field is
-// empty, fills it. The first mention picked addresses the message: later picks only add @name.
+// empty, fills it. Later picks add their names to To while it holds only picked names (ADR 0067);
+// a To typed by hand is left alone.
+
+import { addressees, namesText, parseNames, sameName, withName } from "./address.js";
 
 /** How many suggestions the list shows at most. */
 export const MAX_SUGGESTIONS = 6;
+/** Picks add names to To up to the server's limit (ADR 0067). */
+const MAX_PICKED = 8;
 
 /**
  * The @ being typed at `caret`, or null. An @ counts at the start of the text or after a space
@@ -39,7 +44,7 @@ export function people({ personas = [], messages = [], me = "" } = {}) {
   for (const persona of personas) if (persona?.listening) add(persona.displayName, true);
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     add(messages[i]?.username);
-    add(messages[i]?.to);
+    for (const name of addressees(messages[i])) add(name);
   }
   for (const persona of personas) add(persona?.displayName, Boolean(persona?.listening));
   return out;
@@ -89,20 +94,27 @@ export function hasMention(text, name) {
 }
 
 /**
- * The To field after a pick: the picked name when To is empty, otherwise unchanged.
- * Returns `{ to, mentionTo }`: `mentionTo` is the name a pick put in To (or the old one).
+ * The To field after a pick (ADR 0055, ADR 0067). An empty To becomes the picked name. A To that
+ * holds only names earlier picks put there gains the picked name too (up to 8), so "@lead @worker"
+ * goes to both. A To typed by hand is never touched.
+ * Returns `{ to, mentionTo }`: `mentionTo` is the To text picks made (or the old one).
  */
 export function addressAfterPick(to, mentionTo, name) {
-  if (to.trim()) return { to, mentionTo };
-  return { to: name, mentionTo: name };
+  if (!to.trim()) return { to: name, mentionTo: name };
+  if (!mentionTo || to !== mentionTo) return { to, mentionTo };
+  const names = parseNames(to);
+  if (names.length >= MAX_PICKED && !names.some((kept) => sameName(kept, name))) return { to, mentionTo };
+  const next = namesText(withName(names, name));
+  return { to: next, mentionTo: next };
 }
 
 /**
- * The To field after the text changed: a name a pick put there is cleared again once its @name
+ * The To field after the text changed: a name a pick put in To is taken out again once its @name
  * is gone from the text. A name typed into To by hand is never touched.
  */
 export function addressAfterEdit(to, mentionTo, text) {
-  if (!mentionTo || to !== mentionTo || hasMention(text, mentionTo))
-    return { to, mentionTo: to === mentionTo ? mentionTo : null };
-  return { to: "", mentionTo: null };
+  if (!mentionTo || to !== mentionTo) return { to, mentionTo: null };
+  const kept = parseNames(to).filter((name) => hasMention(text, name));
+  const next = namesText(kept);
+  return { to: next, mentionTo: next || null };
 }

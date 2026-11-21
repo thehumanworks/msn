@@ -1,4 +1,4 @@
-// Writes the task-projection parity corpus (ADR 0067): message logs whose expected board comes
+// Writes the task-projection parity corpus (ADR 0070): message logs whose expected board comes
 // from the Rust reducer. Run it, then fill the expected boards with cargo:
 //
 //   node tests/task-fixtures.mjs [count] [seed] [path]

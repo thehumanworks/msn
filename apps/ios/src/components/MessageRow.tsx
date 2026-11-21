@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
+import { namesLine } from "../core/address.ts";
 import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
 import { REACTION_KINDS, type Message, type ReactionKind } from "../core/types.ts";
@@ -133,7 +134,7 @@ function MessageRowImpl({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
+      accessibilityLabel={`${who}${namesLine(message) ? ` to ${namesLine(message)}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
       }${message.editedAt ? ", edited" : ""}${
         choices && mode ? `. Choices: ${choices.join(", ")}. ${choiceNote(message, mode)}` : ""
@@ -185,9 +186,9 @@ function MessageRowImpl({
         <Text style={[styles.author, own && { color: colors.accent }]} numberOfLines={1}>
           {who}
         </Text>
-        {message.to ? (
+        {namesLine(message) ? (
           <Text style={styles.to} numberOfLines={1}>
-            → {message.to}
+            → {namesLine(message)}
           </Text>
         ) : null}
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>

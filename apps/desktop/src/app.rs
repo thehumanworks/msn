@@ -30,6 +30,9 @@ pub struct MsnDesktopApp {
     search_input: String,
     /// A reply the chat should scroll to on its next frame (the "New reply in thread" pointer).
     scroll_to: Option<u64>,
+    /// The Tasks tab card a dependency link showed, outlined; scrolled to once (ADR 0070).
+    task_focus: Option<String>,
+    task_focus_scroll: bool,
     /// The server the current connection talks to; message links (ADR 0042) start with it.
     link_origin: Option<url::Url>,
     /// A link waiting to go to the clipboard on the next frame (the clipboard needs the context).
@@ -231,8 +234,10 @@ enum Action {
     Quote(u64),
     /// Show the message a quote came from, loading it when it is not loaded (ADR 0059).
     ShowQuoted(u64),
-    /// Show a task's message in Chat, from the Tasks tab (ADR 0067).
+    /// Show a task's message in Chat, from the Tasks tab (ADR 0070).
     ShowTaskMessage(u64),
+    /// Show a dependency's card in the Tasks tab (ADR 0070).
+    ShowTask(String),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
     React(u64, &'static str, bool),
     /// Answer question (id) with a choice (ADR 0065).
@@ -280,6 +285,8 @@ impl MsnDesktopApp {
             active_tab: Tab::Chat,
             search_input: String::new(),
             scroll_to: None,
+            task_focus: None,
+            task_focus_scroll: false,
             link_origin: None,
             copied_link: None,
             receipts_at: None,
@@ -1646,7 +1653,15 @@ impl MsnDesktopApp {
                 for task in section {
                     let id = task["id"].as_str().unwrap_or("?");
                     // An explicit id per task, so equal-looking buttons in two cards never clash.
-                    ui.push_id(("task", id), |ui| render_task(ui, task, &known, actions));
+                    let focused = self.task_focus.as_deref() == Some(id);
+                    let shown = ui
+                        .push_id(("task", id), |ui| {
+                            render_task(ui, task, &known, focused, actions)
+                        })
+                        .inner;
+                    if focused && std::mem::take(&mut self.task_focus_scroll) {
+                        scroll_now(&shown);
+                    }
                 }
             }
         });
@@ -2034,6 +2049,10 @@ impl MsnDesktopApp {
             Action::CancelEdit => self.editing = None,
             Action::Reply(id) => self.reply_to(id),
             Action::Quote(id) => self.quote_message(id),
+            Action::ShowTask(id) => {
+                self.task_focus = Some(id);
+                self.task_focus_scroll = true;
+            }
             Action::ShowTaskMessage(id) => {
                 self.active_tab = Tab::Chat;
                 self.perform(Action::ShowQuoted(id));
@@ -3330,7 +3349,7 @@ fn message_header(
     };
     let mut job = egui::text::LayoutJob::default();
     job.append(username, 0.0, format(name_color));
-    let says = match message["to"].as_str() {
+    let says = match msn_cli::address::names_line(message) {
         Some(to) => format!(" says to {to}"),
         None => " says".to_string(),
     };
@@ -3572,7 +3591,7 @@ fn summarize_json(text: &str) -> String {
     }
 }
 
-/// The Tasks tab's sections (ADR 0067), in the order they show; the web list uses the same ones.
+/// The Tasks tab's sections (ADR 0070), in the order they show; the web list uses the same ones.
 const TASK_SECTIONS: [&str; 6] = [
     "Needs a look",
     "Ready for review",
@@ -3638,7 +3657,13 @@ fn conflict_text(code: &str) -> &str {
     }
 }
 
-fn render_task(ui: &mut egui::Ui, task: &Value, known: &[&str], actions: &mut Vec<Action>) {
+fn render_task(
+    ui: &mut egui::Ui,
+    task: &Value,
+    known: &[&str],
+    focused: bool,
+    actions: &mut Vec<Action>,
+) -> egui::Response {
     let id = task["id"].as_str().unwrap_or("?");
     let state = task["state"].as_str().unwrap_or("?");
     let strs = |key: &str| -> Vec<&str> {
@@ -3653,7 +3678,11 @@ fn render_task(ui: &mut egui::Ui, task: &Value, known: &[&str], actions: &mut Ve
             .map(|items| items.iter().filter_map(Value::as_u64).collect())
             .unwrap_or_default()
     };
-    theme::card().show(ui, |ui| {
+    let mut card = theme::card();
+    if focused {
+        card = card.stroke(egui::Stroke::new(2.0, theme::accent()));
+    }
+    card.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
             ui.strong(task["title"].as_str().unwrap_or(""));
@@ -3710,7 +3739,26 @@ fn render_task(ui: &mut egui::Ui, task: &Value, known: &[&str], actions: &mut Ve
                     } else {
                         format!("{dep} · done")
                     };
-                    ui.label(egui::RichText::new(text).monospace().small());
+                    let label = egui::RichText::new(text).monospace().small();
+                    if !known.contains(&dep) {
+                        ui.label(label);
+                        continue;
+                    }
+                    let rect = ui
+                        .add(egui::Label::new(label).sense(egui::Sense::hover()))
+                        .rect;
+                    let link = ui.interact(
+                        rect,
+                        egui::Id::new(("task-dep", id, dep)),
+                        egui::Sense::click(),
+                    );
+                    if link
+                        .on_hover_text(format!("Show {dep}"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        actions.push(Action::ShowTask(dep.to_string()));
+                    }
                 }
             });
         }
@@ -3758,7 +3806,8 @@ fn render_task(ui: &mut egui::Ui, task: &Value, known: &[&str], actions: &mut Ve
         if matches!(state, "open") && ui.button("Claim").clicked() {
             actions.push(Action::Claim(id.to_string()));
         }
-    });
+    })
+    .response
 }
 
 #[cfg(test)]
@@ -3844,6 +3893,8 @@ mod layout_tests {
             active_tab: Tab::Chat,
             search_input: String::new(),
             scroll_to: None,
+            task_focus: None,
+            task_focus_scroll: false,
             link_origin: None,
             copied_link: None,
             receipts_at: None,
@@ -4914,5 +4965,38 @@ mod task_tab_tests {
             output.textures_delta.clear();
         }
         assert!(matches!(actions.as_slice(), [Action::ShowTaskMessage(2)]));
+        // A dependency link outlines and scrolls to that task's card.
+        let rect = ctx
+            .read_response(egui::Id::new(("task-dep", "build", "spec")))
+            .expect("build lists its dependency")
+            .rect;
+        let mut actions = Vec::new();
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(rect.center()),
+                    egui::Event::PointerButton {
+                        pos: rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.tasks_tab(ui, &mut actions));
+            output.textures_delta.clear();
+        }
+        assert!(matches!(actions.as_slice(), [Action::ShowTask(task)] if task == "spec"));
+        app.perform(Action::ShowTask("spec".into()));
+        assert_eq!(app.task_focus.as_deref(), Some("spec"));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.tasks_tab(ui, &mut Vec::new())
+        });
+        output.textures_delta.clear();
+        assert!(
+            !app.task_focus_scroll,
+            "the scroll to the card happens once"
+        );
     }
 }

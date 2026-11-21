@@ -1157,7 +1157,7 @@ fn handle_command(
                     reply_to,
                     quote,
                     correlation_id: None,
-                    to,
+                    to: to.into_iter().collect(),
                 },
             )
             .map(|()| Some(format!("Scheduled for {send_at}.")));
@@ -1217,7 +1217,7 @@ fn handle_command(
                     reply_to,
                     quote,
                     correlation_id,
-                    to,
+                    to: to.into_iter().collect(),
                 },
                 &cancelled,
             );

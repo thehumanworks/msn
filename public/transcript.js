@@ -11,6 +11,8 @@
 // the board (names, labels, file names) is written as escaped inline text on a line that starts
 // with fixed text, so it cannot start a block either.
 
+import { addressees } from "./address.js";
+
 /**
  * ASCII punctuation that can start inline markup (CommonMark, GFM tables, GitHub math), plus `:`
  * and `@`, which GFM autolinks (`https://…`, `a@b.c`). `www.` is handled in inline().
@@ -131,7 +133,8 @@ export function renderTranscript(meta, messages) {
         : `${origin}/#board=${tenant}/${channel}&msg=${message.replyTo}`;
       details.push(`- Reply to: [#${message.replyTo}](${target})`);
     }
-    if (typeof message.to === "string") details.push(`- To: ${inline(message.to)}`);
+    const to = addressees(message);
+    if (to.length) details.push(`- To: ${to.map(inline).join(", ")}`);
     // A question (ADR 0065) lists its choices; an answer names the choice it picked.
     if (Array.isArray(message.choices) && message.choices.length)
       details.push(`- Choices: ${message.choices.map(inline).join("; ")}`);

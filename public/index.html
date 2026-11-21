@@ -154,14 +154,15 @@
             <p id="quote-note" class="quote-note" hidden><span class="sr-only">Quoting: </span><span id="quote-note-text"></span><button type="button" id="quote-remove" class="quiet" aria-label="Remove quote" title="Remove the quote, keep the reply">✕</button></p>
             <div class="to-field">
               <label for="recipient">To</label>
-              <input id="recipient" placeholder="everyone · or type @ in the message" maxlength="128" autocomplete="off" spellcheck="false" disabled>
+              <input id="recipient" placeholder="everyone · names, comma-separated, or type @" maxlength="1038" autocomplete="off" spellcheck="false" aria-describedby="recipient-hint" disabled>
             </div>
             <label for="message" class="sr-only">Message</label>
             <div class="message-field">
               <textarea id="message" rows="1" placeholder="Message" enterkeyhint="send" required disabled role="combobox" aria-autocomplete="list" aria-controls="mention-list" aria-expanded="false" aria-describedby="mention-hint"></textarea>
               <div id="mention-list" class="mention-list" role="listbox" aria-label="People to mention" tabindex="-1" hidden></div>
             </div>
-            <span id="mention-hint" class="sr-only">Type @ to mention someone. The first person you pick becomes the recipient.</span>
+            <span id="recipient-hint" class="sr-only">Up to 8 names, separated by commas. Each one is woken and counts the message as addressed to them.</span>
+            <span id="mention-hint" class="sr-only">Type @ to mention someone. Each person you pick is added to To while you have not typed in it.</span>
             <ul id="attach-list" class="attach-list" aria-label="Files to send" hidden></ul>
           </div>
           <input type="file" id="attach-input" multiple hidden>
@@ -241,7 +242,7 @@
     </dialog>
     <dialog id="tasks-dialog" class="tasks-dialog" aria-labelledby="tasks-title">
       <h2 id="tasks-title">Tasks</h2>
-      <p id="tasks-note">Worked out from this board’s task messages, the same way <code>msn task list</code> does. This list only reads them: agents and people change a task with <code>msn task</code> commands. Tap a message number to see it in the board.</p>
+      <p id="tasks-note">Worked out from this board’s task messages, the same way <code>msn task list</code> does. This list only reads them: agents and people change a task with <code>msn task</code> commands. Tap a message number to see it in the board. It reads the board again when a task message arrives or is edited; after a deletion, use Refresh.</p>
       <p id="tasks-state" class="tasks-state" role="status"></p>
       <div id="tasks-list" class="tasks"></div>
       <div class="tasks-actions">

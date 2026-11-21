@@ -1,4 +1,4 @@
-// The board's tasks (ADR 0067): the web copy of the msn.task.v1 reducer in cli/src/tasks.rs, and
+// The board's tasks (ADR 0070): the web copy of the msn.task.v1 reducer in cli/src/tasks.rs, and
 // the history scan that `msn task list` runs. Pure functions only, besides the scan's `api` argument.
 //
 // This is a second implementation of the reducer, which ADR 0018 and 0019 warn against: a wrong
@@ -671,6 +671,18 @@ export function projectTasks(messages) {
   };
 }
 
+/**
+ * How many task messages the board could not use: distinct message ids of the warnings, without
+ * deleted chat messages (any deleted row warns) and without missing evidence (shown on its task).
+ */
+export function skippedCount(warnings) {
+  const ids = new Set();
+  for (const warning of warnings)
+    if (warning.code !== "deleted-or-redacted" && warning.code !== "unknown-evidence")
+      ids.add(warning.messageId ?? `none-${ids.size}`);
+  return ids.size;
+}
+
 /** The panel's sections, in the order they show. Each takes the tasks whose `when` is true. */
 export const SECTIONS = [
   { key: "attention", title: "Needs a look", when: (t) => t.state === "conflict" || t.state === "unknown" },
@@ -739,10 +751,20 @@ export async function scanTasks(api, { tenant, channel, current = () => true, pr
   let total = 0;
   let complete = false;
   const messages = [];
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
   const changed = () => new Error(`#${channel} history changed while reading its tasks. Try again.`);
   for (let pageNumber = 0; pageNumber < TASK_PAGES; pageNumber++) {
     const page = await api(path(cursor, 100));
     if (!current()) return null;
+    // Fail closed on a malformed page, like Rust's `integer()` checks in task_client.rs.
+    if (
+      !count(page?.historyRevision) ||
+      !count(page.headCursor) ||
+      !count(page.nextCursor) ||
+      typeof page.hasMore !== "boolean" ||
+      !Array.isArray(page.messages)
+    )
+      throw new Error(`#${channel} history came back malformed. Try again.`);
     total += bytes(JSON.stringify(page));
     if (total > TASK_SCAN_BYTES)
       throw new Error(`#${channel} has too much history to show its tasks here. Use msn task list instead.`);
@@ -751,7 +773,7 @@ export async function scanTasks(api, { tenant, channel, current = () => true, pr
     head ??= page.headCursor;
     if (page.headCursor < head) throw changed();
     let previous = cursor;
-    for (const row of page.messages ?? []) {
+    for (const row of page.messages) {
       if (
         !Number.isSafeInteger(row.id) ||
         row.id <= previous ||
@@ -763,7 +785,7 @@ export async function scanTasks(api, { tenant, channel, current = () => true, pr
       previous = row.id;
       if (row.id <= head) messages.push(row);
     }
-    if (page.nextCursor !== previous || (page.hasMore && !page.messages?.length))
+    if (page.nextCursor !== previous || (page.hasMore && !page.messages.length))
       throw new Error(`#${channel} history came back out of order. Try again.`);
     cursor = page.nextCursor;
     progress(messages.length);
@@ -777,7 +799,7 @@ export async function scanTasks(api, { tenant, channel, current = () => true, pr
   // A deletion anywhere in history changes the revision and invalidates the board.
   const check = await api(path(0, 1));
   if (!current()) return null;
-  if (check.historyRevision !== revision) throw changed();
+  if (!count(check?.historyRevision) || check.historyRevision !== revision) throw changed();
   return {
     ...projectTasks(messages),
     headCursor: head,
