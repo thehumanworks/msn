@@ -119,7 +119,12 @@ export type CoordinationEventType =
   | "channel.created"
   | "message.created"
   | "message.deleted"
-  | "snapshot.published";
+  | "snapshot.published"
+  /** An agent status changed (ADR 0064); resourceId is the change's sequence number. */
+  | "status.changed";
+
+/** What a name says it is doing on a board (ADR 0064): only what it said, never inferred. */
+export type AgentStatus = { name: string; text: string; setAt: string };
 
 export type CoordinationEvent = {
   id: number;

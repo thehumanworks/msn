@@ -152,3 +152,40 @@ test("messages keep editedAt; edit pages carry the cursor (ADR 0052)", async () 
   assert.throws(() => decodeEditPage({ edits: [], hasMore: false }), ProtocolError);
   assert.throws(() => decodeEditPage({ edits: [{}], editCursor: 1, hasMore: false }), ProtocolError);
 });
+
+test("status.changed events and status lists decode; bad rows are protocol errors (ADR 0064)", async () => {
+  const { decodeStatuses } = await import("../src/core/decode.ts");
+  const { formatAgo } = await import("../src/components/format.ts");
+  const page = decodeEventPage(
+    {
+      events: [
+        {
+          id: 3,
+          tenant: "acme",
+          channel: "general",
+          type: "status.changed",
+          resourceId: 7,
+          historyRevision: 0,
+          createdAt: "2026-11-21T02:00:00Z",
+        },
+      ],
+      nextCursor: 3,
+      hasMore: false,
+    },
+    { tenant: "acme", after: 2, limit: 100 },
+  );
+  assert.equal(page.events[0].type, "status.changed");
+  assert.deepEqual(
+    decodeStatuses({
+      statuses: [{ name: "lead", text: "<b>merging</b>", setAt: "2026-11-21T02:00:00Z", seq: 3, personaId: "lead" }],
+    }),
+    [{ name: "lead", text: "<b>merging</b>", setAt: "2026-11-21T02:00:00Z" }],
+  );
+  for (const bad of [{}, { statuses: [{ name: "", text: "x", setAt: "2026-11-21T02:00:00Z" }] }, { statuses: [{ name: "a", text: "x", setAt: "soon" }] }])
+    assert.throws(() => decodeStatuses(bad), ProtocolError);
+  const at = Date.parse("2026-11-21T02:00:00Z");
+  assert.equal(formatAgo("2026-11-21T02:00:00Z", at + 30_000), "just now");
+  assert.equal(formatAgo("2026-11-21T02:00:00Z", at + 180_000), "3 min ago");
+  assert.equal(formatAgo("2026-11-21T02:00:00Z", at + 2 * 3600_000), "2 h ago");
+  assert.equal(formatAgo("bad", at), "bad");
+});

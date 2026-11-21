@@ -11,10 +11,12 @@ import {
   decodeSearchPage,
   decodeSendResult,
   decodeSnapshot,
+  decodeStatuses,
 } from "./decode.ts";
 import type { FetchLike } from "./httpClient.ts";
 import { HttpClient, publicRequest } from "./httpClient.ts";
 import type {
+  AgentStatus,
   CatchupResult,
   ChannelListResult,
   ContentType,
@@ -305,6 +307,12 @@ export class ApiClient {
     return decodePersonas(r);
   }
 
+  /** GET …/statuses: what each name on the board says it is doing (ADR 0064). */
+  async listStatuses(channel: string, signal?: AbortSignal): Promise<AgentStatus[]> {
+    const r = await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/statuses`, { signal });
+    return decodeStatuses(r);
+  }
+
   /** GET …/pins: the board owner's pinned messages (ADR 0038). */
   async listPins(channel: string, signal?: AbortSignal): Promise<PinnedMessage[]> {
     const r = await this.http.request<{ pins: unknown }>(`/channels/${encodeURIComponent(channel)}/pins`, {
@@ -336,7 +344,8 @@ export class ApiClient {
   ): Promise<EventPage> {
     const channel = this.scopeChannel ? undefined : options.channel;
     const raw = await this.http.request<unknown>("/events", {
-      query: { after: options.after, limit: options.limit, wait: options.wait, channel },
+      // status.changed (ADR 0064) is opt-in; this client decodes it.
+      query: { after: options.after, limit: options.limit, wait: options.wait, channel, include: "statuses" },
       timeoutMs: (options.wait + 15) * 1000,
       signal,
     });
