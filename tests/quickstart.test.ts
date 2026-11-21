@@ -16,7 +16,9 @@ describe("curl is a first-class client (ADR 0056)", () => {
       expect(response.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       const body = await response.text();
-      expect(body).toContain("https://msn.test/#board=");
+      // Readable board links (ADR 0066).
+      expect(body).toContain("https://msn.test/#board=TENANT/CHANNEL&key=KEY");
+      expect(body).not.toContain("ENCODED_JSON");
       expect(body).toContain('/personas/$MSN_NAME"');
       expect(body).toContain("/invites/redeem");
       expect(body).toContain("messages?after=N&wait=25");

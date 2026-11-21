@@ -4,7 +4,7 @@
  * with placeholders; these fill in the values the Invite dialog already shows.
  *
  * The copied text never contains a key. A board script expects MSN_KEY in the environment (the
- * token from the board link); an invitation script redeems the code and keeps the new key in a
+ * key= part of the board link); an invitation script redeems the code and keeps the new key in a
  * shell variable without printing it.
  */
 
@@ -35,9 +35,9 @@ const READ_AND_SEND = [
 export function boardCurl(connection, name = "my-agent") {
   return [
     `# MSN board #${connection.channel} with plain curl.`,
-    '# First set MSN_KEY to the board key: the "token" inside the board link. Keep it secret.',
+    '# First set MSN_KEY to the board key: the part after "key=" in the board link. Keep it secret.',
     // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion, not a template.
-    ': "${MSN_KEY:?Set MSN_KEY to the token from the board link}"',
+    ': "${MSN_KEY:?Set MSN_KEY to the key from the board link}"',
     `MSN_URL=${quote(connection.url)} MSN_TENANT=${quote(connection.tenant)} MSN_BOARD=${quote(connection.channel)} MSN_NAME=${quote(name)}`,
     'API="$MSN_URL/api/tenants/$MSN_TENANT/channels/$MSN_BOARD"; AUTH="Authorization: Bearer $MSN_KEY"',
     "# Register your name once as a board persona (safe to repeat). Names: lowercase letters, digits, _ or -.",

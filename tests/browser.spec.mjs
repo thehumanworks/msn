@@ -80,7 +80,11 @@ test("account connection opens every board and shared invitation adds a persona"
   await page.locator("#invite-channel").click();
   await expect(page.locator("#invite-title")).toHaveText("Shared access to # work");
   const link = await page.locator("#invite-link").inputValue();
-  expect(link).toContain("#board=");
+  // Readable (ADR 0066): no URL-encoded JSON, the key stays in the fragment.
+  expect(link).toMatch(
+    new RegExp(`^${new URL(page.url()).origin}/#board=${t.tenant}/work&key=[0-9a-f]{64}$`),
+  );
+  expect(link).not.toContain("%");
   await page.locator("#close-invite").click();
   const guest = await browser.newContext({ viewport: { width: 390, height: 844 } });
   try {
@@ -99,6 +103,44 @@ test("account connection opens every board and shared invitation adds a persona"
     await guest.close();
   }
   await page.screenshot({ path: testInfo.outputPath("message-board.png"), fullPage: true });
+});
+
+test("a board link from before readable links still joins, and a broken one is refused", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request, { username: "human" });
+  const created = await request.put(`${t.path}/channels/work/board`, {
+    headers: t.headers,
+    data: { credential: crypto.randomUUID().replaceAll("-", "").repeat(2), goal: "Goal" },
+  });
+  expect(created.status()).toBe(201);
+  const shared = await (
+    await request.get(`${t.path}/channels/work/board/connection`, { headers: t.headers })
+  ).json();
+  await page.goto("/");
+  const origin = new URL(page.url()).origin;
+  // The old Invite dialog put URL-encoded JSON in the fragment (ADR 0066 keeps it working).
+  await page.goto(`${origin}/#board=${encodeURIComponent(JSON.stringify({ ...shared, url: origin }))}`);
+  await expect(page.locator("#status")).toHaveText("Choose a display name to join this message board.");
+  await expect(page.locator("#tenant")).toHaveValue(t.tenant);
+  await page.locator("#username").fill("legacy");
+  await page.locator("#entry-submit").click();
+  await expect(page.locator("#workspace")).toBeVisible();
+  await expect(page.locator("#identity-note")).toHaveText("Persona · shared channel access");
+  await page.evaluate(() => localStorage.clear());
+  for (const hash of [
+    `#board=${t.tenant}/work&key=`,
+    `#board=${t.tenant}&key=${shared.token}`,
+    "#board=%7Bnope",
+  ]) {
+    await page.goto(`${origin}/?r=${Math.random()}${hash}`);
+    await expect(page.locator("#status")).toHaveText("Invalid channel connection.");
+    expect(new URL(page.url()).hash).toBe("");
+  }
+  // A message link never carries a key.
+  await page.goto(`${origin}/?r=mixed#board=${t.tenant}/work&msg=1&key=${shared.token}`);
+  await expect(page.locator("#status")).toHaveText("Invalid message link.");
 });
 
 test("an owner starts a ready board from a template in one step", async ({ page, request }, testInfo) => {
@@ -4489,7 +4531,7 @@ test("the Invite dialog's curl commands join, read and send with plain curl", as
   // The copied text never holds the key; the agent sets it from the board link.
   expect(script).not.toContain(credential);
   const link = await page.locator("#invite-link").inputValue();
-  const key = JSON.parse(decodeURIComponent(link.split("#board=")[1])).token;
+  const key = new URLSearchParams(new URL(link).hash.slice(1)).get("key");
   // Run the copied commands as an agent would, with only bash and curl; N becomes the start.
   const run = (text, env = {}) =>
     promisify(execFile)(

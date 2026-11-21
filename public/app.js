@@ -1686,6 +1686,36 @@ function messageLink(tenant, name, id) {
   return `${location.origin}/#board=${tenant}/${name}&msg=${id}`;
 }
 
+/*
+ * Board links (ADR 0066). /#board=TENANT/CHANNEL&key=KEY joins a board with its shared key. It reads
+ * like a message link and needs no escaping (slugs and a hex key). The key stays in the fragment,
+ * which never reaches the server. Links from before carry URL-encoded JSON (#board=%7B...) and
+ * still work.
+ */
+function boardLink({ tenant, channel: name, token }) {
+  return `${location.origin}/#board=${tenant}/${name}&key=${token}`;
+}
+
+/** { tenant, token } from a board link's fragment parameters, or null when it is not valid. */
+function parseBoardLink(params) {
+  const board = params.get("board") ?? "";
+  if (params.has("key")) {
+    const [tenant = "", name = "", ...rest] = board.split("/");
+    const token = params.get("key") ?? "";
+    if (rest.length || !SLUG.test(tenant) || !SLUG.test(name) || !/^[A-Za-z0-9_-]{16,256}$/.test(token))
+      return null;
+    return { tenant, token };
+  }
+  try {
+    const data = JSON.parse(board);
+    if (new URL(data.url).origin !== location.origin) return null;
+    if (typeof data.tenant !== "string" || typeof data.token !== "string") return null;
+    return { tenant: data.tenant, token: data.token };
+  } catch {
+    return null;
+  }
+}
+
 /** { tenant, channel, id } from #board=TENANT/CHANNEL&msg=ID, or null when it is not a valid link. */
 function parseMessageLink(params) {
   const [tenant = "", name = "", ...rest] = (params.get("board") ?? "").split("/");
@@ -2523,7 +2553,7 @@ async function openInvite(scope) {
       $("revoke-invite").hidden = true;
       // Only the owner may invite; the board's shared credential gets 400 shared_channel_invitation.
       $("invite-watch-instead").hidden = !session?.owner;
-      $("invite-link").value = `${location.origin}/#board=${encodeURIComponent(JSON.stringify(shared))}`;
+      $("invite-link").value = boardLink(shared);
       setInviteCurl(boardCurl(shared));
       $("invite-expiry").textContent =
         "All personas share this channel credential. Access lasts until the owner rotates it.";
@@ -3169,7 +3199,7 @@ function receiveInvitation() {
   if (params.has("msg")) {
     history.replaceState(null, "", location.pathname);
     // A message link never also carries an invitation or a connection.
-    const mixed = params.has("invite") || params.has("account");
+    const mixed = params.has("invite") || params.has("account") || params.has("key");
     const link = mixed ? null : parseMessageLink(params);
     if (link) followLink(link);
     else status("Invalid message link.", true);
@@ -3178,17 +3208,14 @@ function receiveInvitation() {
   const board = params.get("board");
   if (board) {
     history.replaceState(null, "", location.pathname);
-    try {
-      const data = JSON.parse(board);
-      if (new URL(data.url).origin !== location.origin) throw new Error("Wrong server");
+    const data = parseBoardLink(params);
+    if (data) {
       $("entry-mode").value = "connect";
       $("tenant").value = data.tenant;
       $("token").value = data.token;
       $("username").value = "";
       status("Choose a display name to join this message board.");
-    } catch {
-      status("Invalid channel connection.", true);
-    }
+    } else status("Invalid channel connection.", true);
     return true;
   }
   const account = new URLSearchParams(location.hash.slice(1)).get("account");
