@@ -20,6 +20,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
+import { baseAfterSave } from "../core/brief.ts";
 import { toggled } from "../core/fold.ts";
 import { messageLink } from "../core/links.ts";
 import { seenMark } from "../core/readMarks.ts";
@@ -30,6 +31,7 @@ import { MessageRow } from "../components/MessageRow.tsx";
 import { MutePanel, muteButtonLabel, useMutes } from "../components/MutePanel.tsx";
 import { OutboxRow } from "../components/OutboxRow.tsx";
 import { PinnedStrip } from "../components/PinnedStrip.tsx";
+import { BriefPanel, BriefStrip } from "../components/BriefStrip.tsx";
 import { ScheduledPanel } from "../components/ScheduledPanel.tsx";
 import { SearchView } from "../components/SearchView.tsx";
 import { StatusStrip } from "../components/StatusStrip.tsx";
@@ -82,7 +84,11 @@ export function ChannelScreen({
   };
   const [mutes, setMutes] = useMutes(session, channel);
   const [muting, setMuting] = useState(false);
-  useEffect(() => setMuting(false), [channel]);
+  const [briefing, setBriefing] = useState(false);
+  useEffect(() => {
+    setMuting(false);
+    setBriefing(false);
+  }, [channel]);
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -91,6 +97,14 @@ export function ChannelScreen({
         <Text style={styles.title} numberOfLines={1} accessibilityRole="header">
           #{channel}
         </Text>
+        {session.owner && !archived && controller ? (
+          <Button
+            label="Brief"
+            variant="ghost"
+            accessibilityHint="Write the board's brief: standing instructions every agent receives first"
+            onPress={() => setBriefing((open) => !open)}
+          />
+        ) : null}
         {onSetArchived && session.owner ? (
           <Button
             label={archived ? "Unarchive" : "Archive"}
@@ -123,6 +137,9 @@ export function ChannelScreen({
           }}
         />
       ) : null}
+      {session.owner && briefing && !archived && controller ? (
+        <BriefEditor key={channel} controller={controller} onClose={() => setBriefing(false)} />
+      ) : null}
       <View style={styles.tabs}>
         <Segmented options={TABS} value={tab} onChange={setTab} />
       </View>
@@ -140,6 +157,27 @@ export function ChannelScreen({
       )}
     </KeyboardAvoidingView>
   );
+}
+
+/** Owner only: the brief editor for the open board (ADR 0074). */
+function BriefEditor({
+  controller,
+  onClose,
+}: {
+  controller: NonNullable<ReturnType<typeof useChannel>>;
+  onClose: () => void;
+}) {
+  const brief = useStore(controller.state).brief;
+  // The version on screen when the editor opened. After a conflict the owner has been told, so
+  // the next press builds on the newest version. Any other failure keeps the base, so a retry
+  // still cannot overwrite a change it has not shown.
+  const base = useRef<number | undefined>(controller.state.get().briefVersion);
+  const save = async (text: string) => {
+    const failed = await controller.saveBrief(text, base.current);
+    base.current = baseAfterSave(base.current, failed);
+    return failed;
+  };
+  return <BriefPanel brief={brief} onSave={save} onClose={onClose} />;
 }
 
 function ChannelBody({
@@ -367,6 +405,7 @@ function ChannelBody({
   return (
     <View style={{ flex: 1 }}>
       {banner}
+      <BriefStrip brief={state.brief} />
       <PinnedStrip pinned={state.pinned} />
       <StatusStrip statuses={state.statuses} />
       {empty ? (

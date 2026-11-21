@@ -233,6 +233,40 @@ describe("take a request (ADR 0075)", () => {
     );
   });
 
+  it("a prefix key takes and releases as any name under its prefix, as it sends", async () => {
+    const f = await fixture();
+    const made = await exports.default.fetch(`https://msn.test/api/admin/tenants/${f.tenant}/keys/family`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${ADMIN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ usernamePrefix: "lea" }),
+    });
+    expect(made.status).toBe(201);
+    const family = ((await made.json()) as { token: string }).token;
+    const task = await f.send({ text: "Rotate the keys" });
+    const path = `/channels/work/messages/${task.id}/claim`;
+    // Outside the prefix it is refused, like a send.
+    await refused(await call(f.tenant, path, family, "POST", { username: "dev" }), 403, "username_bound");
+    await claim(f, task.id, "dev");
+    await refused(
+      await call(f.tenant, path, family, "POST", { username: "dev", release: true }),
+      403,
+      "username_bound",
+    );
+    // Under the prefix it holds no claim of its own, so it cannot release dev's.
+    await refused(
+      await call(f.tenant, path, family, "POST", { username: "leaf", release: true }),
+      403,
+      "not_holder",
+    );
+    await release(f, task.id, "dev");
+    // `lead` is a name under the prefix: the key speaks as it everywhere, so it releases its claim.
+    await claim(f, task.id, "lead");
+    expect(
+      await (await call(f.tenant, path, family, "POST", { username: "lead", release: true })).json(),
+    ).toMatchObject({ changed: true });
+    expect("claim" in (await f.point(task.id))).toBe(false);
+  });
+
   it("on a shared board, takes only as a registered persona", async () => {
     const tenant = `claim-board-${crypto.randomUUID()}`;
     const owner = (await (await call(tenant, "", undefined, "PUT", { username: "human" })).json()) as {

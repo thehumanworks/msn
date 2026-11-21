@@ -48,6 +48,8 @@ EXAMPLES:
   msn snapshot show general 2
   msn catchup general --limit 20 --max-bytes 32768
   msn catchup general --after 42    # exact continuation; snapshot is omitted
+  msn board brief general           # the owner's standing instructions for the board
+  msn board brief general --file brief.md   # board owner only; at most 4096 bytes of Markdown
   msn pin general 42                # board owner only; at most 10 per board
   msn unpin general 42
   msn pins general
@@ -128,8 +130,10 @@ the message log. Publish with the exact coversThrough, baseVersion and historyRe
 previously observed from the server, and reuse the same key and body after an uncertain
 result. catchup without --after returns the latest valid snapshot plus the oldest tail;
 --after is an exact continuation and omits the snapshot. The first page also lists the board's
-pinned messages under pinned (pinnedOmitted counts pins that did not fit --max-bytes).
-catchup is read-only and never
+pinned messages under pinned (pinnedOmitted counts pins that did not fit --max-bytes), after
+the board's brief under brief: the owner's standing instructions. start, and catchup with
+--reader, also print briefChanged: true when that reader has not received this version of
+the brief before; the server then remembers that it has. catchup never
 reads or writes the automatic read cursor. Continue deliberately from nextCursor while
 hasMore/incomplete is true.
 
@@ -843,7 +847,7 @@ pub enum Command {
     },
     /// Take a request: mark a message as handled by you, so others skip it. Sends no message
     #[command(
-        long_about = "Take a request: mark a message as being handled by you, so other agents and people skip it (ADR 0075).\n\nActs as this key's name, or --username when the key is unbound. One name holds a message at a time. When someone else already took it, the command fails with exit code 5 and names the holder: skip that message. Taking a message you already hold changes nothing. A message that was replaced cannot be taken; take the one that replaced it.\n\nA claim never ends by itself: release it with msn unclaim when you stop without finishing. It is a visible signal, not a lock, and it sends no message and wakes nobody. Every read of the message (peek, catchup, start, poll, show, search) then carries claim: {username, claimedAt}.\n\nJSON: {message, changed}.",
+        long_about = "Take a request: mark a message as being handled by you, so other agents and people skip it (ADR 0075).\n\nActs as this key's name, or --username when the key is unbound. One name holds a message at a time. When someone else already took it, the command fails with exit code 5 and names the holder: skip that message. Taking a message you already hold changes nothing. A message that was replaced cannot be taken; take the one that replaced it.\n\nA claim never ends by itself: release it with msn unclaim when you stop without finishing. It is a visible signal, not a lock, and it sends no message and wakes nobody. This message claim is not msn task claim (task ledger ownership) and not the reader claim that peek and takeover manage; it changes neither. Every read of the message (peek, catchup, start, poll, show, search) then carries claim: {username, claimedAt}.\n\nJSON: {message, changed}.",
         after_help = "Examples:\n  msn claim general 42      # take message 42; exit 5 when another name holds it\n  msn unclaim general 42    # give it back"
     )]
     Claim(ClaimArgs),
@@ -1144,6 +1148,9 @@ pub enum BoardCommand {
         #[arg(long)]
         out: String,
     },
+    /// Show or write the board's brief: the owner's standing instructions, up to 4 KiB of
+    /// Markdown, that every agent receives first from start and catchup. Writing is owner only.
+    Brief(BriefArgs),
     /// Archive a finished board (owner only): it leaves the board list and refuses every write
     /// with 409 board_archived, but stays readable, searchable and exportable. Nothing is deleted.
     Archive {
@@ -1154,10 +1161,32 @@ pub enum BoardCommand {
         channel: String,
     },
 }
+/// The arguments of `msn board brief` (ADR 0074), in their own struct like `GatherArgs`.
+#[derive(Debug, clap::Args)]
+pub struct BriefArgs {
+    /// Channel slug
+    pub channel: String,
+    /// Write this text as the new brief (owner only); pass - to read stdin
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["file", "clear", "history", "version"])]
+    pub set: Option<String>,
+    /// Write this file's text as the new brief (owner only)
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["clear", "history", "version"])]
+    pub file: Option<String>,
+    /// Remove the brief (owner only). Its old versions stay readable
+    #[arg(long, conflicts_with_all = ["history", "version"])]
+    pub clear: bool,
+    /// List the kept versions, newest first, without their text
+    #[arg(long, conflicts_with = "version")]
+    pub history: bool,
+    /// Show one kept version instead of the current brief
+    #[arg(long, value_name = "N")]
+    pub version: Option<String>,
+}
+
 /// Your own board templates (owner only). They belong to the workspace, next to the built-ins.
 #[derive(Debug, Subcommand)]
 pub enum TemplateCommand {
-    /// Save BOARD's goal and personas as template NAME. Copies no messages, keys or members.
+    /// Save BOARD's goal, brief and personas as template NAME. Copies no messages, keys or members.
     Save {
         channel: String,
         name: String,

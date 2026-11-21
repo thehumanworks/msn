@@ -79,6 +79,8 @@ export type MockServerHandle = {
   setStatus: (channel: string, name: string, text: string | null) => void;
   /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
   setPin: (id: number, pinned: boolean) => void;
+  /** Write a board's brief as its owner on another device (ADR 0074); posts the board notice. */
+  setBrief: (channel: string, text: string) => void;
   /** Make the token stop working, waking any pending event poll (like rotation/revocation). */
   revoke: (token?: string) => void;
   /** Number of event polls currently held open. */
@@ -117,6 +119,19 @@ export async function startMockServer(): Promise<MockServerHandle> {
   const pins = new Set<number>();
   const statuses = new Map<string, Map<string, { text: string; setAt: string; seq: number }>>();
   let statusSeq = 0;
+  /** Board briefs (ADR 0074): every version per channel; the last is current, "" means removed. */
+  const briefs = new Map<string, string[]>();
+  const briefBody = (channel: string) => {
+    const versions = briefs.get(channel) ?? [];
+    const text = versions.at(-1) ?? "";
+    return {
+      channel,
+      brief: text
+        ? { version: versions.length, text, bytes: Buffer.byteLength(text), updatedAt: "2026-11-21T17:00:00.000Z", updatedBy: "owner" }
+        : null,
+      currentVersion: versions.length,
+    };
+  };
   const reactions = new Map<number, Record<string, string[]>>();
   const claims = new Map<number, { username: string; claimedAt: string }>();
   let listsClaims = true;
@@ -146,6 +161,21 @@ export async function startMockServer(): Promise<MockServerHandle> {
   let messageId = 0;
   let eventId = 0;
   const revision = new Map<string, number>();
+
+  /** Like the Worker: a new version, announced by a board message that carries no text. */
+  function writeBrief(channel: string, text: string): void {
+    const versions = briefs.get(channel) ?? [];
+    versions.push(text.trim() ? text : "");
+    briefs.set(channel, versions);
+    insert(
+      channel,
+      "board",
+      JSON.stringify({ schema: "msn.brief.v1", version: versions.length, cleared: !text.trim() }),
+      "application/json",
+      null,
+      "",
+    );
+  }
 
   function appendEvent(channel: string, type: EventType, resourceId: number | null): void {
     eventId += 1;
@@ -473,6 +503,15 @@ export async function startMockServer(): Promise<MockServerHandle> {
           .sort((a, b) => b.seq - a.seq);
         return json(res, 200, { channel, statuses: rows, statusSeq });
       }
+      if (rest[2] === "brief" && rest.length === 3 && method === "GET") return json(res, 200, briefBody(channel));
+      if (rest[2] === "brief" && rest.length === 3 && method === "PUT") {
+        const body = await readBody(req);
+        const versions = briefs.get(channel) ?? [];
+        if (body.baseVersion !== versions.length)
+          return json(res, 409, { error: { code: "brief_conflict", message: "Read the brief again." } });
+        writeBrief(channel, String(body.text));
+        return json(res, 201, { ...briefBody(channel), changed: true });
+      }
       if (rest[2] === "pins" && rest.length === 3 && method === "GET") {
         return json(res, 200, { pins: pinnedRows(channel), limit: 10 });
       }
@@ -633,6 +672,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
       for (const row of scheduled.splice(0))
         insert(String(row.channel), String(row.username), String(row.text), "text/plain", null, "", {});
     },
+    setBrief: (channel, text) => writeBrief(channel, text),
     setPin: (id, pinned) => {
       if (pinned) pins.add(id);
       else pins.delete(id);

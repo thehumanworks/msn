@@ -298,6 +298,40 @@ export const MAX_EDITS = 100000;
 const CATCHUP_EDITS = 20;
 /** Lifetime agent status changes per workspace (ADR 0064); each writes one `status.changed` event. */
 export const MAX_STATUS_CHANGES = 100000;
+/** The longest board brief, in UTF-8 bytes (ADR 0074). */
+export const MAX_BRIEF_BYTES = 4096;
+/** Versions of one board's brief that are kept; the oldest go first (ADR 0074). */
+export const MAX_BRIEF_VERSIONS = 100;
+/** Readers whose last seen brief version one board remembers; the longest idle go first. */
+export const MAX_BRIEF_READERS = 1000;
+type BriefRow = {
+  channel: string;
+  version: number;
+  text: string;
+  bytes: number;
+  updatedBy: string | null;
+  updatedAt: string;
+};
+export type Brief = { version: number; text: string; bytes: number; updatedAt: string; updatedBy?: string };
+function toBrief(row: BriefRow): Brief {
+  return {
+    version: row.version,
+    text: row.text,
+    bytes: row.bytes,
+    updatedAt: row.updatedAt,
+    ...(row.updatedBy ? { updatedBy: row.updatedBy } : {}),
+  };
+}
+/** A brief body: Markdown text of at most MAX_BRIEF_BYTES; blank text clears the brief. */
+function briefText(value: unknown): string {
+  if (typeof value !== "string" || new TextEncoder().encode(value).length > MAX_BRIEF_BYTES)
+    throw new HttpError(
+      400,
+      "invalid_brief",
+      `text must be Markdown text of at most ${MAX_BRIEF_BYTES} UTF-8 bytes. Send "" to clear the brief.`,
+    );
+  return value.trim() ? value : "";
+}
 /** Names with a status on one board at a time (ADR 0064). */
 export const MAX_STATUSES = 200;
 // Status events: every change up to the cap, plus one clear for every row that can still be live
@@ -761,6 +795,19 @@ export class MsnDurableObject extends DurableObject<Env> {
           channel TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, setAt TEXT NOT NULL,
           seq INTEGER NOT NULL, PRIMARY KEY(channel, name)
         );
+        -- Board brief (ADR 0074): the owner's standing instructions, one row per version. The
+        -- highest version is current; empty text means the brief was cleared. brief_seen holds the
+        -- version each reader last received from start or catch-up. New tables with no version
+        -- step, so they are safe in any merge order.
+        CREATE TABLE IF NOT EXISTS board_briefs (
+          channel TEXT NOT NULL, version INTEGER NOT NULL, text TEXT NOT NULL, bytes INTEGER NOT NULL,
+          updatedBy TEXT, updatedAt TEXT NOT NULL, PRIMARY KEY(channel, version)
+        );
+        CREATE TABLE IF NOT EXISTS brief_seen (
+          channel TEXT NOT NULL, reader TEXT NOT NULL, version INTEGER NOT NULL, seenAt TEXT NOT NULL,
+          PRIMARY KEY(channel, reader)
+        );
+        CREATE INDEX IF NOT EXISTS brief_seen_age ON brief_seen(channel, seenAt);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -829,6 +876,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Additive, so no schema_version step and safe in any merge order.
         ["messages", "claimedBy", "TEXT"],
         ["messages", "claimedAt", "TEXT"],
+        // A saved template's brief (ADR 0074): NULL for templates saved before briefs or from a
+        // board without one. Additive, so no schema_version step.
+        ["board_templates", "brief", "TEXT"],
       ]) {
         if (
           !ctx.storage.sql
@@ -1287,6 +1337,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (request.method === "PUT" && secretHash) {
         this.requireOwner(capability);
         const goal = text(input?.goal, "goal", 16384);
+        // A new board may start with a brief (ADR 0074), as one made from a saved template does.
+        const brief = input?.brief === undefined ? "" : briefText(input.brief);
         const existing = this.ctx.storage.sql
           .exec<{ token_hash: string }>(
             "SELECT token_hash FROM access_keys WHERE channel_scope=? AND shared_channel=1",
@@ -1318,6 +1370,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             goal,
             new Date().toISOString(),
           );
+          if (brief && !this.briefRow(channel))
+            this.writeBrief(channel, 1, brief, capability.bound_username ?? null);
           this.ctx.storage.sql.exec(
             "INSERT INTO channel_credentials VALUES(?,?) ON CONFLICT(channel) DO UPDATE SET token=excluded.token",
             channel,
@@ -1443,6 +1497,164 @@ export class MsnDurableObject extends DurableObject<Env> {
    * shared credential only a registered persona. A change writes one metadata-only
    * `status.changed` event; the same text again changes nothing.
    */
+  /** The current brief row of a board, cleared ones included; null before the first write. */
+  private briefRow(channel: string): BriefRow | null {
+    return (
+      this.ctx.storage.sql
+        .exec<BriefRow>("SELECT * FROM board_briefs WHERE channel = ? ORDER BY version DESC LIMIT 1", channel)
+        .toArray()[0] ?? null
+    );
+  }
+
+  /**
+   * Writes a new brief version (ADR 0074). Call inside a transaction. Counts the text against the
+   * workspace's content bytes and drops versions beyond MAX_BRIEF_VERSIONS, oldest first.
+   */
+  private writeBrief(channel: string, version: number, content: string, updatedBy: string | null): Brief {
+    const bytes = new TextEncoder().encode(content).length;
+    const used = this.ctx.storage.sql.exec<{ bytes: number }>("SELECT bytes FROM usage").one().bytes;
+    if (used + bytes > MAX_CONTENT_BYTES)
+      throw new HttpError(409, "quota_exceeded", "Workspace storage is full. Delete old content first.");
+    const row = this.ctx.storage.sql
+      .exec<BriefRow>(
+        "INSERT INTO board_briefs(channel, version, text, bytes, updatedBy, updatedAt) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+        channel,
+        version,
+        content,
+        bytes,
+        updatedBy,
+        new Date().toISOString(),
+      )
+      .one();
+    const dropped = this.ctx.storage.sql
+      .exec<{ bytes: number }>(
+        "DELETE FROM board_briefs WHERE channel = ? AND version <= ? RETURNING bytes",
+        channel,
+        version - MAX_BRIEF_VERSIONS,
+      )
+      .toArray()
+      .reduce((sum, old) => sum + old.bytes, 0);
+    this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes + ? WHERE singleton = 1", bytes - dropped);
+    return toBrief(row);
+  }
+
+  /**
+   * The board brief (ADR 0074): the owner's standing instructions for everyone on the board.
+   * `GET …/brief` returns the current one (null when none or cleared) and `?version=N` an older
+   * one; `GET …/brief/versions` lists the kept versions, newest first, without text. `PUT …/brief`
+   * `{text, baseVersion}` is owner only and writes a new version; blank text clears the brief.
+   */
+  private async briefRoute(
+    request: Request,
+    url: URL,
+    tenant: string,
+    channel: string,
+    rest: string[],
+    hash: string,
+  ): Promise<Response> {
+    const limits = { bytes: MAX_BRIEF_BYTES, versions: MAX_BRIEF_VERSIONS };
+    if (request.method === "GET") {
+      const capability = this.authorize(hash);
+      this.requireScope(capability, channel);
+      this.requireChannel(channel);
+      if (rest.length === 1 && rest[0] === "versions")
+        return json({
+          channel,
+          versions: this.ctx.storage.sql
+            .exec<Omit<BriefRow, "text">>(
+              "SELECT channel, version, bytes, updatedBy, updatedAt FROM board_briefs WHERE channel = ? ORDER BY version DESC",
+              channel,
+            )
+            .toArray()
+            .map((row) => {
+              const { text: _text, ...listed } = toBrief({ ...row, text: "" });
+              return listed;
+            }),
+          limits,
+        });
+      if (rest.length) throw new HttpError(404, "route_not_found", "Use …/brief or …/brief/versions.");
+      const current = this.briefRow(channel);
+      if (url.searchParams.has("version")) {
+        const version = integer(url.searchParams.get("version"), 0, Number.MAX_SAFE_INTEGER);
+        const row = this.ctx.storage.sql
+          .exec<BriefRow>("SELECT * FROM board_briefs WHERE channel = ? AND version = ?", channel, version)
+          .toArray()[0];
+        if (!row)
+          throw new HttpError(
+            404,
+            "brief_version_not_found",
+            `This board keeps no brief version ${version}. List them with GET …/brief/versions.`,
+          );
+        return json({ channel, brief: toBrief(row), currentVersion: current?.version ?? 0, limits });
+      }
+      return json({
+        channel,
+        brief: current?.text ? toBrief(current) : null,
+        currentVersion: current?.version ?? 0,
+        limits,
+      });
+    }
+    if (request.method !== "PUT" || rest.length)
+      throw new HttpError(404, "route_not_found", "Use GET or PUT …/brief.");
+    const input = await body(request);
+    const content = briefText(input.text);
+    if (
+      typeof input.baseVersion !== "number" ||
+      !Number.isSafeInteger(input.baseVersion) ||
+      input.baseVersion < 0
+    )
+      throw new HttpError(
+        400,
+        "invalid_brief",
+        "baseVersion must be the currentVersion you read (0 before the first brief).",
+      );
+    const baseVersion = input.baseVersion;
+    // Authorized after the body was read: a rotation or archive that landed meanwhile still wins.
+    const capability = this.authorize(hash);
+    this.requireScope(capability, channel);
+    this.requireOwner(capability);
+    this.requireChannel(channel);
+    this.requireActive(channel);
+    const result = this.ctx.storage.transactionSync(() => {
+      const current = this.briefRow(channel);
+      if ((current?.version ?? 0) !== baseVersion)
+        throw new HttpError(
+          409,
+          "brief_conflict",
+          `The brief is at version ${current?.version ?? 0} now. Read it again before you change it.`,
+          { currentVersion: current?.version ?? 0 },
+        );
+      if ((current?.text ?? "") === content)
+        return { brief: current?.text ? toBrief(current) : null, changed: false };
+      const brief = this.writeBrief(channel, baseVersion + 1, content, capability.bound_username ?? null);
+      // A visible control message, as for a goal change: it wakes agents that wait on messages and
+      // tells them to read the new brief. It carries no text, so history does not repeat the brief.
+      this.send(
+        tenant,
+        channel,
+        "board",
+        JSON.stringify({
+          schema: "msn.brief.v1",
+          version: brief.version,
+          cleared: !content,
+          bytes: brief.bytes,
+          ...(brief.updatedBy ? { updatedBy: brief.updatedBy } : {}),
+        }),
+        "application/json",
+        {},
+        null,
+        `brief-${brief.version}`,
+        null,
+        false,
+      );
+      return { brief: content ? brief : null, changed: true };
+    });
+    return json(
+      { channel, ...result, currentVersion: result.changed ? baseVersion + 1 : baseVersion, limits },
+      result.changed ? 201 : 200,
+    );
+  }
+
   private async statusRoute(
     request: Request,
     url: URL,
@@ -2478,13 +2690,15 @@ export class MsnDurableObject extends DurableObject<Env> {
           `A workspace keeps at most ${MAX_TEMPLATES} saved templates. Delete one first.`,
         );
       this.ctx.storage.sql.exec(
-        "INSERT OR REPLACE INTO board_templates(name, goal, personas, savedFrom, savedBy, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO board_templates(name, goal, personas, savedFrom, savedBy, createdAt, brief) VALUES (?, ?, ?, ?, ?, ?, ?)",
         name,
         saved.goal,
         JSON.stringify(saved.personas),
         channel,
         capability.bound_username,
         new Date().toISOString(),
+        // The board's brief travels with its template (ADR 0074); NULL when it has none.
+        this.briefRow(channel)?.text || null,
       );
       return !exists;
     });
@@ -2502,6 +2716,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         savedFrom: string;
         savedBy: string | null;
         createdAt: string;
+        brief: string | null;
       }>("SELECT * FROM board_templates ORDER BY name")
       .toArray()
       .map((row) => ({
@@ -2509,6 +2724,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         title: row.name,
         summary: `Saved from board ${row.savedFrom}.`,
         goal: row.goal,
+        ...(row.brief ? { brief: row.brief } : {}),
         personas: JSON.parse(row.personas) as TemplatePersona[],
         own: true,
         savedFrom: row.savedFrom,
@@ -4824,7 +5040,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** All reads stay synchronous: checkpoint, head and tail describe one consistent storage view. */
-  private catchup(tenant: string, channel: string, url: URL): Response {
+  private catchup(tenant: string, channel: string, url: URL, capability: TenantRow): Response {
     this.requireChannel(channel);
     const limit = integer(url.searchParams.get("limit"), 20, 100);
     const maxBytes = integer(url.searchParams.get("maxBytes"), 32768, 262144);
@@ -4876,6 +5092,37 @@ export class MsnDurableObject extends DurableObject<Env> {
     // Pinned messages lead the first page only (ADR 0038), like the snapshot; a continuation
     // already had them. They never move nextCursor.
     const pinned = url.searchParams.has("after") ? null : this.pinned(tenant, channel);
+    // The board brief (ADR 0074) leads the first page, before pins. With `reader`, the page also
+    // says whether this reader has received this version before, and then remembers that it has.
+    const briefRow = url.searchParams.has("after") ? null : this.briefRow(channel);
+    const brief = briefRow?.text ? toBrief(briefRow) : null;
+    // The reader must be one of this key's own names, as for `since` and processing: the bound name
+    // or `name/<worker>`. Otherwise one key could mark a brief as received for another agent and
+    // hide the change from it. A key that may not be this reader gets the brief with no
+    // `briefChanged` and no marker, not an error, so every client still gets its page.
+    const namedReader = url.searchParams.has("reader")
+      ? text(url.searchParams.get("reader"), "reader", 128, "invalid_reader")
+      : null;
+    const briefReader = namedReader !== null && this.ownsReader(capability, namedReader) ? namedReader : null;
+    const briefFields = (withText: boolean) => {
+      if (!brief) return {};
+      const { text: _text, ...rest } = brief;
+      return {
+        brief: withText ? brief : { ...rest, omitted: true },
+        ...(briefReader === null
+          ? {}
+          : {
+              briefChanged:
+                this.ctx.storage.sql
+                  .exec<{ version: number }>(
+                    "SELECT version FROM brief_seen WHERE channel = ? AND reader = ?",
+                    channel,
+                    briefReader,
+                  )
+                  .toArray()[0]?.version !== brief.version,
+            }),
+      };
+    };
     // Edits to messages the reader already has (ADR 0052), opt-in with the edit cursor from the
     // previous page so older clients keep today's shape. Messages after the cursor carry their
     // current text anyway.
@@ -4904,6 +5151,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       pinnedOmitted?: number;
       edited?: Message[];
     } = {
+      ...briefFields(true),
       ...(pinned ? { pinned, pinnedOmitted: 0 } : {}),
       ...editFields(edits?.messages.length ?? 0),
       snapshot: snapshot ? toSnapshot(snapshot, tenant) : null,
@@ -4926,6 +5174,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     // Pins are best effort: the checkpoint and first pending message must fit, pins need not.
     const minimum = {
       ...result,
+      ...briefFields(false),
       ...(pinned ? { pinned: [], pinnedOmitted: pinned.length } : {}),
       ...editFields(0),
       messages: messages.slice(0, 1),
@@ -4968,7 +5217,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     };
     // Shed tail messages first (they stay readable with after=nextCursor), down to one; then the
     // newest edits (they stay readable with editsAfter=editCursor); then the newest pins; then the
-    // last message.
+    // brief's text; then the last message.
     while (size() > maxBytes && result.messages.length > 1) dropMessage();
     while (size() > maxBytes && result.edited?.length) {
       editBytes -= editSizes[result.edited.length - 1] ?? 0;
@@ -4980,6 +5229,13 @@ export class MsnDurableObject extends DurableObject<Env> {
       pinBytes -= pinSizes.pop() ?? 0;
       result.pinnedOmitted = (result.pinnedOmitted ?? 0) + 1;
       result.byteLimitReached = true;
+    }
+    // The brief's text goes after the pins: it stays readable with GET …/brief, and the page says so.
+    let briefShown = brief !== null;
+    if (size() > maxBytes && brief) {
+      Object.assign(result, briefFields(false));
+      result.byteLimitReached = true;
+      briefShown = false;
     }
     while (size() > maxBytes && result.messages.length) dropMessage();
     if (size() > maxBytes || (pendingMessages > 0 && result.messages.length === 0))
@@ -4993,7 +5249,52 @@ export class MsnDurableObject extends DurableObject<Env> {
         },
         413,
       );
+    // Only a page that carried the text counts as seen. This marker is no cursor: it changes no
+    // later page's messages, only briefChanged, and the text is on every first page anyway.
+    if (brief && briefShown && briefReader !== null) this.markBriefSeen(channel, briefReader, brief.version);
     return json(result);
+  }
+
+  /**
+   * The one rule for which reader names a key may use, for processing (ADR 0034), `since`
+   * (ADR 0061) and the brief's seen marker (ADR 0074): a key bound to a name may use the name
+   * itself or `name/<worker>` (for `--reader` on concurrent consumers); a prefix key any name with
+   * its prefix. Unbound and shared board keys stay cooperative (ADR 0026).
+   */
+  private requireReader(capability: TenantRow, reader: string): void {
+    const bound = capability.bound_username;
+    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
+      this.requireBoundName(capability, reader);
+  }
+
+  /** `requireReader` as a yes or no, for a read that leaves a field out instead of refusing. */
+  private ownsReader(capability: TenantRow, reader: string): boolean {
+    try {
+      this.requireReader(capability, reader);
+      return true;
+    } catch (error) {
+      if (error instanceof HttpError) return false;
+      throw error;
+    }
+  }
+
+  private markBriefSeen(channel: string, reader: string, version: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO brief_seen(channel, reader, version, seenAt) VALUES (?, ?, ?, ?)
+       ON CONFLICT(channel, reader) DO UPDATE SET version = excluded.version, seenAt = excluded.seenAt`,
+      channel,
+      reader,
+      version,
+      new Date().toISOString(),
+    );
+    // Names are free text, so bound the table: forget the readers idle the longest.
+    this.ctx.storage.sql.exec(
+      `DELETE FROM brief_seen WHERE channel = ? AND reader IN (
+         SELECT reader FROM brief_seen WHERE channel = ? ORDER BY seenAt DESC, reader LIMIT -1 OFFSET ?)`,
+      channel,
+      channel,
+      MAX_BRIEF_READERS,
+    );
   }
 
   /** Current processing cursor row, or null when the reader was never claimed (ADR 0034). */
@@ -5044,12 +5345,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     if (rest.length !== 2 || request.method !== "POST")
       throw new HttpError(404, "route_not_found", "Unknown processing operation.");
-    // A key bound to a name may only claim, take over or commit that name's readers, as with
-    // sends: the name itself or `name/<worker>` (for `--reader` on concurrent consumers). Prefix
-    // keys already allow any suffix. Unbound and shared board keys stay cooperative (ADR 0026).
-    const bound = capability.bound_username;
-    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
-      this.requireBoundName(capability, reader);
+    // A key bound to a name may only claim, take over or commit that name's readers.
+    this.requireReader(capability, reader);
     const input = await body(request);
     this.requireActive(channel); // After the await: an archive meanwhile still wins (ADR 0046).
     if (rest[1] === "claim") {
@@ -5140,11 +5437,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       throw new HttpError(400, "invalid_reader", "Name the reader: ?reader=NAME (the agent's display name).");
     const reader = text(named, "reader", 128, "invalid_reader");
     // The same rule as processing claims and commits (ADR 0034): a key bound to a name reads only
-    // that name's summaries (the name or `name/<worker>`). Unbound and shared board keys stay
-    // cooperative (ADR 0026).
-    const bound = capability.bound_username;
-    if (bound === null || bound === undefined || !reader.startsWith(`${bound}/`))
-      this.requireBoundName(capability, reader);
+    // that name's summaries.
+    this.requireReader(capability, reader);
     // Who "you" are in the rows: a board persona owns its id or display name as a reader, plus
     // `<that>/<worker>`, as receipts read it (ADR 0040); any other `name/<worker>` reader is `name`.
     const personas = this.ctx.storage.sql
@@ -5753,6 +6047,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           rest.length === 3
         )
           return await this.statusRoute(request, url, slug(rest[1]), rest[2], hash);
+        if (rest[0] === "channels" && rest[1] && rest[2] === "brief")
+          return await this.briefRoute(request, url, tenant, slug(rest[1]), rest.slice(3), hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
           return await this.boardRoute(request, tenant, slug(rest[1]), rest.slice(2), hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.
@@ -6046,7 +6342,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             return json({ channel, created }, created ? 201 : 200);
           }
           if (rest.length === 3 && rest[2] === "catchup" && request.method === "GET")
-            return this.catchup(tenant, channel, url);
+            return this.catchup(tenant, channel, url, capability);
           if (rest[2] === "pins") return this.pinRoute(request, tenant, channel, rest.slice(3), capability);
           if (rest[2] === "processing")
             return await this.processingRoute(request, channel, rest.slice(3), capability);

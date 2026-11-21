@@ -1079,6 +1079,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 edits_after,
                 limit,
                 max_bytes,
+                cli.reader.as_deref(),
             )
         }
         Command::Export {
@@ -2252,11 +2253,15 @@ fn catchup(
     edits_after: Option<u64>,
     limit: u64,
     max_bytes: u64,
+    reader: Option<&str>,
 ) -> Result<(), CliError> {
     let continuation = agent::catchup_query(after, edits_after.map(Some));
+    // With a reader, the first page says whether the board's brief is new to it (ADR 0074).
+    // A continuation carries no brief, so it sends no reader.
+    let reader = agent::reader_query(reader.filter(|_| after.is_none()));
     finish(&MsnClient::new(url)?.get(
         &format!(
-            "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}"
+            "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={max_bytes}{continuation}{reader}"
         ),
         Some(token),
     )?)

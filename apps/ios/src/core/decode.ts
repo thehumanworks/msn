@@ -214,7 +214,13 @@ export function decodeReactionPage(raw: unknown): {
       const entry = obj(item, "reaction page");
       if (!safeInt(entry.id, 1)) bad("reaction page");
       const claim = decodeClaim(entry.claim);
-      if (claim) claims.set(entry.id, claim);
+      // An entry that cannot be read says nothing about who holds the message. Report no list,
+      // so the caller keeps what it shows instead of clearing a claim that may still stand.
+      if (!claim) {
+        claims = null;
+        break;
+      }
+      claims.set(entry.id, claim);
     }
   }
   return { reactions, claims, nextAfter: page.hasMore ? (page.nextAfter as number) : null };

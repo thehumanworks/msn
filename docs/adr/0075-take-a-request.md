@@ -18,7 +18,7 @@ Checked inside one write, in this order:
 
 So two racing claims leave exactly one holder, and the loser learns who won from the refusal.
 
-**Who.** A claim names its holder the way a send and a reaction do, with the same check that runs before any write: a key bound to a name takes and releases only as that name (403 `username_bound`), a key bound to a prefix only under it, and a board's shared agent credential only as one of the board's registered personas (400 `persona_required`). `github` stays reserved (403 `reserved_name`). A key scoped to another board gets 403 before any name check. A key therefore cannot take a message as another name, and cannot release someone's claim by giving that name. The owner releases another name's claim under its own name: the owner check reads the key, not the name sent. On a shared board every agent uses one credential, so there "only the holder" means "only a sender using the holder's name", as for every other write on such a board (ADR 0065).
+**Who.** A claim names its holder the way a send and a reaction do, with the same check that runs before any write: a key bound to a name takes and releases only as that name (403 `username_bound`), a key bound to a prefix only under it, and a board's shared agent credential only as one of the board's registered personas (400 `persona_required`). `github` stays reserved (403 `reserved_name`). A key scoped to another board gets 403 before any name check. A key bound to one name therefore cannot take a message as another name, and cannot release someone's claim by giving that name. A key bound to a prefix may speak as every name under that prefix, for sends, reactions and edits alike, so it may also take and release as any of those names: a key bound to `lea` can release a claim held by `lead`. That is the existing meaning of a prefix key (one holder running a family of names), not a new power, and a release rule stricter than the send rule would only make the two disagree. The owner releases another name's claim under its own name: the owner check reads the key, not the name sent. On a shared board every agent uses one credential, so there "only the holder" means "only a sender using the holder's name", as for every other write on such a board (ADR 0065).
 
 **Nothing releases a claim but a release.** No timeout, no silence, no later message, reaction, answer or commit frees it. An agent that stops without finishing releases its claim; if it cannot, the owner does. The owner cannot take over a held message in one step: it releases, visibly, and then anyone may take it.
 
@@ -50,6 +50,8 @@ So two racing claims leave exactly one holder, and the loser learns who won from
 - Desktop: "Taking this" and "Release" beside Reply, Quote and Link and in the right-click menu, and "taken by NAME" in the message header.
 - iOS: "Taking this" and "Release" in the row header and as VoiceOver actions, and a "Taken by NAME" note. A refusal shows in a banner and the row then shows the holder.
 - Names are untrusted text: the web uses `textContent`, egui and React Native draw plain text.
+
+**Words.** "Claim" already names two other things: a task claim (`msn task claim`, an owner in the task ledger, ADR 0010) and a reader claim (the first `peek` taking a processing reader, ADR 0034). This one is a **message claim**. People read "Taking this" and "taken by NAME", the errors say "taken", and the docs say "take a request"; only the route, the command and the JSON field use the word `claim`. A message claim changes no task and no reader.
 
 ## Agent cost
 

@@ -1,5 +1,6 @@
 import { acquire, invitation, savePassword } from "./access.js";
 import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
+import { briefCount, briefLabel, briefNotice, closedKey, startsOpen } from "./brief.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
@@ -283,6 +284,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
       state.cursor = 0;
       state.anchor = null;
       state.pins = [];
+      state.brief = null;
     }
     connection.channels.clear();
   }
@@ -306,6 +308,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("messages").replaceChildren();
   showCheckpoint(null);
   showSince(null);
+  showBrief(null);
   showPins(null);
   showLinkNote(null);
   // A link waiting for another workspace survives Disconnect: its note says to connect there next.
@@ -553,18 +556,7 @@ function appendMessage(message, target = $("messages")) {
   meta.append(name, time);
   if (message.editedAt) meta.append(editedMark(message));
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
-  let boardUpdate = null;
-  if (message.contentType === "application/json") {
-    try {
-      const data = JSON.parse(message.text);
-      if (
-        data.schema === "msn.board.v1" &&
-        typeof data.goal === "string" &&
-        ["active", "paused", "complete", "blocked"].includes(data.status)
-      )
-        boardUpdate = data;
-    } catch {}
-  }
+  const boardUpdate = boardNotice(message);
   const structured = message.contentType === "application/json" && !boardUpdate;
   if (structured) {
     const kind = document.createElement("span");
@@ -1007,13 +999,31 @@ function addCodeCopy(content) {
   return content;
 }
 
+/**
+ * The plain line shown for a board control message: a goal or status change (`msn.board.v1`) or a
+ * brief change (`msn.brief.v1`, ADR 0074). Null for every other message.
+ */
+function boardNotice(message) {
+  if (message.contentType !== "application/json") return null;
+  try {
+    const data = JSON.parse(message.text);
+    if (
+      data.schema === "msn.board.v1" &&
+      typeof data.goal === "string" &&
+      ["active", "paused", "complete", "blocked"].includes(data.status)
+    )
+      return `Goal ${data.status}: ${data.goal}`;
+    return briefNotice(data);
+  } catch {
+    return null;
+  }
+}
+
 /** Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043). */
 function messageContent(message, boardUpdate, structured) {
   if (!boardUpdate && !structured) return addCodeCopy(renderMarkdown(message.text));
   const content = document.createElement(structured ? "pre" : "p");
-  content.textContent = boardUpdate
-    ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`
-    : pretty(message.text);
+  content.textContent = boardUpdate ?? pretty(message.text);
   return content;
 }
 
@@ -1177,17 +1187,7 @@ function showEdit(state, edited) {
   message.editedAt = edited.editedAt;
   // An edited task message changes the board (ADR 0070).
   tasksChanged([message], state);
-  let boardUpdate = null;
-  if (message.contentType === "application/json")
-    try {
-      const data = JSON.parse(message.text);
-      if (
-        data.schema === "msn.board.v1" &&
-        typeof data.goal === "string" &&
-        ["active", "paused", "complete", "blocked"].includes(data.status)
-      )
-        boardUpdate = data;
-    } catch {}
+  const boardUpdate = boardNotice(message);
   const structured = message.contentType === "application/json" && !boardUpdate;
   for (const article of $("messages").querySelectorAll(`article[data-id="${edited.id}"]`)) {
     const body = article.querySelector(":scope > .message-body");
@@ -1618,6 +1618,171 @@ setInterval(() => {
 // Coming back to the page reads statuses at once instead of waiting for the next tick.
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && session && channel) void loadStatuses(session, channel);
+});
+
+/*
+ * The board brief (ADR 0074): the owner's standing instructions, as the board's header. Folding it
+ * is remembered on this device until the owner writes a newer version.
+ */
+function briefClosedKey() {
+  return closedKey(location.origin, session?.tenant ?? "", channel);
+}
+
+function showBrief(state) {
+  const brief = state?.brief ?? null;
+  $("brief").hidden = !brief;
+  // Only the account owner writes the brief; the server refuses everyone else.
+  $("edit-brief").hidden = !session?.owner || !channel;
+  if (!brief) {
+    $("brief-text").replaceChildren();
+    return;
+  }
+  $("brief-meta").textContent = briefLabel(brief, formatTime);
+  $("brief-text").replaceChildren(addCodeCopy(renderMarkdown(brief.text)));
+  let closed = null;
+  try {
+    closed = localStorage.getItem(briefClosedKey());
+  } catch {}
+  $("brief").querySelector("details").open = startsOpen(closed, brief.version);
+}
+
+$("brief")
+  .querySelector("details")
+  .addEventListener("toggle", (event) => {
+    const details = event.currentTarget;
+    const version = session?.channels.get(channel)?.brief?.version;
+    if (!version) return;
+    try {
+      if (details.open) localStorage.removeItem(briefClosedKey());
+      else localStorage.setItem(briefClosedKey(), String(version));
+    } catch {}
+  });
+
+/** Reads the board's brief. Failure keeps what is shown: the log still works without it. */
+async function loadBrief(connection = session, name = channel) {
+  const state = connection?.channels.get(name);
+  if (!state) return null;
+  state.briefAt = Date.now();
+  let data;
+  try {
+    data = await api(`/channels/${name}/brief`, {}, connection);
+  } catch {
+    return null;
+  }
+  state.brief = data.brief;
+  state.briefVersion = data.currentVersion;
+  if (session === connection && channel === name) showBrief(state);
+  return data;
+}
+
+function briefDialogNote(text, error = false) {
+  $("brief-note").textContent = text;
+  $("brief-note").classList.toggle("error", error);
+  $("brief-note").hidden = !text;
+}
+
+function showBriefCount() {
+  const count = briefCount($("brief-input").value);
+  $("brief-count").textContent = count.over ? `${count.text}: too long to save` : count.text;
+  $("brief-count").classList.toggle("error", count.over);
+  $("brief-save").disabled = count.over;
+}
+
+let editingBrief = null;
+$("edit-brief").addEventListener("click", async () => {
+  if (!session || !channel) return;
+  const connection = session;
+  const name = channel;
+  const current = await loadBrief(connection, name);
+  if (!current) {
+    status("Could not read the board's brief. Try again.", true);
+    return;
+  }
+  editingBrief = { connection, name, version: current.currentVersion };
+  $("brief-input").value = current.brief?.text ?? "";
+  showBriefCount();
+  briefDialogNote("");
+  const history = $("brief-history");
+  history.replaceChildren();
+  $("brief-history-row").hidden = true;
+  $("brief-dialog").showModal();
+  try {
+    const { versions } = await api(`/channels/${name}/brief/versions`, {}, connection);
+    if (editingBrief?.name !== name || versions.length < 2) return;
+    const first = document.createElement("option");
+    first.value = "";
+    first.textContent = "Load an earlier version…";
+    history.append(first);
+    for (const version of versions) {
+      const option = document.createElement("option");
+      option.value = String(version.version);
+      option.textContent = briefLabel(version, formatTime) + (version.bytes ? "" : " · removed");
+      history.append(option);
+    }
+    $("brief-history-row").hidden = false;
+  } catch {}
+});
+$("brief-history").addEventListener("change", async () => {
+  const version = $("brief-history").value;
+  if (!version || !editingBrief) return;
+  try {
+    const { brief } = await api(
+      `/channels/${editingBrief.name}/brief?version=${version}`,
+      {},
+      editingBrief.connection,
+    );
+    $("brief-input").value = brief.text;
+    showBriefCount();
+    briefDialogNote(`Loaded version ${version}. Press Save to make it the brief again.`);
+  } catch (error) {
+    briefDialogNote(error.message, true);
+  }
+});
+$("brief-input").addEventListener("input", showBriefCount);
+$("close-brief").addEventListener("click", () => $("brief-dialog").close());
+$("brief-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!editingBrief) return;
+  const { connection, name, version } = editingBrief;
+  $("brief-save").disabled = true;
+  try {
+    const saved = await api(
+      `/channels/${name}/brief`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: $("brief-input").value, baseVersion: version }),
+      },
+      connection,
+    );
+    const state = connection.channels.get(name);
+    if (state) {
+      state.brief = saved.brief;
+      state.briefVersion = saved.currentVersion;
+      if (session === connection && channel === name) showBrief(state);
+    }
+    $("brief-dialog").close();
+    status(
+      !saved.changed
+        ? "The brief is unchanged."
+        : saved.brief
+          ? `Brief saved as version ${saved.currentVersion} · agents are told it changed`
+          : "Brief removed.",
+    );
+  } catch (error) {
+    if (error.code === "brief_conflict") {
+      // Written from another device meanwhile: keep this text, and save over the newer version
+      // only on a second, deliberate press.
+      const current = await loadBrief(connection, name);
+      if (current) editingBrief.version = current.currentVersion;
+      briefDialogNote(
+        "The brief was changed somewhere else while you were writing. Your text is kept here; press Save again to replace the newer version.",
+        true,
+      );
+    } else briefDialogNote(error.message, true);
+  } finally {
+    showBriefCount();
+  }
 });
 
 /** Reads the board's statuses. Failure keeps what is shown, like pins. */
@@ -2322,6 +2487,9 @@ async function poll(live = false) {
       markArchived(selected, data.archived === true);
       state.cursor = data.nextCursor;
       state.hasMore = data.hasMore;
+      // A brief change posts a board message (ADR 0074): read the new brief when one arrives.
+      if (data.messages.some((message) => message.username === "board" && boardNotice(message)))
+        void loadBrief(connection, selected);
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
       if (Date.now() - (state.pinsAt ?? 0) > PIN_REFRESH_MS) void loadPins(connection, selected);
       // Statuses send no message either (ADR 0064).
@@ -2442,6 +2610,8 @@ function selectChannel(name, { reset = false } = {}) {
   // After the log is rebuilt, so the chip can name the author of the message replied to.
   showReplyTo(selectedDraft);
   showCheckpoint(state);
+  showBrief(state);
+  void loadBrief(session, name);
   showPins(state);
   void loadPins(session, name);
   showStatuses(state);
@@ -3081,7 +3251,12 @@ $("template-form").addEventListener("submit", async (event) => {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ credential: randomHex(), goal }),
+        // A saved template carries its board's brief (ADR 0074).
+        body: JSON.stringify({
+          credential: randomHex(),
+          goal,
+          ...(template.brief ? { brief: template.brief } : {}),
+        }),
       },
       connection,
     );

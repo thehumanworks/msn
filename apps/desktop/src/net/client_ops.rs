@@ -376,6 +376,88 @@ pub fn fetch_statuses(
     Ok(msn_cli::status::parse_list(&value))
 }
 
+/// The board brief (ADR 0074): the owner's standing instructions, shown as the board's header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Brief {
+    pub version: u64,
+    pub text: String,
+    pub updated_by: Option<String>,
+    pub updated_at: String,
+}
+
+/// The longest brief in UTF-8 bytes; the server checks again.
+pub const BRIEF_MAX_BYTES: usize = msn_cli::board::BRIEF_MAX_BYTES;
+
+/// `{brief, currentVersion}` as the brief (None when the board has none, or it was removed) and
+/// the version a write must name as its base.
+fn parse_brief(value: &Value) -> Result<(Option<Brief>, u64), CliError> {
+    let current = integer(value, "currentVersion")?;
+    let brief = &value["brief"];
+    if brief.is_null() {
+        return Ok((None, current));
+    }
+    let text = brief["text"]
+        .as_str()
+        .ok_or_else(|| CliError::generic("Invalid response field brief."))?;
+    Ok((
+        Some(Brief {
+            version: integer(brief, "version")?,
+            text: text.to_owned(),
+            updated_by: brief["updatedBy"].as_str().map(str::to_owned),
+            updated_at: brief["updatedAt"].as_str().unwrap_or_default().to_owned(),
+        }),
+        current,
+    ))
+}
+
+pub fn fetch_brief(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<(Option<Brief>, u64), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let path = format!("/api/tenants/{tenant}/channels/{channel}/brief");
+    parse_brief(&get_json(client, &path, token)?)
+}
+
+/// How a refused write starts when the brief changed while the owner was editing (ADR 0074).
+pub const BRIEF_CONFLICT: &str = "The brief was changed somewhere else.";
+
+/// Writes a new brief version over `base_version` (owner only); blank text removes the brief.
+pub fn put_brief(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    text: &str,
+    base_version: u64,
+) -> Result<(Option<Brief>, u64), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let path = format!("/api/tenants/{tenant}/channels/{channel}/brief");
+    let body = serde_json::json!({"text": text, "baseVersion": base_version});
+    let response = client.send_optional_json("PUT", &path, token, Some(&body))?;
+    match response.status {
+        403 => {
+            return Err(CliError::generic(
+                "Only the board owner can change the brief.",
+            ));
+        }
+        409 if response.body.contains("brief_conflict") => {
+            return Err(CliError::generic(format!(
+                "{BRIEF_CONFLICT} Your text is kept; press Save again to replace the newer version."
+            )));
+        }
+        _ => {}
+    }
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    parse_brief(&value)
+}
+
 /// The board's personas as (display name, listening now), for @ suggestions (ADR 0055).
 pub fn fetch_personas(
     client: &MsnClient,
@@ -787,8 +869,11 @@ pub fn parse_claims(value: &Value) -> Result<Option<ClaimRows>, CliError> {
     let mut page = Vec::with_capacity(rows.len());
     for row in rows {
         let id = row["id"].as_u64().ok_or_else(bad)?;
-        if !row["claim"]["username"].is_string() {
-            return Err(bad());
+        // An entry that cannot be read says nothing about who holds the message: report no
+        // list, so the caller keeps what it shows instead of clearing a claim that may stand.
+        let name = row["claim"]["username"].as_str().unwrap_or_default();
+        if name.is_empty() || !row["claim"]["claimedAt"].is_string() {
+            return Ok(None);
         }
         page.push((id, row["claim"].clone()));
     }
@@ -1591,7 +1676,12 @@ mod tests {
         // A server from before ADR 0075 sends no list: unknown, not "nobody".
         assert_eq!(parse_claims(&json!({"reactions": []})).unwrap(), None);
         assert!(parse_claims(&json!({"claims": {}})).is_err());
-        assert!(parse_claims(&json!({"claims": [{"id": 4}]})).is_err());
+        // A malformed entry means "unknown", not "free": no list, so shown claims stay.
+        assert_eq!(parse_claims(&json!({"claims": [{"id": 4}]})).unwrap(), None);
+        assert_eq!(
+            parse_claims(&json!({"claims": [{"id": 4, "claim": {"username": "dev"}}]})).unwrap(),
+            None
+        );
         assert!(parse_claims(&json!({"claims": [{"claim": {"username": "dev"}}]})).is_err());
     }
 

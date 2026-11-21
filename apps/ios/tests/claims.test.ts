@@ -47,7 +47,14 @@ test("the reactions page lists claims, and says so when the server sent none", (
     claims: [{ id: 3, claim: { username: "dev", claimedAt: at } }, { id: 5, claim: { username: "" } }],
     hasMore: false,
   });
-  assert.deepEqual([...(page.claims ?? [])], [[3, { username: "dev", claimedAt: at }]]);
+  // A malformed entry means "unknown", not "free": no list, so shown claims stay.
+  assert.equal(page.claims, null);
+  const good = decodeReactionPage({
+    reactions: [],
+    claims: [{ id: 3, claim: { username: "dev", claimedAt: at } }],
+    hasMore: false,
+  });
+  assert.deepEqual([...(good.claims ?? [])], [[3, { username: "dev", claimedAt: at }]]);
   assert.equal(decodeReactionPage({ reactions: [], hasMore: false }).claims, null);
   assert.throws(() => decodeReactionPage({ reactions: [], claims: [{ id: 0, claim: {} }], hasMore: false }));
 });

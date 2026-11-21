@@ -807,6 +807,22 @@ try {
   assert.equal(selfCode, 2, self.errors);
   assert.match(self.errors, /which is you/);
   console.log("PASS: gather collects one reply per named agent and lists who has not replied");
+
+  // The owner's brief (ADR 0074) leads start, and `board` returns it in full.
+  {
+    const session = mcp("lead");
+    await session.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+    assert.equal((await session.ok("board")).brief, null);
+    await cli(["board", "brief", "work", "--set", "Run the checks before you report."]);
+    const page = await session.ok("start");
+    assert.equal(Object.keys(page).indexOf("brief") < Object.keys(page).indexOf("messages"), true);
+    assert.equal(page.brief.text, "Run the checks before you report.");
+    assert.equal(page.briefChanged, true);
+    assert.equal((await session.ok("start")).briefChanged, false);
+    assert.equal((await session.ok("board")).brief.text, "Run the checks before you report.");
+    await session.close();
+  }
+  console.log("PASS: start returns the brief first with briefChanged, and board returns it in full");
 } finally {
   for (const p of children)
     if (p.exitCode === null) {
