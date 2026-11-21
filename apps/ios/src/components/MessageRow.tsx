@@ -46,6 +46,8 @@ type Props = {
   onReact?: (message: Message, kind: ReactionKind) => void;
   /** Opens the editor on this message (ADR 0052); only passed for your own, writable messages. */
   onEditMessage?: (message: Message) => void;
+  /** Starts a message that replaces this one (ADR 0068); only for your own, writable messages. */
+  onReplaceMessage?: (message: Message) => void;
   /** Answers a question (ADR 0065); absent where nothing can be posted (archived boards, search). */
   onAnswer?: (message: Message, choice: string) => void;
   /** An answer to this question is in flight: its buttons stay locked until it settles. */
@@ -105,6 +107,7 @@ function MessageRowImpl({
   me,
   onReact,
   onEditMessage,
+  onReplaceMessage,
   onAnswer,
   answering = false,
 }: Props) {
@@ -125,6 +128,8 @@ function MessageRowImpl({
   const choices = message.choices && message.choices.length >= 2 ? message.choices : null;
   const mode = choices ? choiceMode(message, me, onAnswer !== undefined) : null;
   const canTap = mode === "open" && !answering;
+  // Replace (ADR 0068): only a message nothing has replaced yet.
+  const replaceable = onReplaceMessage !== undefined && message.replacedBy === undefined;
   const canLoadParent =
     message.replyTo !== undefined &&
     onLoadParent !== undefined &&
@@ -136,7 +141,9 @@ function MessageRowImpl({
       accessibilityRole="button"
       accessibilityLabel={`${who}${namesLine(message) ? ` to ${namesLine(message)}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
-      }${message.editedAt ? ", edited" : ""}${
+      }${message.editedAt ? ", edited" : ""}${message.replacedBy ? `, replaced by message ${message.replacedBy}` : ""}${
+        message.replaces ? `, replaces message ${message.replaces}` : ""
+      }${
         choices && mode ? `. Choices: ${choices.join(", ")}. ${choiceNote(message, mode)}` : ""
       }${summary ? `. Reactions: ${summary}` : ""}`}
       accessibilityHint={`${replyable ? "Double tap to reply. " : ""}Swipe up or down for more actions.`}
@@ -150,6 +157,7 @@ function MessageRowImpl({
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
         ...(onEditMessage ? [{ name: "editMessage", label: "Edit" }] : []),
+        ...(replaceable ? [{ name: "replaceMessage", label: "Replace with a new message" }] : []),
         ...(choices && canTap
           ? choices.map((choice, index) => ({ name: `answer${index}`, label: `Answer ${choice}` }))
           : []),
@@ -169,6 +177,7 @@ function MessageRowImpl({
           onLoadParent?.(message.replyTo);
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
         else if (nativeEvent.actionName === "editMessage") onEditMessage?.(message);
+        else if (nativeEvent.actionName === "replaceMessage" && replaceable) onReplaceMessage?.(message);
         else if (nativeEvent.actionName.startsWith("answer") && choices && canTap) {
           const choice = choices[Number(nativeEvent.actionName.slice("answer".length))];
           if (choice !== undefined) onAnswer?.(message, choice);
@@ -207,6 +216,16 @@ function MessageRowImpl({
             <Text style={styles.linkAction}>Edit</Text>
           </Pressable>
         ) : null}
+        {replaceable ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Replace message ${message.id} with a new one`}
+            onPress={() => onReplaceMessage?.(message)}
+            hitSlop={12}
+          >
+            <Text style={styles.linkAction}>Replace</Text>
+          </Pressable>
+        ) : null}
         {onShareLink ? (
           // An explicit control: touch and hold stays free for selecting the text.
           <Pressable
@@ -219,6 +238,10 @@ function MessageRowImpl({
           </Pressable>
         ) : null}
       </View>
+      {message.replacedBy !== undefined ? (
+        <Text style={styles.replacedNote}>Replaced by #{message.replacedBy}</Text>
+      ) : null}
+      {message.replaces !== undefined ? <Text style={styles.replacesNote}>Replaces #{message.replaces}</Text> : null}
       {message.replyTo !== undefined ? (
         canLoadParent && onLoadParent ? (
           <Pressable
@@ -241,7 +264,12 @@ function MessageRowImpl({
         )
       ) : null}
       {/* The inner view keeps its natural height, so it is measured even while clipped. */}
-      <View style={fold.maxHeight === null ? undefined : { maxHeight: fold.maxHeight, overflow: "hidden" }}>
+      <View
+        style={[
+          fold.maxHeight === null ? undefined : { maxHeight: fold.maxHeight, overflow: "hidden" },
+          message.replacedBy !== undefined ? { opacity: 0.6 } : undefined,
+        ]}
+      >
         <View onLayout={onToggleFold ? (event) => setBodyHeight(event.nativeEvent.layout.height) : undefined}>
           {task ? (
             <Text style={styles.body}>
@@ -404,4 +432,6 @@ const styles = StyleSheet.create({
   chipText: { color: colors.muted, fontSize: 13 },
   linkAction: { color: colors.accent, fontSize: 12, fontWeight: "600" },
   edited: { color: colors.muted, fontSize: 12, fontStyle: "italic" },
+  replacedNote: { color: colors.accent, fontSize: 12, fontWeight: "600", marginBottom: 2 },
+  replacesNote: { color: colors.muted, fontSize: 12, marginBottom: 2 },
 });

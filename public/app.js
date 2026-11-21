@@ -135,6 +135,8 @@ function draft(connection = session, name = channel) {
       replyTo: null,
       // The part of the replyTo message this reply quotes (ADR 0059), or null.
       quote: null,
+      // The id of your own message this one replaces (ADR 0068), or null.
+      replaces: null,
       files: [],
       // Files a draft had before a reload; files are never stored, so they must be attached again.
       missingFiles: 0,
@@ -260,6 +262,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
       state.mentionTo = null;
       state.replyTo = null;
       state.quote = null;
+      state.replaces = null;
       state.files = [];
       state.retry = null;
     }
@@ -491,6 +494,7 @@ function showFiles(state) {
         recipient: state.recipient,
         replyTo: state.replyTo,
         quote: state.replyTo === null ? null : state.quote,
+        replaces: state.replaces ?? null,
       });
     item.textContent = kept
       ? `Send retries this message with its ${count} already uploaded · editing it needs them attached again`
@@ -564,6 +568,17 @@ function appendMessage(message, target = $("messages")) {
     edit.setAttribute("aria-label", `Edit message #${message.id}`);
     edit.addEventListener("click", () => startEdit(article, message.id));
     meta.append(edit);
+    // Replace (ADR 0068): post a newer instruction linked to this one; this one stays.
+    if (message.replacedBy == null) {
+      const replace = document.createElement("button");
+      replace.type = "button";
+      replace.className = "quiet message-replace";
+      replace.textContent = "Replace";
+      replace.title = `Send a new message that replaces #${message.id}`;
+      replace.setAttribute("aria-label", `Replace message #${message.id} with a new one`);
+      replace.addEventListener("click", () => replaceMessage(message));
+      meta.append(replace);
+    }
   }
   // A link to this one message (ADR 0042). It carries no credential: the reader needs their own access.
   if (session) {
@@ -636,6 +651,9 @@ function appendMessage(message, target = $("messages")) {
     } else annotation.textContent = `${label}: ${message[field]}`;
     article.append(annotation);
   }
+  // Replace an instruction (ADR 0068): each end links to the other, and the old one is dimmed.
+  if (Number.isSafeInteger(message.replaces)) article.append(replaceLink("Replaces", message.replaces));
+  if (Number.isSafeInteger(message.replacedBy)) markReplaced(article, message.replacedBy);
   // The quoted part of the replyTo message (ADR 0059). Plain text; pressing it shows the source.
   if (typeof message.quote === "string" && message.replyTo != null) {
     const block = document.createElement("blockquote");
@@ -970,6 +988,38 @@ function canEdit(message) {
     message.username !== "github" &&
     !archivedBoards.has(message.channel)
   );
+}
+
+/** "Replaces: #N" or "Replaced by: #N", where #N shows that message. */
+function replaceLink(label, id) {
+  const annotation = document.createElement("div");
+  annotation.className = "message-annotation";
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "reply-link";
+  link.textContent = `#${id}`;
+  link.title = `Show message #${id}`;
+  link.addEventListener("click", () => showMessage(id));
+  annotation.append(`${label}: `, link);
+  return annotation;
+}
+
+/** Marks one row as replaced by message `id` (ADR 0068): a note under its header, no Replace. */
+function markReplaced(article, id) {
+  article.classList.add("replaced");
+  article.querySelector(":scope > .message-meta .message-replace")?.remove();
+  if (article.querySelector(":scope > .replaced-note")) return;
+  const note = replaceLink("Replaced by", id);
+  note.classList.add("replaced-note");
+  article.querySelector(":scope > .message-meta").after(note);
+}
+
+/** A newer message replaced `oldId`: mark it in the cache and every row that shows it. */
+function showReplaced(state, oldId, newId) {
+  const old = state.messages.find((item) => item.id === oldId);
+  if (old) old.replacedBy = newId;
+  for (const article of document.querySelectorAll(`article[data-id="${oldId}"]`))
+    markReplaced(article, newId);
 }
 
 function editedMark(message) {
@@ -2034,6 +2084,7 @@ function render(messages, state) {
     // An answer locks its question's buttons (ADR 0065); only the first answer counts.
     const answered = answeredBy(message);
     if (answered) showAnswered(state, message.replyTo, answered);
+    if (Number.isSafeInteger(message.replaces)) showReplaced(state, message.replaces, message.id);
     if (article.classList.contains("reply")) {
       // Someone else's reply after your read mark, in a folded thread, is unseen until the
       // thread is opened: the toggle and the thread pointer say so, and the read mark waits
@@ -2928,6 +2979,7 @@ $("send-form").addEventListener("submit", async (event) => {
   const recipient = $("recipient").value;
   const replyId = state.replyTo;
   const quote = replyId === null ? null : state.quote;
+  const replaces = state.replaces ?? null;
   state.content = content;
   state.recipient = recipient;
   if (!content.trim() || new TextEncoder().encode(content).length > 16384) {
@@ -2942,6 +2994,10 @@ $("send-form").addEventListener("submit", async (event) => {
     return;
   }
   const files = [...state.files];
+  if (sendAt && replaces !== null) {
+    status("A replacement cannot be scheduled. Send it now, or cancel the replace first.", true);
+    return;
+  }
   if (sendAt && (files.length || state.missingFiles > 0)) {
     status("A scheduled message cannot carry files. Send the files now, or remove them first.", true);
     return;
@@ -2956,6 +3012,7 @@ $("send-form").addEventListener("submit", async (event) => {
           recipient,
           replyTo: replyId,
           quote,
+          replaces,
         })
       : null;
   state.sending = true;
@@ -2983,6 +3040,7 @@ $("send-form").addEventListener("submit", async (event) => {
           ...(names.length ? { to: toField(names) } : {}),
           ...(replyId !== null ? { replyTo: replyId } : {}),
           ...(quote !== null ? { quote } : {}),
+          ...(replaces !== null ? { replaces } : {}),
           ...(attachments.length ? { attachments } : {}),
           ...(sendAt ? { sendAt } : {}),
         });
@@ -3007,6 +3065,7 @@ $("send-form").addEventListener("submit", async (event) => {
         state.replyTo = null;
         state.quote = null;
       }
+      if (state.replaces === replaces) state.replaces = null;
       // A closed @ belonged to the sent text; the next message's @ opens the list again.
       mention.dismissed = -1;
     }
@@ -4055,6 +4114,10 @@ if ("serviceWorker" in navigator)
  * resends exactly what was meant.
  */
 function showReplyTo(state) {
+  const replaces = state?.replaces ?? null;
+  $("replace-note").hidden = replaces === null;
+  $("replace-note-text").textContent =
+    replaces === null ? "" : `Replacing #${replaces} · it stays, marked replaced`;
   const id = state?.replyTo ?? null;
   const quote = id === null ? null : (state.quote ?? null);
   $("reply-note").hidden = id === null;
@@ -4146,6 +4209,38 @@ $("quote-remove").addEventListener("click", () => {
   $("message").focus();
 });
 
+/**
+ * Replace (ADR 0068): the composer sends a new message that replaces one of yours. It starts from
+ * the old text when the composer is empty, and keeps the old message's thread and To.
+ */
+function replaceMessage(message) {
+  if (!canPost()) return;
+  const state = draft();
+  state.replaces = message.id;
+  if (!$("message").value.trim()) $("message").value = state.content = message.text;
+  if (state.replyTo !== (message.replyTo ?? null)) state.quote = null;
+  state.replyTo = message.replyTo ?? null;
+  const names = namesText(addressees(message));
+  if (!$("recipient").value.trim() && names) $("recipient").value = state.recipient = names;
+  showReplyTo(state);
+  keepDraft();
+  view("chat");
+  autosize();
+  $("message").focus();
+}
+
+function cancelReplace() {
+  if (!session || !channel || (draft().replaces ?? null) === null) return false;
+  draft().replaces = null;
+  showReplyTo(draft());
+  keepDraft();
+  return true;
+}
+$("replace-cancel").addEventListener("click", () => {
+  cancelReplace();
+  $("message").focus();
+});
+
 function cancelReply() {
   if (!session || !channel || draft().replyTo === null) return false;
   draft().replyTo = null;
@@ -4234,6 +4329,7 @@ function closeSomething(target) {
     clearSearch();
     return true;
   }
+  if (cancelReplace()) return true;
   if (cancelReply()) return true;
   if (!$("search-panel").hidden) {
     clearSearch();

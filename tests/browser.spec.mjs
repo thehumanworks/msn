@@ -5007,3 +5007,73 @@ test("the addressed person answers a question with one tap; the buttons then loc
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath(`ask-answered-${testInfo.project.name}.png`) });
 });
+
+test("people replace an instruction with a newer one; the old one stays, marked replaced (ADR 0068)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const send = async (data) =>
+    (
+      await (
+        await request.post(`${t.path}/channels/work/messages`, {
+          headers: t.headers,
+          data: { username: "human", ...data },
+        })
+      ).json()
+    ).message;
+  const root = await send({ text: "Release plan" });
+  const old = await send({ text: "Deploy to **staging** first", replyTo: root.id, to: ["lead", "qa"] });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const article = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  await expect(article(root.id)).toBeVisible();
+  // Replies sit folded under their root; open the thread to reach the instruction.
+  const expand = async () => {
+    if (await page.locator(`#thread-${root.id}`).isHidden())
+      await page.locator(`#messages article[data-id="${root.id}"] > .thread-toggle`).click();
+  };
+  await expand();
+  await article(old.id)
+    .getByRole("button", { name: `Replace message #${old.id} with a new one` })
+    .click();
+  // The composer starts from the old text, in the old thread, to the same name.
+  await expect(page.locator("#replace-note-text")).toContainText(`Replacing #${old.id}`);
+  await expect(page.locator("#message")).toHaveValue("Deploy to **staging** first");
+  await expect(page.locator("#recipient")).toHaveValue("lead, qa");
+  await expect(page.locator("#reply-note-text")).toContainText(`#${root.id}`);
+  // Escape cancels the replace first, then the reply.
+  await page.locator("#message").press("Escape");
+  await expect(page.locator("#replace-note")).toBeHidden();
+  await article(old.id)
+    .getByRole("button", { name: `Replace message #${old.id} with a new one` })
+    .click();
+  await page.locator("#message").fill("Deploy straight to **production**");
+  await page.screenshot({ path: testInfo.outputPath("replace-compose.png") });
+  await page.locator("#send").click();
+  await expect(page.locator("#replace-note")).toBeHidden();
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages?after=0`, { headers: t.headers })
+  ).json();
+  const next = history.messages.find((m) => m.replaces === old.id);
+  expect(next).toMatchObject({
+    text: "Deploy straight to **production**",
+    replyTo: root.id,
+    to: "lead",
+    recipients: ["lead", "qa"],
+  });
+  expect(history.messages.find((m) => m.id === old.id).replacedBy).toBe(next.id);
+  // The old row says what replaced it and offers no second Replace; the new row says what it replaces.
+  await expect(article(old.id)).toHaveClass(/replaced/);
+  await expect(article(old.id).locator(".replaced-note")).toHaveText(`Replaced by: #${next.id}`);
+  await expect(article(old.id).locator(".message-replace")).toHaveCount(0);
+  await expect(article(next.id)).toContainText(`Replaces: #${old.id}`);
+  await page.screenshot({ path: testInfo.outputPath("replaced.png") });
+  // After a reload the server's replacedBy marks it the same way.
+  await page.reload();
+  await expect(page.locator("#channel-title")).toBeVisible();
+  await openChannel(page, "work");
+  await expand();
+  await expect(article(old.id).locator(".replaced-note")).toHaveText(`Replaced by: #${next.id}`);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

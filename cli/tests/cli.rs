@@ -2856,3 +2856,52 @@ fn answer_posts_a_reply_whose_text_and_answer_are_the_choice() {
         serde_json::json!({"username": "tomas", "text": "no", "replyTo": 5, "answer": "no"})
     );
 }
+
+#[test]
+fn send_forwards_replaces_and_refuses_a_bad_id_or_a_schedule() {
+    // Replace an instruction (ADR 0068): --replaces goes out as `replaces`.
+    let body = r#"{"message":{"id":44,"replaces":43},"replayed":false}"#;
+    let server = MockServer::spawn(vec![Scripted::json(201, body)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "lead",
+        "send",
+        "general",
+        "--text",
+        "Deploy to production instead",
+        "--replaces",
+        "43",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "username": "lead",
+            "text": "Deploy to production instead",
+            "replaces": 43
+        })
+    );
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    for extra in [
+        vec!["--replaces", "0"],
+        vec!["--replaces", "x"],
+        vec!["--replaces", "4", "--at", "10m"],
+    ] {
+        let mut args = tenant_args(&url).to_vec();
+        args.extend(["--username", "u", "send", "general", "--text", "x"]);
+        args.extend(extra.iter().copied());
+        let out = output_of(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{extra:?}: {}",
+            stderr_str(&out)
+        );
+    }
+    assert!(server.recorded().is_empty());
+}

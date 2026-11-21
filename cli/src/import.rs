@@ -850,6 +850,13 @@ fn import_envelope(
     if let Some(answerer) = message.get("answerer").and_then(Value::as_str) {
         provenance.insert("answerer".to_string(), json!(answerer));
     }
+    // Replacement links (ADR 0068) name source ids, so they are kept as provenance only.
+    if let Some(replaces) = message.get("replaces").and_then(Value::as_u64) {
+        provenance.insert("replaces".to_string(), json!(replaces));
+    }
+    if let Some(replaced_by) = message.get("replacedBy").and_then(Value::as_u64) {
+        provenance.insert("replacedBy".to_string(), json!(replaced_by));
+    }
     let mut origin = json!({
         "instanceId": source.instance_id,
         "origin": source.origin,

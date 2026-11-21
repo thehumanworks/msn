@@ -163,6 +163,17 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
             .to_string(),
     );
     let mut shown = HashSet::new();
+    let ids: HashSet<u64> = messages.iter().map(id_of).collect();
+    let link = |id: u64, here: bool| {
+        if here {
+            format!("[#{id}](#msg-{id})")
+        } else {
+            format!(
+                "[#{id}]({}/#board={}/{}&msg={id})",
+                meta.origin, meta.tenant, meta.channel
+            )
+        }
+    };
     for message in messages {
         let id = id_of(message);
         out.extend(["".into(), "---".into(), "".into()]);
@@ -207,6 +218,13 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
         }
         if let Some(answer) = message.get("answer").and_then(Value::as_str) {
             details.push(format!("- Answer: {}", inline(answer)));
+        }
+        // A replacement (ADR 0068) names the message it replaces; the old one names its replacement.
+        if let Some(old) = message.get("replaces").and_then(Value::as_u64) {
+            details.push(format!("- Replaces: {}", link(old, shown.contains(&old))));
+        }
+        if let Some(new) = message.get("replacedBy").and_then(Value::as_u64) {
+            details.push(format!("- Replaced by: {}", link(new, ids.contains(&new))));
         }
         if let Some(labels) = message.get("labels").and_then(Value::as_object) {
             let mut pairs: Vec<(&String, &Value)> = labels.iter().collect();

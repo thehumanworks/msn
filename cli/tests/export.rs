@@ -131,6 +131,13 @@ fn msg(id: u64, text: &str) -> Value {
         row["answered"] =
             json!({"id": 2, "choice": "yes", "username": "alice", "answeredAt": CREATED});
     }
+    // Message 3 replaced message 4's sender's earlier words (ADR 0068).
+    if id == 3 {
+        row["replacedBy"] = json!(4);
+    }
+    if id == 4 {
+        row["replaces"] = json!(3);
+    }
     if id == 2 {
         row["replyTo"] = json!(1);
         row["answer"] = json!("yes");
@@ -334,6 +341,14 @@ fn given_two_message_pages_when_export_then_archive_contains_both_and_stops_at_h
     let answer = lines.iter().find(|row| row["sourceId"] == 2).unwrap();
     assert_eq!(answer["answer"], "yes");
     assert!(answer.get("choices").is_none() && answer.get("answered").is_none());
+    // Replacement links are kept on both ends (ADR 0068) and omitted elsewhere.
+    let replaced = lines.iter().find(|row| row["sourceId"] == 3).unwrap();
+    assert_eq!(replaced["replacedBy"], 4);
+    assert!(replaced.get("replaces").is_none());
+    let newer = lines.iter().find(|row| row["sourceId"] == 4).unwrap();
+    assert_eq!(newer["replaces"], 3);
+    assert!(newer.get("replacedBy").is_none());
+    assert!(answer.get("replaces").is_none() && answer.get("replacedBy").is_none());
     assert!(
         lines
             .iter()
