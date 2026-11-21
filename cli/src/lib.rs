@@ -22,6 +22,7 @@ pub mod reactions;
 pub mod receipts;
 pub mod resumable;
 pub mod runner;
+pub mod scheduled;
 pub mod search;
 pub mod task_client;
 pub mod tasks;
@@ -41,7 +42,7 @@ use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
-use args::{Cli, Command, ExportFormat, SnapshotCommand};
+use args::{Cli, Command, ExportFormat, ScheduledCommand, SnapshotCommand};
 use client::{
     MsnClient, classify, error_message, is_retryable_status, print_success, status_error,
 };
@@ -403,7 +404,12 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             to,
             labels,
             attach,
+            at,
         } => {
+            let send_at = at
+                .as_deref()
+                .map(|raw| scheduled::parse_when(raw, scheduled::now_secs()))
+                .transpose()?;
             let labels = labels::parse_labels(&labels)?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -457,8 +463,18 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 },
                 &labels,
                 &files,
+                send_at.as_deref(),
             )
         }
+        Command::Scheduled { command } => scheduled_command(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            command,
+        ),
         Command::Attachment {
             channel,
             message_id,
@@ -1286,6 +1302,7 @@ fn send(
     correlation: Correlation,
     labels: &labels::Labels,
     files: &[attachments::LocalFile],
+    send_at: Option<&str>,
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
     let key = key
@@ -1297,6 +1314,9 @@ fn send(
     let uploaded = attachments::upload(&client, tenant, token, channel, files)?;
     let mut body = send_body_with(username, payload, &correlation, &uploaded);
     with_labels(&mut body, labels);
+    if let Some(send_at) = send_at {
+        body["sendAt"] = json!(send_at);
+    }
     let response = client.post_json(
         &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
         token,
@@ -1367,6 +1387,68 @@ fn edit(
         &token,
         Some(&json!({ "username": username, "text": text })),
     )?)
+}
+
+/// `msn scheduled list|change|cancel` (ADR 0060). `who` is the global `--tenant`, `--token` and
+/// `--username` options; change and cancel act as this key's name, or `--username` when unbound.
+fn scheduled_command(
+    who: [Option<&str>; 3],
+    url: &Url,
+    command: ScheduledCommand,
+) -> Result<(), CliError> {
+    let [tenant, token, username] = who;
+    let tenant = require_tenant(tenant)?;
+    let token = require_token(token, "MSN_WORKSPACE_TOKEN")?;
+    let client = MsnClient::new(url)?;
+    match command {
+        ScheduledCommand::List { channel } => {
+            let channel = slug(&channel)?;
+            finish(&client.get(
+                &format!("/api/tenants/{tenant}/channels/{channel}/scheduled"),
+                Some(&token),
+            )?)
+        }
+        ScheduledCommand::Change {
+            channel,
+            id,
+            text,
+            at,
+        } => {
+            let channel = slug(&channel)?;
+            let id = parse_message_id(&id)?;
+            if text.is_none() && at.is_none() {
+                return Err(CliError::usage("Pass --text, --at or both."));
+            }
+            let mut body = json!({});
+            if let Some(text) = text {
+                body["text"] = json!(read_text(&text)?);
+            }
+            if let Some(at) = at {
+                body["sendAt"] = json!(scheduled::parse_when(&at, scheduled::now_secs())?);
+            }
+            body["username"] = json!(identity::resolve_username(url, &tenant, &token, username)?);
+            finish(&client.send_optional_json(
+                "PATCH",
+                &format!("/api/tenants/{tenant}/channels/{channel}/scheduled/{id}"),
+                &token,
+                Some(&body),
+            )?)
+        }
+        ScheduledCommand::Cancel { channel, id } => {
+            let channel = slug(&channel)?;
+            let id = parse_message_id(&id)?;
+            let username = identity::resolve_username(url, &tenant, &token, username)?;
+            let mut path = Url::parse("http://x/").expect("static url");
+            path.query_pairs_mut().append_pair("username", &username);
+            finish(&client.delete(
+                &format!(
+                    "/api/tenants/{tenant}/channels/{channel}/scheduled/{id}?{}",
+                    path.query().unwrap_or_default()
+                ),
+                &token,
+            )?)
+        }
+    }
 }
 
 /// Adds or removes one reaction (ADR 0047) as this key's name, or `--username` when unbound.

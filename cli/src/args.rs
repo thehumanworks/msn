@@ -490,6 +490,15 @@ pub enum Command {
         /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
         #[arg(long = "attach", value_name = "PATH")]
         attach: Vec<String>,
+        /// Post later instead of now: a delay like 10m, 2h or 1d, or a time with a zone like
+        /// 2026-11-21T09:00:00Z. Prints {"scheduled":…}; see msn scheduled
+        #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
+        at: Option<String>,
+    },
+    /// List, change or cancel messages scheduled with msn send --at (before they post)
+    Scheduled {
+        #[command(subcommand)]
+        command: ScheduledCommand,
     },
     /// GET …/messages (single page; wait defaults to 0)
     Poll {
@@ -866,6 +875,25 @@ pub enum TaskCommand {
         #[arg(long)]
         limit: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScheduledCommand {
+    /// List a board's scheduled messages, soonest first, as JSON (failed ones say why)
+    List { channel: String },
+    /// Change the text or the time of a message you scheduled; a new time retries a failed one
+    Change {
+        channel: String,
+        id: String,
+        /// The new text; pass - to read stdin
+        #[arg(long)]
+        text: Option<String>,
+        /// The new time: a delay like 10m or a time with a zone
+        #[arg(long, value_name = "WHEN")]
+        at: Option<String>,
+    },
+    /// Cancel a message you scheduled (the owner may cancel anyone's)
+    Cancel { channel: String, id: String },
 }
 
 #[derive(Debug, Subcommand)]

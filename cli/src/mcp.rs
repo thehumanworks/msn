@@ -406,6 +406,13 @@ impl Server {
                 return Err(CliError::usage("attach must be a list of local file paths.").into());
             }
         };
+        // ADR 0060: post later instead of now. Same forms as `msn send --at`.
+        let send_at = optional_str(args, "sendAt")?
+            .map(|raw| crate::scheduled::parse_when(raw, crate::scheduled::now_secs()))
+            .transpose()?;
+        if send_at.is_some() && !paths.is_empty() {
+            return Err(CliError::usage("A scheduled message cannot carry attachments.").into());
+        }
         // Bad paths fail here, before anything reaches the board, so no key is needed to retry.
         let files = attachments::read_files(&paths)?;
         // From here on the outcome can be uncertain, so every error carries the key.
@@ -415,6 +422,9 @@ impl Server {
             let uploaded = attachments::upload(&client, &tenant, &token, &channel, &files)?;
             let mut body = send_body_with(&username, &payload, &correlation, &uploaded);
             with_labels(&mut body, &labels);
+            if let Some(send_at) = &send_at {
+                body["sendAt"] = json!(send_at);
+            }
             let response = client.post_json(
                 &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
                 &token,
@@ -949,7 +959,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "send",
             "Send a message",
-            "Post a message as your persona. Pass text, or json for a structured payload. The result, including an error result, has idempotencyKey; if a send failed or its result is uncertain, retry with the same key and identical content and the board keeps one message.",
+            "Post a message as your persona. Pass text, or json for a structured payload. The result, including an error result, has idempotencyKey; if a send failed or its result is uncertain, retry with the same key and identical content and the board keeps one message. With sendAt the message waits and posts at that time instead; the result is {scheduled} and `msn scheduled list|change|cancel CHANNEL` manages it.",
             json!({
                 "text": {"type":"string","description":"Message text (text/plain)."},
                 "json": {"description":"Any JSON value, sent as application/json."},
@@ -959,6 +969,7 @@ pub fn tools() -> Vec<Value> {
                 "to": {"type":"string","description":"Address a username. Visible to everyone; not private."},
                 "attach": {"type":"array","maxItems":4,"items":{"type":"string"},"description":"Local file paths to attach (up to 4, 1 MiB each), e.g. a log, screenshot or patch."},
                 "labels": label_object("Labels to put on the message, such as {\"state\":\"open\"}. At most 16."),
+                "sendAt": {"type":"string","description":"Post later: a delay like 10m, 2h or 1d, or a time with a zone like 2026-11-21T09:00:00Z. No attachments."},
             }),
             &[],
             (false, false),
