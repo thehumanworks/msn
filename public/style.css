@@ -750,6 +750,22 @@ nav .empty {
 .search-form button {
   flex-shrink: 0;
 }
+.search-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.search-all[hidden] {
+  display: none;
+}
+.search-board {
+  font-weight: 600;
+}
 #search-older {
   margin-top: 6px;
 }

@@ -240,6 +240,13 @@ export const MAX_PINS = 10;
 /** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
 export const UNREAD_BOARDS = 100;
 export const UNREAD_CAP = 99;
+/** Durable Object SQLite binds at most 100 parameters per statement; id lists go in chunks. */
+const SQL_ID_CHUNK = 90;
+/**
+ * A search of every board without words reads at most this many message ids per request
+ * (ADR 0073). A page that ends at the edge of the window says hasMore, so paging continues.
+ */
+export const SEARCH_SCAN_WINDOW = 20_000;
 /** Older messages indexed per backfill step after the v17 migration (ADR 0037). */
 export const SEARCH_BACKFILL_BATCH = 500;
 /** `kind` search filter values and the content type each one matches. */
@@ -963,6 +970,9 @@ export class MsnDurableObject extends DurableObject<Env> {
     ctx.storage.transactionSync(() => this.coverSearchGap());
     if (!this.searchIndexed()) void ctx.storage.setAlarm(Date.now());
   }
+
+  /** Ids one wordless every-board search may read; a field so tests can make it small. */
+  searchScanWindow = SEARCH_SCAN_WINDOW;
 
   /** True once every message that existed at the v17 migration is in the search index. */
   private searchIndexed(): boolean {
@@ -3177,15 +3187,23 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   /** Who reacted to these messages, by message id. Kinds in REACTIONS order. */
   private reactionsOf(channel: string, ids: number[]) {
-    const rows = this.ctx.storage.sql
-      .exec<{ messageId: number; kind: string; name: string }>(
-        `SELECT messageId, kind, name FROM reactions WHERE channel = ? AND messageId IN (${ids
-          .map(() => "?")
-          .join(", ")}) ORDER BY messageId, createdAt, name`,
-        channel,
-        ...ids,
-      )
-      .toArray();
+    // In id order, so the chunks together keep the ORDER BY of one statement.
+    const sorted = [...ids].sort((a, b) => a - b);
+    const rows: { messageId: number; kind: string; name: string }[] = [];
+    for (let start = 0; start < sorted.length; start += SQL_ID_CHUNK) {
+      const chunk = sorted.slice(start, start + SQL_ID_CHUNK);
+      rows.push(
+        ...this.ctx.storage.sql
+          .exec<{ messageId: number; kind: string; name: string }>(
+            `SELECT messageId, kind, name FROM reactions WHERE channel = ? AND messageId IN (${chunk
+              .map(() => "?")
+              .join(", ")}) ORDER BY messageId, createdAt, name`,
+            channel,
+            ...chunk,
+          )
+          .toArray(),
+      );
+    }
     return this.groupReactions(rows);
   }
 
@@ -3548,15 +3566,18 @@ export class MsnDurableObject extends DurableObject<Env> {
    * labels and reactions by id; attachments (ADR 0035) by id range, which works in any order.
    */
   private withSparse(channel: string, messages: Message[]): Message[] {
-    if (messages.length) {
-      const byId = new Map(messages.map((message) => [message.id, message]));
+    const byId = new Map(messages.map((message) => [message.id, message]));
+    const ids = [...byId.keys()];
+    // A full page is 100 ids, more than one statement may bind.
+    for (let start = 0; start < ids.length; start += SQL_ID_CHUNK) {
+      const chunk = ids.slice(start, start + SQL_ID_CHUNK);
       for (const row of this.ctx.storage.sql
         .exec<{ messageId: number; key: string; value: string }>(
-          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${messages
+          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${chunk
             .map(() => "?")
             .join(", ")}) ORDER BY messageId, key`,
           channel,
-          ...byId.keys(),
+          ...chunk,
         )
         .toArray()) {
         const message = byId.get(row.messageId);
@@ -4580,13 +4601,26 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * Newest-first search of one channel (ADR 0037). `q` drives the FTS5 index, so its cost follows
-   * how many messages in the workspace match; `from`, `kind` and `label` narrow it. Without `q`
-   * the channel's own index is scanned newest first. `before` pages to older matches.
+   * Newest-first search (ADR 0037). `q` drives the FTS5 index, so its cost follows how many
+   * messages in the workspace match; `from`, `kind` and `label` narrow it. Without `q` the id
+   * index is scanned newest first. `before` pages to older matches.
+   *
+   * With a channel, only that board is searched. With `null` (ADR 0073) every board the key can
+   * read is: a channel-scoped key, which includes a board's shared key, reads only its own board,
+   * so its board is the whole answer. Archived boards are left out unless `include=archived`, as
+   * in the board list (ADR 0046); a scoped key's own board is searched either way, as its
+   * single-board search is.
    */
-  private search(tenant: string, channel: string, params: URLSearchParams): Response {
+  private search(
+    tenant: string,
+    channel: string | null,
+    params: URLSearchParams,
+    capability: TenantRow,
+  ): Response {
+    const everyBoard = channel === null;
+    const allowed = ["q", "from", "kind", "label", "before", "limit", ...(everyBoard ? ["include"] : [])];
     for (const name of params.keys())
-      if (!["q", "from", "kind", "label", "before", "limit"].includes(name))
+      if (!allowed.includes(name))
         throw new HttpError(400, "invalid_query", `Unknown search parameter ${name}.`);
     const q = params.get("q") ?? "";
     const match = searchMatch(q);
@@ -4603,11 +4637,25 @@ export class MsnDurableObject extends DurableObject<Env> {
       : Number.MAX_SAFE_INTEGER;
     const limit = integer(params.get("limit"), 20, 100);
     if (!limit) throw new HttpError(400, "invalid_query", "limit must be positive.");
+    const include = params.getAll("include");
+    if (include.length > 1 || (include.length && include[0] !== "archived"))
+      throw new HttpError(400, "invalid_query", "include accepts only archived.");
     const columns = MESSAGE_COLUMNS.split(", ")
       .map((column) => `m.${column}`)
       .join(", ");
-    const where: string[] = ["m.channel = ?", "m.deleted = 0", "m.id < ?"];
-    const bindings: unknown[] = [channel, before];
+    const where: string[] = ["m.deleted = 0", "m.id < ?"];
+    const bindings: unknown[] = [before];
+    // The board filter is always built here, from the key, never from what the caller sent: a
+    // scoped key cannot widen it with any parameter.
+    const scope = everyBoard ? (capability.channel_scope ?? null) : channel;
+    if (scope) {
+      where.unshift("m.channel = ?");
+      bindings.unshift(scope);
+    } else if (!include.length) {
+      where.push(
+        "NOT EXISTS (SELECT 1 FROM channels c WHERE c.name = m.channel AND c.archivedAt IS NOT NULL)",
+      );
+    }
     if (from !== null) {
       where.push("m.username = ?");
       bindings.push(from);
@@ -4623,6 +4671,19 @@ export class MsnDurableObject extends DurableObject<Env> {
         })`,
       );
       bindings.push(filter.key, ...(filter.values ?? []));
+    }
+    // Without words there is no index to drive an every-board search, so it walks message ids
+    // newest first. The walk is bounded: one request reads at most searchScanWindow ids.
+    let floor = 0;
+    if (everyBoard && !scope && !match) {
+      // Never above the newest message, so a huge `before` cannot ask for a run of empty windows.
+      const newest =
+        this.ctx.storage.sql.exec<{ top: number | null }>("SELECT MAX(id) AS top FROM messages").one().top ??
+        0;
+      const top = Math.min(before, newest + 1);
+      floor = Math.max(0, top - this.searchScanWindow);
+      where.push("m.id >= ?");
+      bindings.push(floor);
     }
     const rows = match
       ? this.ctx.storage.sql
@@ -4644,10 +4705,22 @@ export class MsnDurableObject extends DurableObject<Env> {
           )
           .toArray();
     const messages = rows.slice(0, limit).map((row) => toMessage(row, tenant));
+    // Labels, reactions and attachments are read per board; the newest-first order is kept.
+    const decorated = new Map<number, Message>();
+    for (const board of new Set(messages.map((message) => message.channel)))
+      for (const message of this.withSparse(
+        board,
+        messages.filter((candidate) => candidate.channel === board),
+      ))
+        decorated.set(message.id, message);
+    // A window that ended above the oldest message has more to read below it, even when this
+    // page is short or empty: the next page starts at the window's lower edge.
+    const more = rows.length > limit;
+    const below = !more && floor > 1;
     return json({
-      messages: this.withSparse(channel, messages),
-      hasMore: rows.length > limit,
-      ...(rows.length > limit ? { nextBefore: messages.at(-1)?.id } : {}),
+      messages: messages.map((message) => decorated.get(message.id) ?? message),
+      hasMore: more || below,
+      ...(more ? { nextBefore: messages.at(-1)?.id } : below ? { nextBefore: floor } : {}),
       complete: this.searchIndexed(),
     });
   }
@@ -6113,6 +6186,9 @@ export class MsnDurableObject extends DurableObject<Env> {
                 .head;
           return json({ head: head ?? 0 });
         }
+        // Search every board this key can read (ADR 0073). The key decides which boards.
+        if (rest.length === 1 && rest[0] === "search" && request.method === "GET")
+          return this.search(tenant, null, url.searchParams, capability);
         if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")
           return json(this.unreadCounts(url, capability));
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {
@@ -6266,7 +6342,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 3 && rest[2] === "search" && request.method === "GET") {
             this.requireChannel(channel);
-            return this.search(tenant, channel, url.searchParams);
+            return this.search(tenant, channel, url.searchParams, capability);
           }
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);

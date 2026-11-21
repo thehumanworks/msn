@@ -93,6 +93,7 @@ EXAMPLES:
   msn rotate new-tenant --unbind                   # clears it
   msn search general 'deploy friday'          # newest matches first
   msn search general --from reviewer --label state=open
+  msn search --all 'deploy friday'            # every board you can read
   msn receipts general 42                     # who committed past message 42
   msn delete general 42
 
@@ -853,26 +854,10 @@ pub enum Command {
         before: Option<String>,
     },
     /// Search a channel's messages by words, sender, kind or label; newest first, as JSON
-    Search {
-        channel: String,
-        /// Words to find (words of 3+ letters also match word starts); "quoted text" matches a phrase
-        text: Option<String>,
-        /// Only messages from this display name
-        #[arg(long)]
-        from: Option<String>,
-        /// Only text or json messages
-        #[arg(long, value_name = "text|json")]
-        kind: Option<String>,
-        /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
-        #[arg(long = "label", value_name = "FILTER")]
-        labels: Vec<String>,
-        /// Only messages older than this id; pass the previous page's nextBefore
-        #[arg(long)]
-        before: Option<String>,
-        /// Page size, 1–100 (default 20)
-        #[arg(long)]
-        limit: Option<String>,
-    },
+    #[command(
+        long_about = "Search a channel's messages by words, sender, kind or label; newest first, as JSON.\n\nWith --all, search every board your key can read at once and leave CHANNEL out: msn search --all 'words'. Each message then carries its channel and a link that opens it. A board's shared key or an invited key reads only its own board, so --all answers from that board alone. Archived boards are left out unless you add --archived."
+    )]
+    Search(SearchArgs),
     /// Summarise what changed on a board since you last looked, as JSON (or --format text)
     #[command(
         long_about = "Summarise what changed on a board since you last looked, without moving anything.\n\nLists tasks opened, claimed, assigned, blocked, marked ready, closed or cancelled; board status changes; failed jobs; messages sent to you; and messages whose labels changed, with their labels now. Rows that need you come first. The same rules as the web app's \"Since you last looked\" panel (ADR 0033), built by the server (ADR 0061).\n\nStarts after your processing commit on the server (msn peek/commit, MCP, msn run). With none, it starts after your progress on this machine (msn peek --local), then your msn read cursor, then the start of the board. --after N starts after message N instead when you have no server commit. Reads at most 300 messages and lists at most 8 rows of each kind, with counts for the rest. Never moves a cursor, progress or receipt.\n\nJSON: {channel, reader, name, from:{source, after}, head, lastId, headline, count, truncated, authors, firstId, items:[{id, kind, text, attention}], hidden, labels:{messages:[{id, username, changes, labels}], hidden, changes, truncated}}."
@@ -1273,6 +1258,37 @@ pub enum WebhookCommand {
     Remove { channel: String, persona: String },
     /// Queue a ping to PERSONA's webhook; check the result with webhook show
     Test { channel: String, persona: String },
+}
+
+/// The arguments of `msn search` (ADR 0037, ADR 0073), in their own struct so clap builds them in
+/// a function of their own: inline subcommand fields overflow the test-thread stack in debug builds.
+#[derive(Debug, clap::Args)]
+pub struct SearchArgs {
+    /// The channel to search; leave it out with --all
+    pub channel: Option<String>,
+    /// Words to find (words of 3+ letters also match word starts); "quoted text" matches a phrase
+    pub text: Option<String>,
+    /// Search every board your key can read; each message carries its channel and a link
+    #[arg(long)]
+    pub all: bool,
+    /// With --all, also search archived boards
+    #[arg(long, requires = "all")]
+    pub archived: bool,
+    /// Only messages from this display name
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Only text or json messages
+    #[arg(long, value_name = "text|json")]
+    pub kind: Option<String>,
+    /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
+    #[arg(long = "label", value_name = "FILTER")]
+    pub labels: Vec<String>,
+    /// Only messages older than this id; pass the previous page's nextBefore while hasMore is true (a page can be short or empty before the last one)
+    #[arg(long)]
+    pub before: Option<String>,
+    /// Page size, 1–100 (default 20)
+    #[arg(long)]
+    pub limit: Option<String>,
 }
 
 /// The arguments of `msn gather` (ADR 0071), in their own struct so clap builds them in a function
