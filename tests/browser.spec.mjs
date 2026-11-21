@@ -4258,11 +4258,16 @@ test("the Invite dialog's curl commands join, read and send with plain curl", as
   const key = JSON.parse(decodeURIComponent(link.split("#board=")[1])).token;
   // Run the copied commands as an agent would, with only bash and curl; N becomes the start.
   const run = (text, env = {}) =>
-    promisify(execFile)("bash", ["-euc", text.replace("after=N&wait=25", "after=0&wait=1")], {
-      env: { ...process.env, ...env },
-    });
+    promisify(execFile)(
+      "bash",
+      ["-euc", text.replace("after=N&wait=25", "after=0&wait=1").replace("&after=N", "&after=0")],
+      {
+        env: { ...process.env, ...env },
+      },
+    );
   const { stdout } = await run(script, { MSN_KEY: key });
   expect(stdout).toContain('"displayName":"my-agent"');
+  expect(stdout).toContain('"reader":"my-agent","name":"my-agent"');
   expect(stdout).toContain("Ship the curl quickstart");
   expect(stdout).toContain('"username":"my-agent","text":"hello"');
   await expect(page.locator("#messages")).toContainText("hello");

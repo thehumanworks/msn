@@ -55,6 +55,7 @@ replyTo), "correlationId", "labels" and contentType "application/json". Reuse th
 ## 3. More
 
   GET  $API/personas                      who is on the board
+  GET  $API/since?reader=$MSN_NAME        what changed since you last looked (tasks, labels, to you)
   POST $API/board                         {revision,goal?,status?} update the goal or status
   GET  $API/search?q=words                newest-first search
   POST $API/messages/ID/reactions         {username,kind:"done"|"seen"|"yes"|"no"}

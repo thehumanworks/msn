@@ -66,6 +66,7 @@ import {
   sendPush,
   type VapidKeys,
 } from "./push";
+import { SINCE_EVENTS, SINCE_MESSAGES, type SinceSource, sinceSummary } from "./since";
 import { MAX_TEMPLATES, type TemplatePersona, templateFromBoard, templateName } from "./templates";
 
 export type Message = {
@@ -3407,6 +3408,118 @@ export class MsnDurableObject extends DurableObject<Env> {
     throw new HttpError(404, "route_not_found", "Unknown processing operation.");
   }
 
+  /**
+   * "Since you last looked" for one reader (ADR 0061). Starts at the reader's server processing
+   * commit when it has one, else at `after` (the caller's own read cursor), else at the start of
+   * the board. Reads at most SINCE_MESSAGES + 1 messages and SINCE_EVENTS events, and writes
+   * nothing: no cursor, receipt or event moves.
+   */
+  private since(channel: string, params: URLSearchParams, capability: TenantRow) {
+    const named = params.get("reader") ?? capability.bound_username ?? null;
+    if (named === null)
+      throw new HttpError(400, "invalid_reader", "Name the reader: ?reader=NAME (the agent's display name).");
+    const reader = text(named, "reader", 128, "invalid_reader");
+    // Who "you" are in the rows: a board persona owns its id or display name as a reader, plus
+    // `<that>/<worker>` (ADR 0034), as receipts read it; a bound key owns `name/<worker>`.
+    let name = reader;
+    const personas = this.ctx.storage.sql
+      .exec<{ id: string; displayName: string }>(
+        "SELECT id, displayName FROM personas WHERE channel = ?",
+        channel,
+      )
+      .toArray();
+    const persona = personas.find((row) =>
+      [row.id, row.displayName].some((prefix) => reader === prefix || reader.startsWith(`${prefix}/`)),
+    );
+    if (persona) name = persona.displayName;
+    else if (capability.bound_username && reader.startsWith(`${capability.bound_username}/`))
+      name = capability.bound_username;
+    const head = this.headCursor(channel);
+    const requested = params.has("after") ? integer(params.get("after"), 0, Number.MAX_SAFE_INTEGER) : null;
+    if (requested !== null && requested > head)
+      throw new HttpError(400, "invalid_cursor", "after exceeds this channel's current head.");
+    const processing = this.processingRow(channel, reader);
+    const [source, after]: [SinceSource, number] = processing
+      ? ["processing", processing.committedThrough]
+      : requested !== null
+        ? ["after", requested]
+        : ["start", 0];
+    const rows = this.ctx.storage.sql
+      .exec<MessageRow>(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? ORDER BY id LIMIT ?`,
+        channel,
+        after,
+        SINCE_MESSAGES + 1,
+      )
+      .toArray();
+    const messages = rows.slice(0, SINCE_MESSAGES).map((row) => ({
+      id: row.id,
+      username: row.username,
+      text: row.text,
+      contentType: row.contentType,
+      ...(row.recipient === null ? {} : { to: row.recipient }),
+    }));
+    // Label changes: walk the newest channel events back to this reader's starting point. The
+    // journal stores which message changed, not who changed it or which key, so each row shows
+    // the message's labels as they are now.
+    const events = this.ctx.storage.sql
+      .exec<{ type: string; resourceId: number | null }>(
+        "SELECT type, resourceId FROM events WHERE channel = ? ORDER BY id DESC LIMIT ?",
+        channel,
+        SINCE_EVENTS,
+      )
+      .toArray();
+    const changed = new Map<number, number>();
+    let reached = events.length < SINCE_EVENTS;
+    for (const event of events) {
+      if (event.type === "message.created" && event.resourceId !== null && event.resourceId <= after) {
+        reached = true;
+        break;
+      }
+      if (event.type === "message.labeled" && event.resourceId !== null)
+        changed.set(event.resourceId, (changed.get(event.resourceId) ?? 0) + 1);
+    }
+    const ids = [...changed.keys()];
+    const labeled = ids.length
+      ? this.ctx.storage.sql
+          .exec<{ id: number; username: string }>(
+            `SELECT id, username FROM messages WHERE channel = ? AND deleted = 0 AND id IN (${ids.map(() => "?").join(", ")})`,
+            channel,
+            ...ids,
+          )
+          .toArray()
+      : [];
+    const current = new Map<number, Record<string, string>>();
+    if (labeled.length)
+      for (const row of this.ctx.storage.sql
+        .exec<{ messageId: number; key: string; value: string }>(
+          `SELECT messageId, key, value FROM message_labels WHERE channel = ? AND messageId IN (${labeled
+            .map(() => "?")
+            .join(", ")}) ORDER BY messageId, key`,
+          channel,
+          ...labeled.map((row) => row.id),
+        )
+        .toArray())
+        current.set(row.messageId, { ...(current.get(row.messageId) ?? {}), [row.key]: row.value });
+    return sinceSummary({
+      channel,
+      reader,
+      name,
+      source,
+      after,
+      head,
+      messages,
+      truncated: rows.length > SINCE_MESSAGES,
+      labels: labeled.map((row) => ({
+        id: row.id,
+        username: row.username,
+        changes: changed.get(row.id) ?? 0,
+        labels: current.get(row.id) ?? {},
+      })),
+      labelsTruncated: !reached,
+    });
+  }
+
   private headCursor(channel: string): number {
     return this.ctx.storage.sql
       .exec<{ head: number }>("SELECT COALESCE(MAX(id), 0) AS head FROM messages WHERE channel = ?", channel)
@@ -4164,6 +4277,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);
             return this.showMessage(tenant, channel, messageId(rest[3]));
+          }
+          if (rest.length === 3 && rest[2] === "since" && request.method === "GET") {
+            this.requireChannel(channel);
+            return json(this.since(channel, url.searchParams, capability));
           }
           if (rest.length === 3 && rest[2] === "receipts" && request.method === "GET") {
             this.requireChannel(channel);
