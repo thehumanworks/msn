@@ -245,10 +245,20 @@ function ChannelBody({
     [controller],
   );
   // Questions with buttons (ADR 0065): a failed answer shows in a banner until the next one.
+  // While an answer is in flight its question's buttons stay locked, so a second tap sends nothing.
   const [answerError, setAnswerError] = useState<string | null>(null);
+  const [answering, setAnswering] = useState<ReadonlySet<number>>(() => new Set());
   const onAnswer = useCallback(
     (message: Message, choice: string) => {
-      void controller.answer(message.id, choice).then(setAnswerError);
+      setAnswering((current) => new Set(current).add(message.id));
+      void controller.answer(message.id, choice).then((error) => {
+        setAnswerError(error);
+        setAnswering((current) => {
+          const next = new Set(current);
+          next.delete(message.id);
+          return next;
+        });
+      });
     },
     [controller],
   );
@@ -389,6 +399,7 @@ function ChannelBody({
                 me={me}
                 onReact={archived ? undefined : onReact}
                 onAnswer={archived ? undefined : onAnswer}
+                answering={answering.has(item.id)}
                 onEditMessage={!archived && item.username === me && me !== "github" ? onEditMessage : undefined}
               />
             );

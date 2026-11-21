@@ -14,6 +14,7 @@ import {
 import {
   ATTACHMENT_ORPHAN_MS,
   type AttachmentRef,
+  addressedTo,
   admin,
   answerChoice,
   attachmentRefs,
@@ -2878,6 +2879,16 @@ export class MsnDurableObject extends DurableObject<Env> {
           "This message changed since you started editing. Reload it and edit again.",
         );
       const { deleted: _deleted, bytes: oldBytes, ...current } = row;
+      // An answered question and an answer are a record of a decision (ADR 0065): changing the
+      // question's words after the fact, or the answer's, would change what was decided.
+      if (row.text !== edit.text && (row.answered != null || row.answer != null))
+        throw new HttpError(
+          409,
+          "answered_locked",
+          row.answer != null
+            ? "An answer to a question cannot be edited. Reply again to add to it."
+            : "This question was answered, so its text cannot change. Ask a new question instead.",
+        );
       if (row.text === edit.text)
         return { message: this.withLabels(channel, [toMessage(current, tenant)])[0], changed: false };
       const usage = this.ctx.storage.sql
@@ -3611,7 +3622,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             "invalid_answer",
             `answer must be one of the question's choices: ${choices.map((c) => JSON.stringify(c)).join(", ")}.`,
           );
-        if (username !== row.recipient)
+        if (!addressedTo(username, row.recipient))
           throw new HttpError(
             403,
             "not_addressed",
@@ -5172,7 +5183,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         // An answer (ADR 0065) may leave out text: the reply then reads as the choice itself.
         const content = input
           ? text(
-              input.text === undefined && typeof input.answer === "string" ? input.answer : input.text,
+              input.text === undefined && typeof input.answer === "string" ? input.answer.trim() : input.text,
               "text",
               16384,
             )

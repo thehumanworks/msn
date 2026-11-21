@@ -123,6 +123,17 @@ fn msg(id: u64, text: &str) -> Value {
     if id == 3 {
         row["editedAt"] = json!("2026-11-20T10:00:00.000Z");
     }
+    // Message 1 is a question that message 2 answers (ADR 0065).
+    if id == 1 {
+        row["to"] = json!("alice");
+        row["choices"] = json!(["yes", "no"]);
+        row["answered"] =
+            json!({"id": 2, "choice": "yes", "username": "alice", "answeredAt": CREATED});
+    }
+    if id == 2 {
+        row["replyTo"] = json!(1);
+        row["answer"] = json!("yes");
+    }
     row
 }
 
@@ -312,6 +323,22 @@ fn given_two_message_pages_when_export_then_archive_contains_both_and_stops_at_h
             &json!("2026-11-20T10:00:00.000Z"),
             &Value::Null
         ]
+    );
+    // A question keeps its choices and first answer, and the answer keeps its choice (ADR 0065).
+    let question = lines.iter().find(|row| row["sourceId"] == 1).unwrap();
+    assert_eq!(question["choices"], json!(["yes", "no"]));
+    assert_eq!(question["answered"]["id"], 2);
+    assert!(question.get("answer").is_none());
+    let answer = lines.iter().find(|row| row["sourceId"] == 2).unwrap();
+    assert_eq!(answer["answer"], "yes");
+    assert!(answer.get("choices").is_none() && answer.get("answered").is_none());
+    assert!(
+        lines
+            .iter()
+            .find(|row| row["sourceId"] == 3)
+            .unwrap()
+            .get("choices")
+            .is_none()
     );
     assert_eq!(lines.last().unwrap()["record"], "completion");
     verify_archive_path(&out, |_| Ok(())).unwrap();

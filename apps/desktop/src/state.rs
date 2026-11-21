@@ -303,6 +303,41 @@ impl ChannelState {
             };
             self.messages.remove(&smallest);
         }
+        self.link_answers();
+    }
+
+    /// Marks each question answered from an answer reply in the cache (ADR 0065), so the buttons
+    /// lock when someone else answers even if the question was read before the answer. The first
+    /// answer (lowest id) wins, as on the server; a question that already records one keeps it.
+    fn link_answers(&mut self) {
+        let answers: Vec<(u64, Value)> = self
+            .messages
+            .values()
+            .filter_map(|reply| {
+                let question = reply["replyTo"].as_u64()?;
+                let choice = reply["answer"].as_str()?;
+                Some((
+                    question,
+                    serde_json::json!({
+                        "id": reply["id"],
+                        "choice": choice,
+                        "username": reply["username"],
+                        "answeredAt": reply["createdAt"],
+                    }),
+                ))
+            })
+            .collect();
+        for (question, answered) in answers {
+            if let Some(message) = self
+                .messages
+                .get_mut(&question)
+                .and_then(Value::as_object_mut)
+                && message.get("choices").is_some_and(Value::is_array)
+                && !message.get("answered").is_some_and(Value::is_object)
+            {
+                message.insert("answered".into(), answered);
+            }
+        }
     }
 }
 
@@ -2433,6 +2468,45 @@ mod tests {
         assert_eq!(
             state.channel.as_ref().unwrap().messages[&4]["answered"]["id"],
             5
+        );
+    }
+
+    #[test]
+    fn someone_elses_answer_locks_the_question_on_the_next_sync() {
+        // Ask a question with buttons (ADR 0065): the answer arrives as a reply from another client.
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let mut question = msg(4, "Ship it?");
+        question["to"] = json!("alice");
+        question["choices"] = json!(["yes", "no"]);
+        synced(&mut state, vec![question.clone()], 4, 0);
+        assert!(
+            state.channel.as_ref().unwrap().messages[&4]
+                .get("answered")
+                .is_none()
+        );
+        // The sync returns the question without its record (read first) and the answer reply.
+        let mut answer = msg(5, "yes");
+        answer["username"] = json!("alice");
+        answer["replyTo"] = json!(4);
+        answer["answer"] = json!("yes");
+        let mut late = msg(6, "no");
+        late["replyTo"] = json!(4);
+        late["answer"] = json!("no");
+        synced(&mut state, vec![question, answer, late], 6, 0);
+        let answered = &state.channel.as_ref().unwrap().messages[&4]["answered"];
+        assert_eq!(answered["choice"], "yes");
+        assert_eq!(answered["id"], 5);
+        assert_eq!(answered["username"], "alice");
+        // A plain reply never marks a question, and a message without choices is never marked.
+        let mut plain = msg(7, "hm");
+        plain["replyTo"] = json!(8);
+        plain["answer"] = json!("x");
+        synced(&mut state, vec![plain, msg(8, "not a question")], 8, 0);
+        assert!(
+            state.channel.as_ref().unwrap().messages[&8]
+                .get("answered")
+                .is_none()
         );
     }
 

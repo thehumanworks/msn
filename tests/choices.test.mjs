@@ -28,6 +28,9 @@ test("buttons are open only for the addressed name, until the first answer", () 
   const question = { id: 5, to: "tomas", choices: ["yes", "no"] };
   assert.equal(choiceState(question, "tomas"), "open");
   assert.equal(choiceState(question, "agent"), "waiting");
+  // `to` matches exactly, or trimmed and ignoring case, as on the server.
+  assert.equal(choiceState({ ...question, to: " Tomas " }, "tomas"), "open");
+  assert.equal(choiceState({ ...question, to: "tomasz" }, "tomas"), "waiting");
   assert.equal(choiceState(question, undefined), "waiting");
   assert.equal(choiceState(question, "tomas", { interactive: false }), "waiting");
   assert.equal(choiceState({ ...question, answered: { id: 8, choice: "no" } }, "tomas"), "answered");

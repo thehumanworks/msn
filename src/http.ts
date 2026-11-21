@@ -174,8 +174,36 @@ export const MAX_CHOICES = 6;
 export const MAX_CHOICE_BYTES = 128;
 
 /**
+ * Characters a choice may not hold (ADR 0065), the same set as an agent status (ADR 0064):
+ * controls (newlines, tabs), line and paragraph separators, the Arabic letter mark, embeddings,
+ * overrides and isolates, which could reorder the text around a button, and invisible ones
+ * (zero-width space, word joiner, byte order mark). Joiners and direction marks stay allowed.
+ */
+export const CHOICE_FORBIDDEN = /[\p{Cc}\p{Zl}\p{Zp}\u061C\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/u;
+
+/** One choice or answer: a string, trimmed, non-blank, one line of plain text, ≤128 bytes. */
+function choiceText(value: unknown, field: string, code: string): string {
+  if (typeof value !== "string") throw new HttpError(400, code, `${field} must be text.`);
+  const trimmed = value.trim();
+  if (!trimmed || new TextEncoder().encode(trimmed).length > MAX_CHOICE_BYTES)
+    throw new HttpError(
+      400,
+      code,
+      `${field} must be non-blank text, at most ${MAX_CHOICE_BYTES} UTF-8 bytes.`,
+    );
+  if (CHOICE_FORBIDDEN.test(trimmed))
+    throw new HttpError(
+      400,
+      code,
+      `${field} must be one line of plain text: no newlines, tabs, control, direction or invisible characters.`,
+    );
+  return trimmed;
+}
+
+/**
  * Optional `choices` body field (ADR 0065): the buttons a question offers its addressed person.
  * Absent/null means a plain message. A question needs `to`, so exactly one name may answer it.
+ * Each choice is kept trimmed; choices must differ after trimming.
  */
 export function choiceList(value: unknown, to: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
@@ -187,15 +215,15 @@ export function choiceList(value: unknown, to: unknown): string[] | undefined {
       "invalid_choices",
       `choices must be a list of ${MIN_CHOICES} to ${MAX_CHOICES} answers.`,
     );
-  const choices = value.map((choice) => text(choice, "Each choice", MAX_CHOICE_BYTES, "invalid_choices"));
+  const choices = value.map((choice) => choiceText(choice, "Each choice", "invalid_choices"));
   if (new Set(choices).size !== choices.length)
     throw new HttpError(400, "invalid_choices", "choices must all differ.");
   return choices;
 }
 
 /**
- * Optional `answer` body field (ADR 0065): the choice a reply picks from its replyTo question.
- * The store checks it against the question; here it only needs a replyTo and a choice's shape.
+ * Optional `answer` body field (ADR 0065): the choice a reply picks from its replyTo question,
+ * trimmed. The store checks it against the question; here it only needs a replyTo and a choice's shape.
  */
 export function answerChoice(value: unknown, replyTo: unknown, choices: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -203,7 +231,16 @@ export function answerChoice(value: unknown, replyTo: unknown, choices: unknown)
     throw new HttpError(400, "invalid_answer", "answer needs replyTo: name the question it answers.");
   if (choices !== undefined && choices !== null)
     throw new HttpError(400, "invalid_answer", "A message cannot both ask and answer a question.");
-  return text(value, "answer", MAX_CHOICE_BYTES, "invalid_answer");
+  return choiceText(value, "answer", "invalid_answer");
+}
+
+/**
+ * Whether `username` is the name a question is addressed to (ADR 0065): exactly, or trimmed and
+ * ignoring case, as unread counts and webhooks match `to`.
+ */
+export function addressedTo(username: string, to: string | null | undefined): boolean {
+  if (typeof to !== "string") return false;
+  return username === to || username.trim().toLowerCase() === to.trim().toLowerCase();
 }
 
 /** Optional `correlationId` body field: absent/null means unset; otherwise opaque text ≤ 128 bytes. */

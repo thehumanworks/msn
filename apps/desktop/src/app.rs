@@ -2693,7 +2693,11 @@ pub fn question_choices(message: &Value) -> Option<Vec<&str>> {
 pub fn choice_mode(message: &Value, me: &str, can_post: bool) -> ChoiceMode {
     if message["answered"].is_object() {
         ChoiceMode::Answered
-    } else if can_post && message["to"].as_str() == Some(me) {
+    } else if can_post
+        && message["to"]
+            .as_str()
+            .is_some_and(|to| msn_cli::ask::addressed_to(me, to))
+    {
         ChoiceMode::Open
     } else {
         ChoiceMode::Waiting
@@ -4491,6 +4495,8 @@ mod choice_tests {
         assert_eq!(question_choices(&question), Some(vec!["yes", "no"]));
         assert_eq!(choice_mode(&question, "alice", true), ChoiceMode::Open);
         assert_eq!(choice_mode(&question, "bob", true), ChoiceMode::Waiting);
+        let folded = json!({"id": 3, "to": " Alice ", "choices": ["yes", "no"]});
+        assert_eq!(choice_mode(&folded, "alice", true), ChoiceMode::Open);
         // Watch-only or archived: nobody can post, so the buttons stay locked.
         assert_eq!(choice_mode(&question, "alice", false), ChoiceMode::Waiting);
         let mut answered = question.clone();

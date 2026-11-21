@@ -53,6 +53,8 @@ test("buttons are open only for the addressed name until the first answer", () =
   assert.equal(choiceMode(question, "tomas", true), "open");
   assert.equal(choiceMode(question, "tomas", false), "waiting");
   assert.equal(choiceMode(question, "asha", true), "waiting");
+  assert.equal(choiceMode({ ...question, to: " Tomas " }, "tomas", true), "open");
+  assert.equal(choiceMode({ ...question, to: "tomasz" }, "tomas", true), "waiting");
   assert.equal(choiceNote(question, "waiting"), "Waiting for tomas");
   const reply = decodeMessage({ ...base, id: 5, username: "tomas", replyTo: 4, answer: "no", createdAt: "t5" });
   const answered = answeredBy(reply);
@@ -82,6 +84,44 @@ test("one tap answers; the question locks, and an answer from elsewhere locks it
     const again = await channelCtl.answer(mine.id, "yes");
     assert.match(again ?? "", /already answered/);
     assert.equal(find(mine.id)?.answered?.choice, "no");
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});
+
+test("a second tap while the first answer is in flight sends nothing", async () => {
+  const server = await startMockServer();
+  try {
+    const asked = server.ask("general", "lead", "Ship it?", "tomas", ["yes", "no"]);
+    const { ctl, channelCtl } = await open(server);
+    const posts = () =>
+      server.requests.filter((r) => r.method === "POST" && r.path.endsWith("/channels/general/messages")).length;
+    const before = posts();
+    const [first, second] = await Promise.all([channelCtl.answer(asked.id, "yes"), channelCtl.answer(asked.id, "no")]);
+    assert.equal(first, null);
+    assert.equal(second, null);
+    assert.equal(posts() - before, 1);
+    assert.equal(channelCtl.state.get().messages.find((m) => m.id === asked.id)?.answered?.choice, "yes");
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});
+
+test("deleting the answer reopens the question's buttons", async () => {
+  const server = await startMockServer();
+  try {
+    const asked = server.ask("general", "lead", "Ship it?", "tomas", ["yes", "no"]);
+    const reply = server.answer("general", "tomas", asked.id, "no");
+    const { ctl, channelCtl } = await open(server);
+    const find = () => channelCtl.state.get().messages.find((m) => m.id === asked.id);
+    assert.equal(find()?.answered?.choice, "no");
+    server.remove(reply.id);
+    await waitFor(() => find() !== undefined && find()?.answered === undefined, "question reopened");
+    assert.equal(choiceMode(find()!, "tomas", true), "open");
     channelCtl.dispose();
     ctl.dispose();
   } finally {

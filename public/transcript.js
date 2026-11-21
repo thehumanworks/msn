@@ -132,6 +132,10 @@ export function renderTranscript(meta, messages) {
       details.push(`- Reply to: [#${message.replyTo}](${target})`);
     }
     if (typeof message.to === "string") details.push(`- To: ${inline(message.to)}`);
+    // A question (ADR 0065) lists its choices; an answer names the choice it picked.
+    if (Array.isArray(message.choices) && message.choices.length)
+      details.push(`- Choices: ${message.choices.map(inline).join("; ")}`);
+    if (typeof message.answer === "string") details.push(`- Answer: ${inline(message.answer)}`);
     const labels = Object.entries(message.labels ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     if (labels.length)
       details.push(`- Labels: ${labels.map(([key, value]) => `${inline(key)}=${inline(value)}`).join(", ")}`);

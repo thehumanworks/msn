@@ -10,37 +10,70 @@ pub const MIN_CHOICES: usize = 2;
 pub const MAX_CHOICES: usize = 6;
 pub const MAX_CHOICE_BYTES: usize = 128;
 
-/// Checks choices the way the server does: 2 to 6, each non-blank and at most 128 UTF-8 bytes,
-/// all different. Fails before anything is sent.
+/// Characters a choice or answer may not hold, as on the server (ADR 0065, the same set as an
+/// agent status): controls, line and paragraph separators, the Arabic letter mark, embeddings,
+/// overrides and isolates, and invisible ones. Joiners and direction marks stay allowed.
+pub fn forbidden_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{061C}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{200B}'
+                | '\u{2060}'
+                | '\u{FEFF}'
+        )
+}
+
+/// One choice or answer, trimmed: non-blank, one line of plain text, at most 128 UTF-8 bytes.
+fn choice_text(value: &str, what: &str) -> Result<String, CliError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_CHOICE_BYTES {
+        return Err(CliError::usage(format!(
+            "{what} must be non-blank and at most {MAX_CHOICE_BYTES} UTF-8 bytes."
+        )));
+    }
+    if trimmed.chars().any(forbidden_char) {
+        return Err(CliError::usage(format!(
+            "{what} must be one line of plain text: no newlines, tabs, control, direction or invisible characters."
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Checks choices the way the server does: 2 to 6, each trimmed, non-blank, one line, at most
+/// 128 UTF-8 bytes, all different after trimming. Returns them trimmed. Fails before anything is sent.
 pub fn validate_choices(choices: &[String]) -> Result<Vec<String>, CliError> {
     if !(MIN_CHOICES..=MAX_CHOICES).contains(&choices.len()) {
         return Err(CliError::usage(format!(
             "Give {MIN_CHOICES} to {MAX_CHOICES} choices (repeat --choice)."
         )));
     }
-    for (index, choice) in choices.iter().enumerate() {
-        if choice.trim().is_empty() || choice.len() > MAX_CHOICE_BYTES {
-            return Err(CliError::usage(format!(
-                "Each choice must be non-blank and at most {MAX_CHOICE_BYTES} UTF-8 bytes."
-            )));
-        }
-        if choices[..index].contains(choice) {
+    let mut out: Vec<String> = Vec::with_capacity(choices.len());
+    for choice in choices {
+        let choice = choice_text(choice, "Each choice")?;
+        if out.contains(&choice) {
             return Err(CliError::usage(format!(
                 "Choices must all differ; {choice:?} is repeated."
             )));
         }
+        out.push(choice);
     }
-    Ok(choices.to_vec())
+    Ok(out)
 }
 
-/// Checks one answer's shape; the server checks that it is one of the question's choices.
+/// Checks one answer's shape and trims it; the server checks that it is one of the choices.
 pub fn validate_answer(choice: &str) -> Result<String, CliError> {
-    if choice.trim().is_empty() || choice.len() > MAX_CHOICE_BYTES {
-        return Err(CliError::usage(format!(
-            "The answer must be non-blank and at most {MAX_CHOICE_BYTES} UTF-8 bytes."
-        )));
-    }
-    Ok(choice.to_string())
+    choice_text(choice, "The answer")
+}
+
+/// Whether `username` is the name a question is addressed to: exactly, or trimmed and ignoring
+/// case, as the server matches it (ADR 0065).
+pub fn addressed_to(username: &str, to: &str) -> bool {
+    username == to || username.trim().to_lowercase() == to.trim().to_lowercase()
 }
 
 /// The POST body of a question.
@@ -150,6 +183,35 @@ mod tests {
         assert!(validate_choices(&strings(&["yes", " "])).is_err());
         assert!(validate_choices(&["x".repeat(129), "no".into()]).is_err());
         assert!(validate_choices(&["x".repeat(128), "no".into()]).is_ok());
+        // Trimmed, and refused when the text could hide or reorder words.
+        assert_eq!(
+            validate_choices(&strings(&[" yes ", "no"])).unwrap(),
+            strings(&["yes", "no"])
+        );
+        assert!(validate_choices(&strings(&["yes", "yes "])).is_err());
+        for bad in [
+            "n\no",
+            "n\to",
+            "n\u{202E}o",
+            "n\u{200B}o",
+            "n\u{2028}o",
+            "n\u{FEFF}o",
+        ] {
+            assert!(
+                validate_choices(&strings(&["yes", bad])).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(validate_choices(&strings(&["yes", "👨\u{200D}💻"])).is_ok());
+        assert_eq!(validate_answer(" yes ").unwrap(), "yes");
+        assert!(validate_answer("y\u{200B}es").is_err());
+    }
+
+    #[test]
+    fn given_names_when_addressed_to_then_case_and_spaces_fold() {
+        assert!(addressed_to("tomas", "tomas"));
+        assert!(addressed_to("tomas", " Tomas "));
+        assert!(!addressed_to("tomas", "tomasz"));
     }
 
     #[test]

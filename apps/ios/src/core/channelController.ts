@@ -95,6 +95,7 @@ export class ChannelController {
   private running = false;
   private outboxRunning = false;
   private disposed = false;
+  private readonly answering = new Set<number>();
   private outboxSeq = 0;
   private retryAttempt = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -159,7 +160,12 @@ export class ChannelController {
         this.needSync = true;
         break;
       case "message.deleted":
-        if (event.resourceId !== null && this.byId.delete(event.resourceId)) this.publishMessages();
+        if (event.resourceId !== null) {
+          const removed = this.byId.delete(event.resourceId);
+          // Deleting an answer reopens its question (ADR 0065).
+          const reopened = this.reopenQuestions(event.resourceId);
+          if (removed || reopened) this.publishMessages();
+        }
         this.needReload = true; // a redaction also invalidates snapshots
         break;
       case "snapshot.published":
@@ -481,6 +487,17 @@ export class ChannelController {
   async answer(id: number, choice: string): Promise<string | null> {
     const question = this.byId.get(id);
     if (!question?.choices) return "That question is no longer loaded.";
+    // One answer at a time per question: a second tap while the first is in flight sends nothing.
+    if (this.answering.has(id)) return null;
+    this.answering.add(id);
+    try {
+      return await this.sendAnswer(id, choice);
+    } finally {
+      this.answering.delete(id);
+    }
+  }
+
+  private async sendAnswer(id: number, choice: string): Promise<string | null> {
     const username = this.ctl.session.username;
     try {
       const result = await this.ctl.api.answer(
@@ -542,6 +559,18 @@ export class ChannelController {
       }
       throw error;
     }
+  }
+
+  /** Clears `answered` from loaded questions whose answer was `id`. True when any changed. */
+  private reopenQuestions(id: number): boolean {
+    let changed = false;
+    for (const message of this.byId.values()) {
+      if (message.answered?.id !== id) continue;
+      const { answered: _gone, ...open } = message;
+      this.byId.set(message.id, open);
+      changed = true;
+    }
+    return changed;
   }
 
   private publishMessages(): void {

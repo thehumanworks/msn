@@ -583,6 +583,8 @@ export async function startMockServer(): Promise<MockServerHandle> {
       message.deleted = true;
       message.text = "";
       message.username = "";
+      // Deleting an answer reopens its question (ADR 0065).
+      for (const asked of messages) if (asked.answered?.id === id) asked.answered = undefined;
       revision.set(message.channel, (revision.get(message.channel) ?? 0) + 1);
       for (const s of snapshots) if (s.channel === message.channel) s.invalidated = true;
       appendEvent(message.channel, "message.deleted", id);

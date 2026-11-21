@@ -193,6 +193,19 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
         if let Some(to) = message.get("to").and_then(Value::as_str) {
             details.push(format!("- To: {}", inline(to)));
         }
+        // A question (ADR 0065) lists its choices; an answer names the choice it picked.
+        if let Some(choices) = message.get("choices").and_then(Value::as_array)
+            && !choices.is_empty()
+        {
+            let shown_choices: Vec<String> = choices
+                .iter()
+                .map(|choice| inline(choice.as_str().unwrap_or("")))
+                .collect();
+            details.push(format!("- Choices: {}", shown_choices.join("; ")));
+        }
+        if let Some(answer) = message.get("answer").and_then(Value::as_str) {
+            details.push(format!("- Answer: {}", inline(answer)));
+        }
         if let Some(labels) = message.get("labels").and_then(Value::as_object) {
             let mut pairs: Vec<(&String, &Value)> = labels.iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(b.0));

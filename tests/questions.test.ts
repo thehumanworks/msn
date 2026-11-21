@@ -267,6 +267,56 @@ describe("ask a question with buttons (ADR 0065)", () => {
     );
   });
 
+  it("trims choices and answers and refuses control, direction and invisible characters", async () => {
+    const f = await fixture();
+    for (const choices of [
+      ["yes", "yes "],
+      ["yes", "no\nmaybe"],
+      ["yes", "n\to"],
+      ["yes", "n\u202Eo"],
+      ["yes", "n\u200Bo"],
+      ["yes", "n\u2028o"],
+      ["yes", "n\uFEFFo"],
+    ]) {
+      const response = await f.post({ text: "Q?", to: "tomas", choices });
+      expect(response.status, JSON.stringify(choices)).toBe(400);
+      expect(((await response.json()) as ErrorBody).error.code).toBe("invalid_choices");
+    }
+    // Surrounding spaces go; joiners inside an emoji stay.
+    const question = await f.send({ text: "Q?", to: "tomas", choices: ["  yes ", "👍🏽", "👨\u200D💻"] });
+    expect(question.choices).toEqual(["yes", "👍🏽", "👨\u200D💻"]);
+    const bad = await f.post({ username: "tomas", replyTo: question.id, answer: "y\u200Bes" });
+    expect(bad.status).toBe(400);
+    const reply = await f.send({ username: "tomas", replyTo: question.id, answer: " yes " });
+    expect(reply).toMatchObject({ answer: "yes", text: "yes" });
+  });
+
+  it("matches the addressed name ignoring case and surrounding spaces, as unread counts do", async () => {
+    const f = await fixture();
+    const question = await f.send({ text: "Ship?", to: " Tomas ", choices: ["yes", "no"] });
+    const reply = await f.send({ username: "tomas", replyTo: question.id, answer: "yes" });
+    expect((await f.point(question.id)).answered).toMatchObject({ id: reply.id, username: "tomas" });
+    const other = await f.send({ text: "Merge?", to: "TOMASZ", choices: ["a", "b"] });
+    const refused = await f.post({ username: "tomas", replyTo: other.id, answer: "a" });
+    expect(refused.status).toBe(403);
+  });
+
+  it("refuses to change the words of an answered question or of an answer", async () => {
+    const f = await fixture();
+    const question = await f.ask();
+    const reply = await f.send({ username: "tomas", replyTo: question.id, answer: "yes" });
+    const edit = (id: number, username: string, token: string, text: string) =>
+      call(f.tenant, `/channels/work/messages/${id}`, token, "PATCH", { username, text });
+    const asked = await edit(question.id, "agent", f.agent, "Delete prod?");
+    expect(asked.status).toBe(409);
+    expect(((await asked.json()) as ErrorBody).error.code).toBe("answered_locked");
+    const answered = await edit(reply.id, "tomas", f.owner, "no");
+    expect(answered.status).toBe(409);
+    // Saving the same text is still a no-op success.
+    expect((await edit(reply.id, "tomas", f.owner, "yes")).status).toBe(200);
+    expect((await f.point(question.id)).text).toBe("Ship it?");
+  });
+
   it("hashes a send without choices or answer exactly as before", async () => {
     const { payload } = await import("../src/store");
     expect(payload("a", "b", "text/plain", {})).toBe(JSON.stringify(["a", "b"]));

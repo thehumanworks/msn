@@ -366,12 +366,18 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
                 // An edited source message (ADR 0052) keeps its editedAt in the import envelope.
                 let mut edited = msg(10, "hello");
                 edited["editedAt"] = json!("2026-11-20T10:00:00.000Z");
+                // A question (ADR 0065) keeps its choices and first answer as provenance.
+                edited["to"] = json!("bob");
+                edited["choices"] = json!(["world", "later"]);
+                edited["answered"] =
+                    json!({"id": 11, "choice": "world", "username": "bob", "answeredAt": "t"});
                 edited
             },
             {
                 // A reply's quote (ADR 0059) is kept as provenance.
                 let mut quoted = reply(11, 10, "world");
                 quoted["quote"] = json!("hello");
+                quoted["answer"] = json!("world");
                 quoted
             },
             snapshot(1, 11, false),
@@ -436,12 +442,18 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
     assert_eq!(first["source"]["messageId"], 10);
     assert_eq!(first["payload"]["text"], "hello");
     assert_eq!(first["source"]["editedAt"], "2026-11-20T10:00:00.000Z");
+    assert_eq!(first["provenance"]["choices"], json!(["world", "later"]));
+    assert_eq!(first["provenance"]["answered"]["id"], 11);
+    // The import posts a plain message: it never asks again on the destination.
+    assert!(messages[1].get("choices").is_none() && messages[1].get("to").is_none());
     assert_eq!(messages[1]["username"], "importer");
     let reply_body = &messages[2];
     assert_eq!(reply_body["replyTo"], 2);
     let reply_env: Value = serde_json::from_str(reply_body["text"].as_str().unwrap()).unwrap();
     assert_eq!(reply_env["provenance"]["replyTo"], 10);
     assert_eq!(reply_env["provenance"]["quote"], "hello");
+    assert_eq!(reply_env["provenance"]["answer"], "world");
+    assert!(reply_body.get("answer").is_none());
     assert!(reply_env["source"].get("editedAt").is_none());
     let snap = recorded
         .iter()

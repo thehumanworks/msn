@@ -832,6 +832,17 @@ fn import_envelope(
     if let Some(to) = message.get("to").and_then(Value::as_str) {
         provenance.insert("to".to_string(), json!(to));
     }
+    // A question's choices, an answer and a question's first answer (ADR 0065) are kept as
+    // provenance only: the import posts plain messages, so it never asks or answers again.
+    if let Some(choices) = message.get("choices").filter(|value| value.is_array()) {
+        provenance.insert("choices".to_string(), choices.clone());
+    }
+    if let Some(answer) = message.get("answer").and_then(Value::as_str) {
+        provenance.insert("answer".to_string(), json!(answer));
+    }
+    if let Some(answered) = message.get("answered").filter(|value| value.is_object()) {
+        provenance.insert("answered".to_string(), answered.clone());
+    }
     let mut origin = json!({
         "instanceId": source.instance_id,
         "origin": source.origin,

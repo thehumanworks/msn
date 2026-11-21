@@ -1339,7 +1339,7 @@ pub fn tools() -> Vec<Value> {
             json!({
                 "text": {"type":"string","description":"The question."},
                 "to": {"type":"string","description":"The one name that may answer."},
-                "choices": {"type":"array","minItems":2,"maxItems":6,"items":{"type":"string","minLength":1,"maxLength":128},"description":"2 to 6 different answers, in the order to show them."},
+                "choices": {"type":"array","minItems":2,"maxItems":6,"items":{"type":"string","minLength":1,"maxLength":128},"description":"2 to 6 answers, in the order to show them. Each is trimmed, then must be one line of plain text (no control, direction or invisible characters), at most 128 UTF-8 bytes, and different from the others."},
                 "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for the answer (default 0)."},
                 "key": {"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Idempotency key; generated when omitted."},
             }),
@@ -1363,7 +1363,7 @@ pub fn tools() -> Vec<Value> {
             "Answer a question addressed to you (a message whose to is your name and that has choices) with one of its choices, exactly as listed. Only the first answer counts; a later one fails with already_answered.",
             json!({
                 "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"The question's message id."},
-                "choice": {"type":"string","maxLength":128,"description":"One of the question's choices."},
+                "choice": {"type":"string","maxLength":128,"description":"One of the question's choices (trimmed, at most 128 UTF-8 bytes)."},
             }),
             &["id", "choice"],
             (false, true),

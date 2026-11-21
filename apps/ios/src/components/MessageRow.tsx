@@ -47,6 +47,8 @@ type Props = {
   onEditMessage?: (message: Message) => void;
   /** Answers a question (ADR 0065); absent where nothing can be posted (archived boards, search). */
   onAnswer?: (message: Message, choice: string) => void;
+  /** An answer to this question is in flight: its buttons stay locked until it settles. */
+  answering?: boolean;
 };
 
 // The body's font size is 16; React Native's default line is about 1.2 times that.
@@ -103,6 +105,7 @@ function MessageRowImpl({
   onReact,
   onEditMessage,
   onAnswer,
+  answering = false,
 }: Props) {
   const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
   const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
@@ -120,6 +123,7 @@ function MessageRowImpl({
   // A question's buttons (ADR 0065): open only for the addressed name, locked once answered.
   const choices = message.choices && message.choices.length >= 2 ? message.choices : null;
   const mode = choices ? choiceMode(message, me, onAnswer !== undefined) : null;
+  const canTap = mode === "open" && !answering;
   const canLoadParent =
     message.replyTo !== undefined &&
     onLoadParent !== undefined &&
@@ -145,7 +149,7 @@ function MessageRowImpl({
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
         ...(onEditMessage ? [{ name: "editMessage", label: "Edit" }] : []),
-        ...(choices && mode === "open"
+        ...(choices && canTap
           ? choices.map((choice, index) => ({ name: `answer${index}`, label: `Answer ${choice}` }))
           : []),
         ...(onReact
@@ -164,7 +168,7 @@ function MessageRowImpl({
           onLoadParent?.(message.replyTo);
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
         else if (nativeEvent.actionName === "editMessage") onEditMessage?.(message);
-        else if (nativeEvent.actionName.startsWith("answer") && choices && mode === "open") {
+        else if (nativeEvent.actionName.startsWith("answer") && choices && canTap) {
           const choice = choices[Number(nativeEvent.actionName.slice("answer".length))];
           if (choice !== undefined) onAnswer?.(message, choice);
         } else if (nativeEvent.actionName.startsWith("react_"))
@@ -272,8 +276,8 @@ function MessageRowImpl({
                 key={choice}
                 accessibilityRole="button"
                 accessibilityLabel={`Answer ${choice}`}
-                accessibilityState={{ selected: chosen, disabled: mode !== "open" }}
-                disabled={mode !== "open"}
+                accessibilityState={{ selected: chosen, disabled: !canTap, busy: answering }}
+                disabled={!canTap}
                 onPress={() => onAnswer?.(message, choice)}
                 style={[styles.choice, mode === "open" && styles.choiceOpen, chosen && styles.choiceChosen]}
               >
