@@ -3428,10 +3428,13 @@ test("one name takes a request: Taking this, taken by NAME, and Release for the 
   await expect(note(ids[0]).locator(".claim-holder")).toHaveText("Taken by human (you)");
   await expect(take(ids[0])).toHaveCount(0);
   await expect(releaseButton(ids[0])).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath(`claim-${testInfo.project.name}-dark.png`) });
-  await page.emulateMedia({ colorScheme: "light" });
-  await page.screenshot({ path: testInfo.outputPath(`claim-${testInfo.project.name}-light.png`) });
-  await page.emulateMedia({ colorScheme: "dark" });
+  // Both themes (ADR 0049): the note and the buttons use theme tokens only.
+  for (const colorScheme of ["dark", "light"]) {
+    await page.emulateMedia({ colorScheme });
+    await expect(note(ids[0]).locator(".claim-holder")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`claim-${testInfo.project.name}-${colorScheme}.png`) });
+  }
+  await page.emulateMedia({ colorScheme: null });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
   // Taking sends nothing: the log has the same four messages, and the server names the holder.
