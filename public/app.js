@@ -2408,9 +2408,10 @@ async function poll(live = false) {
     generation === epoch &&
     !(archivedBoards.has(selected) && !state.hasMore)
   );
-  if (generation === epoch && archivedBoards.has(selected))
-    status(`#${selected} is archived · nothing new will arrive`);
+  if (generation === epoch && archivedBoards.has(selected)) status(archivedStatus(selected));
 }
+
+const archivedStatus = (name) => `#${name} is archived · nothing new will arrive`;
 
 /** Shows or hides the read-only state for the open board when the server reports it. */
 function markArchived(name, archived) {
@@ -2427,7 +2428,11 @@ async function setArchived(name, archived) {
     await api(`/channels/${name}/archive`, { method: archived ? "PUT" : "DELETE" }, connection);
     if (session !== connection) return;
     markArchived(name, archived);
-    status(archived ? `#${name} archived · it is read only and hidden from the list` : `#${name} unarchived`);
+    // Archiving also ends the open board's live poll, which shows the archived status. The two
+    // answers arrive in either order, so both write the same text for the open board.
+    if (!archived) status(`#${name} unarchived`);
+    else if (name === channel) status(archivedStatus(name));
+    else status(`#${name} archived · it is read only and hidden from the list`);
     await refreshChannels(connection);
     if (!archived && name === channel) poll($("live").checked);
   } catch (error) {
