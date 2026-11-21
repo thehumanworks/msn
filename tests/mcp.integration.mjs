@@ -147,6 +147,9 @@ try {
       "find",
       "search",
       "wait_label",
+      "ask",
+      "wait_answer",
+      "answer",
     ],
   );
 

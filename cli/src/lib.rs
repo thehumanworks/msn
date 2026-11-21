@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod archive;
 pub mod args;
+pub mod ask;
 pub mod attachments;
 pub mod board;
 pub mod client;
@@ -469,6 +470,70 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 &files,
                 send_at.as_deref(),
             )
+        }
+        Command::Ask {
+            channel,
+            text,
+            to,
+            choices,
+            key,
+            reply_to,
+            wait,
+        } => {
+            let choices = ask::validate_choices(&choices)?;
+            let to = identity::validate_username(&to).map_err(|_| {
+                CliError::usage("--to must be a non-blank username of at most 128 UTF-8 bytes.")
+            })?;
+            let wait = wait
+                .as_deref()
+                .map(|raw| parse_int(raw, 86_400))
+                .transpose()?;
+            if wait == Some(0) {
+                return Err(CliError::usage("--wait must be 1 to 86400 seconds."));
+            }
+            let reply_to = reply_to.as_deref().map(parse_message_id).transpose()?;
+            let text = read_text(&text)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let username =
+                identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
+            let mut body = ask::question_body(&username, &text, &to, &choices);
+            if let Some(reply_to) = reply_to {
+                body["replyTo"] = json!(reply_to);
+            }
+            ask_question(
+                &url,
+                &tenant,
+                &token,
+                channel,
+                &body,
+                key.as_deref(),
+                wait,
+                stop,
+            )
+        }
+        Command::Answer {
+            channel,
+            message_id,
+            choice,
+            key,
+        } => {
+            let question = parse_message_id(&message_id)?;
+            let choice = ask::validate_answer(&choice)?;
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let username =
+                identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
+            let key = key.unwrap_or_else(|| Uuid::new_v4().to_string());
+            eprintln!("Idempotency-Key: {key}");
+            finish(&MsnClient::new(&url)?.post_json(
+                &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+                &token,
+                &[("Idempotency-Key", key.as_str())],
+                &ask::answer_body(&username, question, &choice),
+            )?)
         }
         Command::Scheduled { command } => scheduled_command(
             [
@@ -1599,6 +1664,90 @@ fn wait_label(
                 timeout.unwrap_or(0),
                 filters.join(" ")
             )));
+        }
+    }
+}
+
+/// Posts a question (ADR 0065). Without `wait`, prints the posted message like `msn send`. With
+/// it, prints the answer as JSON once the addressed name taps a choice, or exits 2 on timeout.
+#[allow(clippy::too_many_arguments)]
+fn ask_question(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    body: &Value,
+    key: Option<&str>,
+    wait: Option<u64>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), CliError> {
+    let client = Arc::new(MsnClient::new(url)?);
+    let key = key
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    eprintln!("Idempotency-Key: {key}");
+    let _ = io::stderr().flush();
+    let response = client.post_json(
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+        token,
+        &[("Idempotency-Key", key.as_str())],
+        body,
+    )?;
+    let Some(timeout) = wait else {
+        return finish(&response);
+    };
+    classify(response.status, &response.body)?;
+    let posted: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let question = posted["message"]["id"]
+        .as_u64()
+        .ok_or_else(|| CliError::generic("The server did not return the question's id."))?;
+    eprintln!("Asked as message {question}; waiting up to {timeout}s for the answer.");
+    let _ = io::stderr().flush();
+    // A retried ask (same key) may replay a question that was answered already.
+    if let Some(found) = ask::recorded_answer(&posted["message"]) {
+        return agent::print_json(&found);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout);
+    let mut after = question;
+    let mut backoff = BACKOFF_START_MS;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            agent::print_json(&json!({ "question": question, "answered": false }))?;
+            return Err(CliError::timeout(format!(
+                "Timed out after {timeout}s; nobody answered message {question}."
+            )));
+        }
+        // Round the remaining time up, so the last poll still waits instead of spinning at wait=0.
+        let wait = (left.as_secs() + u64::from(left.subsec_nanos() > 0)).min(MAX_WAIT);
+        let path = format!(
+            "/api/tenants/{tenant}/channels/{channel}/messages?after={after}&wait={wait}&limit=100"
+        );
+        let Some(result) = get_interruptible(client.clone(), path, token.to_string(), &stop)?
+        else {
+            return Err(CliError::generic("Interrupted before the answer arrived."));
+        };
+        match result {
+            Ok(response) if (200..300).contains(&response.status) => {
+                backoff = BACKOFF_START_MS;
+                let page: Value = serde_json::from_str(&response.body)
+                    .map_err(|_| CliError::generic("Response was not JSON."))?;
+                if let Some(found) = ask::find_answer(&page, question) {
+                    return agent::print_json(&found);
+                }
+                after = ask::next_cursor(&page, after);
+            }
+            Ok(response) if !is_retryable_status(response.status) => {
+                return Err(status_error(response.status, &response.body));
+            }
+            Ok(_) | Err(CliError::Network(_)) => {
+                if interruptible_sleep(backoff, &stop, "Answer wait failed; retrying", 0) {
+                    return Err(CliError::generic("Interrupted before the answer arrived."));
+                }
+                backoff = (backoff * 2).min(BACKOFF_MAX_MS);
+            }
+            Err(error) => return Err(error),
         }
     }
 }

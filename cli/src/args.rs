@@ -499,6 +499,41 @@ pub enum Command {
         #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
         at: Option<String>,
     },
+    /// Ask one person a question with 2 to 6 buttons (ADR 0065). Prints the question; with --wait,
+    /// waits for the answer and prints it as JSON (exit 0), or exits 2 on timeout
+    Ask {
+        /// Channel slug
+        channel: String,
+        /// The question; pass - to read stdin
+        text: String,
+        /// The one name that may answer
+        #[arg(long, required = true)]
+        to: String,
+        /// One answer button (≤128 bytes); repeat 2 to 6 times, in the order to show them
+        #[arg(long = "choice", value_name = "TEXT", required = true)]
+        choices: Vec<String>,
+        /// Idempotency-Key; generated and printed to stderr when omitted
+        #[arg(long)]
+        key: Option<String>,
+        /// Id of the same-channel message this question replies to
+        #[arg(long = "reply-to")]
+        reply_to: Option<String>,
+        /// Wait up to this many seconds (1–86400) for the answer
+        #[arg(long, value_name = "SECONDS")]
+        wait: Option<String>,
+    },
+    /// Answer a question addressed to you with one of its choices (ADR 0065)
+    Answer {
+        /// Channel slug
+        channel: String,
+        /// The question's message id
+        message_id: String,
+        /// The choice, exactly as the question lists it
+        choice: String,
+        /// Idempotency-Key; generated and printed to stderr when omitted
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// List, change or cancel messages scheduled with msn send --at (before they post)
     Scheduled {
         #[command(subcommand)]

@@ -41,6 +41,7 @@ fn main() {
             | Command::Peek { .. }
             | Command::Export { .. }
             | Command::Watch { .. }
+            | Command::Ask { wait: Some(_), .. }
     ) {
         install_stop_signals().unwrap_or_else(|error| {
             write_err(&error);
