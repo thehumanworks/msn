@@ -137,6 +137,7 @@ try {
       "show_message",
       "message_link",
       "receipts",
+      "since",
       "get_attachment",
       "board",
       "label",
@@ -512,8 +513,33 @@ try {
     ["reviewer"],
   );
   assert.deepEqual(after.notYet, []);
+  // Since you last looked (ADR 0061): from the server commit, read-only.
+  const caughtUp = await resumable.ok("since", {});
+  assert.deepEqual(caughtUp.from, { source: "processing", after: all.nextCursor });
+  assert.equal(caughtUp.count, 0);
   await resumable.close();
   console.log("PASS: receipts name only server commits and never the sender");
+
+  // A local-only agent's summary starts at its progress on this machine and lists what is for it.
+  const ask = await cli(["--profile", "lead", "send", "work", "--to", "quiet", "--text", "Can you check?"]);
+  const quietSince = await cli(["--profile", "quiet", "since", "work"]);
+  assert.deepEqual(quietSince.from, { source: "localProcessing", after: quietPage.nextCursor });
+  assert.equal(quietSince.name, "quiet", "a persona reader is shown by its display name");
+  assert.deepEqual(quietSince.items[0], {
+    id: ask.message.id,
+    kind: "question",
+    text: "lead to you: \u201cCan you check?\u201d",
+    attention: true,
+  });
+  const text = child(binary, ["--profile", "quiet", "since", "work", "--format", "text"]);
+  assert.equal((await text.done)[0], 0, text.errors);
+  assert.match(
+    text.output,
+    new RegExp(`^! #${ask.message.id} lead to you: \u201cCan you check\\?\u201d$`, "m"),
+  );
+  const progress = await cli(["--profile", "quiet", "since", "work", "--after", "0"]);
+  assert.equal(progress.from.source, "after");
+  console.log("PASS: since summarises from server or local progress without moving it");
 } finally {
   for (const p of children)
     if (p.exitCode === null) {

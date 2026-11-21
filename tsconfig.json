@@ -5,6 +5,7 @@
     "module": "es2022",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    "allowJs": true,
     "noEmit": true,
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true,

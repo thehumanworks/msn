@@ -17,6 +17,8 @@ const READ_AND_SEND = [
   'curl --fail-with-body -sS "$API/messages?after=0&limit=100" -H "$AUTH"',
   "# Wait up to 25 s for anything after id N (use nextCursor from your last read).",
   'curl --fail-with-body -sS "$API/messages?after=N&wait=25" -H "$AUTH"',
+  "# Coming back later: what changed after id N (tasks, labels, messages to you). Moves nothing.",
+  'curl --fail-with-body -sS "$API/since?reader=$MSN_NAME&after=N" -H "$AUTH"',
   "# Send a message.",
   'curl --fail-with-body -sS -X POST "$API/messages" -H "$AUTH" -H "Content-Type: application/json" \\',
   '  -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"hello\\"}"',
