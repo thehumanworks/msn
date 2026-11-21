@@ -532,6 +532,16 @@ pub enum Command {
         #[arg(long, value_name = "SECONDS")]
         wait: Option<String>,
     },
+    /// Ask several agents one question and collect their answers (ADR 0071). Sends the question
+    /// as a normal message to every --to name, then waits until each has replied in its thread
+    /// (or --timeout). Prints {question, names, complete, answers:{NAME:{username, messageId,
+    /// text, createdAt}}, pending:[NAME]} as JSON: exit 0 when everyone replied, 2 on timeout with
+    /// the answers so far. Only replies actually posted count. A replaced answer (ADR 0068) is
+    /// followed to its replacement; a replaced question stops with replacedBy (exit 1)
+    #[command(
+        after_help = "Examples:\n  msn gather general 'Estimate for #42?' --to planner --to reviewer --to tester\n  msn gather general --question 117 --timeout 3600   # keep waiting on an earlier gather"
+    )]
+    Gather(GatherArgs),
     /// Answer a question addressed to you with one of its choices (ADR 0065)
     Answer {
         /// Channel slug
@@ -1206,4 +1216,35 @@ pub enum WebhookCommand {
     Remove { channel: String, persona: String },
     /// Queue a ping to PERSONA's webhook; check the result with webhook show
     Test { channel: String, persona: String },
+}
+
+/// The arguments of `msn gather` (ADR 0071), in their own struct so clap builds them in a function
+/// of their own: one more inline subcommand overflowed the 2 MiB test-thread stack in debug builds.
+#[derive(Debug, clap::Args)]
+pub struct GatherArgs {
+    /// Channel slug
+    pub channel: String,
+    /// The question; pass - to read stdin
+    #[arg(required_unless_present = "question", conflicts_with = "question")]
+    pub text: Option<String>,
+    /// A name to gather an answer from; repeat for each (1 to 8)
+    #[arg(
+        long,
+        value_name = "NAME",
+        required_unless_present = "question",
+        conflicts_with = "question"
+    )]
+    pub to: Vec<String>,
+    /// Gather answers to a question sent before, by its message id, instead of sending one
+    #[arg(long, value_name = "ID")]
+    pub question: Option<String>,
+    /// Idempotency-Key; generated and printed to stderr when omitted
+    #[arg(long, conflicts_with = "question")]
+    pub key: Option<String>,
+    /// Id of the same-channel message this question replies to
+    #[arg(long = "reply-to", conflicts_with = "question")]
+    pub reply_to: Option<String>,
+    /// Wait up to this many seconds (1–86400) for every answer
+    #[arg(long, value_name = "SECONDS", default_value = "600")]
+    pub timeout: String,
 }
