@@ -298,6 +298,26 @@ test("only addressed non-self messages invoke the handler; argv is literal and s
   assert.equal((await f.records()).length, 1);
 });
 
+test("a message addressed to several names invokes the handler of each named agent only (ADR 0067)", async (t) => {
+  const f = await fixture(
+    t,
+    [2, 3, 4].map((id) => event(id)),
+    {
+      2: message(2, { to: "lead", recipients: ["lead", "reviewer"] }),
+      3: message(3, { to: "lead", recipients: ["lead", "worker"] }),
+      // A malformed list is refused like any other invalid canonical message.
+      4: message(4, { to: "lead", recipients: ["lead"] }),
+    },
+  );
+  const result = await f.start().done;
+  assert.notEqual(result.code, 0);
+  const records = await f.records();
+  assert.deepEqual(
+    records.map((record) => record.input.message.id),
+    [2],
+  );
+});
+
 test("an edit to a message the handler already processed dispatches again with a notice (ADR 0052)", async (t) => {
   const f = await fixture(t, [event(1, 4)], { 4: message(4) });
   assert.equal((await f.start().done).code, 0);

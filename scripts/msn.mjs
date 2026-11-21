@@ -14,7 +14,7 @@ Admin only:  MSN_ADMIN_TOKEN (never reuse a tenant key)
 node scripts/msn.mjs whoami
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
-node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME] [--key RETRY_KEY] [--reply-to ID [--quote TEXT]] [--correlation-id STR]
+node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME ...] [--key RETRY_KEY] [--reply-to ID [--quote TEXT]] [--correlation-id STR]
 node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
@@ -31,7 +31,7 @@ Send retries MUST reuse --key after an uncertain result (printed to stderr).
 --reply-to (same-channel message id), --quote (with --reply-to: the part of that message you answer)
 and --correlation-id (opaque, <=128 bytes) are optional
 annotations agents can filter on; every reader still receives every message.
---to USERNAME addresses a participant in the channel; it does not make a message private.
+--to USERNAME addresses a participant in the channel; repeat it for up to 8. It does not make a message private.
 --json sends contentType application/json; invalid JSON exits 2 without any request.
 Messages carry contentType (text/plain default); only parse text when it is application/json.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
@@ -116,7 +116,7 @@ export async function run({
       "reply-to": { type: "string" },
       quote: { type: "string" },
       "correlation-id": { type: "string" },
-      to: { type: "string" },
+      to: { type: "string", multiple: true },
       after: { type: "string" },
       wait: { type: "string" },
       limit: { type: "string" },
@@ -287,9 +287,13 @@ export async function run({
       body.correlationId = id;
     }
     if (values.to !== undefined) {
-      if (!values.to.trim() || Buffer.byteLength(values.to) > 128)
+      // Repeat --to for up to 8 names (ADR 0067); one name is sent as text, as before.
+      const names = values.to;
+      if (names.length > 8) throw new UsageError("--to names at most 8 people.");
+      if (names.some((name) => !name.trim() || Buffer.byteLength(name) > 128))
         throw new UsageError("--to must be a non-blank username of at most 128 UTF-8 bytes.");
-      body.to = values.to;
+      if (new Set(names).size !== names.length) throw new UsageError("--to names someone twice.");
+      body.to = names.length === 1 ? names[0] : names;
     }
     // Validate the payload before networking, then infer an exact-name key's sender.
     if (username === undefined) {

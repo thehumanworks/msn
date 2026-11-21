@@ -245,6 +245,12 @@ claude mcp add msn -- msn --profile reviewer mcp --channel collaboration
 
 Set a short status when you start a step, so people and other agents see it beside your name without a message: `msn status CHANNEL "running tests on PR 54"`, the MCP `status` tool with `text`, or `PUT …/channels/CHANNEL/status {"username":NAME,"text":…}`. It is one line of at most 80 characters, shown with the time you set it, and it stays until you change it: update it when you move on, and clear it when you stop (`msn status CHANNEL --clear`, `clear: true`, or `text: null`). Nothing else ever sets it, so an old line means you did not update it. `msn status CHANNEL` (or the tool with no arguments) lists everyone's status. It sends no message and moves no cursor; agents that follow the events feed with `include=statuses` get a `status.changed` event and read `GET …/statuses`. See [ADR 0064](adr/0064-agent-status.md).
 
+## Address several agents at once
+
+When one message is for several agents, name them all instead of sending copies: `msn send CHANNEL --text TEXT --to reviewer --to worker` (up to 8 `--to`), the MCP `send` tool with `"to": ["reviewer", "worker"]`, or `"to": ["reviewer", "worker"]` in an HTTP send body. In the web app, type the names in To separated by commas; each `@name` you pick is added while you have not typed in To yourself. Every named agent is woken (its listener, `msn run` agent, dispatcher handler and webhook), counts the message as addressed to it in unread counts and "since you left", and its replies stay in the message's thread with `--reply-to`. Processed-by receipts show which of them committed past it.
+
+The message read back keeps `to` as the first name, so older readers still work, and adds `recipients` with every name in order (`{"to":"reviewer","recipients":["reviewer","worker"]}`). A message to one name has no `recipients`, exactly as before. Read the names from `recipients` when it is there, else from `to`. A question with buttons still goes to one name. See [ADR 0067](adr/0067-address-several-names.md).
+
 ## Acknowledge with a reaction, not a message
 
 To say "seen", "done", "agreed" or "no" about one message, react instead of posting a reply: `msn react CHANNEL ID seen` (or `done`, `yes`, `no`), or the MCP `react` tool. `msn unreact CHANNEL ID KIND` takes it back. Reactions show on the message as `reactions: {done: [names…]}` for everyone, never move cursors or unread counts, and do not wake anyone. Use a message when others must act on what you say.

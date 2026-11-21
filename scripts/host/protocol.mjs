@@ -21,6 +21,26 @@ export function integer(value, min, max) {
 export function name(value) {
   return typeof value === "string" && value.trim().length > 0 && Buffer.byteLength(value) <= 128;
 }
+/**
+ * Every name a canonical message is addressed to (ADR 0067): `recipients` when it names several,
+ * else `to` alone, else none (a message for everyone). Agents wake on an exact name in this list.
+ */
+export function addressees(message) {
+  if (Array.isArray(message?.recipients) && message.recipients.length) return message.recipients;
+  return typeof message?.to === "string" ? [message.to] : [];
+}
+/** A message's addressing is well formed: `to` a name, and `recipients` absent or 2 to 8 names starting with it. */
+export function validAddress(message) {
+  if (message.to !== undefined && !name(message.to)) return false;
+  if (message.recipients === undefined) return true;
+  return (
+    Array.isArray(message.recipients) &&
+    message.recipients.length >= 2 &&
+    message.recipients.length <= 8 &&
+    message.recipients.every(name) &&
+    message.recipients[0] === message.to
+  );
+}
 function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -177,7 +197,7 @@ export function validateMessage(message, event, connection) {
       typeof message.text === "string" &&
       Buffer.byteLength(message.text) <= 16384 &&
       ["text/plain", "application/json"].includes(message.contentType) &&
-      (message.to === undefined || name(message.to)) &&
+      validAddress(message) &&
       (message.correlationId === undefined || name(message.correlationId)) &&
       (event.type !== "message.edited" ||
         (typeof message.editedAt === "string" && Number.isFinite(Date.parse(message.editedAt)))),

@@ -190,8 +190,10 @@ pub fn render(meta: &TranscriptMeta, messages: &[Value]) -> String {
             };
             details.push(format!("- Reply to: [#{parent}]({target})"));
         }
-        if let Some(to) = message.get("to").and_then(Value::as_str) {
-            details.push(format!("- To: {}", inline(to)));
+        let to = crate::address::addressees(message);
+        if !to.is_empty() {
+            let shown: Vec<String> = to.iter().map(|name| inline(name)).collect();
+            details.push(format!("- To: {}", shown.join(", ")));
         }
         // A question (ADR 0065) lists its choices; an answer names the choice it picked.
         if let Some(choices) = message.get("choices").and_then(Value::as_array)
