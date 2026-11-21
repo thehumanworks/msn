@@ -108,6 +108,9 @@ enum Shortcut {
     Chord,
 }
 
+/// Height of the composer's quote row (ADR 0059), with the space around it.
+const QUOTE_ROW_HEIGHT: f32 = 64.0;
+
 /// How long `g` waits for its second key.
 const CHORD: std::time::Duration = std::time::Duration::from_millis(1500);
 
@@ -949,6 +952,11 @@ impl MsnDesktopApp {
                     40.0
                 } else {
                     0.0
+                } + if self.composer.quote.is_empty() {
+                    0.0
+                } else {
+                    // The quote row (ADR 0059): three small lines and the field's margins.
+                    QUOTE_ROW_HEIGHT
                 },
             )
             .show_separator_line(false)
@@ -1254,30 +1262,47 @@ impl MsnDesktopApp {
             // It starts as the whole message; cut it down to the part you answer.
             if !self.composer.quote.is_empty() {
                 let mut remove = false;
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Quote")
-                            .small()
-                            .strong()
-                            .color(theme::accent()),
-                    )
-                    .on_hover_text("Shown above your reply. Edit it down to the part you answer.");
-                    let width = (ui.available_width() - 40.0).max(80.0);
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.composer.quote)
-                            .id_salt("composer-quote")
-                            .margin(egui::Margin::symmetric(10, 5))
-                            .font(egui::TextStyle::Small)
-                            .desired_rows(2)
-                            .desired_width(width),
-                    );
-                    remove = ui
-                        .small_button("\u{2715}")
-                        .on_hover_text("Remove the quote, keep the reply")
-                        .clicked();
-                });
+                // A fixed-height row: three lines, scrolling for more, so a long quote never
+                // spills over the To row below it.
+                let line = ui.text_style_height(&egui::TextStyle::Small);
+                let height = line * 3.0 + 12.0;
+                let width = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, height),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Quote")
+                                .small()
+                                .strong()
+                                .color(theme::accent()),
+                        )
+                        .on_hover_text(
+                            "Shown above your reply. Edit it down to the part you answer.",
+                        );
+                        let field = (ui.available_width() - 70.0).max(80.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("composer-quote-scroll")
+                            .max_height(height)
+                            .max_width(field)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.composer.quote)
+                                        .id_salt("composer-quote")
+                                        .margin(egui::Margin::symmetric(10, 5))
+                                        .font(egui::TextStyle::Small)
+                                        .desired_rows(3)
+                                        .desired_width(field),
+                                );
+                            });
+                        remove = ui
+                            .small_button("Remove")
+                            .on_hover_text("Remove the quote, keep the reply")
+                            .clicked();
+                    },
+                );
                 if remove {
                     self.composer.quote.clear();
                 }
