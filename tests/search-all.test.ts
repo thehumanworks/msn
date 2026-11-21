@@ -31,7 +31,9 @@ async function fixture() {
   const tenant = `all-${crypto.randomUUID()}`;
   const api = `/api/tenants/${tenant}`;
   const owner = (
-    await (await call(api, undefined, { method: "PUT", json: { username: "human" } })).json<{
+    await (
+      await call(api, undefined, { method: "PUT", json: { username: "human" } })
+    ).json<{
       token: string;
     }>()
   ).token;

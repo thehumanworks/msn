@@ -4343,7 +4343,9 @@ export class MsnDurableObject extends DurableObject<Env> {
       where.unshift("m.channel = ?");
       bindings.unshift(scope);
     } else if (!include.length) {
-      where.push("NOT EXISTS (SELECT 1 FROM channels c WHERE c.name = m.channel AND c.archivedAt IS NOT NULL)");
+      where.push(
+        "NOT EXISTS (SELECT 1 FROM channels c WHERE c.name = m.channel AND c.archivedAt IS NOT NULL)",
+      );
     }
     if (from !== null) {
       where.push("m.username = ?");

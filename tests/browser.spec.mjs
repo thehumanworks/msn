@@ -3578,10 +3578,7 @@ test("All boards searches every board at once, names each hit's board and opens 
     "#ops",
     "#ops",
   ]);
-  await expect(page.locator("#search-results article").first()).toHaveAttribute(
-    "data-id",
-    String(here.id),
-  );
+  await expect(page.locator("#search-results article").first()).toHaveAttribute("data-id", String(here.id));
   await expect(page.locator("#search-results img")).toHaveCount(0);
   // A label from another board is shown but does not filter this board.
   await expect(page.locator("#search-results .label-chip")).toHaveText(["state=open"]);

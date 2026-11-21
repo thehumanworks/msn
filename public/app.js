@@ -1031,9 +1031,7 @@ function replaceLink(label, id, board = null) {
   link.className = "reply-link";
   link.textContent = `#${id}`;
   link.title = `Show message #${id}`;
-  link.addEventListener("click", () =>
-    board ? void openLink({ channel: board, id }) : showMessage(id),
-  );
+  link.addEventListener("click", () => (board ? void openLink({ channel: board, id }) : showMessage(id)));
   annotation.append(`${label}: `, link);
   return annotation;
 }
