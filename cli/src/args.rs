@@ -1192,7 +1192,8 @@ pub enum WebhookCommand {
         #[arg(value_name = "URL")]
         endpoint: String,
         /// Send this environment variable's value as "Authorization: Bearer KEY" on every notice.
-        /// The key is read from the environment so it never appears in argv or shell history.
+        /// The key is read from the environment so it never appears in argv; load the variable from
+        /// a file or secret store rather than typing the key, which would put it in shell history.
         #[arg(long, value_name = "VAR")]
         bearer_env: Option<String>,
     },

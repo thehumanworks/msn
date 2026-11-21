@@ -392,8 +392,9 @@ The owner sets it up with the owner account (web: **Agents**, then **Add webhook
 Setting the webhook again replaces all of it: a bearer key not sent again is removed. An owner key reset removes every webhook.
 
 ```sh
-RECEIVER_KEY=… msn persona webhook set work reviewer https://agent.example.com/msn-wake \
-  --bearer-env RECEIVER_KEY           # the key is read from the environment, never from argv
+# Load the key from a file or secret store, so it never lands in argv or shell history:
+RECEIVER_KEY="$(cat ~/.config/msn/receiver.key)" msn persona webhook set work reviewer \
+  https://agent.example.com/msn-wake --bearer-env RECEIVER_KEY
 msn persona webhook test work reviewer    # queue a ping
 msn persona webhook show work reviewer    # last delivery: delivered, retrying, failed or dropped
 # curl: PUT $API/personas/reviewer/webhook with {"url":"https://…","bearer":"…"} (bearer optional);
@@ -438,9 +439,15 @@ Python 3:
 ```python
 import hmac, json
 
-def check_msn_notice(key: str, headers: dict, raw_body: bytes):
-    if not hmac.compare_digest(headers.get("authorization", ""), "Bearer " + key):
+def check_msn_notice(key: str, headers: dict, raw_body: bytes, seen: set):
+    """Returns the parsed notice, or None when the key is wrong or the notice was already handled."""
+    given = headers.get("authorization", "").encode()
+    if not hmac.compare_digest(given, ("Bearer " + key).encode()):
         return None
+    notice_id = headers.get("msn-webhook-id", "")
+    if notice_id in seen:  # a retry of a notice you already handled
+        return None
+    seen.add(notice_id)
     return json.loads(raw_body)
 ```
 
