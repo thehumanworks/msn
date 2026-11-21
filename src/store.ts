@@ -88,11 +88,11 @@ import {
   MAX_PENDING_NOTICES,
   MAX_WEBHOOKS,
   type Notice,
-  newWebhookSecret,
   noticeBody,
   postNotice,
   WEBHOOK_BATCH,
   WEBHOOK_RETRY_DELAYS_MS,
+  webhookBearer,
   webhookUrl,
 } from "./webhook";
 
@@ -674,7 +674,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE INDEX IF NOT EXISTS scheduled_due ON scheduled_messages(dueMs) WHERE failedAt IS NULL;
         CREATE INDEX IF NOT EXISTS scheduled_channel ON scheduled_messages(channel, dueMs);
         -- Persona webhooks (ADR 0062). New tables with no version step, so they are safe in any
-        -- merge order. The secret is kept to sign notices; it is shown only when it is made.
+        -- merge order. The secret column is unused: notices are no longer signed, so it holds ''.
         CREATE TABLE IF NOT EXISTS webhooks (
           channel TEXT NOT NULL, personaId TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL,
           origin TEXT NOT NULL, createdAt TEXT NOT NULL, createdBy TEXT,
@@ -732,6 +732,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["usage", "edits", "INTEGER NOT NULL DEFAULT 0"],
         // Quotes in replies (ADR 0059): NULL quotes nothing. Additive, so no schema_version step.
         ["messages", "quote", "TEXT"],
+        // Webhook bearer key (ADR 0062): sent as Authorization on each notice, NULL for none.
+        // Additive, so no schema_version step.
+        ["webhooks", "bearer", "TEXT"],
         // Agent status changes (ADR 0064), for the workspace cap and as the status sequence. The
         // table is new with it, so 0 is exact. Additive, so no schema_version step.
         ["usage", "statusChanges", "INTEGER NOT NULL DEFAULT 0"],
@@ -752,6 +755,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         )
           ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
       }
+      // Notices are no longer signed (ADR 0062, amended): drop secrets made before that.
+      ctx.storage.sql.exec("UPDATE webhooks SET secret = '' WHERE secret <> ''");
       // After the column loop: restored databases gain messages.personaId first. Serves lastActedAt.
       ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS persona_messages ON messages(channel, personaId, id)");
       // After the column loop too. Only edited messages are indexed; serves catch-up's edits.
@@ -1837,8 +1842,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     await Promise.allSettled(
       due.map(async (row) => {
         const hook = this.ctx.storage.sql
-          .exec<{ url: string; secret: string }>(
-            "SELECT url, secret FROM webhooks WHERE channel = ? AND personaId = ?",
+          .exec<{ url: string; bearer: string | null }>(
+            "SELECT url, bearer FROM webhooks WHERE channel = ? AND personaId = ?",
             row.channel,
             row.personaId,
           )
@@ -1847,7 +1852,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           this.ctx.storage.sql.exec("DELETE FROM webhook_notices WHERE id = ?", row.id);
           return;
         }
-        const attempt = await postNotice(hook.url, hook.secret, row.body, row.id, this.webhookFetch);
+        const attempt = await postNotice(hook.url, hook.bearer, row.body, row.id, this.webhookFetch);
         const at = new Date().toISOString();
         const attempts = row.attempts + 1;
         const retry = !attempt.ok && attempt.retry && attempts <= WEBHOOK_RETRY_DELAYS_MS.length;
@@ -1889,6 +1894,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         url: string;
         createdAt: string;
         createdBy: string | null;
+        bearer: string | null;
         lastStatus: string | null;
         lastNoticeId: string | null;
         lastAttemptAt: string | null;
@@ -1908,6 +1914,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       channel,
       persona: row.personaId,
       url: row.url,
+      // Whether notices carry a bearer key; never the key itself.
+      bearer: row.bearer !== null,
       createdAt: row.createdAt,
       createdBy: row.createdBy,
       pending: row.pending,
@@ -1928,7 +1936,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   /**
    * Owner only (ADR 0062): `GET …/channels/C/webhooks` lists the board's webhooks;
    * `GET|PUT|DELETE …/personas/ID/webhook` reads, sets or removes one persona's webhook, and
-   * `POST …/personas/ID/webhook/test` queues a ping. PUT shows the signing secret once.
+   * `POST …/personas/ID/webhook/test` queues a ping. The bearer key is never returned.
    */
   private async webhookRoute(
     request: Request,
@@ -1964,8 +1972,11 @@ export class MsnDurableObject extends DurableObject<Env> {
       return json({ webhook: view });
     }
     if (rest.length === 0 && request.method === "PUT") {
+      for (const field of Object.keys(input ?? {}))
+        if (!["url", "bearer"].includes(field))
+          throw new HttpError(400, "invalid_webhook", `Unknown field ${field}; use url and bearer.`);
       const target = webhookUrl(input?.url, this.selfHosts(url));
-      const secret = newWebhookSecret();
+      const bearer = webhookBearer(input?.bearer);
       const replaced = this.ctx.storage.transactionSync(() => {
         const existing = this.ctx.storage.sql
           .exec("SELECT 1 FROM webhooks WHERE channel = ? AND personaId = ?", channel, personaId)
@@ -1981,23 +1992,24 @@ export class MsnDurableObject extends DurableObject<Env> {
               `A workspace can have at most ${MAX_WEBHOOKS} webhooks.`,
             );
         }
-        // A new URL or secret starts a fresh record; waiting notices go to the new URL.
+        // A new URL or key starts a fresh record; waiting notices go to the new URL.
         this.ctx.storage.sql.exec(
-          `INSERT INTO webhooks(channel, personaId, url, secret, origin, createdAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(channel, personaId) DO UPDATE SET url = excluded.url, secret = excluded.secret, origin = excluded.origin,
+          `INSERT INTO webhooks(channel, personaId, url, secret, bearer, origin, createdAt, createdBy) VALUES (?, ?, ?, '', ?, ?, ?, ?)
+           ON CONFLICT(channel, personaId) DO UPDATE SET url = excluded.url, secret = '', bearer = excluded.bearer, origin = excluded.origin,
              createdAt = excluded.createdAt, createdBy = excluded.createdBy, lastStatus = NULL, lastNoticeId = NULL,
              lastAttemptAt = NULL, lastHttpStatus = NULL, lastError = NULL, lastDeliveredAt = NULL`,
           channel,
           personaId,
           target,
-          secret,
+          bearer,
           url.origin,
           new Date().toISOString(),
           capability.bound_username,
         );
         return existing > 0;
       });
-      return json({ webhook: this.webhookView(channel, personaId), secret }, replaced ? 200 : 201);
+      // The bearer key was the owner's to begin with and is never echoed back.
+      return json({ webhook: this.webhookView(channel, personaId) }, replaced ? 200 : 201);
     }
     if (rest.length === 0 && request.method === "DELETE") {
       this.ctx.storage.transactionSync(() => {

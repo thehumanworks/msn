@@ -59,3 +59,11 @@ export function webhookSummary(hook, now = Date.now()) {
       return `Wakes ${host} · failed ${when}: ${failureText(last)}`;
   }
 }
+
+/** Whether notices carry a bearer key, in words. */
+export function authText(hook) {
+  if (!hook) return "";
+  return hook.bearer
+    ? "Sent with a bearer key."
+    : "No bearer key: the receiver cannot tell these notices are from this board.";
+}

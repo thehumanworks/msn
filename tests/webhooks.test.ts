@@ -6,13 +6,12 @@ import {
   MAX_PENDING_NOTICES,
   postNotice,
   privateHost,
-  signNotice,
   WEBHOOK_RETRY_DELAYS_MS,
   webhookUrl,
 } from "../src/webhook";
 
 // Wake an agent with a webhook (ADR 0062): the owner registers an https URL for a board persona,
-// and a message addressed to that persona makes the Durable Object POST a small signed notice.
+// and a message addressed to that persona makes the Durable Object POST a small notice.
 
 const call = (tenant: string, suffix = "", token?: string, method = "GET", input?: unknown) =>
   exports.default.fetch(`https://msn.test/api/tenants/${tenant}${suffix}`, {
@@ -66,9 +65,16 @@ async function fixture() {
       return answer();
     };
   });
-  const register = async (persona = "rev", url = "https://agent.example.com/wake") => {
-    const response = await call(tenant, `/channels/work/personas/${persona}/webhook`, owner, "PUT", { url });
-    return { status: response.status, ...(await response.json<{ webhook: Hook; secret: string }>()) };
+  const register = async (
+    persona = "rev",
+    url = "https://agent.example.com/wake",
+    extra: Record<string, unknown> = {},
+  ) => {
+    const response = await call(tenant, `/channels/work/personas/${persona}/webhook`, owner, "PUT", {
+      url,
+      ...extra,
+    });
+    return { status: response.status, ...(await response.json<{ webhook: Hook; secret?: string }>()) };
   };
   const hook = async (persona = "rev") =>
     (
@@ -171,7 +177,7 @@ describe("webhook URLs", () => {
     );
   });
 
-  it("signs notices so a receiver can check them, and never follows redirects", async () => {
+  it("sends the bearer key and ids, no signature, and never follows redirects", async () => {
     const seen: RequestInit[] = [];
     const fetcher = (async (_url: string, init: RequestInit) => {
       seen.push(init);
@@ -179,7 +185,7 @@ describe("webhook URLs", () => {
     }) as unknown as typeof fetch;
     const attempt = await postNotice(
       "https://a.example.com/",
-      "whsec_x",
+      "rcv_key_123",
       '{"a":1}',
       "n1",
       fetcher,
@@ -191,24 +197,14 @@ describe("webhook URLs", () => {
     expect(seen[0].signal).toBeInstanceOf(AbortSignal);
     expect(headers.get("MSN-Webhook-Timestamp")).toBe("1700000000");
     expect(headers.get("MSN-Webhook-Id")).toBe("n1");
-    // Independent HMAC: Web Crypto over "timestamp.body" with the whole secret string as the key.
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode("whsec_x"),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
-    const hex = headers.get("MSN-Webhook-Signature")?.replace(/^v1=/, "") ?? "";
-    const mac = Uint8Array.from(hex.match(/../g) ?? [], (h) => Number.parseInt(h, 16));
-    expect(await crypto.subtle.verify("HMAC", key, mac, new TextEncoder().encode('1700000000.{"a":1}'))).toBe(
-      true,
-    );
-    expect(await signNotice("whsec_x", 1700000000, '{"a":1}')).toBe(hex);
+    expect(headers.get("Authorization")).toBe("Bearer rcv_key_123");
+    expect(headers.has("MSN-Webhook-Signature")).toBe(false);
+    await postNotice("https://a.example.com/", null, "{}", "n0", fetcher);
+    expect(new Headers(seen[1].headers).has("Authorization")).toBe(false);
     const failing = (async () => {
       throw new TypeError("connect failed");
     }) as unknown as typeof fetch;
-    expect(await postNotice("https://a.example.com/", "s", "{}", "n2", failing)).toEqual({
+    expect(await postNotice("https://a.example.com/", null, "{}", "n2", failing)).toEqual({
       ok: false,
       retry: true,
       httpStatus: null,
@@ -218,13 +214,13 @@ describe("webhook URLs", () => {
       throw new DOMException("timed out", "TimeoutError");
     }) as unknown as typeof fetch;
     expect(
-      (await postNotice("https://a.example.com/", "s", "{}", "n3", slow)) as { error: string },
+      (await postNotice("https://a.example.com/", "k".repeat(8), "{}", "n3", slow)) as { error: string },
     ).toMatchObject({ error: "timeout", retry: true });
   });
 });
 
 describe("persona webhooks", () => {
-  it("only the owner sets, reads and removes a webhook; the secret is shown once", async () => {
+  it("only the owner sets, reads and removes a webhook; no secret is made", async () => {
     const f = await fixture();
     const path = "/channels/work/personas/rev/webhook";
     expect((await call(f.tenant, path, f.agent, "PUT", { url: "https://agent.example.com/w" })).status).toBe(
@@ -243,11 +239,14 @@ describe("persona webhooks", () => {
     expect(refused.status).toBe(400);
     const made = await f.register();
     expect(made.status).toBe(201);
-    expect(made.secret).toMatch(/^whsec_[0-9a-f]{64}$/);
-    expect(made.webhook).toMatchObject({ persona: "rev", url: "https://agent.example.com/wake", pending: 0 });
-    const read = await (await call(f.tenant, path, f.owner)).text();
-    expect(read).not.toContain(made.secret);
-    expect(read).not.toContain("whsec_");
+    expect(made.secret).toBeUndefined();
+    expect(made.webhook).toMatchObject({
+      persona: "rev",
+      url: "https://agent.example.com/wake",
+      bearer: false,
+      pending: 0,
+    });
+    expect(made.webhook).not.toHaveProperty("signing");
     const list = await (await call(f.tenant, "/channels/work/webhooks", f.owner)).json<{
       webhooks: Hook[];
     }>();
@@ -255,16 +254,16 @@ describe("persona webhooks", () => {
     expect((await call(f.tenant, "/channels/work/webhooks", f.agent)).status).toBe(403);
     const again = await f.register("rev", "https://other.example.com/wake");
     expect(again.status).toBe(200);
-    expect(again.secret).not.toBe(made.secret);
     expect(again.webhook.url).toBe("https://other.example.com/wake");
     expect((await call(f.tenant, path, f.agent, "DELETE")).status).toBe(403);
     expect((await call(f.tenant, path, f.owner, "DELETE")).status).toBe(204);
     expect((await call(f.tenant, path, f.owner)).status).toBe(404);
   });
 
-  it("wakes the addressed persona with a signed notice that holds ids, never text", async () => {
+  it("wakes the addressed persona with a notice that holds ids, never text", async () => {
     const f = await fixture();
-    const { secret } = await f.register();
+    const bearer = "rcv_wake_key_0123";
+    await f.register("rev", "https://agent.example.com/wake", { bearer });
     const sentMessage = await (await say(f, "please review the secret plan", { to: "reviewer" })).json<{
       message: { id: number };
     }>();
@@ -275,7 +274,7 @@ describe("persona webhooks", () => {
     expect(notice.redirect).toBe("manual");
     expect(notice.body).not.toContain("secret plan");
     expect(notice.body).not.toContain(f.agent);
-    expect(notice.body).not.toContain(secret);
+    expect(notice.body).not.toContain(bearer);
     expect(new TextEncoder().encode(notice.body).length).toBeLessThanOrEqual(1024);
     const body = JSON.parse(notice.body);
     expect(body).toMatchObject({
@@ -290,9 +289,8 @@ describe("persona webhooks", () => {
     expect(notice.headers.get("MSN-Webhook-Id")).toBe(body.id);
     const timestamp = Number(notice.headers.get("MSN-Webhook-Timestamp"));
     expect(Math.abs(timestamp - Date.now() / 1000)).toBeLessThan(60);
-    expect(notice.headers.get("MSN-Webhook-Signature")).toBe(
-      `v1=${await signNotice(secret, timestamp, notice.body)}`,
-    );
+    expect(notice.headers.get("Authorization")).toBe(`Bearer ${bearer}`);
+    expect(notice.headers.has("MSN-Webhook-Signature")).toBe(false);
     // The event id is the board journal entry for this message.
     const events = await (await call(f.tenant, "/events?after=0", f.agent)).json<{
       events: { id: number; type: string; resourceId: number }[];
@@ -345,6 +343,54 @@ describe("persona webhooks", () => {
     await vi.waitFor(() => expect(f.sent).toHaveLength(1));
     expect(await f.deliver()).toBe(0);
     expect(f.sent).toHaveLength(1);
+  });
+
+  it("a webhook can carry a bearer key that is never read back; a PUT without one removes it", async () => {
+    const f = await fixture();
+    const bearer = "rcv_0123456789abcdefABCDEF-._~+/=";
+    const keyed = await f.register("rev", "https://agent.example.com/wake", { bearer });
+    expect(keyed.status).toBe(201);
+    expect(keyed.secret).toBeUndefined();
+    expect(keyed.webhook).toMatchObject({ bearer: true });
+    expect(JSON.stringify(keyed)).not.toContain(bearer);
+    await say(f, "wake", { to: "reviewer" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(f.sent[0].headers.get("Authorization")).toBe(`Bearer ${bearer}`);
+    expect(f.sent[0].headers.get("MSN-Webhook-Id")).toBe(JSON.parse(f.sent[0].body).id);
+    expect(f.sent[0].body).not.toContain(bearer);
+    for (const path of ["/channels/work/personas/rev/webhook", "/channels/work/webhooks"]) {
+      const text = await (await call(f.tenant, path, f.owner)).text();
+      expect(text).not.toContain(bearer);
+      expect(text).toContain('"bearer":true');
+    }
+    // A PUT replaces the whole webhook: leaving bearer out removes it.
+    const plain = await f.register();
+    expect(plain.status).toBe(200);
+    expect(plain.webhook).toMatchObject({ bearer: false });
+    await say(f, "again", { to: "reviewer" });
+    await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+    expect(f.sent[1].headers.has("Authorization")).toBe(false);
+  });
+
+  it("refuses a malformed bearer key and unknown fields, signing included", async () => {
+    const f = await fixture();
+    for (const [extra, code] of [
+      [{ bearer: "short" }, "invalid_webhook_bearer"],
+      [{ bearer: "Bearer abcdefgh" }, "invalid_webhook_bearer"],
+      [{ bearer: "abc\ndefghij" }, "invalid_webhook_bearer"],
+      [{ bearer: "x".repeat(1025) }, "invalid_webhook_bearer"],
+      [{ bearer: 12345678 }, "invalid_webhook_bearer"],
+      [{ signing: false }, "invalid_webhook"],
+      [{ secret: "mine" }, "invalid_webhook"],
+    ] as const) {
+      const made = await call(f.tenant, "/channels/work/personas/rev/webhook", f.owner, "PUT", {
+        url: "https://agent.example.com/wake",
+        ...extra,
+      });
+      expect(made.status, JSON.stringify(extra)).toBe(400);
+      expect((await made.json<{ error: { code: string } }>()).error.code).toBe(code);
+    }
+    expect((await call(f.tenant, "/channels/work/personas/rev/webhook", f.owner)).status).toBe(404);
   });
 
   it("matches the addressed name trimmed and ignoring case", async () => {

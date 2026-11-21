@@ -871,18 +871,26 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     channel,
                     persona,
                     endpoint,
+                    bearer_env,
                 } => {
+                    let mut body = json!({"url": endpoint});
+                    if let Some(var) = bearer_env {
+                        let key = std::env::var(var).map_err(|_| {
+                            CliError::usage(format!(
+                                "Set the environment variable {var} to the receiver's bearer key."
+                            ))
+                        })?;
+                        body["bearer"] = json!(key);
+                    }
                     let made = value(client.exchange(
                         "PUT",
                         &hook(channel, persona)?,
                         Some(&p.token),
                         &[],
-                        Some(&json!({"url": endpoint})),
+                        Some(&body),
                     )?)?;
                     println!("{made}");
-                    eprintln!(
-                        "The secret is shown only now. Give it to the receiver to check each notice: HMAC-SHA256 of \"TIMESTAMP.BODY\" must equal MSN-Webhook-Signature (v1=HEX). Run msn persona webhook test {channel} {persona} to send a ping."
-                    );
+                    eprintln!("Run msn persona webhook test {channel} {persona} to send a ping.");
                 }
                 WebhookCommand::Show { channel, persona } => {
                     println!(

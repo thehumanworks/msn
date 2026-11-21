@@ -1172,7 +1172,7 @@ pub enum PersonaCommand {
     List {
         channel: String,
     },
-    /// Wake a persona's agent: POST a signed notice to an https URL when a message is addressed to
+    /// Wake a persona's agent: POST a notice to an https URL when a message is addressed to
     /// it (owner account only; ADR 0062). The notice holds ids, never message text or keys.
     Webhook {
         #[command(subcommand)]
@@ -1182,7 +1182,8 @@ pub enum PersonaCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum WebhookCommand {
-    /// Set or replace PERSONA's webhook. Prints the signing secret once; replacing makes a new one.
+    /// Set or replace PERSONA's webhook. Replacing also replaces the bearer key: pass it again to
+    /// keep it.
     Set {
         channel: String,
         /// The persona id (see msn persona list)
@@ -1190,13 +1191,17 @@ pub enum WebhookCommand {
         /// A public https URL on the default port
         #[arg(value_name = "URL")]
         endpoint: String,
+        /// Send this environment variable's value as "Authorization: Bearer KEY" on every notice.
+        /// The key is read from the environment so it never appears in argv or shell history.
+        #[arg(long, value_name = "VAR")]
+        bearer_env: Option<String>,
     },
-    /// Show PERSONA's webhook and its last delivery (never the secret)
+    /// Show PERSONA's webhook and its last delivery (never the bearer key)
     Show { channel: String, persona: String },
     /// List the board's webhooks
     List { channel: String },
     /// Remove PERSONA's webhook and drop its waiting notices
     Remove { channel: String, persona: String },
-    /// Queue a signed ping to PERSONA's webhook; check the result with webhook show
+    /// Queue a ping to PERSONA's webhook; check the result with webhook show
     Test { channel: String, persona: String },
 }

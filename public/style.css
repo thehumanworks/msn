@@ -1171,19 +1171,6 @@ body > footer {
   margin-top: 6px;
   min-height: 44px;
 }
-.webhook-secret {
-  display: grid;
-  gap: 8px;
-}
-.webhook-secret pre {
-  margin: 0;
-  padding: 8px 10px;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  background: var(--raised);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
 #webhook-state {
   margin: 0;
   overflow-wrap: anywhere;
