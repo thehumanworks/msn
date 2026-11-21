@@ -555,9 +555,37 @@ try {
   );
   const noJson = await cli(["--profile", "lead", "search", "work", "parser", "--kind", "json"]);
   assert.deepEqual(noJson.messages, []);
+  // Search every board (ADR 0073). The owner's key reads both boards; the board's shared key
+  // (profile lead) reads only `work`, over the CLI and over MCP.
+  await cli(["send", "other", "--username", "human", "--text", "parser notes kept elsewhere"]);
+  const everywhere = await cli(["search", "--all", "parser"]);
+  assert.deepEqual(
+    everywhere.messages.map((m) => m.channel),
+    ["other", "work"],
+  );
+  for (const m of everywhere.messages)
+    assert.equal(m.link, `${origin}/#board=${m.tenant}/${m.channel}&msg=${m.id}`);
+  const sharedKeyOnly = await cli(["--profile", "lead", "search", "--all", "parser"]);
+  assert.deepEqual(
+    sharedKeyOnly.messages.map((m) => m.channel),
+    ["work"],
+  );
+  const overMcp = await labeler.ok("search", { all: true, text: "parser" });
+  assert.deepEqual(
+    overMcp.messages.map((m) => [m.channel, m.id]),
+    [["work", task.message.id]],
+  );
+  assert.match(overMcp.messages[0].link, /#board=[^/]+\/work&msg=\d+$/);
+  assert.equal((await labeler.tool("search", { all: true, channel: "other", text: "parser" })).isError, true);
+  assert.equal((await labeler.tool("search", { archived: true, text: "parser" })).isError, true);
+  const twoNames = child(binary, ["search", "--all", "work", "parser"]);
+  assert.equal((await twoNames.done)[0], 2);
+  assert.match(twoNames.errors, /leave the channel out/);
+  const noChannel = child(binary, ["search"]);
+  assert.equal((await noChannel.done)[0], 2);
   await labeler.close();
   console.log(
-    "PASS: labels on send, conditional claims, filters, waiting on a label and search over MCP and CLI",
+    "PASS: labels on send, conditional claims, filters, waiting on a label and search over MCP and CLI, one board and every board",
   );
 
   // Receipts (ADR 0040, ADR 0053): the reviewer's MCP commits above went to the server by default,

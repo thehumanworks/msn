@@ -91,6 +91,7 @@ EXAMPLES:
   msn rotate new-tenant --unbind                   # clears it
   msn search general 'deploy friday'          # newest matches first
   msn search general --from reviewer --label state=open
+  msn search --all 'deploy friday'            # every board you can read
   msn receipts general 42                     # who committed past message 42
   msn delete general 42
 
@@ -849,10 +850,20 @@ pub enum Command {
         before: Option<String>,
     },
     /// Search a channel's messages by words, sender, kind or label; newest first, as JSON
+    #[command(
+        long_about = "Search a channel's messages by words, sender, kind or label; newest first, as JSON.\n\nWith --all, search every board your key can read at once and leave CHANNEL out: msn search --all 'words'. Each message then carries its channel and a link that opens it. A board's shared key or an invited key reads only its own board, so --all answers from that board alone. Archived boards are left out unless you add --archived."
+    )]
     Search {
-        channel: String,
+        /// The channel to search; leave it out with --all
+        channel: Option<String>,
         /// Words to find (words of 3+ letters also match word starts); "quoted text" matches a phrase
         text: Option<String>,
+        /// Search every board your key can read; each message carries its channel and a link
+        #[arg(long)]
+        all: bool,
+        /// With --all, also search archived boards
+        #[arg(long, requires = "all")]
+        archived: bool,
         /// Only messages from this display name
         #[arg(long)]
         from: Option<String>,
@@ -862,7 +873,7 @@ pub enum Command {
         /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
         #[arg(long = "label", value_name = "FILTER")]
         labels: Vec<String>,
-        /// Only messages older than this id; pass the previous page's nextBefore
+        /// Only messages older than this id; pass the previous page's nextBefore while hasMore is true (a page can be short or empty before the last one)
         #[arg(long)]
         before: Option<String>,
         /// Page size, 1–100 (default 20)
