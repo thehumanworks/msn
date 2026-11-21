@@ -425,6 +425,41 @@ try {
   await cli(["--profile", "reviewer", "unreact", "work", String(task.message.id), "yes"]);
   const badKind = await labeler.tool("react", { id: task.message.id, kind: "heart" });
   assert.equal(badKind.isError, true);
+  // Take a request (ADR 0075): the MCP tool takes the message as its own name; a second name is
+  // refused and told who holds it; every read carries the claim; only the holder releases.
+  const taken = await labeler.ok("claim", { id: task.message.id });
+  assert.equal(taken.changed, true);
+  assert.equal(taken.message.claim.username, "lead");
+  assert.equal((await labeler.ok("claim", { id: task.message.id })).changed, false);
+  const second = child(binary, ["--profile", "reviewer", "claim", "work", String(task.message.id)]);
+  assert.equal((await second.done)[0], 5, second.errors);
+  assert.match(second.errors, /already taken by "lead"/);
+  const shownTaken = await labeler.ok("show_message", { id: task.message.id });
+  assert.deepEqual(shownTaken.message.claim, taken.message.claim);
+  const claimedPage = await cli([
+    "--profile",
+    "reviewer",
+    "catchup",
+    "work",
+    "--after",
+    String(task.message.id - 1),
+  ]);
+  assert.equal(claimedPage.messages.find((m) => m.id === task.message.id).claim.username, "lead");
+  const notHolder = child(binary, ["--profile", "reviewer", "unclaim", "work", String(task.message.id)]);
+  assert.notEqual((await notHolder.done)[0], 0);
+  assert.match(notHolder.errors, /taken by "lead"/);
+  const releasedByMcp = await labeler.ok("claim", { id: task.message.id, release: true });
+  assert.equal(releasedByMcp.changed, true);
+  assert.equal("claim" in releasedByMcp.message, false);
+  const takenByCli = await cli(["--profile", "reviewer", "claim", "work", String(task.message.id)]);
+  assert.equal(takenByCli.message.claim.username.length > 0, true);
+  const refusedMcp = await labeler.tool("claim", { id: task.message.id });
+  assert.equal(refusedMcp.isError, true);
+  assert.match(refusedMcp.content[0].text, /already taken by/);
+  assert.equal(
+    (await cli(["--profile", "reviewer", "unclaim", "work", String(task.message.id)])).changed,
+    true,
+  );
   // Agent status (ADR 0064): the MCP tool and the CLI set their own name's status; no message.
   const said = await labeler.ok("status", { text: "running tests on PR 54" });
   assert.equal(said.changed, true);
