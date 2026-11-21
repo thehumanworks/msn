@@ -2182,6 +2182,8 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("welcome").hidden = true;
     $("workspace").hidden = false;
     $("workspace-name").textContent = connection.tenant;
+    // An account workspace is a long generated id; the full id stays one long-press away.
+    $("workspace-name").title = connection.tenant;
     $("display-name").textContent = connection.username;
     $("channel-form").hidden = Boolean(identity.channel);
     $("invite-workspace").hidden = Boolean(identity.channel);
@@ -2407,6 +2409,42 @@ $("revoke-invite").addEventListener("click", async () => {
   } catch (error) {
     status(error.message, true);
   }
+});
+
+// Board and template names are lower-case slugs. A phone keyboard offers a capital and a
+// space far more readily than a hyphen, and the browser's pattern bubble then refuses
+// "msn chat" without saying why. Type it the way it will be saved instead.
+for (const id of ["new-channel", "template-channel", "template-name"]) {
+  const field = $(id);
+  const slugify = () => {
+    const slug = field.value.toLowerCase().replace(/\s/g, "-");
+    if (slug === field.value) return;
+    const caret = field.selectionStart;
+    field.value = slug;
+    field.setSelectionRange(caret, caret);
+  };
+  // Rewriting the value mid-composition breaks an IME; the composed text is slugged once it
+  // lands (Safari sends compositionend after the last input event, Chrome before it).
+  field.addEventListener("input", (event) => {
+    if (!event.isComposing) slugify();
+  });
+  field.addEventListener("compositionend", slugify);
+}
+
+// The board toolbar scrolls sideways with its scrollbar hidden; a fade on the edge that has
+// more buttons says so.
+function toolbarEdges() {
+  const bar = document.querySelector(".toolbar");
+  bar.classList.toggle("more-left", bar.scrollLeft > 1);
+  bar.classList.toggle("more-right", bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 1);
+}
+document.querySelector(".toolbar").addEventListener("scroll", toolbarEdges, { passive: true });
+new ResizeObserver(toolbarEdges).observe(document.querySelector(".toolbar"));
+// A button shown or hidden (Mute, Jump, Load next page) changes what is left to scroll to.
+new MutationObserver(toolbarEdges).observe(document.querySelector(".toolbar"), {
+  subtree: true,
+  attributes: true,
+  attributeFilter: ["hidden"],
 });
 
 $("channel-form").addEventListener("submit", async (event) => {
@@ -3225,6 +3263,7 @@ async function showAgents() {
     list.replaceChildren();
     if (!personas.length) {
       const empty = document.createElement("li");
+      empty.className = "agents-empty";
       empty.textContent = "No personas on this board yet.";
       list.append(empty);
     }
