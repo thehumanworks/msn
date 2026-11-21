@@ -458,3 +458,45 @@ test("edits change your own message in place and others' edits arrive on a later
     await server.close();
   }
 });
+
+test("a scheduled message is listed, changed and cancelled, and leaves the list once posted (ADR 0060)", async () => {
+  const server = await startMockServer();
+  try {
+    server.createChannel("general");
+    const ctl = track(
+      new SessionController(
+        { origin: server.url, tenant: "acme", token: TEST_TOKEN, username: "tomas", usernamePrefix: null },
+        { ...fast, fetchImpl: nodeFetch },
+      ),
+    );
+    await ctl.start();
+    const channelCtl = track(new ChannelController(ctl, "general", { baseMs: 5, maxMs: 20 }, 0));
+    channelCtl.start();
+    await waitFor(() => channelCtl.state.get().phase === "ready", "channel ready");
+    const sendAt = new Date(Date.now() + 3600_000).toISOString();
+    assert.equal(await channelCtl.schedule({ text: "  " }, sendAt), "Write the message first, then choose when to send it.");
+    assert.equal(await channelCtl.schedule({ text: "standup at 10", to: "asha" }, sendAt), null);
+    const [item] = channelCtl.state.get().scheduled;
+    assert.deepEqual(
+      { text: item.text, to: item.to, sendAt: item.sendAt, status: item.status },
+      { text: "standup at 10", to: "asha", sendAt, status: "pending" },
+    );
+    const post = server.requests.find((r) => r.method === "POST" && r.path.endsWith("/messages"));
+    assert.ok(post, "the schedule went to the messages route");
+    assert.equal(await channelCtl.changeScheduled(item.id, {}), "Give new text or a new time.");
+    assert.equal(await channelCtl.changeScheduled(item.id, { text: "standup at 10:30" }), null);
+    assert.equal(channelCtl.state.get().scheduled[0].text, "standup at 10:30");
+    assert.equal(await channelCtl.cancelScheduled(item.id), null);
+    assert.deepEqual(channelCtl.state.get().scheduled, []);
+
+    // One that posts on the server arrives as a normal message, and the list empties on a sync.
+    assert.equal(await channelCtl.schedule({ text: "posted later" }, sendAt), null);
+    assert.equal(channelCtl.state.get().scheduled.length, 1);
+    server.deliverScheduled();
+    await waitFor(() => channelCtl.state.get().messages.some((m) => m.text === "posted later"), "posted");
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});

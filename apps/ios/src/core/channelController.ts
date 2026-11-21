@@ -1,6 +1,7 @@
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend } from "./composer.ts";
+import type { ScheduledMessage } from "./scheduled.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
 import { Store } from "./store.ts";
@@ -42,6 +43,8 @@ export type ChannelState = {
   snapshotDue: boolean;
   snapshotDueReasons: string[];
   outbox: OutboxItem[];
+  /** The board's scheduled messages (ADR 0060), soonest first; empty until read. */
+  scheduled: ScheduledMessage[];
 };
 
 export type Draft = { text: string; to?: string; replyTo?: number };
@@ -71,6 +74,7 @@ export class ChannelController {
     snapshotDue: false,
     snapshotDueReasons: [],
     outbox: [],
+    scheduled: [],
   });
 
   readonly channel: string;
@@ -81,6 +85,7 @@ export class ChannelController {
   private pinsAt = 0;
   private reactionsAt = 0;
   private editsAt = 0;
+  private scheduledAt = 0;
   /** Edit cursor (ADR 0052); 0 reads every edit once, so none made while loading is missed. */
   private editCursor = 0;
   private needReload = true;
@@ -288,6 +293,7 @@ export class ChannelController {
       if (!next.hasMore) {
         await this.refreshReactions();
         await this.refreshEdits();
+        await this.refreshScheduled();
         return this.refreshPins();
       }
     }
@@ -336,6 +342,75 @@ export class ChannelController {
     } catch (error) {
       if (isAbortError(error)) throw error;
     }
+  }
+
+  /**
+   * Scheduled messages (ADR 0060) post on the server, so a sync re-reads the list as often as
+   * reactions, and at once when one of them should have posted. Best effort.
+   */
+  private async refreshScheduled(force = false): Promise<void> {
+    const due = this.state.get().scheduled.some((s) => s.status === "pending" && Date.parse(s.sendAt) <= Date.now());
+    if (!force && !due && Date.now() - this.scheduledAt < this.pinRefreshMs) return;
+    this.scheduledAt = Date.now();
+    try {
+      const scheduled = await this.ctl.api.listScheduled(this.channel, this.ctl.signal);
+      if (this.disposed) return;
+      this.state.update({ scheduled });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+    }
+  }
+
+  /** Runs one scheduled-message change, then re-reads the list. Resolves to an error message or null. */
+  private async scheduledChange(run: () => Promise<void>, fallback: string): Promise<string | null> {
+    try {
+      await run();
+      if (this.disposed) return null;
+      await this.refreshScheduled(true);
+      return null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+      return error instanceof Error ? error.message : fallback;
+    }
+  }
+
+  /** Schedules a message to post at `sendAt` (ADR 0060). Resolves to an error message, or null. */
+  async schedule(draft: Draft, sendAt: string): Promise<string | null> {
+    if (!draft.text.trim()) return "Write the message first, then choose when to send it.";
+    if (byteLength(draft.text) > MAX_TEXT_BYTES) return "Messages are limited to 16 KiB.";
+    const to = draft.to?.trim() || undefined;
+    const input = {
+      username: this.ctl.session.username,
+      text: draft.text,
+      ...(to ? { to } : {}),
+      ...(draft.replyTo ? { replyTo: draft.replyTo } : {}),
+      sendAt,
+    };
+    const key = createPendingSend(input).key;
+    return this.scheduledChange(
+      () => this.ctl.api.scheduleMessage(this.channel, input, key, this.ctl.signal),
+      "Could not schedule the message.",
+    );
+  }
+
+  /** Changes the text and/or time of one of your scheduled messages (ADR 0060). */
+  async changeScheduled(id: number, change: { text?: string; sendAt?: string }): Promise<string | null> {
+    if (change.text === undefined && change.sendAt === undefined) return "Give new text or a new time.";
+    if (change.text !== undefined && !change.text.trim()) return "A message cannot be empty.";
+    const username = this.ctl.session.username;
+    return this.scheduledChange(
+      () => this.ctl.api.changeScheduled(this.channel, id, { username, ...change }, this.ctl.signal),
+      "Could not change the scheduled message.",
+    );
+  }
+
+  /** Cancels a scheduled message (ADR 0060); the owner may cancel anyone's. */
+  async cancelScheduled(id: number): Promise<string | null> {
+    return this.scheduledChange(
+      () => this.ctl.api.cancelScheduled(this.channel, id, this.ctl.session.username, this.ctl.signal),
+      "Could not cancel the scheduled message.",
+    );
   }
 
   /** Takes an edit's text and editedAt into the loaded copy; reactions and the rest stay. */
