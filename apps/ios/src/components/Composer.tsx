@@ -11,6 +11,7 @@ import {
   people,
   suggest,
 } from "../core/mention.ts";
+import { presets, sendAtFrom, whenText } from "../core/scheduled.ts";
 import type { Message } from "../core/types.ts";
 import { useKeyboardVisible } from "../hooks/useKeyboardVisible.ts";
 import { colors, MAX_FONT_SCALE, radius, spacing } from "./theme.ts";
@@ -58,6 +59,11 @@ export function Composer({
   const [dismissed, setDismissed] = useState(-1);
   const [personas, setPersonas] = useState<Persona[] | null>(null);
   const [asked, setAsked] = useState(false);
+  // Send later (ADR 0060): the choice panel, a typed delay, and a note after scheduling.
+  const [later, setLater] = useState(false);
+  const [when, setWhen] = useState("");
+  const [scheduling, setScheduling] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
 
   const at = selection.start === selection.end ? mentionAt(text, selection.start) : null;
   const open = at !== null && at.start !== dismissed;
@@ -136,9 +142,34 @@ export function Composer({
     onClearReply();
   }
 
+  async function sendLater(sendAt: string | null) {
+    if (!sendAt) return setError("Use a delay like 10m, 2h or 1d, or a time with a zone.");
+    const draft: Draft = { text, ...(to.trim() ? { to: to.trim() } : {}), ...(replyTo ? { replyTo: replyTo.id } : {}) };
+    setScheduling(true);
+    const failure = await channel.schedule(draft, sendAt);
+    setScheduling(false);
+    if (failure) return setError(failure);
+    setError(null);
+    setNote(`Scheduled for ${whenText(sendAt)}. It posts as a normal message then.`);
+    setText("");
+    setWhen("");
+    setLater(false);
+    if (mentionTo !== null && mentionTo === to) {
+      setTo("");
+      setShowTo(false);
+    }
+    setMentionTo(null);
+    onClearReply();
+  }
+
   return (
     <View style={[styles.wrap, { paddingBottom: keyboardVisible ? spacing.sm : Math.max(bottomInset, spacing.sm) }]}>
       {error ? <Banner tone="danger">{error}</Banner> : null}
+      {note && !error ? (
+        <Text style={{ color: colors.muted, fontSize: 13 }} accessibilityLiveRegion="polite">
+          {note}
+        </Text>
+      ) : null}
       {replyTo ? (
         <View style={styles.reply}>
           <Text style={{ flex: 1, color: colors.muted, fontSize: 13 }} numberOfLines={1}>
@@ -208,7 +239,52 @@ export function Composer({
         />
         <Button label="Send" variant="primary" onPress={send} disabled={!text.trim()} />
       </View>
+      {later ? (
+        <View style={styles.later} accessibilityLabel="Send later">
+          <View style={styles.presets}>
+            {presets().map((choice) => (
+              <Button
+                key={choice.label}
+                label={choice.label}
+                disabled={!text.trim()}
+                busy={scheduling}
+                onPress={() => void sendLater(choice.sendAt)}
+              />
+            ))}
+          </View>
+          <View style={styles.toLine}>
+            <TextInput
+              accessibilityLabel="Send after a delay"
+              placeholder="Or a delay: 10m, 2h, 1d"
+              placeholderTextColor={colors.muted}
+              keyboardAppearance="dark"
+              autoCapitalize="none"
+              autoCorrect={false}
+              maxFontSizeMultiplier={MAX_FONT_SCALE}
+              value={when}
+              onChangeText={setWhen}
+              style={[styles.input, { minHeight: 44, flex: 1 }]}
+            />
+            <Button
+              label="Schedule"
+              variant="primary"
+              disabled={!text.trim() || !when.trim()}
+              busy={scheduling}
+              onPress={() => void sendLater(sendAtFrom(when))}
+            />
+          </View>
+        </View>
+      ) : null}
       <View style={styles.options}>
+        <Button
+          label={later ? "Send now instead" : "Send later"}
+          variant="ghost"
+          accessibilityHint="Choose a time for this message to post, even if the app is closed"
+          onPress={() => {
+            setLater(!later);
+            setNote(null);
+          }}
+        />
         <Button
           label={showTo ? "Remove recipient" : "Add recipient"}
           variant="ghost"
@@ -253,7 +329,9 @@ const styles = StyleSheet.create({
   },
   message: { flex: 1, minHeight: 44, maxHeight: 140, paddingTop: 10 },
   reply: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
-  options: { flexDirection: "row", justifyContent: "space-between" },
+  options: { flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap" },
+  later: { gap: spacing.sm },
+  presets: { flexDirection: "row", gap: spacing.sm, flexWrap: "wrap" },
   toLine: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
   toLabel: { color: colors.muted, fontSize: 13 },
   toLabelSet: { color: colors.accent, fontWeight: "600" },

@@ -184,6 +184,37 @@ pub enum Command {
         generation: u64,
         channel: String,
     },
+    /// The open board's scheduled messages (ADR 0060).
+    LoadScheduled {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
+    /// Schedules the composer's text to post at `send_at` (ADR 0060), then reloads the list.
+    Schedule {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        text: String,
+        key: String,
+        send_at: String,
+        reply_to: Option<u64>,
+        /// The quote that rides on `reply_to` (ADR 0059).
+        quote: Option<String>,
+        to: Option<String>,
+    },
+    /// Changes a scheduled message's text and/or time, or cancels it (`cancel`), then reloads.
+    ChangeScheduled {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        id: u64,
+        text: Option<String>,
+        send_at: Option<String>,
+        cancel: bool,
+    },
 }
 
 impl Command {
@@ -208,7 +239,10 @@ impl Command {
             | Command::LoadMessage { generation, .. }
             | Command::LoadMutes { generation }
             | Command::SetMute { generation, .. }
-            | Command::ClearMute { generation, .. } => Some(*generation),
+            | Command::ClearMute { generation, .. }
+            | Command::LoadScheduled { generation, .. }
+            | Command::Schedule { generation, .. }
+            | Command::ChangeScheduled { generation, .. } => Some(*generation),
             Command::Disconnect => None,
         }
     }
@@ -216,6 +250,14 @@ impl Command {
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
+    /// The open board's scheduled messages (ADR 0060), with what the user's own change did.
+    ScheduledList {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        list: Vec<Value>,
+        note: Option<String>,
+    },
     Connected {
         generation: u64,
         username: String,
@@ -985,6 +1027,80 @@ fn handle_command(
                 None,
             ),
         },
+        Command::LoadScheduled {
+            channel_generation,
+            channel,
+            ..
+        } => scheduled_reply(
+            tx,
+            wake,
+            cc,
+            generation,
+            channel_generation,
+            channel,
+            Ok(None),
+        ),
+        Command::Schedule {
+            channel_generation,
+            channel,
+            username,
+            text,
+            key,
+            send_at,
+            reply_to,
+            quote,
+            to,
+            ..
+        } => {
+            let done = client_ops::schedule_message(
+                &cc.client,
+                &cc.tenant,
+                &cc.token,
+                &channel,
+                &username,
+                &text,
+                &key,
+                &send_at,
+                Correlation {
+                    reply_to,
+                    quote,
+                    correlation_id: None,
+                    to,
+                },
+            )
+            .map(|()| Some(format!("Scheduled for {send_at}.")));
+            scheduled_reply(tx, wake, cc, generation, channel_generation, channel, done);
+        }
+        Command::ChangeScheduled {
+            channel_generation,
+            channel,
+            username,
+            id,
+            text,
+            send_at,
+            cancel,
+            ..
+        } => {
+            let done = if cancel {
+                client_ops::cancel_scheduled(
+                    &cc.client, &cc.tenant, &cc.token, &channel, &username, id,
+                )
+                .map(|()| Some("Scheduled message cancelled.".to_string()))
+            } else {
+                client_ops::change_scheduled(
+                    &cc.client,
+                    &cc.tenant,
+                    &cc.token,
+                    &channel,
+                    &username,
+                    id,
+                    text.as_deref(),
+                    send_at.as_deref(),
+                )
+                .map(|()| Some("Scheduled message changed.".to_string()))
+            };
+            scheduled_reply(tx, wake, cc, generation, channel_generation, channel, done);
+        }
         Command::SendMessage {
             channel_generation,
             channel,
@@ -1085,6 +1201,57 @@ fn handle_command(
 fn emit(tx: &SyncSender<UiEvent>, wake: &Wake, event: UiEvent) {
     if tx.send(event).is_ok() {
         wake();
+    }
+}
+
+/// After a scheduled-message change (or none), re-reads the board's list and reports both.
+#[allow(clippy::too_many_arguments)]
+fn scheduled_reply(
+    tx: &SyncSender<UiEvent>,
+    wake: &Wake,
+    cc: &ConnCtx,
+    generation: u64,
+    channel_generation: u64,
+    channel: String,
+    done: Result<Option<String>, CliError>,
+) {
+    let note = match done {
+        Ok(note) => note,
+        Err(err) => {
+            return emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "schedule",
+                err,
+                false,
+                None,
+            );
+        }
+    };
+    match client_ops::fetch_scheduled(&cc.client, &cc.tenant, &cc.token, &channel) {
+        Ok(list) => emit(
+            tx,
+            wake,
+            UiEvent::ScheduledList {
+                generation,
+                channel_generation,
+                channel,
+                list,
+                note,
+            },
+        ),
+        Err(err) => emit_error(
+            tx,
+            wake,
+            generation,
+            Some(channel_generation),
+            "scheduled",
+            err,
+            false,
+            None,
+        ),
     }
 }
 
