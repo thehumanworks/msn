@@ -1,6 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { MAX_THREAD, THREAD_MEMBERS_SQL } from "../src/store";
 
 const ADMIN = "test-admin-secret-000000000000000000000";
 
@@ -172,18 +173,87 @@ describe("follow one thread (ADR 0063)", () => {
     expect(fenced.status).toBe(400);
   });
 
-  it("serves thread reads from the reply index", async () => {
+  it("walks the thread from the reply index with a pinned join order, even after ANALYZE", async () => {
     const t = await tenant();
-    await board(t);
-    const plan = await runInDurableObject(t.stub, (_, state) =>
-      state.storage.sql
-        .exec<{ detail: string }>(
-          "EXPLAIN QUERY PLAN SELECT id FROM messages WHERE channel = 'general' AND replyTo = 1",
-        )
+    const m = await board(t);
+    const plan = await runInDurableObject(t.stub, (_, state) => {
+      state.storage.sql.exec("ANALYZE");
+      return state.storage.sql
+        .exec<{ detail: string }>(`EXPLAIN QUERY PLAN ${THREAD_MEMBERS_SQL}`, m.root.id, "general", 10)
         .toArray()
         .map((row) => row.detail)
-        .join("\n"),
-    );
+        .join("\n");
+    });
     expect(plan).toContain("message_replies");
+    expect(plan).not.toMatch(/SCAN m\b/);
+  });
+
+  it("bounds a page with before and carries quotes", async () => {
+    const t = await tenant();
+    const m = await board(t);
+    const quoted = await sent(t, "Yes, the full suite", { replyTo: m.nested.id, quote: "Which suite?" });
+    const page = await list(t, `?thread=${m.root.id}&after=${m.a.id}&before=${m.b.id}`);
+    expect(ids(page)).toEqual([m.nested.id]);
+    const last = await list(t, `?thread=${m.root.id}&after=${m.b.id}`);
+    expect(last.messages).toMatchObject([{ id: quoted.id, replyTo: m.nested.id, quote: "Which suite?" }]);
+  });
+
+  it("refuses a thread larger than the limit", async () => {
+    const t = await tenant();
+    const root = await sent(t, "Huge thread");
+    await runInDurableObject(t.stub, (_, state) => {
+      state.storage.sql.exec(
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+         INSERT INTO messages(channel, username, text, contentType, createdAt, digest, bytes, replyTo)
+         SELECT 'general', 'agent', 'r', 'text/plain', '2026-11-21T00:00:00.000Z', '', 1, ? FROM n`,
+        MAX_THREAD,
+        root.id,
+      );
+    });
+    const response = await call(`${t.channel}/messages?thread=${root.id}`, t.token);
+    expect(response.status).toBe(400);
+    expect((await response.json<{ error: { code: string } }>()).error.code).toBe("thread_too_large");
+  });
+
+  it("works with channel-scoped and watch-only keys on their own board only", async () => {
+    const name = `thr-${crypto.randomUUID()}`;
+    const api = `/api/tenants/${name}`;
+    const owner = await (
+      await call(api, undefined, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "human" }),
+      })
+    ).json<{ token: string }>();
+    const ownerSend = async (channel: string, text: string, replyTo?: number) =>
+      (
+        await (
+          await call(
+            `${api}/channels/${channel}/messages`,
+            owner.token,
+            post({ username: "human", text, replyTo }),
+          )
+        ).json<{ message: Message }>()
+      ).message;
+    const root = await ownerSend("work", "Question");
+    const reply = await ownerSend("work", "Answer", root.id);
+    await ownerSend("other", "Elsewhere");
+    for (const watch of [false, true]) {
+      const invite = await (
+        await call(`${api}/invites`, owner.token, post({ channel: "work", ...(watch ? { watch } : {}) }))
+      ).json<{ code: string }>();
+      const key = await (
+        await call(
+          `${api}/invites/redeem`,
+          undefined,
+          post({ code: invite.code, username: `reader-${watch}` }),
+        )
+      ).json<{ token: string }>();
+      const own = await call(`${api}/channels/work/messages?thread=${reply.id}`, key.token);
+      expect(own.status).toBe(200);
+      expect(ids(await own.json<Page>())).toEqual([root.id, reply.id]);
+      const foreign = await call(`${api}/channels/other/messages?thread=${root.id}`, key.token);
+      expect(foreign.status).toBe(403);
+    }
   });
 });

@@ -285,20 +285,36 @@ type Receipt = {
 function toProcessing(row: ProcessingRow) {
   return { ...row };
 }
+/** The most messages one thread read follows (ADR 0063); a bigger thread is read as the board. */
+export const MAX_THREAD = 10_000;
 /**
- * A `thread` CTE for SQL that reads one thread (ADR 0063): the root and every message whose
- * replyTo chain leads to it, at any depth. A reply always has a higher id than what it answers.
- * Empty when there is no thread.
+ * Every message in one thread (ADR 0063): the root and every message whose replyTo chain leads
+ * to it, at any depth, at most MAX_THREAD + 1 of them. A reply always has a higher id than what it
+ * answers. CROSS JOIN pins the join order, so each step looks up replies to known members in
+ * the message_replies index instead of scanning every reply on the board. Parameters: root,
+ * channel, row limit.
  */
-function threadScope(channel: string, root: number | null): [string, (string | number)[]] {
-  if (root === null) return ["", []];
-  return [
-    `WITH RECURSIVE thread(id) AS (
-       SELECT ? UNION SELECT m.id FROM messages m JOIN thread t ON m.replyTo = t.id
-       WHERE m.channel = ? AND m.id > t.id
-     ) `,
-    [root, channel],
-  ];
+export const THREAD_MEMBERS_SQL = `WITH RECURSIVE thread(id) AS (
+    SELECT ? UNION SELECT m.id FROM thread t CROSS JOIN messages m ON m.replyTo = t.id
+    WHERE m.channel = ? AND m.id > t.id LIMIT ?
+  ) SELECT id FROM thread ORDER BY id`;
+/**
+ * One thread's members for one request (ADR 0063), built once and grown as messages arrive:
+ * ids only increase and a reply's parent is always older, so a new message is a member exactly
+ * when the message it answers is. `through` is the newest id already looked at. Deleted
+ * (tombstoned) members stay, because they still link their replies to the thread.
+ */
+type ThreadView = { root: number; ids: Set<number>; sorted: number[]; through: number };
+/** Index of the first member id greater than `after`. */
+function firstAfter(sorted: number[], after: number): number {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (sorted[middle] <= after) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 function processingReader(value: string | undefined): string {
   let reader: string;
@@ -2257,6 +2273,88 @@ export class MsnDurableObject extends DurableObject<Env> {
     return row.id;
   }
 
+  /** The members of the thread rooted at `root` (ADR 0063); refuses threads over MAX_THREAD. */
+  private threadView(channel: string, root: number): ThreadView {
+    const through =
+      this.ctx.storage.sql.exec<{ id: number | null }>("SELECT MAX(id) AS id FROM messages").one().id ?? 0;
+    const sorted = this.ctx.storage.sql
+      .exec<{ id: number }>(THREAD_MEMBERS_SQL, root, channel, MAX_THREAD + 1)
+      .toArray()
+      .map((row) => row.id);
+    if (sorted.length > MAX_THREAD)
+      throw new HttpError(
+        400,
+        "thread_too_large",
+        `Thread #${root} has more than ${MAX_THREAD.toLocaleString("en-US")} messages; read the board without thread instead.`,
+      );
+    return { root, ids: new Set(sorted), sorted, through };
+  }
+
+  /** Adds messages sent since the view was built or last grown; reads only the new rows. */
+  private growThread(channel: string, view: ThreadView): void {
+    const rows = this.ctx.storage.sql
+      .exec<{ id: number; replyTo: number | null }>(
+        "SELECT id, replyTo FROM messages WHERE id > ? AND channel = ? ORDER BY id",
+        view.through,
+        channel,
+      )
+      .toArray();
+    for (const row of rows) {
+      view.through = row.id;
+      if (row.replyTo !== null && view.ids.has(row.replyTo)) {
+        view.ids.add(row.id);
+        view.sorted.push(row.id);
+      }
+    }
+  }
+
+  /**
+   * A page of one thread (ADR 0063): its members after `after`, oldest first, fetched by id in
+   * small batches, so the cost follows the thread rows read, not the board.
+   */
+  private threadPage(
+    tenant: string,
+    channel: string,
+    view: ThreadView,
+    after: number,
+    limit: number,
+    filters: LabelFilter[],
+    before: number,
+  ) {
+    const exists = (filter: LabelFilter) =>
+      ` AND EXISTS (SELECT 1 FROM message_labels l WHERE l.channel = messages.channel AND l.messageId = messages.id AND l.key = ?${
+        filter.values ? ` AND l.value IN (${filter.values.map(() => "?").join(", ")})` : ""
+      })`;
+    const labelParams = filters.flatMap((filter) => [filter.key, ...(filter.values ?? [])]);
+    // Durable Object SQL takes at most 100 bound parameters per statement.
+    const batch = Math.max(10, 99 - 1 - labelParams.length);
+    const rows: MessageRow[] = [];
+    for (let index = firstAfter(view.sorted, after); index < view.sorted.length && rows.length <= limit; ) {
+      const ids: number[] = [];
+      while (ids.length < batch && index < view.sorted.length && view.sorted[index] < before)
+        ids.push(view.sorted[index++]);
+      if (!ids.length) break;
+      rows.push(
+        ...this.ctx.storage.sql
+          .exec<MessageRow>(
+            `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id IN (${ids
+              .map(() => "?")
+              .join(", ")})${filters.map(exists).join("")} ORDER BY id`,
+            channel,
+            ...ids,
+            ...labelParams,
+          )
+          .toArray(),
+      );
+      if (ids.length < batch) break;
+    }
+    const messages = this.withSparse(
+      channel,
+      rows.slice(0, limit).map((row) => toMessage(row, tenant)),
+    );
+    return { messages, nextCursor: messages.at(-1)?.id ?? after, hasMore: rows.length > limit };
+  }
+
   private page(
     tenant: string,
     channel: string,
@@ -2264,11 +2362,9 @@ export class MsnDurableObject extends DurableObject<Env> {
     limit: number,
     filters: LabelFilter[] = [],
     before = Number.MAX_SAFE_INTEGER,
-    thread: number | null = null,
+    thread: ThreadView | null = null,
   ) {
-    // A thread read (ADR 0063) keeps only the root and every message whose replyTo chain leads to it.
-    const [threadCte, threadParams] = threadScope(channel, thread);
-    const inThread = thread === null ? "" : " AND messages.id IN (SELECT id FROM thread)";
+    if (thread) return this.threadPage(tenant, channel, thread, after, limit, filters, before);
     const exists = (filter: LabelFilter) =>
       `EXISTS (SELECT 1 FROM message_labels l WHERE l.channel = messages.channel AND l.messageId = messages.id AND l.key = ?${
         filter.values ? ` AND l.value IN (${filter.values.map(() => "?").join(", ")})` : ""
@@ -2278,8 +2374,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (!filters.length) {
       rows = this.ctx.storage.sql
         .exec<MessageRow>(
-          `${threadCte}SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? AND id < ?${inThread} ORDER BY id LIMIT ?`,
-          ...threadParams,
+          `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND deleted = 0 AND id > ? AND id < ? ORDER BY id LIMIT ?`,
           channel,
           after,
           before,
@@ -2300,13 +2395,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         .join(", ");
       rows = this.ctx.storage.sql
         .exec<MessageRow>(
-          `${threadCte}SELECT ${columns} FROM message_labels d INDEXED BY label_values JOIN messages ON messages.id = d.messageId
+          `SELECT ${columns} FROM message_labels d INDEXED BY label_values JOIN messages ON messages.id = d.messageId
            WHERE d.channel = ? AND d.key = ?${driver.values ? ` AND d.value IN (${driver.values.map(() => "?").join(", ")})` : ""}
            AND d.messageId > ? AND d.messageId < ? AND messages.channel = d.channel AND messages.deleted = 0${rest
              .map((filter) => ` AND ${exists(filter)}`)
-             .join("")}${inThread}
+             .join("")}
            ORDER BY d.messageId LIMIT ?`,
-          ...threadParams,
           channel,
           ...params(driver),
           after,
@@ -2631,23 +2725,32 @@ export class MsnDurableObject extends DurableObject<Env> {
     editsAfter: number,
     through: number,
     limit: number,
-    thread: number | null = null,
+    thread: ThreadView | null = null,
   ) {
-    const [threadCte, threadParams] = threadScope(channel, thread);
-    const rows = this.ctx.storage.sql
-      .exec<MessageRow & { editSeq: number }>(
-        `${threadCte}SELECT ${MESSAGE_COLUMNS}, editSeq FROM messages INDEXED BY message_edits
-         WHERE channel = ? AND editSeq IS NOT NULL AND editSeq > ? AND id <= ? AND deleted = 0${
-           thread === null ? "" : " AND id IN (SELECT id FROM thread)"
-}
-         ORDER BY editSeq LIMIT ?`,
-        ...threadParams,
-        channel,
-        editsAfter,
-        through,
-        limit + 1,
-      )
-      .toArray();
+    const read = (from: number, count: number) =>
+      this.ctx.storage.sql
+        .exec<MessageRow & { editSeq: number }>(
+          `SELECT ${MESSAGE_COLUMNS}, editSeq FROM messages INDEXED BY message_edits
+           WHERE channel = ? AND editSeq IS NOT NULL AND editSeq > ? AND id <= ? AND deleted = 0
+           ORDER BY editSeq LIMIT ?`,
+          channel,
+          from,
+          through,
+          count,
+        )
+        .toArray();
+    let rows: (MessageRow & { editSeq: number })[];
+    if (!thread) rows = read(editsAfter, limit + 1);
+    else {
+      // A thread read (ADR 0063) keeps only its members' edits, scanning edits in batches.
+      rows = [];
+      for (let from = editsAfter; rows.length <= limit; ) {
+        const found = read(from, 200);
+        rows.push(...found.filter((row) => thread.ids.has(row.id)));
+        if (found.length < 200) break;
+        from = found[found.length - 1].editSeq;
+      }
+    }
     const page = rows.slice(0, limit);
     return {
       messages: this.withSparse(
@@ -2818,7 +2921,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     before = Number.MAX_SAFE_INTEGER,
     fence: ProcessingFence | null = null,
     editsAfter: number | null = null,
-    thread: number | null = null,
+    thread: ThreadView | null = null,
   ): Promise<Response> | Response {
     // Edits to messages at or before `after` since the reader's edit cursor (ADR 0052). Opt-in,
     // so older clients keep today's page shape. They end a wait like a new message does.
@@ -2840,7 +2943,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       // forever for messages that cannot arrive (ADR 0046). Absent on active boards.
       const archived = this.archivedAt(channel) ? { archived: true } : {};
       // A thread read names the root it followed, so a reply id given as thread=ID is explained.
-      const scope = thread === null ? {} : { thread };
+      const scope = thread === null ? {} : { thread: thread.root };
       if (!fence) return json({ ...page, ...scope, ...archived, ...(edited ?? {}) });
       // Recheck at reply time: a takeover during a long poll fences this reply, too.
       this.requireGeneration(channel, fence.reader, fence.generation);
@@ -2855,6 +2958,18 @@ export class MsnDurableObject extends DurableObject<Env> {
     const page = this.page(tenant, channel, after, limit, filters, before, thread);
     const edited = edits();
     if (ready(page, edited) || !wait) return respond(page, edited);
+    // A thread wait (ADR 0063) first adds the new messages to its members, and reads a page only
+    // when a member is newer than its cursor, so a send outside the thread costs one small read.
+    const check = () => {
+      if (thread) {
+        this.growThread(channel, thread);
+        const next = firstAfter(thread.sorted, after);
+        if ((thread.sorted[next] ?? Number.MAX_SAFE_INTEGER) >= before && editsAfter === null) return null;
+      }
+      const next = this.page(tenant, channel, after, limit, filters, before, thread);
+      const nextEdits = edits();
+      return ready(next, nextEdits) ? ([next, nextEdits] as const) : null;
+    };
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
     // No await between SELECT and registration: sends cannot fall into a lost-wakeup gap.
@@ -2865,12 +2980,16 @@ export class MsnDurableObject extends DurableObject<Env> {
         this.waiters.delete(waiter);
         request.signal.removeEventListener("abort", abort);
       };
-      const finish = (aborted = false) => {
+      const finish = (aborted = false, found: NonNullable<ReturnType<typeof check>> | null = null) => {
         if (finished) return;
         try {
           this.authorize(hash); // Rotation revokes already-pending polls, too.
-          const next = this.page(tenant, channel, after, limit, filters, before, thread);
-          const nextEdits = edits();
+          if (thread && !found) this.growThread(channel, thread);
+          // A wake that already read the ready page answers with it instead of reading it again.
+          const [next, nextEdits] = found ?? [
+            this.page(tenant, channel, after, limit, filters, before, thread),
+            edits(),
+          ];
           finished = true;
           cleanup();
           resolve(
@@ -2895,7 +3014,8 @@ export class MsnDurableObject extends DurableObject<Env> {
             finish();
             return;
           }
-          if (ready(this.page(tenant, channel, after, limit, filters, before, thread), edits())) finish();
+          const found = check();
+          if (found) finish(false, found);
         },
       };
       const abort = () => finish(true);
@@ -4874,7 +4994,10 @@ export class MsnDurableObject extends DurableObject<Env> {
                 : Number.MAX_SAFE_INTEGER;
               // thread=ID (ADR 0063): only that thread's root and replies; a reply id means its thread.
               const thread = url.searchParams.has("thread")
-                ? this.threadRoot(channel, messageId(url.searchParams.get("thread") ?? ""))
+                ? this.threadView(
+                    channel,
+                    this.threadRoot(channel, messageId(url.searchParams.get("thread") ?? "")),
+                  )
                 : null;
               return await this.poll(
                 request,

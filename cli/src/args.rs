@@ -332,7 +332,7 @@ pub enum Command {
     Peek {
         channel: String,
         /// Follow one thread: only its root message and replies, at any depth (a reply id means its thread). Its progress stays on this machine, apart from the board's (ADR 0063)
-        #[arg(long, value_name = "ID", conflicts_with = "resumable")]
+        #[arg(long, value_name = "ID", conflicts_with_all = ["resumable", "local"])]
         thread: Option<String>,
         /// Seconds to wait, 0–25 (default 0)
         #[arg(long)]
@@ -356,7 +356,7 @@ pub enum Command {
         #[arg(long)]
         through: String,
         /// Commit progress in this thread only, as peeked with --thread (ADR 0063)
-        #[arg(long, value_name = "ID", conflicts_with = "resumable")]
+        #[arg(long, value_name = "ID", conflicts_with_all = ["resumable", "local"])]
         thread: Option<String>,
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,

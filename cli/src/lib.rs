@@ -1110,6 +1110,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
             let channel = slug(&channel)?;
             let (wait, limit) = parse_loop_bounds(wait.as_deref(), limit.as_deref())?;
+            let thread = parse_thread(thread.as_deref())?;
             if after.is_some() && cursor_file.is_some() {
                 return Err(CliError::usage(
                     "Use either --after or --cursor-file, not both.",
@@ -1119,7 +1120,6 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             // Acquire before reading and hold until all output and cursor writes are finished.
             let lock = file.as_deref().map(CursorLock::acquire).transpose()?;
             let file = lock.as_ref().map(CursorLock::cursor_path);
-            let thread = parse_thread(thread.as_deref())?;
             let cursor_after =
                 resolve_cursor(&url, &tenant, channel, thread, after.as_deref(), file, None)?;
             let target = LoopTarget {
