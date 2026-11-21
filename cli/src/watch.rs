@@ -46,13 +46,16 @@ pub enum Scan {
 /// True when `message` is addressed to `name` and someone else sent it. Names match trimmed and
 /// ignoring case, as unread counts do (ADR 0045); a message to everyone is not addressed.
 pub fn addressed_to(message: &Value, name: &str) -> bool {
-    let me = crate::status::js_trim(name).to_lowercase();
-    if me.is_empty() || message.get("username").and_then(Value::as_str) == Some(name) {
+    // The sender is folded too, so `--username Reviewer` ignores its own messages as "reviewer".
+    let fold = |value: &str| crate::status::js_trim(value).to_lowercase();
+    let me = fold(name);
+    let sender = message.get("username").and_then(Value::as_str).map(fold);
+    if me.is_empty() || sender.as_deref() == Some(me.as_str()) {
         return false;
     }
     crate::address::addressees(message)
         .iter()
-        .any(|to| crate::status::js_trim(to).to_lowercase() == me)
+        .any(|to| fold(to) == me)
 }
 
 /// One workspace as seen by one key.
@@ -61,6 +64,8 @@ pub struct Boards<'a> {
     tenant: &'a str,
     token: &'a str,
     stop: &'a AtomicBool,
+    /// After this, failures are no longer retried and the catch-up stops (the MCP tool's bound).
+    give_up: Option<Instant>,
 }
 
 impl<'a> Boards<'a> {
@@ -75,7 +80,19 @@ impl<'a> Boards<'a> {
             tenant,
             token,
             stop,
+            give_up: None,
         }
+    }
+
+    /// Bounds retries and the catch-up: once `at` passes, a failure is returned instead of
+    /// retried, and `first_addressed` stops catching up. `msn wait --all` has no bound.
+    pub fn give_up_at(mut self, at: Instant) -> Self {
+        self.give_up = Some(at);
+        self
+    }
+
+    fn given_up(&self, after: Duration) -> bool {
+        self.give_up.is_some_and(|at| Instant::now() + after >= at)
     }
 
     /// A GET that retries 429, 5xx and transport failures with backoff. `None` means stopped.
@@ -102,6 +119,9 @@ impl<'a> Boards<'a> {
                 Err(CliError::Network(message)) => message,
                 Err(error) => return Err(error),
             };
+            if self.given_up(Duration::from_millis(backoff)) {
+                return Err(CliError::network(reason));
+            }
             eprintln!("{reason}; retrying in {}s", backoff / 1000);
             let until = Instant::now() + Duration::from_millis(backoff);
             while Instant::now() < until {
@@ -341,6 +361,9 @@ pub fn first_addressed(
         }
     };
     for channel in &names {
+        if boards.given_up(Duration::ZERO) {
+            return Ok(None);
+        }
         if let Some(hit) = check(channel, memo)? {
             return Ok(Some(hit));
         }
@@ -392,9 +415,31 @@ mod tests {
             "bob"
         ));
         assert!(!addressed_to(
+            &json!({"username": " Bob", "to": "bob"}),
+            "BOB"
+        ));
+        assert!(!addressed_to(
             &json!({"username": "lead", "to": "bob"}),
             " "
         ));
+    }
+
+    #[test]
+    fn a_bound_stops_retrying_and_catching_up() {
+        let stop = AtomicBool::new(false);
+        let url = url::Url::parse("http://127.0.0.1:9").unwrap();
+        let client = Arc::new(MsnClient::new(&url).unwrap());
+        let boards = Boards::new(Arc::clone(&client), "team", "t", &stop);
+        assert!(
+            !boards.given_up(Duration::from_secs(3600)),
+            "no bound by default"
+        );
+        let bounded = Boards::new(client, "team", "t", &stop).give_up_at(Instant::now());
+        assert!(bounded.given_up(Duration::ZERO));
+        // A refused connection is not retried past the bound: it returns the failure.
+        let started = Instant::now();
+        assert!(matches!(bounded.get("/x"), Err(CliError::Network(_))));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

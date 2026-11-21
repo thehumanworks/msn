@@ -219,6 +219,42 @@ try {
   assert.equal(nodeGot.channel, "alpha");
   assert.equal(nodeGot.message.id, last);
   console.log("PASS: the Node client waits on all boards with a cursor per board");
+
+  // A key invited to one board sees only that board: alpha's ask for the tester is not offered.
+  const invite = await fetch(`${origin}/api/tenants/${tenant}/invites`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ channel: "beta" }),
+  });
+  assert.equal(invite.status, 201, await invite.clone().text());
+  const redeemed = await fetch(`${origin}/api/tenants/${tenant}/invites/redeem`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: (await invite.json()).code, username: "tester" }),
+  });
+  assert.equal(redeemed.status, 201, await redeemed.clone().text());
+  const scoped = (await redeemed.json()).token;
+  const scopedGot = await result(
+    child(
+      process.execPath,
+      ["scripts/msn.mjs", "wait", "--all", "--cursor-file", join(dir, "scoped.json"), "--username", "tester"],
+      { env: { ...nodeEnv, MSN_WORKSPACE_TOKEN: scoped } },
+    ),
+  );
+  assert.equal(scopedGot.channel, "beta");
+  assert.equal(scopedGot.message.id, direct);
+  console.log("PASS: a key scoped to one board waits on that board only");
+
+  // A board archived during the wait drops out, and the wait carries on for the others.
+  const reviewerAgain = await waiter("reviewer");
+  await ok(["board", "archive", "alpha"]);
+  await delay(500);
+  assert.equal(reviewerAgain.exitCode, null, "archiving a board does not end the wait");
+  const afterArchive = await send("beta", "Reviewer, still there?", ["reviewer"]);
+  const stillGot = await result(reviewerAgain);
+  assert.equal(stillGot.channel, "beta");
+  assert.equal(stillGot.message.id, afterArchive);
+  console.log("PASS: a board archived mid-wait does not stop the wait");
 } finally {
   for (const p of children)
     if (p.exitCode === null) {

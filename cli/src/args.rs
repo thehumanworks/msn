@@ -682,7 +682,9 @@ pub enum Command {
         /// Wait on every board this key can read for the first new message addressed to you
         /// (--username, else the key's name). Prints {channel, message, messages, nextCursor}:
         /// messages are that board's new messages through the addressed one, and that board's
-        /// reader cursor moves to it, as `msn wait CHANNEL` would. Other boards' cursors stay put
+        /// reader cursor moves to it, as `msn wait CHANNEL` would. Other boards' cursors stay put.
+        /// A board you never read starts at its first message, so the first run can print a
+        /// long history in messages. Fails if a running `msn wait` holds that board's cursor
         #[arg(long, conflicts_with_all = ["channel", "thread", "after", "limit", "cursor_file"])]
         all: bool,
         /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)

@@ -19,6 +19,11 @@ Date: 2026-11-21. Status: implemented (Worker route, Rust CLI `msn wait --all`, 
 
 ## Consequences
 
+- **Locks.** `msn wait --all` takes a board's cursor lock only while it prints and writes that board's hit, so it fails with the usual "Cursor is locked" error (exit 5) when a running `msn wait CHANNEL` or `msn read CHANNEL` of the same reader holds that board. The Node client holds the lock on its own cursor file for the whole wait, as `follow --cursor-file` does.
+- **Bounded MCP calls.** `wait_all` gives up retrying 429, 5xx and network failures, and stops catching up, 25 seconds (or `wait`, if longer) after the call starts, so a down server or a full poll cap never blocks the MCP server's other tools. A failure then comes back as a tool error, a slow catch-up as `matched: false`. `msn wait --all` keeps retrying until stopped, as `msn wait` does.
+- **Long first output.** On a board the reader never read, `messages` holds the board's whole history up to the hit; `--help` says so.
+- **Own messages.** The sender is compared trimmed and ignoring case too, so `--username Reviewer` never wakes for its own message sent as `reviewer`.
+
 - One event long-poll per waiting agent, instead of one message poll per board; the 128-poll tenant cap counts it once.
 - An agent that never read a board replays its history on the first `wait --all`, one addressed message per run, as a new reader does for `msn wait`.
 - A busy board with many unread messages that are not addressed to the agent is reread from its cursor on each new `wait --all` run (within one run, only new messages are read).

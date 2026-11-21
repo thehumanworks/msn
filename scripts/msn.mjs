@@ -407,9 +407,11 @@ export async function run({
 
 /** A message addressed to `me` by someone else; names match trimmed and ignoring case (ADR 0069). */
 export function addressedTo(message, me) {
-  const self = me.trim().toLowerCase();
-  if (!self || message.username === me) return false;
-  return addressees(message).some((to) => to.trim().toLowerCase() === self);
+  const fold = (value) => (typeof value === "string" ? value.trim().toLowerCase() : "");
+  const self = fold(me);
+  // The sender is folded too, so --username Reviewer ignores its own messages as "reviewer".
+  if (!self || fold(message.username) === self) return false;
+  return addressees(message).some((to) => fold(to) === self);
 }
 
 /**
@@ -421,8 +423,7 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
   if (!file) throw new UsageError("wait --all needs --cursor-file FILE to keep each board's cursor.");
   if (values.after !== undefined || values.limit !== undefined)
     throw new UsageError("wait --all keeps a cursor per board; --after and --limit do not apply.");
-  const wait = number(values.wait, 25, 25);
-  if (!wait) throw new Error("wait must be positive.");
+  const wait = Math.max(1, number(values.wait, 25, 25));
   let me = values.username ?? env.MSN_USERNAME;
   if (me === undefined) {
     const identity = await request("");
@@ -430,6 +431,26 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
     if (typeof me !== "string" || !me.trim())
       throw new UsageError("This key has no exact username binding. Choose --username NAME.");
   }
+  // Every read retries 429, 5xx and network failures with backoff, as the Rust CLI does; a
+  // signal ends the wait without printing or moving a cursor.
+  const stopped = Symbol("stopped");
+  const get = async (path) => {
+    for (let backoff = 1000; ; backoff = Math.min(backoff * 2, 15000)) {
+      try {
+        return await request(path);
+      } catch (error) {
+        if (signal?.aborted) throw stopped;
+        if (error.status && error.status < 500 && error.status !== 429) throw error;
+        err(`${error.message}; retrying in ${backoff / 1000}s`);
+        const { setTimeout } = await import("node:timers/promises");
+        try {
+          await setTimeout(backoff, undefined, { signal });
+        } catch {
+          throw stopped;
+        }
+      }
+    }
+  };
   const lock = await lockCursor(file);
   file = lock.path;
   const binding = { server: base.origin, tenant, name: me };
@@ -446,13 +467,13 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
     // Read the event head first, so a message sent while catching up still has a newer event.
     let events;
     try {
-      events = (await request("/events/head")).head;
+      events = (await get("/events/head")).head;
     } catch (error) {
       if (error.status !== 404) throw error;
       // A server before ADR 0069: page the journal to its end instead.
       events = 0;
       for (let more = true; more; ) {
-        const page = await request(`/events?after=${events}&limit=100`);
+        const page = await get(`/events?after=${events}&limit=100`);
         events = page.nextCursor;
         more = page.hasMore;
       }
@@ -462,7 +483,7 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
       const start = boards[channel] ?? 0;
       let after = Math.max(start, read[channel] ?? 0);
       for (;;) {
-        const page = await request(`/channels/${channel}/messages?after=${after}&limit=100`);
+        const page = await get(`/channels/${channel}/messages?after=${after}&limit=100`);
         if (!page.messages.length && page.archived) return null;
         const found = page.messages.findIndex((message) => addressedTo(message, me));
         if (found >= 0) {
@@ -470,7 +491,7 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
           // The board's new messages through the addressed one, as `msn wait CHANNEL` prints them.
           const messages = [];
           for (let from = start; from < message.id; ) {
-            const chunk = await request(`/channels/${channel}/messages?after=${from}&limit=100`);
+            const chunk = await get(`/channels/${channel}/messages?after=${from}&limit=100`);
             messages.push(...chunk.messages.filter((m) => m.id <= message.id));
             if (!chunk.messages.length || chunk.nextCursor <= from) break;
             from = chunk.nextCursor;
@@ -486,32 +507,15 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
     };
     const listed = [];
     for (let after = "", more = true; more; ) {
-      const page = await request(`/channels?limit=1000&after=${after}`);
+      const page = await get(`/channels?limit=1000&after=${after}`);
       listed.push(...page.channels.map((row) => row.name));
       more = page.hasMore && page.channels.length > 0;
       after = page.channels.at(-1)?.name ?? after;
     }
     let hit = null;
     for (const channel of listed) if (!hit) hit = await scan(slug(channel));
-    let backoff = 1000;
     while (!hit && !signal?.aborted) {
-      let page;
-      try {
-        page = await request(`/events?after=${events}&wait=${wait}&limit=100`);
-      } catch (error) {
-        if (signal?.aborted) return;
-        if (error.status && error.status < 500 && error.status !== 429) throw error;
-        err(`${error.message}; reconnecting from event ${events}`);
-        const { setTimeout } = await import("node:timers/promises");
-        try {
-          await setTimeout(backoff, undefined, { signal });
-        } catch {
-          return;
-        }
-        backoff = Math.min(backoff * 2, 15000);
-        continue;
-      }
-      backoff = 1000;
+      const page = await get(`/events?after=${events}&wait=${wait}&limit=100`);
       events = page.nextCursor;
       const touched = [
         ...new Set(
@@ -532,6 +536,8 @@ async function waitAll({ request, values, env, base, tenant, out, err, signal })
     } finally {
       await unlink(temp).catch(() => {});
     }
+  } catch (error) {
+    if (error !== stopped) throw error;
   } finally {
     await unlink(lock.lockPath).catch((error) =>
       err(`Could not remove cursor lock ${lock.lockPath}: ${error.message}`),

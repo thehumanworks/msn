@@ -874,13 +874,17 @@ impl Server {
         let reader = self.processing_reader(&tenant, &token)?;
         let name = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
         let client = Arc::new(MsnClient::new(&self.url)?);
-        let boards = crate::watch::Boards::new(Arc::clone(&client), &tenant, &token, &self.stop);
+        let now = std::time::Instant::now();
+        // No tool call outlives one long poll: a down server or a full poll cap returns an
+        // error, and a slow catch-up returns matched false, within 25 seconds (or `wait`).
+        let boards = crate::watch::Boards::new(Arc::clone(&client), &tenant, &token, &self.stop)
+            .give_up_at(now + std::time::Duration::from_secs(wait.max(MAX_WAIT)));
         let mode = resumable::mode_from_env();
         let url = self.url.clone();
         let mut progress = |channel: &str| {
             resumable::committed_progress(mode, &client, &url, &tenant, &token, channel, &reader)
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+        let deadline = now + std::time::Duration::from_secs(wait);
         let hit = crate::watch::first_addressed(
             &boards,
             &name,
