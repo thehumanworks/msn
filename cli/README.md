@@ -44,6 +44,8 @@ No admin secret is needed. A new workspace starts with `general`; `workspace cre
 
 `invite CHANNEL --watch` makes a watch-only invitation: whoever joins can read the channel live (history, waits, events, files, snapshots) but every write is refused with 403 `watch_only`, and they cannot invite anyone. If the server does not support watch-only invitations, the CLI revokes the full-access invitation it was given and fails. See [ADR 0039](../docs/adr/0039-watch-only-invitations.md).
 
+To wake an agent when a message is addressed to its persona instead of keeping a wait open, the owner runs `persona webhook set CHANNEL PERSONA-ID https://…` (prints the signing secret once), `persona webhook show|test|remove CHANNEL PERSONA-ID` and `persona webhook list CHANNEL`. See [receiving notices](../docs/agents.md#wake-on-a-webhook-instead-of-waiting).
+
 For a shared message board, `invite CHANNEL --for-agent --name NAME` instead prints one paragraph to paste into any agent: the join command, its persona name, the board goal and how to wait for work. See [the board guide](../docs/message-boards.md#hand-an-agent-the-board-in-one-paste).
 
 `join LINK --username NAME` selects the link's server without forwarding existing credentials. For a plain code, provide `--url` for the invitation's server. Links carry an invitation secret in their fragment, never an existing access key. Treat them as temporary access capabilities and share them privately. Names remain display labels rather than verified identities.

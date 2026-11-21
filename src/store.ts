@@ -80,6 +80,17 @@ import {
   sinceSummary,
 } from "./since";
 import { MAX_TEMPLATES, type TemplatePersona, templateFromBoard, templateName } from "./templates";
+import {
+  MAX_PENDING_NOTICES,
+  MAX_WEBHOOKS,
+  type Notice,
+  newWebhookSecret,
+  noticeBody,
+  postNotice,
+  WEBHOOK_BATCH,
+  WEBHOOK_RETRY_DELAYS_MS,
+  webhookUrl,
+} from "./webhook";
 
 export type Message = {
   id: number;
@@ -147,6 +158,8 @@ const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
 const SCHEMA_VERSION = 20;
+/** After an alarm run in which a job threw, the next run waits at least this long. */
+export const ALARM_FAILURE_BACKOFF_MS = 30_000;
 /** Names per reaction kind on one message (ADR 0047). */
 export const MAX_REACTORS = 100;
 /** Reactions stored per workspace at once (ADR 0047); removing one frees its place. */
@@ -157,8 +170,6 @@ export const MAX_SCHEDULED_PER_BOARD = 100;
 export const MAX_SCHEDULED = 1000;
 /** A scheduled message that failed to post is kept this long for its sender to see, then removed. */
 export const FAILED_SCHEDULED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-/** After an alarm job throws, the next alarm runs no sooner than this. */
-export const ALARM_RETRY_MS = 30_000;
 /** Due scheduled messages posted per alarm run; the alarm runs again at once while more are due. */
 const SCHEDULED_BATCH = 50;
 /** Pinned messages per board (ADR 0038). */
@@ -563,6 +574,20 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS scheduled_due ON scheduled_messages(dueMs) WHERE failedAt IS NULL;
         CREATE INDEX IF NOT EXISTS scheduled_channel ON scheduled_messages(channel, dueMs);
+        -- Persona webhooks (ADR 0062). New tables with no version step, so they are safe in any
+        -- merge order. The secret is kept to sign notices; it is shown only when it is made.
+        CREATE TABLE IF NOT EXISTS webhooks (
+          channel TEXT NOT NULL, personaId TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL,
+          origin TEXT NOT NULL, createdAt TEXT NOT NULL, createdBy TEXT,
+          lastStatus TEXT, lastNoticeId TEXT, lastAttemptAt TEXT, lastHttpStatus INTEGER,
+          lastError TEXT, lastDeliveredAt TEXT, PRIMARY KEY(channel, personaId)
+        );
+        CREATE TABLE IF NOT EXISTS webhook_notices (
+          id TEXT PRIMARY KEY, channel TEXT NOT NULL, personaId TEXT NOT NULL, body TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0, nextAttemptMs INTEGER NOT NULL, createdAt TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS webhook_notices_due ON webhook_notices(nextAttemptMs);
+        CREATE INDEX IF NOT EXISTS webhook_notices_hook ON webhook_notices(channel, personaId);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -768,14 +793,13 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * The object's one alarm serves two jobs: search backfill batches (ADR 0037) and scheduled
-   * messages (ADR 0060). Each run does a backfill batch, posts what is due, then sets the alarm
-   * for the earliest remaining work.
+   * The object's one alarm serves three jobs: search backfill batches (ADR 0037), scheduled
+   * messages (ADR 0060) and webhook notices (ADR 0062). Each run does a backfill batch, posts the
+   * scheduled messages that are due, sends the notices that are due, then sets the alarm for the
+   * earliest remaining work. Each job catches its own errors, and the alarm is set again whatever
+   * happens, so one failing job never stops the others.
    */
   async alarm(): Promise<void> {
-    // Each job runs on its own: a failure in one never stops the other or leaves the alarm unset.
-    // After a failure the next run waits ALARM_RETRY_MS, so a job that always throws backs off
-    // instead of re-firing at once forever.
     let failed = false;
     try {
       try {
@@ -790,32 +814,44 @@ export class MsnDurableObject extends DurableObject<Env> {
         failed = true;
         console.error("alarm: scheduled delivery failed", error);
       }
+      try {
+        await this.sendDueNotices();
+      } catch (error) {
+        failed = true;
+        console.error("alarm: webhook delivery failed", error);
+      }
     } finally {
-      await this.armAlarm(failed ? Date.now() + ALARM_RETRY_MS : 0);
+      // A job that keeps failing must not spin the alarm: wait before the next run.
+      await this.armAlarm(failed ? ALARM_FAILURE_BACKOFF_MS : 0);
     }
   }
 
   /**
-   * Sets the alarm to now while backfill remains, else to the next pending scheduled message or
-   * the time the oldest failed one expires, whichever is first.
+   * Sets the alarm to now while backfill remains, else to the earliest of: the next scheduled
+   * message due (ADR 0060), the time the oldest failed one expires, and the next webhook notice
+   * due (ADR 0062). Deletes it when nothing is left, so an idle workspace has no alarm. Every job
+   * that adds work calls this. `notBeforeMs` delays the next run after a failed one.
    */
-  private async armAlarm(notBefore = 0): Promise<void> {
-    let next: number | null = Date.now();
-    if (this.searchIndexed()) {
-      const times = this.ctx.storage.sql
-        .exec<{ due: number | null; failed: string | null }>(
-          `SELECT (SELECT MIN(dueMs) FROM scheduled_messages WHERE failedAt IS NULL) AS due,
-             (SELECT MIN(failedAt) FROM scheduled_messages WHERE failedAt IS NOT NULL) AS failed`,
-        )
-        .one();
-      const expiry = times.failed === null ? null : Date.parse(times.failed) + FAILED_SCHEDULED_TTL_MS;
-      next = times.due === null ? expiry : expiry === null ? times.due : Math.min(times.due, expiry);
-    }
+  async armAlarm(notBeforeMs = 0): Promise<void> {
+    const times = this.ctx.storage.sql
+      .exec<{ due: number | null; failed: string | null; notice: number | null }>(
+        `SELECT (SELECT MIN(dueMs) FROM scheduled_messages WHERE failedAt IS NULL) AS due,
+           (SELECT MIN(failedAt) FROM scheduled_messages WHERE failedAt IS NOT NULL) AS failed,
+           (SELECT MIN(nextAttemptMs) FROM webhook_notices) AS notice`,
+      )
+      .one();
+    const candidates = [
+      this.searchIndexed() ? null : Date.now(),
+      times.due,
+      times.failed === null ? null : Date.parse(times.failed) + FAILED_SCHEDULED_TTL_MS,
+      times.notice,
+    ].filter((time): time is number => time !== null);
+    let next: number | null = candidates.length ? Math.min(...candidates) : null;
     if (next === null) {
       if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
-    next = Math.max(next, notBefore);
+    if (notBeforeMs) next = Math.max(next, Date.now() + notBeforeMs);
     if ((await this.ctx.storage.getAlarm()) !== next) await this.ctx.storage.setAlarm(next);
   }
 
@@ -1428,6 +1464,325 @@ export class MsnDurableObject extends DurableObject<Env> {
   /** Replaced in tests; production calls the push service directly. */
   pushFetch: typeof fetch = (input, init) => fetch(input, init);
 
+  /** Replaced in tests; production calls the owner's webhook URL directly (ADR 0062). */
+  webhookFetch: typeof fetch = (input, init) => fetch(input, init);
+
+  /**
+   * Queues a notice when the message is addressed to a board persona with a webhook (ADR 0062).
+   * Runs inside the send transaction. A persona's own messages never wake it. Returns true when a
+   * notice was queued, so the caller arms the alarm after the commit.
+   */
+  private queueAddressedNotice(message: Message, eventId: number): boolean {
+    if (message.to === undefined) return false;
+    // An exact name wins; otherwise names match trimmed and ignoring case, as unread counts do
+    // ("@Reviewer" wakes "reviewer"). Names are unique only by exact case, so the exact match
+    // decides between "Reviewer" and "reviewer", and the folded fallback takes the oldest persona.
+    const fold = (name: string) => name.trim().toLowerCase();
+    const hooks = this.ctx.storage.sql
+      .exec<{ personaId: string; origin: string; displayName: string }>(
+        `SELECT w.personaId, w.origin, p.displayName FROM webhooks w JOIN personas p ON p.channel = w.channel AND p.id = w.personaId
+         WHERE w.channel = ? ORDER BY p.createdAt, p.id`,
+        message.channel,
+      )
+      .toArray();
+    const hook =
+      hooks.find((row) => row.displayName === message.to) ??
+      hooks.find((row) => fold(row.displayName) === fold(message.to as string));
+    // A persona's own message never wakes it: same persona id, or sent under its exact name.
+    if (!hook || message.personaId === hook.personaId || message.username === hook.displayName) return false;
+    const path = `/api/tenants/${message.tenant}/channels/${message.channel}/messages/${message.id}`;
+    return this.queueNotice(message.channel, hook.personaId, {
+      schema: "msn.webhook.v1",
+      type: "message.addressed",
+      id: crypto.randomUUID(),
+      tenant: message.tenant,
+      channel: message.channel,
+      persona: hook.personaId,
+      messageId: message.id,
+      eventId,
+      messageUrl: `${hook.origin}${path}`,
+      createdAt: message.createdAt,
+    });
+  }
+
+  /** Stores one notice, due now. A full backlog drops it and records the drop on the webhook. */
+  private queueNotice(channel: string, personaId: string, notice: Notice): boolean {
+    const waiting = this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM webhook_notices WHERE channel = ? AND personaId = ?",
+        channel,
+        personaId,
+      )
+      .one().n;
+    if (waiting >= MAX_PENDING_NOTICES) {
+      this.ctx.storage.sql.exec(
+        "UPDATE webhooks SET lastStatus = 'dropped', lastNoticeId = ?, lastError = 'backlog_full', lastAttemptAt = ? WHERE channel = ? AND personaId = ?",
+        notice.id,
+        new Date().toISOString(),
+        channel,
+        personaId,
+      );
+      return false;
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT INTO webhook_notices(id, channel, personaId, body, attempts, nextAttemptMs, createdAt) VALUES (?, ?, ?, ?, 0, ?, ?)",
+      notice.id,
+      channel,
+      personaId,
+      noticeBody(notice),
+      Date.now(),
+      new Date().toISOString(),
+    );
+    return true;
+  }
+
+  /**
+   * Sends every notice that is due, oldest first, at most WEBHOOK_BATCH per run, in parallel.
+   * Each row is leased before its attempt (moved to the first retry time), so a run that is cut
+   * short retries later instead of losing the notice; a receiver may then see an id twice.
+   * Success or a final failure removes the row; a retryable failure waits WEBHOOK_RETRY_DELAYS_MS.
+   * The webhook row keeps the last outcome for `GET …/webhook`.
+   */
+  async sendDueNotices(now = Date.now()): Promise<number> {
+    const due = this.ctx.storage.sql
+      .exec<{ id: string; channel: string; personaId: string; body: string; attempts: number }>(
+        "SELECT id, channel, personaId, body, attempts FROM webhook_notices WHERE nextAttemptMs <= ? ORDER BY nextAttemptMs, createdAt LIMIT ?",
+        now,
+        WEBHOOK_BATCH,
+      )
+      .toArray();
+    if (!due.length) return 0;
+    for (const row of due)
+      this.ctx.storage.sql.exec(
+        "UPDATE webhook_notices SET nextAttemptMs = ?, attempts = attempts + 1 WHERE id = ?",
+        now + WEBHOOK_RETRY_DELAYS_MS[0],
+        row.id,
+      );
+    await Promise.allSettled(
+      due.map(async (row) => {
+        const hook = this.ctx.storage.sql
+          .exec<{ url: string; secret: string }>(
+            "SELECT url, secret FROM webhooks WHERE channel = ? AND personaId = ?",
+            row.channel,
+            row.personaId,
+          )
+          .toArray()[0];
+        if (!hook) {
+          this.ctx.storage.sql.exec("DELETE FROM webhook_notices WHERE id = ?", row.id);
+          return;
+        }
+        const attempt = await postNotice(hook.url, hook.secret, row.body, row.id, this.webhookFetch);
+        const at = new Date().toISOString();
+        const attempts = row.attempts + 1;
+        const retry = !attempt.ok && attempt.retry && attempts <= WEBHOOK_RETRY_DELAYS_MS.length;
+        const outcome = attempt.ok ? "delivered" : retry ? "retrying" : "failed";
+        this.ctx.storage.transactionSync(() => {
+          if (retry)
+            this.ctx.storage.sql.exec(
+              "UPDATE webhook_notices SET nextAttemptMs = ? WHERE id = ?",
+              Date.now() + WEBHOOK_RETRY_DELAYS_MS[attempts - 1],
+              row.id,
+            );
+          else this.ctx.storage.sql.exec("DELETE FROM webhook_notices WHERE id = ?", row.id);
+          // Only if the webhook was not removed or replaced by another URL meanwhile.
+          this.ctx.storage.sql.exec(
+            `UPDATE webhooks SET lastStatus = ?, lastNoticeId = ?, lastAttemptAt = ?, lastHttpStatus = ?, lastError = ?,
+               lastDeliveredAt = CASE WHEN ? THEN ? ELSE lastDeliveredAt END
+             WHERE channel = ? AND personaId = ? AND url = ?`,
+            outcome,
+            row.id,
+            at,
+            attempt.httpStatus,
+            attempt.ok ? null : attempt.error,
+            attempt.ok ? 1 : 0,
+            at,
+            row.channel,
+            row.personaId,
+            hook.url,
+          );
+        });
+      }),
+    );
+    return due.length;
+  }
+
+  private webhookView(channel: string, personaId: string) {
+    const row = this.ctx.storage.sql
+      .exec<{
+        personaId: string;
+        url: string;
+        createdAt: string;
+        createdBy: string | null;
+        lastStatus: string | null;
+        lastNoticeId: string | null;
+        lastAttemptAt: string | null;
+        lastHttpStatus: number | null;
+        lastError: string | null;
+        lastDeliveredAt: string | null;
+        pending: number;
+      }>(
+        `SELECT w.*, (SELECT COUNT(*) FROM webhook_notices n WHERE n.channel = w.channel AND n.personaId = w.personaId) AS pending
+         FROM webhooks w WHERE w.channel = ? AND w.personaId = ?`,
+        channel,
+        personaId,
+      )
+      .toArray()[0];
+    if (!row) return null;
+    return {
+      channel,
+      persona: row.personaId,
+      url: row.url,
+      createdAt: row.createdAt,
+      createdBy: row.createdBy,
+      pending: row.pending,
+      lastDelivery:
+        row.lastStatus === null
+          ? null
+          : {
+              status: row.lastStatus,
+              noticeId: row.lastNoticeId,
+              at: row.lastAttemptAt,
+              httpStatus: row.lastHttpStatus,
+              error: row.lastError,
+              deliveredAt: row.lastDeliveredAt,
+            },
+    };
+  }
+
+  /**
+   * Owner only (ADR 0062): `GET …/channels/C/webhooks` lists the board's webhooks;
+   * `GET|PUT|DELETE …/personas/ID/webhook` reads, sets or removes one persona's webhook, and
+   * `POST …/personas/ID/webhook/test` queues a ping. PUT shows the signing secret once.
+   */
+  private async webhookRoute(
+    request: Request,
+    url: URL,
+    channel: string,
+    personaId: string | null,
+    rest: string[],
+    hash: string,
+  ): Promise<Response> {
+    const input = request.method === "PUT" ? await body(request) : null;
+    const capability = this.authorize(hash);
+    this.requireScope(capability, channel);
+    this.requireOwner(capability);
+    this.board(channel);
+    if (personaId === null) {
+      if (request.method !== "GET") throw new HttpError(404, "route_not_found", "Unknown webhook operation.");
+      const ids = this.ctx.storage.sql
+        .exec<{ personaId: string }>(
+          "SELECT personaId FROM webhooks WHERE channel = ? ORDER BY personaId",
+          channel,
+        )
+        .toArray();
+      return json({ webhooks: ids.map((row) => this.webhookView(channel, row.personaId)) });
+    }
+    const persona = this.ctx.storage.sql
+      .exec("SELECT 1 FROM personas WHERE channel = ? AND id = ?", channel, personaId)
+      .toArray();
+    if (!persona.length)
+      throw new HttpError(404, "persona_not_found", "Register the persona on this board first.");
+    if (rest.length === 0 && request.method === "GET") {
+      const view = this.webhookView(channel, personaId);
+      if (!view) throw new HttpError(404, "webhook_not_found", "This persona has no webhook.");
+      return json({ webhook: view });
+    }
+    if (rest.length === 0 && request.method === "PUT") {
+      const target = webhookUrl(input?.url, this.selfHosts(url));
+      const secret = newWebhookSecret();
+      const replaced = this.ctx.storage.transactionSync(() => {
+        const existing = this.ctx.storage.sql
+          .exec("SELECT 1 FROM webhooks WHERE channel = ? AND personaId = ?", channel, personaId)
+          .toArray().length;
+        if (!existing) {
+          const count = this.ctx.storage.sql
+            .exec<{ n: number }>("SELECT COUNT(*) AS n FROM webhooks")
+            .one().n;
+          if (count >= MAX_WEBHOOKS)
+            throw new HttpError(
+              409,
+              "webhook_quota",
+              `A workspace can have at most ${MAX_WEBHOOKS} webhooks.`,
+            );
+        }
+        // A new URL or secret starts a fresh record; waiting notices go to the new URL.
+        this.ctx.storage.sql.exec(
+          `INSERT INTO webhooks(channel, personaId, url, secret, origin, createdAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(channel, personaId) DO UPDATE SET url = excluded.url, secret = excluded.secret, origin = excluded.origin,
+             createdAt = excluded.createdAt, createdBy = excluded.createdBy, lastStatus = NULL, lastNoticeId = NULL,
+             lastAttemptAt = NULL, lastHttpStatus = NULL, lastError = NULL, lastDeliveredAt = NULL`,
+          channel,
+          personaId,
+          target,
+          secret,
+          url.origin,
+          new Date().toISOString(),
+          capability.bound_username,
+        );
+        return existing > 0;
+      });
+      return json({ webhook: this.webhookView(channel, personaId), secret }, replaced ? 200 : 201);
+    }
+    if (rest.length === 0 && request.method === "DELETE") {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM webhooks WHERE channel = ? AND personaId = ?",
+          channel,
+          personaId,
+        );
+        this.ctx.storage.sql.exec(
+          "DELETE FROM webhook_notices WHERE channel = ? AND personaId = ?",
+          channel,
+          personaId,
+        );
+      });
+      await this.armAlarm();
+      return new Response(null, { status: 204 });
+    }
+    if (rest.length === 1 && rest[0] === "test" && request.method === "POST") {
+      const hook = this.webhookView(channel, personaId);
+      if (!hook) throw new HttpError(404, "webhook_not_found", "This persona has no webhook.");
+      const id = crypto.randomUUID();
+      const queued = this.ctx.storage.transactionSync(() =>
+        this.queueNotice(channel, personaId, {
+          schema: "msn.webhook.v1",
+          type: "ping",
+          id,
+          tenant: this.tenantName(url),
+          channel,
+          persona: personaId,
+          messageId: null,
+          eventId: null,
+          messageUrl: null,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      if (!queued)
+        throw new HttpError(
+          409,
+          "webhook_backlog_full",
+          "Too many notices are waiting; try again after they are sent.",
+        );
+      await this.armAlarm();
+      return json({ queued: true, noticeId: id }, 202);
+    }
+    throw new HttpError(404, "route_not_found", "Unknown webhook operation.");
+  }
+
+  /**
+   * Hosts that reach this app: the request's own host, plus WEBHOOK_SELF_HOSTS (comma-separated,
+   * optional) for its other names, such as its workers.dev address.
+   */
+  private selfHosts(url: URL): string[] {
+    const extra = (this.env as Env & { WEBHOOK_SELF_HOSTS?: string }).WEBHOOK_SELF_HOSTS ?? "";
+    return [url.hostname, ...extra.split(",")].map((host) => host.trim()).filter(Boolean);
+  }
+
+  /** The tenant slug from a tenant route URL (`/api/tenants/T/…`). */
+  private tenantName(url: URL): string {
+    return slug(url.pathname.split("/")[3] ?? "");
+  }
+
   private githubSecret(): string | undefined {
     return this.ctx.storage.sql
       .exec<{ secret: string }>("SELECT secret FROM github_hook WHERE singleton = 1")
@@ -1918,7 +2273,7 @@ export class MsnDurableObject extends DurableObject<Env> {
    * rolls back atomically with the canonical mutation it describes. Capacity failure throws,
    * which aborts that whole transaction: no mutation is ever recorded without its event.
    */
-  private insertEvent(channel: string, type: EventType, resourceId: number | null): void {
+  private insertEvent(channel: string, type: EventType, resourceId: number | null): number {
     // This journal is append-only. Bound its allocated sequence with an indexed rowid lookup,
     // rather than counting the entire retained journal on every write. Gaps consume capacity
     // conservatively; no mutation can bypass the ceiling or silently discard retained events.
@@ -1927,14 +2282,16 @@ export class MsnDurableObject extends DurableObject<Env> {
       .one().allocated;
     if (allocated >= MAX_EVENTS)
       throw new HttpError(409, "event_quota", "Event journal capacity reached. Contact the administrator.");
-    this.ctx.storage.sql.exec(
-      "INSERT INTO events (channel, type, resourceId, historyRevision, createdAt) VALUES (?, ?, ?, ?, ?)",
-      channel,
-      type,
-      resourceId,
-      this.historyRevision(channel),
-      new Date().toISOString(),
-    );
+    return this.ctx.storage.sql
+      .exec<{ id: number }>(
+        "INSERT INTO events (channel, type, resourceId, historyRevision, createdAt) VALUES (?, ?, ?, ?, ?) RETURNING id",
+        channel,
+        type,
+        resourceId,
+        this.historyRevision(channel),
+        new Date().toISOString(),
+      )
+      .one().id;
   }
 
   /** Wakes pending event polls for this channel, plus unscoped polls watching every channel. */
@@ -3065,16 +3422,21 @@ export class MsnDurableObject extends DurableObject<Env> {
           ref.name,
           ref.mediaType,
         );
-      this.insertEvent(channel, "message.created", message.id);
-      return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: false };
+      const eventId = this.insertEvent(channel, "message.created", message.id);
+      const created = this.withLabels(channel, [toMessage(message, tenant)])[0];
+      // Same transaction as the message: a notice exists exactly when its message does.
+      const woke = this.queueAddressedNotice(created, eventId);
+      return { message: created, replayed: false, woke };
     });
     // transactionSync succeeded; output gates delay network replies until durable commit.
     if (!result.replayed) {
       for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
       this.wakeEvents(channel);
       if (notify) this.notifyOwner(result.message);
+      // A webhook notice goes out from the alarm, never from this request (ADR 0062).
+      if (result.woke) this.ctx.waitUntil(this.armAlarm());
     }
-    return json(result, result.replayed ? 200 : 201);
+    return json({ message: result.message, replayed: result.replayed }, result.replayed ? 200 : 201);
   }
 
   /** Adds attachment metadata to a page of same-channel messages with one range query. */
@@ -4335,6 +4697,10 @@ export class MsnDurableObject extends DurableObject<Env> {
             // The webhook secret was readable with the old owner credential; GitHub deliveries
             // fail until the owner copies the new one (links stay).
             this.ctx.storage.sql.exec("DELETE FROM github_hook");
+            // Persona webhooks (ADR 0062) were set with owner credentials; a leaked owner key could
+            // have pointed one at its own URL to keep learning about new messages. They go too.
+            this.ctx.storage.sql.exec("DELETE FROM webhooks");
+            this.ctx.storage.sql.exec("DELETE FROM webhook_notices");
           });
           this.wakeAllWaiters();
           return json(this.identity(tenant, this.authorize(hash), token));
@@ -4492,6 +4858,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
         if (rest[0] === "templates") return await this.templateRoute(request, rest.slice(1), hash);
+        if (rest[0] === "channels" && rest[1] && rest[2] === "webhooks" && rest.length === 3)
+          return await this.webhookRoute(request, url, slug(rest[1]), null, [], hash);
+        if (rest[0] === "channels" && rest[1] && rest[2] === "personas" && rest[4] === "webhook")
+          return await this.webhookRoute(request, url, slug(rest[1]), slug(rest[3]), rest.slice(5), hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
           return await this.boardRoute(request, tenant, slug(rest[1]), rest.slice(2), hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.

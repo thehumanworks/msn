@@ -261,6 +261,36 @@ describe("send a message later (ADR 0060)", () => {
     });
   });
 
+  it("queues and sends a webhook notice when a scheduled message to a persona with a webhook posts", async () => {
+    const f = await fixture();
+    const sent: { url: string; body: string }[] = [];
+    await runInDurableObject(f.stub(), (instance) => {
+      (
+        instance as unknown as { webhookFetch: (input: unknown, init?: RequestInit) => Promise<Response> }
+      ).webhookFetch = async (input, init) => {
+        sent.push({ url: String(input), body: String(init?.body) });
+        return new Response("ok");
+      };
+    });
+    const hook = await call(f.tenant, "/channels/work/personas/dev/webhook", f.owner, "PUT", {
+      url: "https://agent.example.com/wake",
+    });
+    expect(hook.status).toBeLessThan(300);
+    await f.schedule("Your turn", { to: "dev" });
+    expect(sent).toEqual([]);
+    await f.arrive();
+    const [posted] = await f.messages();
+    expect(posted.text).toBe("Your turn");
+    // The same alarm run that posted it also sent the notice.
+    expect(sent.length).toBe(1);
+    expect(sent[0].url).toBe("https://agent.example.com/wake");
+    expect(JSON.parse(sent[0].body)).toMatchObject({
+      type: "message.addressed",
+      channel: "work",
+      persona: "dev",
+    });
+  });
+
   it("keeps the alarm set when one alarm job throws", async () => {
     const f = await fixture();
     const scheduled = await f.schedule("still armed");

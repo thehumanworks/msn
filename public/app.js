@@ -11,6 +11,7 @@ import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from ".
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
+import { webhookSummary } from "./webhook.js";
 
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "msn.session";
@@ -3319,10 +3320,17 @@ async function showAgents() {
   const connection = session;
   const target = agentsChannel;
   try {
-    const { personas } = await api(`/channels/${target}/personas`, {}, connection);
+    const [{ personas }, hooks] = await Promise.all([
+      api(`/channels/${target}/personas`, {}, connection),
+      // Webhooks are the owner's to see and set (ADR 0062); a failed read only hides them.
+      connection.owner
+        ? api(`/channels/${target}/webhooks`, {}, connection).catch(() => null)
+        : Promise.resolve(null),
+    ]);
     const cached = connection.channels.get(target);
     if (cached) cached.personas = personas;
     if (session !== connection || agentsChannel !== target) return;
+    const webhooks = new Map((hooks?.webhooks ?? []).map((hook) => [hook.persona, hook]));
     const list = $("agents-list");
     list.replaceChildren();
     if (!personas.length) {
@@ -3348,6 +3356,19 @@ async function showAgents() {
       const acted = persona.lastActedAt ? `last acted ${ago(persona.lastActedAt)}` : "no messages yet";
       detail.textContent = `${heard} · ${acted}`;
       row.append(dot, name, detail);
+      if (hooks) {
+        const hook = webhooks.get(persona.id) ?? null;
+        const wake = document.createElement("small");
+        wake.className = "agents-webhook";
+        wake.textContent = webhookSummary(hook) ?? "No webhook: its agent wakes only when it listens.";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "quiet agents-webhook-button";
+        button.textContent = hook ? "Webhook…" : "Add webhook…";
+        button.setAttribute("aria-label", `${hook ? "Webhook" : "Add webhook"} for ${persona.displayName}`);
+        button.addEventListener("click", () => openWebhook(target, persona, hook));
+        row.append(wake, button);
+      }
       list.append(row);
     }
     $("agents-title").textContent = `Agents in # ${target}`;
@@ -3374,6 +3395,102 @@ $("agents-dialog").addEventListener("close", () => {
   agentsTimer = null;
 });
 $("close-agents").addEventListener("click", () => $("agents-dialog").close());
+
+// Wake an agent with a webhook (ADR 0062): the owner sets, tests and removes a persona's webhook.
+// The signing secret is shown once, right after Save, and never stored by the page.
+let webhookTarget = null;
+function webhookPath() {
+  return `/channels/${webhookTarget.channel}/personas/${encodeURIComponent(webhookTarget.persona.id)}/webhook`;
+}
+function showWebhook(hook) {
+  webhookTarget.hook = hook;
+  $("webhook-state").textContent = hook ? webhookSummary(hook) : "No webhook yet.";
+  $("webhook-test").hidden = !hook;
+  $("webhook-remove").hidden = !hook;
+  $("webhook-save").textContent = hook ? "Save and make a new secret" : "Save";
+}
+function openWebhook(target, persona, hook) {
+  webhookTarget = { channel: target, persona, hook, connection: session };
+  $("webhook-title").textContent = `Wake ${persona.displayName} with a webhook`;
+  $("webhook-url").value = hook?.url ?? "";
+  $("webhook-secret").textContent = "";
+  $("webhook-secret-row").hidden = true;
+  showWebhook(hook);
+  $("webhook-dialog").showModal();
+}
+async function refreshWebhook() {
+  const target = webhookTarget;
+  try {
+    const { webhook } = await api(webhookPath(), {}, target.connection);
+    if (webhookTarget === target) showWebhook(webhook);
+  } catch (error) {
+    if (webhookTarget === target && error.status === 404) showWebhook(null);
+  }
+}
+$("webhook-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const target = webhookTarget;
+  if (!target) return;
+  try {
+    const made = await api(
+      webhookPath(),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: $("webhook-url").value.trim() }),
+      },
+      target.connection,
+    );
+    if (webhookTarget !== target) return;
+    showWebhook(made.webhook);
+    $("webhook-secret").textContent = made.secret;
+    $("webhook-secret-row").hidden = false;
+    $("webhook-state").textContent = "Saved. Copy the secret now: it is not shown again.";
+    if ($("agents-dialog").open) showAgents();
+  } catch (error) {
+    if (webhookTarget === target) $("webhook-state").textContent = error.message;
+  }
+});
+$("copy-webhook-secret").addEventListener("click", () =>
+  copy($("webhook-secret").textContent, "Signing secret copied."),
+);
+$("webhook-test").addEventListener("click", async () => {
+  const target = webhookTarget;
+  try {
+    await api(`${webhookPath()}/test`, { method: "POST" }, target.connection);
+    if (webhookTarget !== target) return;
+    $("webhook-state").textContent = "Test notice queued. Checking how it went…";
+    // Delivery runs in the background, usually within a second or two; one attempt waits up to 5 s.
+    for (const wait of [1500, 4500]) {
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      if (webhookTarget !== target || !$("webhook-dialog").open) return;
+      await refreshWebhook();
+    }
+  } catch (error) {
+    if (webhookTarget === target) $("webhook-state").textContent = error.message;
+  }
+});
+$("webhook-remove").addEventListener("click", async () => {
+  const target = webhookTarget;
+  try {
+    await api(webhookPath(), { method: "DELETE" }, target.connection);
+    if (webhookTarget !== target) return;
+    $("webhook-url").value = "";
+    $("webhook-secret-row").hidden = true;
+    showWebhook(null);
+    $("webhook-state").textContent = "Webhook removed. Waiting notices were dropped.";
+    if ($("agents-dialog").open) showAgents();
+  } catch (error) {
+    if (webhookTarget === target) $("webhook-state").textContent = error.message;
+  }
+});
+$("close-webhook").addEventListener("click", () => $("webhook-dialog").close());
+$("webhook-dialog").addEventListener("close", () => {
+  // The secret leaves the page with the dialog.
+  $("webhook-secret").textContent = "";
+  $("webhook-secret-row").hidden = true;
+  webhookTarget = null;
+});
 
 // Board mutes (ADR 0044): per person and stored on the server, so a mute holds on every device.
 // Expiry is decided by the server at send time; the page only shows the time it was given.
