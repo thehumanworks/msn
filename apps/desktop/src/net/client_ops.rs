@@ -363,6 +363,19 @@ pub fn fetch_receipts(
     msn_cli::receipts::parse_channel(&value, channel)
 }
 
+/// What each name on the board says it is doing (ADR 0064), newest first.
+pub fn fetch_statuses(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<Vec<msn_cli::status::Status>, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let value = get_json(client, &msn_cli::status::list_path(tenant, channel), token)?;
+    Ok(msn_cli::status::parse_list(&value))
+}
+
 /// The board's personas as (display name, listening now), for @ suggestions (ADR 0055).
 pub fn fetch_personas(
     client: &MsnClient,
