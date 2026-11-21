@@ -739,33 +739,55 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 agent::print_json(&value)
             }
         }
-        Command::Search {
+        Command::Search(args::SearchArgs {
             channel,
             text,
+            all,
+            archived,
             from,
             kind,
             labels: filters,
             before,
             limit,
-        } => {
+        }) => {
             let before = before.as_deref().map(parse_message_id).transpose()?;
             let limit = parse_optional_int(limit.as_deref(), search::DEFAULT_LIMIT, MAX_LIMIT)?;
+            // With --all there is no channel, so the one positional argument is the words.
+            let (channel, text) = match (all, channel, text) {
+                (true, _, Some(_)) => {
+                    return Err(CliError::usage(
+                        "With --all, leave the channel out: msn search --all 'words'.",
+                    ));
+                }
+                (true, words, None) => (None, words),
+                (false, Some(channel), text) => (Some(channel), text),
+                (false, None, _) => {
+                    return Err(CliError::usage(
+                        "Name a channel to search, or use --all for every board.",
+                    ));
+                }
+            };
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
-            let channel = slug(&channel)?;
-            let path = search::path(
-                &tenant,
-                channel,
-                &search::Search {
-                    text: text.as_deref(),
-                    from: from.as_deref(),
-                    kind: kind.as_deref(),
-                    labels: &filters,
-                    before,
-                    limit,
-                },
-            )?;
-            finish(&MsnClient::new(&url)?.get(&path, Some(&token))?)
+            let query = search::Search {
+                text: text.as_deref(),
+                from: from.as_deref(),
+                kind: kind.as_deref(),
+                labels: &filters,
+                before,
+                limit,
+            };
+            match channel {
+                Some(channel) => {
+                    let path = search::path(&tenant, slug(&channel)?, &query)?;
+                    finish(&MsnClient::new(&url)?.get(&path, Some(&token))?)
+                }
+                None => {
+                    let path = search::path_all(&tenant, &query, archived)?;
+                    let answer = agent::fetch_json(&MsnClient::new(&url)?, &path, &token)?;
+                    agent::print_json(&search::with_links(&url, &tenant, answer))
+                }
+            }
         }
         Command::Label {
             channel,

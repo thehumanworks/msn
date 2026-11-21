@@ -123,6 +123,8 @@ pub struct SearchState {
     pub error: Option<String>,
     /// A search has been asked for since the channel opened (or the view was cleared).
     pub active: bool,
+    /// The search covers every board the key can read (ADR 0073); results can be from any board.
+    pub all: bool,
 }
 
 #[derive(Debug, Default)]
@@ -948,6 +950,11 @@ impl AppState {
     /// Starts a new search of the selected channel. `input` is what the person typed; a
     /// `from:name` word becomes the sender filter. Empty input clears the view.
     pub fn search(&mut self, input: &str) -> Vec<Command> {
+        self.search_in(input, false)
+    }
+
+    /// As `search`; with `all`, every board the key can read is searched (ADR 0073).
+    pub fn search_in(&mut self, input: &str, all: bool) -> Vec<Command> {
         let (text, from) = msn_cli::search::split_from(input);
         let Some(state) = self.channel.as_mut() else {
             return Vec::new();
@@ -962,6 +969,7 @@ impl AppState {
             text,
             from,
             active: true,
+            all,
             ..SearchState::default()
         };
         self.search_command(None).into_iter().collect()
@@ -995,6 +1003,7 @@ impl AppState {
             text: search.text.clone(),
             from: search.from.clone(),
             before,
+            all: search.all,
         })
     }
 
@@ -2147,6 +2156,33 @@ mod tests {
         });
         assert!(!state.mutes_inflight);
         assert_eq!(state.status.as_deref(), Some("Mute: Offline"));
+    }
+
+    #[test]
+    fn search_of_every_board_keeps_the_choice_for_older_pages() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let query = match state.search_in("deploy", true).as_slice() {
+            [
+                Command::Search {
+                    query, all, before, ..
+                },
+            ] => {
+                assert!(*all && before.is_none());
+                *query
+            }
+            other => panic!("expected a search, got {other:?}"),
+        };
+        search_reply(&mut state, query, &[8, 5], true);
+        match state.search_older().as_slice() {
+            [Command::Search { all, before, .. }] => assert!(*all && *before == Some(5)),
+            other => panic!("expected an older page, got {other:?}"),
+        }
+        // A plain search afterwards is one board again.
+        match state.search("deploy").as_slice() {
+            [Command::Search { all, .. }] => assert!(!*all),
+            other => panic!("expected a search, got {other:?}"),
+        }
     }
 
     #[test]

@@ -330,6 +330,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
     "invite-channel",
     "tasks",
     "search",
+    "search-all",
     "search-submit",
   ])
     $(id).disabled = true;
@@ -535,6 +536,20 @@ function appendMessage(message, target = $("messages")) {
   const label = document.createElement("span");
   label.textContent = `#${message.id}`;
   label.title = `#${message.channel} · message ${message.id}`;
+  // A hit from "All boards" (ADR 0073) names its board first; pressing it opens the message there.
+  // A hit on another board shows what it has, but its links act on that board, not this one.
+  const hit = target === $("search-results") && Boolean(searchState?.all);
+  const elsewhere = hit && message.channel !== channel;
+  if (hit) {
+    const board = document.createElement("button");
+    board.type = "button";
+    board.className = "quiet search-board";
+    board.textContent = `#${message.channel}`;
+    board.title = `Open message #${message.id} on board #${message.channel}`;
+    board.setAttribute("aria-label", `Open message #${message.id} on board ${message.channel}`);
+    board.addEventListener("click", () => void openLink({ channel: message.channel, id: message.id }));
+    meta.append(board);
+  }
   meta.append(name, time);
   if (message.editedAt) meta.append(editedMark(message));
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
@@ -652,7 +667,11 @@ function appendMessage(message, target = $("messages")) {
       link.className = "reply-link";
       link.textContent = `#${message.replyTo}`;
       link.title = `Show message #${message.replyTo}, the one this replies to`;
-      link.addEventListener("click", () => showParent(message, article));
+      link.addEventListener("click", () =>
+        elsewhere
+          ? void openLink({ channel: message.channel, id: message.replyTo })
+          : showParent(message, article),
+      );
       annotation.append(`${label}: `, link);
     } else if (field === "to") {
       // Several names (ADR 0067) show in the order they were given.
@@ -662,8 +681,10 @@ function appendMessage(message, target = $("messages")) {
     article.append(annotation);
   }
   // Replace an instruction (ADR 0068): each end links to the other, and the old one is dimmed.
-  if (Number.isSafeInteger(message.replaces)) article.append(replaceLink("Replaces", message.replaces));
-  if (Number.isSafeInteger(message.replacedBy)) markReplaced(article, message.replacedBy);
+  const elsewhereBoard = elsewhere ? message.channel : null;
+  if (Number.isSafeInteger(message.replaces))
+    article.append(replaceLink("Replaces", message.replaces, elsewhereBoard));
+  if (Number.isSafeInteger(message.replacedBy)) markReplaced(article, message.replacedBy, elsewhereBoard);
   // Take a request (ADR 0075): who is handling this, and the button to take or release it.
   fillClaim(article, message, target === $("messages"));
   // The quoted part of the replyTo message (ADR 0059). Plain text; pressing it shows the source.
@@ -677,7 +698,11 @@ function appendMessage(message, target = $("messages")) {
     source.textContent = message.quote;
     source.title = `Quoted from message #${message.replyTo}. Show it`;
     source.setAttribute("aria-label", `Quote from message #${message.replyTo}: ${message.quote}`);
-    source.addEventListener("click", () => showParent(message, article));
+    source.addEventListener("click", () =>
+      elsewhere
+        ? void openLink({ channel: message.channel, id: message.replyTo })
+        : showParent(message, article),
+    );
     block.append(source);
     article.append(block);
   }
@@ -702,8 +727,14 @@ function appendMessage(message, target = $("messages")) {
       chip.type = "button";
       chip.className = "label-chip";
       chip.textContent = `${key}=${value}`;
-      chip.title = `Show messages in this channel with ${key}=${value}`;
-      chip.addEventListener("click", () => showLabel(key, value));
+      // The label list is this board's; a hit from another board shows its labels as text.
+      if (elsewhere) {
+        chip.disabled = true;
+        chip.title = `Label on board #${message.channel}`;
+      } else {
+        chip.title = `Show messages in this channel with ${key}=${value}`;
+        chip.addEventListener("click", () => showLabel(key, value));
+      }
       row.append(chip);
     }
     article.append(row);
@@ -1003,7 +1034,8 @@ function canEdit(message) {
 }
 
 /** "Replaces: #N" or "Replaced by: #N", where #N shows that message. */
-function replaceLink(label, id) {
+/** `board` is set for a search hit from another board: the link then opens the message there. */
+function replaceLink(label, id, board = null) {
   const annotation = document.createElement("div");
   annotation.className = "message-annotation";
   const link = document.createElement("button");
@@ -1011,19 +1043,19 @@ function replaceLink(label, id) {
   link.className = "reply-link";
   link.textContent = `#${id}`;
   link.title = `Show message #${id}`;
-  link.addEventListener("click", () => showMessage(id));
+  link.addEventListener("click", () => (board ? void openLink({ channel: board, id }) : showMessage(id)));
   annotation.append(`${label}: `, link);
   return annotation;
 }
 
 /** Marks one row as replaced by message `id` (ADR 0068): a note under its header, no Replace. */
-function markReplaced(article, id) {
+function markReplaced(article, id, board = null) {
   article.classList.add("replaced");
   article.querySelector(":scope > .message-meta .message-replace")?.remove();
   // A replaced message cannot be taken (ADR 0075); a claim made earlier stays shown.
   article.querySelector(":scope > .message-meta .claim-button")?.remove();
   if (article.querySelector(":scope > .replaced-note")) return;
-  const note = replaceLink("Replaced by", id);
+  const note = replaceLink("Replaced by", id, board);
   note.classList.add("replaced-note");
   article.querySelector(":scope > .message-meta").after(note);
 }
@@ -1652,26 +1684,32 @@ async function runSearch(older = false) {
   const { q, from } = older && searchState ? searchState : parseSearch($("search").value);
   if (!q && !from) return clearSearch();
   if (!older) {
-    searchState = { q, from, count: 0, before: null };
+    // All boards (ADR 0073): one request for every board this key can read. The server picks the
+    // boards from the key. Archived boards are searched only while the board list shows them.
+    const all = $("search-all").checked && !$("search-all-label").hidden;
+    searchState = { q, from, count: 0, before: null, all, archived: all && $("show-archived").checked };
     $("search-results").replaceChildren();
   }
+  const { all, archived } = searchState;
   const describe = [q && `“${q}”`, from && `from ${from}`].filter(Boolean).join(" ");
+  const where = all ? " on all boards" : "";
   $("search-panel").hidden = false;
   $("search-older").hidden = true;
-  $("search-title").textContent = `Searching for ${describe}…`;
+  $("search-title").textContent = `Searching${where} for ${describe}…`;
   const params = new URLSearchParams({ limit: "20" });
   if (q) params.set("q", q);
   if (from) params.set("from", from);
   if (older && searchState.before) params.set("before", String(searchState.before));
+  if (archived) params.set("include", "archived");
   try {
-    const data = await api(`/channels/${channel}/search?${params}`);
+    const data = await api(all ? `/search?${params}` : `/channels/${channel}/search?${params}`);
     if (query !== searchQuery) return;
     for (const message of data.messages) appendMessage(message, $("search-results"));
     searchState.count += data.messages.length;
     searchState.before = data.nextBefore ?? null;
     const count = searchState.count;
     $("search-title").textContent =
-      `${count}${data.hasMore ? "+" : ""} message${count === 1 ? "" : "s"} matching ${describe}, newest first` +
+      `${count}${data.hasMore ? "+" : ""} message${count === 1 ? "" : "s"}${where} matching ${describe}, newest first` +
       (data.complete ? "" : " · older messages are still being indexed");
     $("search-older").hidden = !data.hasMore;
   } catch (error) {
@@ -2364,6 +2402,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("download").disabled = false;
   showMute(name);
   $("search").disabled = false;
+  $("search-all").disabled = false;
   $("search-submit").disabled = false;
   savePosition();
   stopPolling();
@@ -2572,6 +2611,10 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
       note = `Display name · your access key requires the prefix “${identity.usernamePrefix}”`;
     }
     connection.sharedChannel = identity.sharedChannel === true;
+    // A key for one board (a shared board key or an invitation) reads only that board, so "All
+    // boards" would be the same search; the choice is hidden (ADR 0073).
+    $("search-all-label").hidden = typeof identity.channel === "string";
+    $("search-all").checked = false;
     // Watch-only keys (ADR 0039) read live; the server refuses every write, so hide the controls.
     connection.watchOnly = identity.watchOnly === true;
     $("workspace").classList.toggle("watching", connection.watchOnly);
@@ -3299,6 +3342,10 @@ $("label-filter-clear").addEventListener("click", clearLabel);
 $("search-form").addEventListener("submit", (event) => {
   event.preventDefault();
   void runSearch();
+});
+// Changing the choice re-runs a search that is showing, so the list always matches the box.
+$("search-all").addEventListener("change", () => {
+  if (!$("search-panel").hidden) void runSearch();
 });
 $("search-clear").addEventListener("click", () => {
   $("search").value = "";

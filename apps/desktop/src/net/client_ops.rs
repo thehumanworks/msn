@@ -930,8 +930,11 @@ pub struct SearchPage {
     pub complete: bool,
 }
 
-/// Searches one channel by words and an optional sender; checks every result's workspace and
-/// channel so a confused server cannot place another board's message in this view.
+/// Searches by words and an optional sender. With `all` false it searches one channel and checks
+/// every result's workspace and channel, so a confused server cannot place another board's
+/// message in this view. With `all` true it searches every board the key can read (ADR 0073);
+/// the server picks the boards from the key, and every result must name a board of this workspace.
+#[allow(clippy::too_many_arguments)]
 pub fn search_messages(
     client: &MsnClient,
     tenant: &str,
@@ -940,39 +943,45 @@ pub fn search_messages(
     text: &str,
     from: Option<&str>,
     before: Option<u64>,
+    all: bool,
 ) -> Result<SearchPage, CliError> {
     slug(tenant)?;
     slug(channel)?;
     let text = (!text.trim().is_empty()).then_some(text);
-    let path = msn_cli::search::path(
-        tenant,
-        channel,
-        &msn_cli::search::Search {
-            text,
-            from,
-            before,
-            limit: msn_cli::search::DEFAULT_LIMIT,
-            ..Default::default()
-        },
-    )?;
+    let search = msn_cli::search::Search {
+        text,
+        from,
+        before,
+        limit: msn_cli::search::DEFAULT_LIMIT,
+        ..Default::default()
+    };
+    let path = if all {
+        msn_cli::search::path_all(tenant, &search, false)?
+    } else {
+        msn_cli::search::path(tenant, channel, &search)?
+    };
     let value = get_json(client, &path, token)?;
-    parse_search_page(&value, tenant, channel)
+    parse_search_page(&value, tenant, (!all).then_some(channel))
 }
 
+/// `channel` is the one board every result must be on, or `None` for a search of every board,
+/// where each result must name some board (a valid slug) of this workspace.
 pub fn parse_search_page(
     value: &Value,
     tenant: &str,
-    channel: &str,
+    channel: Option<&str>,
 ) -> Result<SearchPage, CliError> {
     let invalid = || CliError::generic("Search response did not match this workspace and channel.");
     let messages = value["messages"].as_array().ok_or_else(invalid)?;
     let mut last = u64::MAX;
     for message in messages {
         let id = message["id"].as_u64().ok_or_else(invalid)?;
-        if id >= last
-            || message["channel"].as_str() != Some(channel)
-            || message["tenant"].as_str() != Some(tenant)
-        {
+        let board = message["channel"].as_str().ok_or_else(invalid)?;
+        let board_ok = match channel {
+            Some(channel) => board == channel,
+            None => slug(board).is_ok(),
+        };
+        if id >= last || !board_ok || message["tenant"].as_str() != Some(tenant) {
             return Err(invalid());
         }
         last = id;
@@ -1355,7 +1364,7 @@ mod tests {
         let page = parse_search_page(
             &json!({"messages": [message(9, "c"), message(4, "c")], "hasMore": true, "nextBefore": 4, "complete": false}),
             "t",
-            "c",
+            Some("c"),
         )
         .unwrap();
         assert_eq!(
@@ -1373,7 +1382,25 @@ mod tests {
             json!({"messages": [], "hasMore": true}),
             json!({"messages": "nope", "hasMore": false}),
         ] {
-            assert!(parse_search_page(&bad, "t", "c").is_err(), "{bad}");
+            assert!(parse_search_page(&bad, "t", Some("c")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_board_search_pages_may_mix_boards_of_this_workspace_only() {
+        let message = |id: u64, tenant: &str, channel: &str| json!({"id": id, "tenant": tenant, "channel": channel});
+        let mixed = json!({"messages": [message(9, "t", "ops"), message(4, "t", "c")], "hasMore": false, "complete": true});
+        let page = parse_search_page(&mixed, "t", None).unwrap();
+        assert_eq!(page.messages.len(), 2);
+        // The same page is refused where one board was asked for.
+        assert!(parse_search_page(&mixed, "t", Some("c")).is_err());
+        for bad in [
+            json!({"messages": [message(9, "other", "ops")], "hasMore": false}),
+            json!({"messages": [message(4, "t", "c"), message(9, "t", "ops")], "hasMore": false}),
+            json!({"messages": [message(9, "t", "Not A Slug")], "hasMore": false}),
+            json!({"messages": [{"id": 9, "tenant": "t"}], "hasMore": false}),
+        ] {
+            assert!(parse_search_page(&bad, "t", None).is_err(), "{bad}");
         }
     }
 

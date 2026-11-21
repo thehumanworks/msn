@@ -28,6 +28,10 @@ pub struct MsnDesktopApp {
     new_channel_name: String,
     active_tab: Tab,
     search_input: String,
+    /// The Search tab's "All boards" box (ADR 0073): search every board the key can read.
+    search_all: bool,
+    /// A search hit on another board being opened: shown once that board has loaded.
+    pending_hit: Option<(String, u64)>,
     /// A reply the chat should scroll to on its next frame (the "New reply in thread" pointer).
     scroll_to: Option<u64>,
     /// The Tasks tab card a dependency link showed, outlined; scrolled to once (ADR 0070).
@@ -214,6 +218,10 @@ enum Action {
     Reload,
     Search,
     SearchOlder,
+    /// Open a hit of an every-board search on its own board (ADR 0073).
+    OpenHit(String, u64),
+    /// Copy the link of a hit of an every-board search; the link names the hit's board.
+    CopyHitLink(String, u64),
     ToggleThread(u64),
     /// Show more / Show less on a long message (ADR 0050).
     ToggleFold(u64),
@@ -290,6 +298,8 @@ impl MsnDesktopApp {
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
             search_input: String::new(),
+            search_all: false,
+            pending_hit: None,
             scroll_to: None,
             task_focus: None,
             task_focus_scroll: false,
@@ -350,6 +360,27 @@ impl MsnDesktopApp {
     fn dispatch_all(&mut self, commands: Vec<Command>) {
         for command in commands {
             self.dispatch(command);
+        }
+    }
+
+    /// Shows a search hit opened on another board, once that board's messages have loaded.
+    fn show_pending_hit(&mut self) {
+        let Some((board, id)) = self.pending_hit.clone() else {
+            return;
+        };
+        if self.state.selected_channel.as_deref() != Some(board.as_str()) {
+            // The person chose another board meanwhile.
+            self.pending_hit = None;
+            return;
+        }
+        let Some(channel) = self.state.channel.as_ref().filter(|state| state.loaded) else {
+            return;
+        };
+        self.pending_hit = None;
+        if channel.messages.contains_key(&id) {
+            self.perform(Action::ShowQuoted(id));
+        } else {
+            self.state.status = Some(format!("Message #{id} is not loaded on #{board}."));
         }
     }
 
@@ -1576,13 +1607,27 @@ impl MsnDesktopApp {
                 actions.push(Action::Search);
             }
         });
+        // A key for one board lists one board; there is nothing more to search then.
+        if self.state.channels.len() > 1
+            && ui
+                .checkbox(&mut self.search_all, "All boards")
+                .on_hover_text("Search every board you can read, not only this one")
+                .changed()
+            && state.search.active
+        {
+            actions.push(Action::Search);
+        }
         ui.add_space(4.0);
         let search = &state.search;
         if let Some(error) = &search.error {
             ui.colored_label(theme::error(), error);
         }
         if !search.active {
-            ui.weak("Find earlier messages on this board by words or sender.");
+            ui.weak(if self.search_all {
+                "Find earlier messages on every board you can read, by words or sender."
+            } else {
+                "Find earlier messages on this board by words or sender."
+            });
             return;
         }
         ui.horizontal(|ui| {
@@ -1613,12 +1658,16 @@ impl MsnDesktopApp {
             .show(ui, |ui| {
                 // Search hits show in full: the match may be below the fold (ADR 0050).
                 for message in &search.results {
-                    let viewer = Viewer {
-                        me: &me,
-                        can_post,
-                        owner: false,
-                    };
-                    render_message(ui, message, viewer, None, actions);
+                    if search.all {
+                        render_hit(ui, message, &me, actions);
+                    } else {
+                        let viewer = Viewer {
+                            me: &me,
+                            can_post,
+                            owner: false,
+                        };
+                        render_message(ui, message, viewer, None, actions);
+                    }
                     ui.add_space(4.0);
                 }
                 if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
@@ -2097,8 +2146,37 @@ impl MsnDesktopApp {
                 }
             }
             Action::Search => {
-                let commands = self.state.search(&self.search_input);
+                let all = self.search_all && self.state.channels.len() > 1;
+                let commands = self.state.search_in(&self.search_input, all);
                 self.dispatch_all(commands);
+            }
+            Action::OpenHit(board, id) => {
+                if !self.state.channels.contains(&board) {
+                    self.state.status = Some(format!(
+                        "Board #{board} is not in your board list. Copy the link to open message #{id} in the web app."
+                    ));
+                    return;
+                }
+                self.active_tab = Tab::Chat;
+                if self.state.selected_channel.as_deref() == Some(board.as_str()) {
+                    self.perform(Action::ShowQuoted(id));
+                } else {
+                    self.perform(Action::Select(board.clone()));
+                    self.pending_hit = Some((board, id));
+                }
+            }
+            Action::CopyHitLink(board, id) => {
+                let link = self
+                    .link_origin
+                    .as_ref()
+                    .zip(self.state.connection.as_ref())
+                    .map(|(origin, connection)| {
+                        msn_cli::links::message_link(origin, &connection.tenant, &board, id)
+                    });
+                if let Some(link) = link {
+                    self.copied_link = Some(link);
+                    self.state.status = Some(format!("Link to message #{id} on #{board} copied."));
+                }
             }
             Action::SearchOlder => {
                 let commands = self.state.search_older();
@@ -2631,6 +2709,7 @@ impl MsnDesktopApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         theme::sync(ui.ctx());
         self.drain_events(ui.ctx());
+        self.show_pending_hit();
         if let Some(link) = self.copied_link.take() {
             ui.ctx().copy_text(link);
         }
@@ -2825,13 +2904,58 @@ fn pin_line(pin: &Value) -> String {
     format!("#{id} {name}: {line}")
 }
 
+/// One hit of an every-board search (ADR 0073): the board's name, which opens the message on
+/// that board, then the message. The message's own controls would act on the open board, so only
+/// its link is kept, and it names the hit's board.
+fn render_hit(ui: &mut egui::Ui, message: &Value, me: &str, actions: &mut Vec<Action>) {
+    let id = message["id"].as_u64().unwrap_or(0);
+    let board = message["channel"].as_str().unwrap_or("").to_string();
+    // egui 0.36 repeats ui.id() across rows; salt every hit's widgets with its message id.
+    ui.push_id(("search-hit", id), |ui| {
+        // The name sits on the side of its bubble: your own messages are on the right.
+        let side = if message["username"].as_str() == Some(me) {
+            egui::Align::Max
+        } else {
+            egui::Align::Min
+        };
+        let opened = ui
+            .with_layout(egui::Layout::top_down(side), |ui| {
+                ui.link(egui::RichText::new(format!("#{board}")).small().strong())
+                    .on_hover_text(format!("Open message #{id} on board #{board}"))
+                    .clicked()
+            })
+            .inner;
+        if opened {
+            actions.push(Action::OpenHit(board.clone(), id));
+        }
+        let mut own = Vec::new();
+        let viewer = Viewer {
+            me,
+            can_post: false,
+            owner: false,
+        };
+        render_message(ui, message, viewer, None, &mut own);
+        for action in own {
+            match action {
+                Action::CopyLink(id) => actions.push(Action::CopyHitLink(board.clone(), id)),
+                // The quoted or replied-to message is on the hit's board: open the hit there.
+                Action::ShowQuoted(_) | Action::ShowReply(_) | Action::LoadParent(_) => {
+                    actions.push(Action::OpenHit(board.clone(), id));
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 /// "3 messages matching “deploy” from ada, newest first", as the web app words it.
 fn search_summary(search: &SearchState) -> String {
     let count = search.results.len();
     let mut summary = format!(
-        "{count}{} message{} matching",
+        "{count}{} message{}{} matching",
         if search.has_more { "+" } else { "" },
         if count == 1 { "" } else { "s" },
+        if search.all { " on all boards" } else { "" },
     );
     if !search.text.is_empty() {
         summary.push_str(&format!(" \u{201c}{}\u{201d}", search.text));
@@ -4127,6 +4251,8 @@ mod layout_tests {
             new_channel_name: String::new(),
             active_tab: Tab::Chat,
             search_input: String::new(),
+            search_all: false,
+            pending_hit: None,
             scroll_to: None,
             task_focus: None,
             task_focus_scroll: false,
@@ -5310,6 +5436,111 @@ mod task_tab_tests {
             conflict_text("claim-conflict"),
             "claimed by more than one person"
         );
+    }
+
+    fn all_boards_search(app: &mut MsnDesktopApp) {
+        app.active_tab = Tab::Search;
+        app.search_all = true;
+        app.state.channel.as_mut().unwrap().search = SearchState {
+            query: 1,
+            text: "rollout".into(),
+            active: true,
+            all: true,
+            complete: true,
+            results: vec![
+                json!({"id": 9, "channel": "design", "tenant": "design-studio", "username": "Jamie",
+                    "text": "rollout approved", "replyTo": 7, "quote": "ship it",
+                    "createdAt": "2026-09-20T14:00:00Z"}),
+                json!({"id": 6, "channel": "general", "tenant": "design-studio", "username": "Alex",
+                    "text": "rollout notes", "createdAt": "2026-09-20T14:00:00Z"}),
+            ],
+            ..SearchState::default()
+        };
+    }
+
+    #[test]
+    fn all_boards_hits_draw_without_id_clashes_and_say_so_in_the_summary() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(8);
+        all_boards_search(&mut app);
+        assert_eq!(
+            search_summary(&app.state.channel.as_ref().unwrap().search),
+            "2 messages on all boards matching \u{201c}rollout\u{201d}, newest first"
+        );
+        for _ in 0..2 {
+            let mut actions = Vec::new();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.search_tab(ui, &mut actions)
+            });
+            output.textures_delta.clear();
+            assert!(actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_hit_on_another_board_opens_that_board_and_then_shows_the_message() {
+        let mut app = fixture(8);
+        all_boards_search(&mut app);
+        // A hit on the open board shows at once.
+        app.perform(Action::OpenHit("general".into(), 6));
+        assert!(app.active_tab == Tab::Chat);
+        assert_eq!(app.scroll_to, Some(6));
+        assert_eq!(app.pending_hit, None);
+        // A hit on another board selects it and waits for its messages.
+        app.scroll_to = None;
+        app.perform(Action::OpenHit("design".into(), 9));
+        assert_eq!(app.state.selected_channel.as_deref(), Some("design"));
+        assert_eq!(app.pending_hit, Some(("design".to_string(), 9)));
+        app.show_pending_hit();
+        assert_eq!(app.scroll_to, None, "the board has not loaded yet");
+        let channel = app.state.channel.as_mut().unwrap();
+        channel.loaded = true;
+        channel.messages.insert(
+            9,
+            json!({"id": 9, "username": "Jamie", "text": "rollout approved",
+                "createdAt": "2026-09-20T14:00:00Z"}),
+        );
+        app.show_pending_hit();
+        assert_eq!(app.scroll_to, Some(9));
+        assert_eq!(app.selected, Some(9));
+        assert_eq!(app.pending_hit, None);
+        // A board that is not listed is not opened.
+        app.perform(Action::OpenHit("gone".into(), 1));
+        assert_eq!(app.state.selected_channel.as_deref(), Some("design"));
+        assert!(app.state.status.as_deref().unwrap().contains("#gone"));
+        // Choosing another board before the hit's board loads drops the wait.
+        app.perform(Action::OpenHit("general".into(), 6));
+        assert_eq!(app.pending_hit, Some(("general".to_string(), 6)));
+        app.perform(Action::Select("design".into()));
+        app.show_pending_hit();
+        assert_eq!(app.pending_hit, None);
+    }
+
+    #[test]
+    fn a_hit_link_names_the_hit_board_not_the_open_one() {
+        let mut app = fixture(8);
+        app.link_origin = Some(url::Url::parse("https://msn.example").unwrap());
+        app.perform(Action::CopyHitLink("design".into(), 9));
+        assert_eq!(
+            app.copied_link.as_deref(),
+            Some("https://msn.example/#board=design-studio/design&msg=9")
+        );
+    }
+
+    #[test]
+    fn the_all_boards_box_decides_what_a_search_asks_for() {
+        let mut app = fixture(8);
+        app.search_input = "rollout".into();
+        app.perform(Action::Search);
+        assert!(!app.state.channel.as_ref().unwrap().search.all);
+        app.search_all = true;
+        app.perform(Action::Search);
+        assert!(app.state.channel.as_ref().unwrap().search.all);
+        // A key that lists one board has no other board to search.
+        app.state.channels = vec!["general".into()];
+        app.perform(Action::Search);
+        assert!(!app.state.channel.as_ref().unwrap().search.all);
     }
 
     #[test]
