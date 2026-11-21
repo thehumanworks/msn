@@ -1264,6 +1264,55 @@ function showPins(state) {
     );
 }
 
+// Agent status (ADR 0064): one line each name says about what it is doing, with the time it was
+// set. Shown exactly as said (textContent only) and never inferred from silence.
+const STATUS_REFRESH_MS = 15_000;
+function showStatuses(state) {
+  const statuses = state?.statuses ?? [];
+  $("statuses").hidden = !statuses.length;
+  $("statuses-title").textContent = `Agent status · ${statuses.length}`;
+  $("statuses-list").replaceChildren(...statuses.map((entry) => statusRow(entry.name, entry)));
+}
+
+/** One "name · status · 3 min ago" line; untrusted text goes in through textContent only. */
+function statusRow(name, status, tag = "li") {
+  const row = document.createElement(tag);
+  row.className = "status-row";
+  const who = document.createElement("strong");
+  who.textContent = name;
+  const said = document.createElement("span");
+  said.className = "status-text";
+  said.textContent = status.text;
+  const when = document.createElement("time");
+  when.dateTime = status.setAt;
+  when.textContent = ago(status.setAt);
+  when.title = `Set ${formatTime(status.setAt)}`;
+  row.append(who, said, when);
+  return row;
+}
+
+// A quiet board's long poll can hold for 25 s, so statuses also refresh on their own clock while
+// the page is visible. One small read per board every 15 s; nothing while hidden.
+setInterval(() => {
+  const state = session?.channels.get(channel);
+  if (!state || document.hidden) return;
+  if (Date.now() - (state.statusesAt ?? 0) > STATUS_REFRESH_MS) void loadStatuses(session, channel);
+}, 5000);
+
+/** Reads the board's statuses. Failure keeps what is shown, like pins. */
+async function loadStatuses(connection = session, name = channel) {
+  const state = connection?.channels.get(name);
+  if (!state) return;
+  state.statusesAt = Date.now();
+  try {
+    const data = await api(`/channels/${name}/statuses`, {}, connection);
+    state.statuses = data.statuses;
+  } catch {
+    return;
+  }
+  if (session === connection && channel === name) showStatuses(state);
+}
+
 /** Reads the board's pins. Failure keeps what is shown: pins are a convenience, not the log. */
 async function loadPins(connection = session, name = channel) {
   const state = connection?.channels.get(name);
@@ -1913,6 +1962,8 @@ async function poll(live = false) {
       state.hasMore = data.hasMore;
       // Another device may pin or unpin; pins send no message, so refresh them now and then.
       if (Date.now() - (state.pinsAt ?? 0) > PIN_REFRESH_MS) void loadPins(connection, selected);
+      // Statuses send no message either (ADR 0064).
+      if (Date.now() - (state.statusesAt ?? 0) > STATUS_REFRESH_MS) void loadStatuses(connection, selected);
       // Reactions send no message either (ADR 0047).
       if (Date.now() - (state.reactionsAt ?? 0) > REACTION_REFRESH_MS)
         void loadReactions(connection, selected, state);
@@ -2022,6 +2073,8 @@ function selectChannel(name, { reset = false } = {}) {
   showCheckpoint(state);
   showPins(state);
   void loadPins(session, name);
+  showStatuses(state);
+  void loadStatuses(session, name);
   void loadReactions(session, name, state);
   void loadEdits(session, name, state);
   // Capture where the reader stopped before this visit's own reading moves the mark.
@@ -3296,12 +3349,14 @@ async function showAgents() {
   const connection = session;
   const target = agentsChannel;
   try {
-    const [{ personas }, hooks] = await Promise.all([
+    const [{ personas }, hooks, said] = await Promise.all([
       api(`/channels/${target}/personas`, {}, connection),
       // Webhooks are the owner's to see and set (ADR 0062); a failed read only hides them.
       connection.owner
         ? api(`/channels/${target}/webhooks`, {}, connection).catch(() => null)
         : Promise.resolve(null),
+      // Names that are not personas can have a status too (ADR 0064); a failed read hides them.
+      api(`/channels/${target}/statuses`, {}, connection).catch(() => null),
     ]);
     const cached = connection.channels.get(target);
     if (cached) cached.personas = personas;
@@ -3309,7 +3364,10 @@ async function showAgents() {
     const webhooks = new Map((hooks?.webhooks ?? []).map((hook) => [hook.persona, hook]));
     const list = $("agents-list");
     list.replaceChildren();
-    if (!personas.length) {
+    const others = (said?.statuses ?? []).filter(
+      (entry) => !personas.some((persona) => persona.displayName === entry.name),
+    );
+    if (!personas.length && !others.length) {
       const empty = document.createElement("li");
       empty.className = "agents-empty";
       empty.textContent = "No personas on this board yet.";
@@ -3332,6 +3390,12 @@ async function showAgents() {
       const acted = persona.lastActedAt ? `last acted ${ago(persona.lastActedAt)}` : "no messages yet";
       detail.textContent = `${heard} · ${acted}`;
       row.append(dot, name, detail);
+      if (persona.status) {
+        const line = statusRow(persona.displayName, persona.status, "small");
+        line.classList.add("agents-status");
+        line.querySelector("strong").remove();
+        row.append(line);
+      }
       if (hooks) {
         const hook = webhooks.get(persona.id) ?? null;
         const wake = document.createElement("small");
@@ -3345,6 +3409,22 @@ async function showAgents() {
         button.addEventListener("click", () => openWebhook(target, persona, hook));
         row.append(wake, button);
       }
+      list.append(row);
+    }
+    for (const entry of others) {
+      const row = document.createElement("li");
+      row.className = "idle";
+      const dot = document.createElement("span");
+      dot.className = "presence-dot";
+      dot.setAttribute("aria-hidden", "true");
+      const name = document.createElement("strong");
+      name.textContent = entry.name;
+      const detail = document.createElement("small");
+      detail.textContent = "Not a board persona";
+      const line = statusRow(entry.name, entry, "small");
+      line.classList.add("agents-status");
+      line.querySelector("strong").remove();
+      row.append(dot, name, detail, line);
       list.append(row);
     }
     $("agents-title").textContent = `Agents in # ${target}`;

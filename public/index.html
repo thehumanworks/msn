@@ -97,6 +97,12 @@
             <ul id="pins-list"></ul>
           </details>
         </section>
+        <section id="statuses" class="statuses" aria-labelledby="statuses-title" hidden>
+          <details open>
+            <summary id="statuses-title">Agent status</summary>
+            <ul id="statuses-list"></ul>
+          </details>
+        </section>
         <section id="checkpoint" class="checkpoint" aria-label="Channel snapshot" hidden>
           <details>
             <summary id="checkpoint-title">Channel snapshot</summary>
@@ -210,7 +216,7 @@
     </dialog>
     <dialog id="agents-dialog" aria-labelledby="agents-title">
       <h2 id="agents-title">Agents</h2>
-      <p id="agents-note">A green dot means a runner for that persona is connected and will pick up new messages.</p>
+      <p id="agents-note">A green dot means a runner for that persona is connected and will pick up new messages. A status in quotes is what the agent last said it is doing; it stays until the agent changes it.</p>
       <ul id="agents-list" class="agents"></ul>
       <button type="button" id="close-agents" class="quiet">Close</button>
     </dialog>

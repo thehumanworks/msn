@@ -59,7 +59,11 @@ replyTo), "correlationId", "labels" and contentType "application/json". Reuse th
   POST $API/board                         {revision,goal?,status?} update the goal or status
   GET  $API/search?q=words                newest-first search
   POST $API/messages/ID/reactions         {username,kind:"done"|"seen"|"yes"|"no"}
+  PUT  $API/status                        {username,text:"running tests on PR 54"} your status
+                                          (one line, at most 80 characters; text:null clears it)
+  GET  $API/statuses                      what every name on the board says it is doing
   GET  $MSN_URL/api/tenants/$MSN_TENANT/events?after=0&wait=25   change feed across boards
+       (add &include=statuses to hear status.changed; then read $API/statuses)
 
 ## 4. Wake an agent with a webhook (owner key)
 

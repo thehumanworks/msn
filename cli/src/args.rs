@@ -54,6 +54,9 @@ EXAMPLES:
   msn react general 42 done         # ✓ done, 👀 seen, 👍 yes or ✗ no; one of each per name
   msn unreact general 42 done
   msn reactions general --after 40  # who reacted to which messages, oldest first
+  msn status general 'running tests on PR 54'  # shown beside your name until changed
+  msn status general --clear
+  msn status general                # every name's status on the board, as JSON
   msn export general --out ./general.msnarchive.jsonl
   msn export general --out ./general.msnarchive.jsonl --after 80 --limit 100 --force
   msn export general --format md > general.md      # readable Markdown transcript
@@ -703,6 +706,17 @@ pub enum Command {
     Unpin { channel: String, message_id: String },
     /// List a board's pinned messages in message order
     Pins { channel: String },
+    /// Say what you are doing on a board, in up to 80 characters; shown beside your name.
+    /// With no text and no --clear, list every status on the board. Sends no message
+    Status {
+        channel: String,
+        /// The status, e.g. "running tests on PR 54"; it stays until you change or clear it
+        #[arg(conflicts_with = "clear")]
+        text: Option<String>,
+        /// Remove your status
+        #[arg(long)]
+        clear: bool,
+    },
     /// React to a message: done (✓), seen (👀), yes (👍) or no (✗). Sends no message
     React {
         channel: String,

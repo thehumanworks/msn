@@ -56,6 +56,7 @@ import {
   sha256,
   slug,
   snapshotInteger,
+  statusChange,
   text,
 } from "./http";
 import {
@@ -205,7 +206,12 @@ const MAX_SNAPSHOTS = 1000;
 export const MAX_EDITS = 100000;
 /** Edited earlier messages returned by one catch-up page (ADR 0052). */
 const CATCHUP_EDITS = 20;
-const MAX_EVENTS = MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES + MAX_EDITS;
+/** Lifetime agent status changes per workspace (ADR 0064); each writes one `status.changed` event. */
+export const MAX_STATUS_CHANGES = 100000;
+/** Names with a status on one board at a time (ADR 0064). */
+export const MAX_STATUSES = 200;
+const MAX_EVENTS =
+  MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES + MAX_EDITS + MAX_STATUS_CHANGES;
 const SNAPSHOT_COLUMNS =
   "channel, version, username, text, coversThrough, historyRevision, createdAt, invalidated";
 type SnapshotRow = {
@@ -229,7 +235,8 @@ export type EventType =
   | "message.deleted"
   | "message.labeled"
   | "message.edited"
-  | "snapshot.published";
+  | "snapshot.published"
+  | "status.changed";
 export type CoordinationEvent = {
   id: number;
   tenant: string;
@@ -249,8 +256,8 @@ type EventRow = {
 };
 const EVENT_COLUMNS = "id, channel, type, resourceId, historyRevision, createdAt";
 /** Event types a client opted in to; older decoders reject types they do not know. */
-type EventInclude = { labels: boolean; edits: boolean };
-const NO_EXTRA_EVENTS: EventInclude = { labels: false, edits: false };
+type EventInclude = { labels: boolean; edits: boolean; statuses?: boolean };
+const NO_EXTRA_EVENTS: EventInclude = { labels: false, edits: false, statuses: false };
 function toEvent(row: EventRow, tenant: string): CoordinationEvent {
   return { ...row, tenant };
 }
@@ -492,6 +499,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
         CREATE INDEX IF NOT EXISTS webhook_notices_due ON webhook_notices(nextAttemptMs);
         CREATE INDEX IF NOT EXISTS webhook_notices_hook ON webhook_notices(channel, personaId);
+        -- Agent status (ADR 0064): what each name says it is doing, per board. A new table with no
+        -- version step, so it is safe in any merge order. seq orders changes across the workspace.
+        CREATE TABLE IF NOT EXISTS agent_status (
+          channel TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL, setAt TEXT NOT NULL,
+          seq INTEGER NOT NULL, PRIMARY KEY(channel, name)
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -531,6 +544,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         ["usage", "edits", "INTEGER NOT NULL DEFAULT 0"],
         // Quotes in replies (ADR 0059): NULL quotes nothing. Additive, so no schema_version step.
         ["messages", "quote", "TEXT"],
+        // Agent status changes (ADR 0064), for the workspace cap and as the status sequence. The
+        // table is new with it, so 0 is exact. Additive, so no schema_version step.
+        ["usage", "statusChanges", "INTEGER NOT NULL DEFAULT 0"],
       ]) {
         if (
           !ctx.storage.sql
@@ -978,11 +994,15 @@ export class MsnDurableObject extends DurableObject<Env> {
         createdAt: string;
         lastListeningAt: string | null;
         lastActedAt: string | null;
+        statusText: string | null;
+        statusSetAt: string | null;
       }>(
-        `SELECT p.id, p.displayName, p.createdAt, pp.lastListeningAt,
+        `SELECT p.id, p.displayName, p.createdAt, pp.lastListeningAt, s.text AS statusText,
+           s.setAt AS statusSetAt,
            (SELECT m.createdAt FROM messages m WHERE m.channel=p.channel AND m.personaId=p.id AND m.deleted=0
             ORDER BY m.id DESC LIMIT 1) AS lastActedAt
          FROM personas p LEFT JOIN persona_presence pp ON pp.channel=p.channel AND pp.personaId=p.id
+         LEFT JOIN agent_status s ON s.channel=p.channel AND s.name=p.displayName
          WHERE p.channel=? ORDER BY p.createdAt, p.id`,
         channel,
       )
@@ -999,8 +1019,131 @@ export class MsnDurableObject extends DurableObject<Env> {
           listening: seen !== null && now - seen < LISTENING_GRACE_MS,
           lastListeningAt: last < 0 ? null : new Date(last).toISOString(),
           lastActedAt: row.lastActedAt,
+          // What the agent last said it is doing (ADR 0064); never inferred.
+          status: row.statusText === null ? null : { text: row.statusText, setAt: row.statusSetAt as string },
         };
       });
+  }
+
+  /**
+   * Agent status (ADR 0064). `GET …/statuses` lists every name's status on the board.
+   * `PUT …/status {username, text}` sets one (text null clears it); `DELETE …/status?username=`
+   * clears one. Names follow the send rules: a bound key sets only its own name, and a board's
+   * shared credential only a registered persona. A change writes one metadata-only
+   * `status.changed` event; the same text again changes nothing.
+   */
+  private async statusRoute(
+    request: Request,
+    url: URL,
+    channel: string,
+    kind: string,
+    hash: string,
+  ): Promise<Response> {
+    if (kind === "statuses") {
+      if (request.method !== "GET")
+        throw new HttpError(404, "route_not_found", "Use GET …/statuses, or PUT or DELETE …/status.");
+      const capability = this.authorize(hash);
+      this.requireScope(capability, channel);
+      this.requireChannel(channel);
+      return json({ channel, statuses: this.statuses(channel), statusSeq: this.statusSeq() });
+    }
+    let change: { username: string; text: string | null };
+    if (request.method === "PUT") change = statusChange(await body(request));
+    else if (request.method === "DELETE")
+      change = { username: text(url.searchParams.get("username") ?? undefined, "username", 128), text: null };
+    else throw new HttpError(404, "route_not_found", "Use PUT to set a status and DELETE to clear it.");
+    const capability = this.authorize(hash);
+    // Scope first, so a key for another board learns nothing about this board's personas.
+    this.requireScope(capability, channel);
+    this.requireChannel(channel);
+    // The archive gate ran before the body was read; check again (ADR 0046).
+    this.requireActive(channel);
+    this.requireBoundName(capability, change.username);
+    if (change.username === GITHUB_SENDER)
+      throw new HttpError(403, "reserved_name", "The display name github is reserved for GitHub messages.");
+    if (
+      capability.shared_channel &&
+      !this.ctx.storage.sql
+        .exec("SELECT 1 FROM personas WHERE channel=? AND displayName=?", channel, change.username)
+        .toArray().length
+    )
+      throw new HttpError(
+        400,
+        "persona_required",
+        `Register this name as a board persona first: PUT …/channels/${channel}/personas/ID with {"displayName":${JSON.stringify(change.username)}} (CLI: msn persona add). Steps: GET /api.`,
+      );
+    const changed = this.ctx.storage.transactionSync(() => {
+      const current = this.ctx.storage.sql
+        .exec<{ text: string }>(
+          "SELECT text FROM agent_status WHERE channel = ? AND name = ?",
+          channel,
+          change.username,
+        )
+        .toArray()[0];
+      if ((current?.text ?? null) === change.text) return false;
+      if (current === undefined) {
+        const count = this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM agent_status WHERE channel = ?", channel)
+          .one().n;
+        if (count >= MAX_STATUSES)
+          throw new HttpError(
+            409,
+            "status_limit",
+            `At most ${MAX_STATUSES} names can have a status on one board. Clear some first.`,
+          );
+      }
+      const used = this.ctx.storage.sql
+        .exec<{ statusChanges: number }>("SELECT statusChanges FROM usage")
+        .one().statusChanges;
+      if (used >= MAX_STATUS_CHANGES)
+        throw new HttpError(
+          409,
+          "status_quota",
+          `This workspace has used all ${MAX_STATUS_CHANGES.toLocaleString("en-US")} status changes.`,
+        );
+      const seq = used + 1;
+      this.ctx.storage.sql.exec("UPDATE usage SET statusChanges = ? WHERE singleton = 1", seq);
+      if (change.text === null)
+        this.ctx.storage.sql.exec(
+          "DELETE FROM agent_status WHERE channel = ? AND name = ?",
+          channel,
+          change.username,
+        );
+      else
+        this.ctx.storage.sql.exec(
+          `INSERT INTO agent_status(channel, name, text, setAt, seq) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(channel, name) DO UPDATE SET text = excluded.text, setAt = excluded.setAt, seq = excluded.seq`,
+          channel,
+          change.username,
+          change.text,
+          new Date().toISOString(),
+          seq,
+        );
+      // Metadata only: the event names the change's sequence number, never the text.
+      this.insertEvent(channel, "status.changed", seq);
+      return true;
+    });
+    if (changed) this.wakeEvents(channel);
+    const status = this.statuses(channel).find((row) => row.name === change.username) ?? null;
+    return json({ channel, status, changed });
+  }
+
+  private statuses(channel: string) {
+    return this.ctx.storage.sql
+      .exec<{ name: string; text: string; setAt: string; seq: number; personaId: string | null }>(
+        `SELECT s.name, s.text, s.setAt, s.seq, p.id AS personaId FROM agent_status s
+         LEFT JOIN personas p ON p.channel = s.channel AND p.displayName = s.name
+         WHERE s.channel = ? ORDER BY s.setAt DESC, s.name`,
+        channel,
+      )
+      .toArray()
+      .map(({ personaId, ...row }) => (personaId === null ? row : { ...row, personaId }));
+  }
+
+  /** The workspace's status sequence: the `seq` of the newest change (ADR 0064). */
+  private statusSeq(): number {
+    return this.ctx.storage.sql.exec<{ statusChanges: number }>("SELECT statusChanges FROM usage").one()
+      .statusChanges;
   }
 
   /** A listener poll started or ended: update memory, and persist at most every few minutes. */
@@ -2114,6 +2257,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     const hidden = [
       ...(include.labels ? [] : ["'message.labeled'"]),
       ...(include.edits ? [] : ["'message.edited'"]),
+      ...(include.statuses ? [] : ["'status.changed'"]),
     ];
     const types = hidden.length ? ` AND type NOT IN (${hidden.join(", ")})` : "";
     const rows = (
@@ -4401,6 +4545,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           return await this.webhookRoute(request, url, slug(rest[1]), null, [], hash);
         if (rest[0] === "channels" && rest[1] && rest[2] === "personas" && rest[4] === "webhook")
           return await this.webhookRoute(request, url, slug(rest[1]), slug(rest[3]), rest.slice(5), hash);
+        if (
+          rest[0] === "channels" &&
+          rest[1] &&
+          ["status", "statuses"].includes(rest[2]) &&
+          rest.length === 3
+        )
+          return await this.statusRoute(request, url, slug(rest[1]), rest[2], hash);
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
           return await this.boardRoute(request, tenant, slug(rest[1]), rest.slice(2), hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.
@@ -4564,11 +4715,12 @@ export class MsnDurableObject extends DurableObject<Env> {
             .getAll("include")
             .flatMap((value) => value.split(","))
             .filter(Boolean);
-          if (include.some((value) => value !== "labels" && value !== "edits"))
-            throw new HttpError(400, "invalid_query", "include accepts labels and edits.");
+          if (include.some((value) => !["labels", "edits", "statuses"].includes(value)))
+            throw new HttpError(400, "invalid_query", "include accepts labels, edits and statuses.");
           return await this.eventPoll(request, hash, tenant, effectiveChannel, after, limit, wait, listener, {
             labels: include.includes("labels"),
             edits: include.includes("edits"),
+            statuses: include.includes("statuses"),
           });
         }
         if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")
