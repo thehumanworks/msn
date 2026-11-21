@@ -39,6 +39,10 @@ export type Message = {
   answered?: Answered;
   /** The exact name that may answer, resolved by the server when the question was asked. */
   answerer?: string;
+  /** Your earlier message this one replaces (ADR 0067). */
+  replaces?: number;
+  /** The newer message that replaced this one (ADR 0067); absent until replaced. */
+  replacedBy?: number;
 };
 
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */

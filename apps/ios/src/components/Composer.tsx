@@ -21,6 +21,9 @@ type Props = {
   channel: ChannelController;
   replyTo: Message | null;
   onClearReply: () => void;
+  /** Your message this one replaces (ADR 0067), or null for a new message. */
+  replacing?: Message | null;
+  onClearReplace?: () => void;
   bottomInset: number;
   /** A rejected message returned for editing; `n` changes each time so the same text can be restored twice. */
   restored: { draft: Draft; n: number } | null;
@@ -38,6 +41,8 @@ export function Composer({
   channel,
   replyTo,
   onClearReply,
+  replacing = null,
+  onClearReplace,
   bottomInset,
   restored,
   onSent,
@@ -125,8 +130,15 @@ export function Composer({
     setAsked(false);
   }, [channel.channel]);
 
+  // A replacement stays in the old message's thread, even when that thread's root is not loaded.
+  const thread = replyTo?.id ?? replacing?.replyTo;
   function send() {
-    const draft: Draft = { text, ...(to.trim() ? { to: to.trim() } : {}), ...(replyTo ? { replyTo: replyTo.id } : {}) };
+    const draft: Draft = {
+      text,
+      ...(to.trim() ? { to: to.trim() } : {}),
+      ...(thread ? { replyTo: thread } : {}),
+      ...(replacing ? { replaces: replacing.id } : {}),
+    };
     const result = channel.send(draft);
     if (!result.ok) return setError(result.error);
     setError(null);
@@ -140,11 +152,17 @@ export function Composer({
     setDismissed(-1);
     onSent?.(draft);
     onClearReply();
+    onClearReplace?.();
   }
 
   async function sendLater(sendAt: string | null) {
     if (!sendAt) return setError("Use a delay like 10m, 2h or 1d, or a time with a zone.");
-    const draft: Draft = { text, ...(to.trim() ? { to: to.trim() } : {}), ...(replyTo ? { replyTo: replyTo.id } : {}) };
+    const draft: Draft = {
+      text,
+      ...(to.trim() ? { to: to.trim() } : {}),
+      ...(thread ? { replyTo: thread } : {}),
+      ...(replacing ? { replaces: replacing.id } : {}),
+    };
     setScheduling(true);
     const failure = await channel.schedule(draft, sendAt);
     setScheduling(false);
@@ -169,6 +187,14 @@ export function Composer({
         <Text style={{ color: colors.muted, fontSize: 13 }} accessibilityLiveRegion="polite">
           {note}
         </Text>
+      ) : null}
+      {replacing ? (
+        <View style={styles.reply}>
+          <Text style={{ flex: 1, color: colors.accent, fontSize: 13 }} numberOfLines={1}>
+            Replacing #{replacing.id} · it stays, marked replaced
+          </Text>
+          <Button label="Cancel replace" variant="ghost" onPress={() => onClearReplace?.()} />
+        </View>
       ) : null}
       {replyTo ? (
         <View style={styles.reply}>

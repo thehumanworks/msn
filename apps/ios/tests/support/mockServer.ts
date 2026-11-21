@@ -41,6 +41,9 @@ type StoredMessage = {
   choices?: string[];
   answer?: string;
   answered?: { id: number; choice: string; username: string; answeredAt: string };
+  /** Replace an instruction (ADR 0067). */
+  replaces?: number;
+  replacedBy?: number;
 };
 
 type StoredSnapshot = { channel: string; version: number; text: string; coversThrough: number; invalidated: boolean };
@@ -175,10 +178,12 @@ export async function startMockServer(): Promise<MockServerHandle> {
       ...(m.choices ? { choices: m.choices } : {}),
       ...(m.answer ? { answer: m.answer } : {}),
       ...(m.answered ? { answered: m.answered } : {}),
+      ...(m.replaces ? { replaces: m.replaces } : {}),
+      ...(m.replacedBy ? { replacedBy: m.replacedBy } : {}),
     };
   }
 
-  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number; choices?: string[]; answer?: string } = {}): StoredMessage {
+  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number; choices?: string[]; answer?: string; replaces?: number } = {}): StoredMessage {
     ensureChannel(channel);
     messageId += 1;
     const stored: StoredMessage = {
@@ -351,7 +356,10 @@ export async function startMockServer(): Promise<MockServerHandle> {
             ...(body.replyTo ? { replyTo: Number(body.replyTo) } : {}),
             ...(Array.isArray(body.choices) ? { choices: body.choices.map(String) } : {}),
             ...(body.answer !== undefined ? { answer: String(body.answer) } : {}),
+            ...(body.replaces !== undefined ? { replaces: Number(body.replaces) } : {}),
           });
+          const replaced = stored.replaces ? messages.find((m) => m.id === stored.replaces) : undefined;
+          if (replaced) replaced.replacedBy = stored.id;
           if (question)
             question.answered = { id: stored.id, choice: String(body.answer), username: stored.username, answeredAt: stored.createdAt };
           return json(res, 201, { message: toMessage(stored), replayed: false });

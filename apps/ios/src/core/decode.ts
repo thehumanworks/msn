@@ -145,6 +145,15 @@ export function decodeMessage(raw: unknown): Message {
     if (typeof m.answerer !== "string") bad("message");
     message.answerer = m.answerer;
   }
+  // Replace an instruction (ADR 0067).
+  if (m.replaces !== undefined) {
+    if (!safeInt(m.replaces, 1)) bad("message");
+    message.replaces = m.replaces;
+  }
+  if (m.replacedBy !== undefined) {
+    if (!safeInt(m.replacedBy, 1)) bad("message");
+    message.replacedBy = m.replacedBy;
+  }
   return message;
 }
 

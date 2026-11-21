@@ -58,7 +58,8 @@ export type ChannelState = {
   scheduled: ScheduledMessage[];
 };
 
-export type Draft = { text: string; to?: string; replyTo?: number };
+/** `replaces` is your earlier message this one replaces (ADR 0067). */
+export type Draft = { text: string; to?: string; replyTo?: number; replaces?: number };
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;
@@ -177,7 +178,9 @@ export class ChannelController {
           const removed = this.byId.delete(event.resourceId);
           // Deleting an answer reopens its question (ADR 0065).
           const reopened = this.reopenQuestions(event.resourceId);
-          if (removed || reopened) this.publishMessages();
+          // Deleting a replacement makes the message it replaced current again (ADR 0067).
+          const current = this.unreplace(event.resourceId);
+          if (removed || reopened || current) this.publishMessages();
         }
         this.needReload = true; // a redaction also invalidates snapshots
         break;
@@ -413,6 +416,7 @@ export class ChannelController {
   /** Schedules a message to post at `sendAt` (ADR 0060). Resolves to an error message, or null. */
   async schedule(draft: Draft, sendAt: string): Promise<string | null> {
     if (!draft.text.trim()) return "Write the message first, then choose when to send it.";
+    if (draft.replaces !== undefined) return "A replacement cannot be scheduled. Send it now, or cancel the replace.";
     if (byteLength(draft.text) > MAX_TEXT_BYTES) return "Messages are limited to 16 KiB.";
     const to = draft.to?.trim() || undefined;
     const input = {
@@ -612,7 +616,24 @@ export class ChannelController {
     return changed;
   }
 
+  /** Clears `replacedBy` from loaded messages that `id` replaced. True when any changed. */
+  private unreplace(id: number): boolean {
+    let changed = false;
+    for (const message of this.byId.values()) {
+      if (message.replacedBy !== id) continue;
+      const { replacedBy: _gone, ...current } = message;
+      this.byId.set(message.id, current);
+      changed = true;
+    }
+    return changed;
+  }
+
   private publishMessages(): void {
+    // A replacement marks the loaded message it replaces (ADR 0067); one read later carries it.
+    for (const message of this.byId.values()) {
+      const old = message.replaces !== undefined ? this.byId.get(message.replaces) : undefined;
+      if (old && old.replacedBy === undefined) this.byId.set(old.id, { ...old, replacedBy: message.id });
+    }
     // An answer locks its loaded question (ADR 0065); a question read later carries `answered`.
     for (const message of this.byId.values()) {
       const answered = answeredBy(message);
@@ -645,6 +666,7 @@ export class ChannelController {
       text: draft.text,
       ...(to ? { to } : {}),
       ...(draft.replyTo ? { replyTo: draft.replyTo } : {}),
+      ...(draft.replaces ? { replaces: draft.replaces } : {}),
     };
     const pending = createPendingSend(input);
     const item: OutboxItem = { id: ++this.outboxSeq, key: pending.key, input, status: "queued", error: null };
@@ -672,7 +694,7 @@ export class ChannelController {
     const item = this.state.get().outbox.find((i) => i.id === id);
     if (!item || item.status !== "rejected") return null;
     this.discardSend(id);
-    return { text: item.input.text, to: item.input.to, replyTo: item.input.replyTo };
+    return { text: item.input.text, to: item.input.to, replyTo: item.input.replyTo, replaces: item.input.replaces };
   }
 
   private patchItem(id: number, patch: Partial<OutboxItem>): void {

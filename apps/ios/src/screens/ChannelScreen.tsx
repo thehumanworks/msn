@@ -270,6 +270,19 @@ function ChannelBody({
     setEditError(null);
     setEditing(message);
   }, []);
+  // Replace (ADR 0067): the composer starts from the old message, in its thread and to its name.
+  const [replacing, setReplacing] = useState<Message | null>(null);
+  const onReplaceMessage = useCallback(
+    (message: Message) => {
+      setReplacing(message);
+      setReplyTo(message.replyTo !== undefined ? (byId.get(message.replyTo) ?? null) : null);
+      setRestored((prev) => ({
+        draft: { text: message.text, ...(message.to ? { to: message.to } : {}) },
+        n: (prev?.n ?? 0) + 1,
+      }));
+    },
+    [byId],
+  );
   const onShareLink = useCallback(
     (message: Message) => {
       const { origin, tenant } = session.session;
@@ -282,6 +295,7 @@ function ChannelBody({
   const onEdit = useCallback(
     (draft: Draft) => {
       setReplyTo(draft.replyTo !== undefined ? (byId.get(draft.replyTo) ?? null) : null);
+      setReplacing(draft.replaces !== undefined ? (byId.get(draft.replaces) ?? null) : null);
       setRestored((prev) => ({ draft, n: (prev?.n ?? 0) + 1 }));
     },
     [byId],
@@ -403,6 +417,7 @@ function ChannelBody({
                 onAnswer={archived ? undefined : onAnswer}
                 answering={answering.has(item.id)}
                 onEditMessage={!archived && item.username === me && me !== "github" ? onEditMessage : undefined}
+                onReplaceMessage={!archived && item.username === me && me !== "github" ? onReplaceMessage : undefined}
               />
             );
           }}
@@ -447,6 +462,8 @@ function ChannelBody({
           onSent={onSent}
           replyTo={replyTo}
           onClearReply={() => setReplyTo(null)}
+          replacing={replacing}
+          onClearReplace={() => setReplacing(null)}
           bottomInset={bottomInset}
           restored={restored}
           messages={state.messages}
