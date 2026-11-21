@@ -331,6 +331,9 @@ pub enum Command {
     /// Read work after committed progress without committing it (one ordered worker per reader)
     Peek {
         channel: String,
+        /// Follow one thread: only its root message and replies, at any depth (a reply id means its thread). Its progress stays on this machine, apart from the board's (ADR 0063)
+        #[arg(long, value_name = "ID", conflicts_with = "resumable")]
+        thread: Option<String>,
         /// Seconds to wait, 0–25 (default 0)
         #[arg(long)]
         wait: Option<String>,
@@ -352,6 +355,9 @@ pub enum Command {
         channel: String,
         #[arg(long)]
         through: String,
+        /// Commit progress in this thread only, as peeked with --thread (ADR 0063)
+        #[arg(long, value_name = "ID", conflicts_with = "resumable")]
+        thread: Option<String>,
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
         /// Require a server commit, fenced by this machine's generation (ADR 0034)
@@ -497,6 +503,9 @@ pub enum Command {
     /// GET …/messages (single page; wait defaults to 0)
     Poll {
         channel: String,
+        /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread) (ADR 0063)
+        #[arg(long, value_name = "ID")]
+        thread: Option<String>,
         /// Only messages with this label: KEY, KEY=VALUE or KEY=A|B; repeat to require all
         #[arg(long = "label", value_name = "FILTER")]
         labels: Vec<String>,
@@ -618,6 +627,9 @@ pub enum Command {
     /// Block until new messages exist, print that page, persist the cursor, exit 0
     Wait {
         channel: String,
+        /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
+        #[arg(long, value_name = "ID")]
+        thread: Option<String>,
         /// Exclusive message id cursor; disables cursor files (not with --cursor-file)
         #[arg(long)]
         after: Option<String>,
@@ -634,6 +646,9 @@ pub enum Command {
     /// Long-poll loop; one JSON message per line
     Follow {
         channel: String,
+        /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
+        #[arg(long, value_name = "ID")]
+        thread: Option<String>,
         /// Exclusive message id cursor (not with --cursor-file)
         #[arg(long)]
         after: Option<String>,
