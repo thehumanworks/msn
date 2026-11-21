@@ -236,3 +236,55 @@ fn wait_on_an_archived_board_stops_with_a_conflict_instead_of_polling_forever() 
     assert!(out.stdout.is_empty());
     assert_eq!(server.recorded().len(), 1);
 }
+
+#[test]
+fn persona_webhook_commands_use_the_owner_key_and_webhook_routes() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            201,
+            r#"{"webhook":{"persona":"reviewer","url":"https://agent.example.com/wake"},"secret":"whsec_x"}"#,
+        ),
+        Scripted::json(200, r#"{"webhook":{"persona":"reviewer"}}"#),
+        Scripted::json(200, r#"{"webhooks":[]}"#),
+        Scripted::json(202, r#"{"queued":true,"noticeId":"n1"}"#),
+        Scripted::json(204, ""),
+    ]);
+    let base = [
+        "--url",
+        &server.url(),
+        "--tenant",
+        "team",
+        "--token",
+        "owner-secret",
+        "persona",
+        "webhook",
+    ];
+    let run = |rest: &[&str]| home.run(&[&base[..], rest].concat());
+    let made = run(&["set", "work", "reviewer", "https://agent.example.com/wake"]);
+    assert_eq!(made["secret"], "whsec_x");
+    run(&["show", "work", "reviewer"]);
+    run(&["list", "work"]);
+    assert_eq!(run(&["test", "work", "reviewer"])["queued"], true);
+    assert_eq!(run(&["remove", "work", "reviewer"])["removed"], "reviewer");
+    let requests = server.recorded();
+    let hook = "/api/tenants/team/channels/work/personas/reviewer/webhook";
+    let expected = [
+        ("PUT", hook.to_string()),
+        ("GET", hook.to_string()),
+        (
+            "GET",
+            "/api/tenants/team/channels/work/webhooks".to_string(),
+        ),
+        ("POST", format!("{hook}/test")),
+        ("DELETE", hook.to_string()),
+    ];
+    assert_eq!(requests.len(), expected.len());
+    for (request, (method, path)) in requests.iter().zip(expected) {
+        assert_eq!(request.method, method);
+        assert_eq!(request.path, path);
+        assert_eq!(request.headers["authorization"], "Bearer owner-secret");
+    }
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body, json!({"url": "https://agent.example.com/wake"}));
+}

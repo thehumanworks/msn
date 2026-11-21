@@ -1066,4 +1066,31 @@ pub enum PersonaCommand {
     List {
         channel: String,
     },
+    /// Wake a persona's agent: POST a signed notice to an https URL when a message is addressed to
+    /// it (owner account only; ADR 0062). The notice holds ids, never message text or keys.
+    Webhook {
+        #[command(subcommand)]
+        command: WebhookCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WebhookCommand {
+    /// Set or replace PERSONA's webhook. Prints the signing secret once; replacing makes a new one.
+    Set {
+        channel: String,
+        /// The persona id (see msn persona list)
+        persona: String,
+        /// A public https URL on the default port
+        #[arg(value_name = "URL")]
+        endpoint: String,
+    },
+    /// Show PERSONA's webhook and its last delivery (never the secret)
+    Show { channel: String, persona: String },
+    /// List the board's webhooks
+    List { channel: String },
+    /// Remove PERSONA's webhook and drop its waiting notices
+    Remove { channel: String, persona: String },
+    /// Queue a signed ping to PERSONA's webhook; check the result with webhook show
+    Test { channel: String, persona: String },
 }

@@ -2391,6 +2391,76 @@ test("the Agents list shows which board personas are listening and when each las
   expect((await poll).status()).toBe(200);
 });
 
+test("the owner sets a persona's wake-up webhook in Agents; the secret shows once (ADR 0062)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  await request.put(`${t.path}/channels/work/board`, {
+    headers: t.headers,
+    data: { credential, goal: "Wake the reviewer" },
+  });
+  const shared = { Authorization: `Bearer ${credential}` };
+  await request.put(`${t.path}/channels/work/personas/reviewer`, {
+    headers: shared,
+    data: { displayName: "reviewer" },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#agents").click();
+  const row = page.locator("#agents-list li").first();
+  await expect(row).toContainText("No webhook: its agent wakes only when it listens.");
+  await row.getByRole("button", { name: "Add webhook for reviewer" }).click();
+  await expect(page.locator("#webhook-title")).toHaveText("Wake reviewer with a webhook");
+  // A private address is refused with the server's reason.
+  await page.locator("#webhook-url").fill("https://127.0.0.1/wake");
+  await page.locator("#webhook-save").click();
+  await expect(page.locator("#webhook-state")).toContainText("must point at a public host");
+  await expect(page.locator("#webhook-secret-row")).toBeHidden();
+  await page.locator("#webhook-url").fill("https://agent.example.com/wake");
+  await page.locator("#webhook-save").click();
+  await expect(page.locator("#webhook-state")).toHaveText(
+    "Saved. Copy the secret now: it is not shown again.",
+  );
+  await expect(page.locator("#webhook-secret")).toHaveText(/^whsec_[0-9a-f]{64}$/);
+  const secret = await page.locator("#webhook-secret").textContent();
+  await expect(page.locator("#webhook-test")).toBeVisible();
+  await expect(page.locator("#webhook-save")).toHaveText("Save and make a new secret");
+  if (testInfo.project.name === "mobile")
+    for (const id of [
+      "#webhook-save",
+      "#webhook-test",
+      "#webhook-remove",
+      "#copy-webhook-secret",
+      "#close-webhook",
+    ])
+      expect((await page.locator(id).boundingBox()).height, id).toBeGreaterThanOrEqual(43.5);
+  await page.screenshot({ path: testInfo.outputPath("webhook-secret.png") });
+  // The Agents list behind the dialog now says where the persona wakes.
+  await expect(row).toContainText("Wakes agent.example.com");
+  await page.locator("#close-webhook").click();
+  await expect(page.locator("#webhook-dialog")).toHaveJSProperty("open", false);
+  // Reopening never shows the secret again, and the server never returns it.
+  await row.getByRole("button", { name: "Webhook for reviewer" }).click();
+  await expect(page.locator("#webhook-url")).toHaveValue("https://agent.example.com/wake");
+  await expect(page.locator("#webhook-secret-row")).toBeHidden();
+  const read = await (
+    await request.get(`${t.path}/channels/work/personas/reviewer/webhook`, { headers: t.headers })
+  ).text();
+  expect(read).not.toContain(secret);
+  // The shared board key cannot read or change it.
+  expect((await request.get(`${t.path}/channels/work/webhooks`, { headers: shared })).status()).toBe(403);
+  await page.locator("#webhook-test").click();
+  await expect(page.locator("#webhook-state")).toContainText("Test notice queued");
+  await expect(page.locator("#webhook-state")).toContainText("Wakes agent.example.com", { timeout: 10000 });
+  await page.locator("#webhook-remove").click();
+  await expect(page.locator("#webhook-state")).toHaveText("Webhook removed. Waiting notices were dropped.");
+  await expect(page.locator("#webhook-test")).toBeHidden();
+  await page.locator("#close-webhook").click();
+  await expect(row).toContainText("No webhook");
+});
+
 test("the owner turns notifications on and off; disconnecting turns them off", async ({
   page,
   context,
