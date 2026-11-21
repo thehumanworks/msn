@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod export;
+pub mod gather;
 pub mod identity;
 pub mod import;
 pub mod labels;
@@ -541,6 +542,59 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 wait,
                 stop,
             )
+        }
+        Command::Gather(args::GatherArgs {
+            channel,
+            text,
+            to,
+            question,
+            key,
+            reply_to,
+            timeout,
+        }) => {
+            let timeout = parse_int(&timeout, 86_400)?;
+            if timeout == 0 {
+                return Err(CliError::usage("--timeout must be 1 to 86400 seconds."));
+            }
+            let question = question.as_deref().map(parse_message_id).transpose()?;
+            let ask = match (question, text) {
+                (Some(_), _) => None,
+                (None, Some(text)) => {
+                    let names = gather::validate_names(&to, "--to")?;
+                    let reply_to = reply_to.as_deref().map(parse_message_id).transpose()?;
+                    Some((read_text(&text)?, names, reply_to))
+                }
+                (None, None) => {
+                    return Err(CliError::usage("Pass the question text, or --question ID."));
+                }
+            };
+            let tenant = require_tenant(cli.tenant.as_deref())?;
+            let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+            let channel = slug(&channel)?;
+            let client = Arc::new(MsnClient::new(&url)?);
+            let question = match (question, ask) {
+                (Some(question), _) => question,
+                (None, Some((text, names, reply_to))) => {
+                    let username =
+                        identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
+                    let key = key.unwrap_or_else(|| Uuid::new_v4().to_string());
+                    eprintln!("Idempotency-Key: {key}");
+                    let response = client.post_json(
+                        &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+                        &token,
+                        &[("Idempotency-Key", key.as_str())],
+                        &gather::question_body(&username, &text, &names, reply_to),
+                    )?;
+                    classify(response.status, &response.body)?;
+                    let posted: Value = serde_json::from_str(&response.body)
+                        .map_err(|_| CliError::generic("Response was not JSON."))?;
+                    posted["message"]["id"].as_u64().ok_or_else(|| {
+                        CliError::generic("The server did not return the question's id.")
+                    })?
+                }
+                (None, None) => unreachable!("checked above"),
+            };
+            gather_answers(client, &tenant, &token, channel, question, timeout, &stop)
         }
         Command::Answer {
             channel,
@@ -1869,6 +1923,72 @@ fn ask_question(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Waits for every name a question is addressed to, then prints the gathered answers (ADR 0071).
+/// Prints what it has on timeout or interrupt too, so no answer that was posted is lost.
+fn gather_answers(
+    client: Arc<MsnClient>,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    question: u64,
+    timeout: u64,
+    stop: &AtomicBool,
+) -> Result<(), CliError> {
+    const INTERRUPTED: &str = "Interrupted before every answer arrived.";
+    let mut get = |path: &str| -> Result<Value, CliError> {
+        let mut backoff = BACKOFF_START_MS;
+        loop {
+            let Some(result) =
+                get_interruptible(client.clone(), path.to_string(), token.to_string(), stop)?
+            else {
+                return Err(CliError::generic(INTERRUPTED));
+            };
+            match result {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    return serde_json::from_str(&response.body)
+                        .map_err(|_| CliError::generic("Response was not JSON."));
+                }
+                Ok(response) if !is_retryable_status(response.status) => {
+                    return Err(status_error(response.status, &response.body));
+                }
+                Ok(_) | Err(CliError::Network(_)) => {
+                    if interruptible_sleep(backoff, stop, "Gather read failed; retrying", 0) {
+                        return Err(CliError::generic(INTERRUPTED));
+                    }
+                    backoff = (backoff * 2).min(BACKOFF_MAX_MS);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    let mut gathered = gather::start(&mut get, tenant, channel, question)?;
+    eprintln!(
+        "Gathering answers to message {question} from {}; waiting up to {timeout}s.",
+        gathered.pending().join(", ")
+    );
+    let _ = io::stderr().flush();
+    let waited = if gathered.finished() {
+        Ok(())
+    } else {
+        gather::wait(&mut get, &mut gathered, tenant, channel, timeout)
+    };
+    agent::print_json(&gathered.result())?;
+    waited?;
+    if let Some(new) = gathered.replaced_by() {
+        return Err(CliError::generic(format!(
+            "Message {question} was replaced by message {new}; gather answers to it with --question {new}."
+        )));
+    }
+    let pending = gathered.pending();
+    if !pending.is_empty() {
+        return Err(CliError::timeout(format!(
+            "Timed out after {timeout}s; no reply yet from {}.",
+            pending.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn events_path(tenant: &str, channel: Option<&str>, after: u64, wait: u64, limit: u64) -> String {

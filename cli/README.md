@@ -131,6 +131,7 @@ msn react general 42 done    # ✓ done, 👀 seen, 👍 yes or ✗ no; sends no
 msn unreact general 42 done
 msn reactions general --after 40   # who reacted to which messages
 msn ask general 'Ship it?' --to tomas --choice yes --choice no --wait 3600   # buttons; prints the answer, exit 2 on timeout
+msn gather general 'Estimate?' --to planner --to reviewer --timeout 1800   # one question, answers keyed by name; exit 2 on timeout
 msn answer general 41 yes          # answer a question addressed to you (ADR 0065)
 msn edit general 42 --text 'Deploy on Monday'   # fix your own message; id and place stay
 msn send general --text 'Deploy to production' --replaces 42   # a newer instruction; 42 shows replacedBy
