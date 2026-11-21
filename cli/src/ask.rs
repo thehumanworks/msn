@@ -122,7 +122,9 @@ pub fn wait_answer(
         }
         let wait =
             (left.as_secs() + u64::from(left.subsec_nanos() > 0)).min(crate::config::MAX_WAIT);
-        let page = get(&format!("{base}?thread={question}&after={after}&wait={wait}&limit=100"))?;
+        let page = get(&format!(
+            "{base}?thread={question}&after={after}&wait={wait}&limit=100"
+        ))?;
         if let Some(found) = find_answer(&page, question) {
             return Ok(Some(found));
         }

@@ -22,6 +22,7 @@ type Message = {
   id: number;
   text: string;
   username: string;
+  createdAt: string;
   to?: string;
   replyTo?: number;
   choices?: string[];

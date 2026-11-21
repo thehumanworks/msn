@@ -2795,7 +2795,7 @@ fn ask_wait_prints_the_answer_once_the_addressed_name_replies() {
         recorded[1].path
     );
     assert!(
-        recorded[2].path.contains("messages?after=7&"),
+        recorded[2].path.contains("messages?thread=5&after=7&"),
         "{}",
         recorded[2].path
     );

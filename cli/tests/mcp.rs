@@ -404,7 +404,9 @@ fn ask_posts_a_question_and_wait_answer_finds_the_reply() {
     );
     assert!(requests[1].path.ends_with("/channels/general/messages/5"));
     assert!(
-        requests[2].path.contains("messages?thread=5&after=5&wait=5"),
+        requests[2]
+            .path
+            .contains("messages?thread=5&after=5&wait=5"),
         "{}",
         requests[2].path
     );
