@@ -853,9 +853,45 @@ async function loadReceipts(connection, name, state, force = false) {
   }
 }
 
+const COPIED_MS = 2000;
+
+/**
+ * Each fenced code block gets a Copy button (ADR 0058). It copies the code as the sender wrote
+ * it, without the fence or language tag; the <pre> keeps only the code, so its text is unchanged.
+ */
+function addCodeCopy(content) {
+  for (const pre of content.querySelectorAll("pre.md-code")) {
+    const block = document.createElement("div");
+    block.className = "md-codeblock";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "copy-code";
+    button.textContent = "Copy";
+    button.setAttribute("aria-label", pre.dataset.lang ? `Copy ${pre.dataset.lang} code` : "Copy code");
+    let timer = 0;
+    button.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(pre.textContent);
+      } catch {
+        status("Clipboard unavailable. Select the code and copy it manually.", true);
+        return;
+      }
+      status("Code copied.");
+      button.textContent = "Copied";
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        button.textContent = "Copy";
+      }, COPIED_MS);
+    });
+    pre.replaceWith(block);
+    block.append(pre, button);
+  }
+  return content;
+}
+
 /** Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043). */
 function messageContent(message, boardUpdate, structured) {
-  if (!boardUpdate && !structured) return renderMarkdown(message.text);
+  if (!boardUpdate && !structured) return addCodeCopy(renderMarkdown(message.text));
   const content = document.createElement(structured ? "pre" : "p");
   content.textContent = boardUpdate
     ? `Goal ${boardUpdate.status}: ${boardUpdate.goal}`

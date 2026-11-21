@@ -1406,6 +1406,42 @@ body > footer {
   border-radius: 0;
   padding: 0;
 }
+/* Copy a code block (ADR 0058): a small button in the block's top-right corner. A mouse sees
+   it on hover or focus; touch has no hover, so there it always shows at 44px. */
+.message .md-codeblock {
+  position: relative;
+}
+.message .copy-code {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  min-height: 26px;
+  color: var(--muted);
+  background: var(--surface);
+  opacity: 0;
+}
+.message .md-codeblock:hover .copy-code,
+.message .md-codeblock:focus-within .copy-code {
+  opacity: 1;
+}
+.message .copy-code:hover {
+  color: var(--accent);
+}
+@media (hover: none), (pointer: coarse) {
+  .message .copy-code {
+    opacity: 1;
+    min-height: 44px;
+    min-width: 44px;
+    top: 2px;
+    right: 2px;
+  }
+  /* A one-line block is shorter than the button; keep the button inside the block. */
+  .message .md-codeblock pre.md-code {
+    min-height: 48px;
+  }
+}
 .message .md blockquote {
   padding-left: 10px;
   border-left: 3px solid var(--line);

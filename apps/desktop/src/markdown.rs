@@ -1321,8 +1321,63 @@ fn show_inline(ui: &mut egui::Ui, nodes: &[Inline], size: f32, base: egui::Color
     }
 }
 
+/// How long the copy button reads "Copied" after a click.
+const COPIED_SECS: f64 = 2.0;
+
+/// The id of the copy button on block `n` of the blocks drawn in `ui`.
+fn copy_id(ui: &egui::Ui, n: usize) -> egui::Id {
+    ui.id().with(("md-code-copy", n))
+}
+
+/// ADR 0058: a small Copy button in a code block's top-right corner. It shows while the pointer
+/// is over the block, and copies the code exactly as written, without the fence or language.
+fn copy_button(ui: &mut egui::Ui, id: egui::Id, block: egui::Rect, text: &str) {
+    let now = ui.input(|i| i.time);
+    let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(id));
+    let copied = copied_at.is_some_and(|at| now - at < COPIED_SECS);
+    if !copied && !ui.rect_contains_pointer(block) {
+        return;
+    }
+    let label = if copied { "Copied" } else { "Copy" };
+    let font = egui::FontId::proportional(11.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font, egui::Color32::PLACEHOLDER);
+    let size = galley.size() + egui::vec2(12.0, 6.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(block.right() - size.x - 4.0, block.top() + 4.0),
+        size,
+    );
+    let response = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Copy code");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copy code"));
+    let visuals = ui.style().interact(&response);
+    let color = if response.hovered() {
+        ui.visuals().hyperlink_color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().rect(
+        rect,
+        4,
+        ui.visuals().extreme_bg_color,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, color);
+    if response.clicked() {
+        ui.ctx().copy_text(text.to_string());
+        ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(COPIED_SECS));
+    }
+}
+
 fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color32) {
-    for block in blocks {
+    for (n, block) in blocks.iter().enumerate() {
         match block {
             Block::Paragraph { children } => show_inline(ui, children, size, base),
             Block::Heading { level, children } => {
@@ -1336,7 +1391,7 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
             }
             Block::CodeBlock { text, .. } => {
                 // Long lines scroll sideways instead of wrapping.
-                egui::Frame::new()
+                let frame = egui::Frame::new()
                     .fill(ui.visuals().code_bg_color)
                     .corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(8, 6))
@@ -1355,6 +1410,7 @@ fn show_blocks(ui: &mut egui::Ui, blocks: &[Block], size: f32, base: egui::Color
                                 );
                             });
                     });
+                copy_button(ui, copy_id(ui, n), frame.response.rect, text);
             }
             Block::Quote { children } => {
                 ui.horizontal_top(|ui| {
@@ -1484,6 +1540,65 @@ mod tests {
                 Block::CodeBlock { .. } => {}
             }
         }
+    }
+
+    /// ADR 0058: hovering a code block shows Copy; a click copies only the code, then the
+    /// button reads Copied.
+    #[test]
+    fn the_copy_button_copies_a_code_block_without_its_fence() {
+        let ctx = egui::Context::default();
+        let blocks = parse("Run this:\n\n```sh\nmsn join general\nmsn listen\n```");
+        let screen = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 300.0),
+        ));
+        let button_id = std::cell::Cell::new(None);
+        let frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    button_id.set(Some(copy_id(ui, 1)));
+                    show(ui, &blocks);
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .platform_output
+                .commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        frame(vec![]);
+        let id = button_id.get().unwrap();
+        assert!(ctx.read_response(id).is_none(), "hidden until hovered");
+        // The block sits below the paragraph; hover its left edge, then find the button.
+        frame(vec![egui::Event::PointerMoved(egui::pos2(4.0, 40.0))]);
+        frame(vec![]);
+        let button = ctx.read_response(id).expect("hovering shows Copy");
+        let pos = button.rect.center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        frame(vec![press(true)]);
+        assert_eq!(frame(vec![press(false)]), ["msn join general\nmsn listen"]);
+        // Away from the block, Copied still shows for a moment.
+        frame(vec![egui::Event::PointerMoved(egui::pos2(590.0, 290.0))]);
+        assert!(
+            ctx.read_response(id).is_some(),
+            "Copied stays while it reads"
+        );
     }
 
     #[test]
