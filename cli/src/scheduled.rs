@@ -1,8 +1,179 @@
 //! Scheduled messages (ADR 0060): `msn send --at WHEN` and `msn scheduled list|change|cancel`.
+//! Repeating ones (ADR 0072): `msn send --repeat daily|weekdays|Nh`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::{Value, json};
+
 use crate::error::CliError;
+
+/// What a send adds to its body to post later: `sendAt`, `repeat`, or both.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Later {
+    /// The absolute time of the message, or of a repeat's first copy. A retry must send this.
+    pub send_at: Option<String>,
+    /// The repeat rule the Worker takes (ADR 0072).
+    pub repeat: Option<Value>,
+    /// The time zone that was found for this computer because none was given. The caller says
+    /// it, so a fallback to UTC is never silent.
+    pub guessed_zone: Option<String>,
+}
+
+impl Later {
+    pub fn is_some(&self) -> bool {
+        self.send_at.is_some() || self.repeat.is_some()
+    }
+
+    /// Adds `sendAt` and `repeat` to a send body.
+    pub fn apply(&self, body: &mut Value) {
+        if let Some(send_at) = &self.send_at {
+            body["sendAt"] = json!(send_at);
+        }
+        if let Some(repeat) = &self.repeat {
+            body["repeat"] = repeat.clone();
+        }
+    }
+}
+
+/// Turns `--at`, `--repeat`, `--until` and `--tz` into what the Worker takes.
+///
+/// `--repeat` is `daily`, `weekdays` or every N hours as `Nh` (1 to 168). Daily and weekdays need
+/// `--at`: a wall-clock time `HH:MM` read in the time zone (the Worker finds the first copy), or a
+/// delay or zoned time for the first copy, whose wall-clock time then repeats. Hours take a delay
+/// or zoned time for the first copy, or none to start one interval from now. The time zone is
+/// `--tz`, else this computer's (see `local_zone`), else UTC; the Worker checks its name.
+pub fn plan(
+    at: Option<&str>,
+    repeat: Option<&str>,
+    until: Option<&str>,
+    tz: Option<&str>,
+    now_secs: u64,
+) -> Result<Later, CliError> {
+    let Some(rule) = repeat.map(str::trim) else {
+        if until.is_some() || tz.is_some() {
+            return Err(CliError::usage(
+                "--until and --tz go with --repeat. For one message, give --at a time with a zone.",
+            ));
+        }
+        return Ok(Later {
+            send_at: at.map(|raw| parse_when(raw, now_secs)).transpose()?,
+            ..Later::default()
+        });
+    };
+    let zone = tz
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(local_zone);
+    let mut body = json!({ "timeZone": zone });
+    let mut send_at = None;
+    if rule == "daily" || rule == "weekdays" {
+        body["every"] = json!(rule);
+        let at = at.map(str::trim).ok_or_else(|| {
+            CliError::usage(format!(
+                "--repeat {rule} needs --at: a time of day like 09:00 (read in --tz, here {zone}), or a delay or zoned time for the first copy."
+            ))
+        })?;
+        match wall_clock(at) {
+            Some(clock) => body["at"] = json!(clock),
+            None => send_at = Some(parse_when(at, now_secs).map_err(|_| {
+                CliError::usage(
+                    "--at with --repeat takes a time of day like 09:00, a delay like 10m, or a time with a zone like 2026-11-21T09:00:00Z.",
+                )
+            })?),
+        }
+    } else {
+        let hours = rule
+            .strip_suffix('h')
+            .filter(|digits| !digits.is_empty() && digits.len() <= 3)
+            .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u32>().ok())
+            .filter(|hours| (1..=168).contains(hours))
+            .ok_or_else(|| {
+                CliError::usage(
+                    "--repeat takes daily, weekdays, or every N hours as Nh from 1h to 168h, like 6h.",
+                )
+            })?;
+        body["every"] = json!("hours");
+        body["hours"] = json!(hours);
+        if let Some(at) = at {
+            if wall_clock(at.trim()).is_some() {
+                return Err(CliError::usage(
+                    "--repeat Nh counts from the first copy: give --at a delay like 10m or a time with a zone, or leave it out to start one interval from now.",
+                ));
+            }
+            send_at = Some(parse_when(at, now_secs)?);
+        }
+    }
+    if let Some(until) = until {
+        body["until"] = json!(until.trim());
+    }
+    Ok(Later {
+        send_at,
+        repeat: Some(body),
+        guessed_zone: tz.is_none().then_some(zone),
+    })
+}
+
+/// `9:00`, `09:00` or `09:00:30` as the zero-padded 24-hour time the Worker takes.
+fn wall_clock(value: &str) -> Option<String> {
+    let parts: Vec<&str> = value.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let number = |part: &str, digits: std::ops::RangeInclusive<usize>, max: u32| {
+        (digits.contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+            .filter(|n| *n <= max)
+    };
+    let hour = number(parts[0], 1..=2, 23)?;
+    let minute = number(parts[1], 2..=2, 59)?;
+    match parts.get(2) {
+        Some(second) => Some(format!(
+            "{hour:02}:{minute:02}:{:02}",
+            number(second, 2..=2, 59)?
+        )),
+        None => Some(format!("{hour:02}:{minute:02}")),
+    }
+}
+
+/// This computer's IANA time zone: `TZ` when it names one (like `Europe/Lisbon`), else the zone
+/// `/etc/localtime` links to, else `UTC`. No lookup can fail the send: the Worker checks the name
+/// and the result prints the zone, so a wrong guess is visible.
+pub fn local_zone() -> String {
+    zone_from(
+        std::env::var("TZ").ok().as_deref(),
+        std::fs::read_link("/etc/localtime")
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .as_deref(),
+    )
+}
+
+fn zone_from(tz: Option<&str>, localtime: Option<&str>) -> String {
+    let named = |value: &str| {
+        let value = value.strip_prefix(':').unwrap_or(value);
+        // zoneinfo keeps copies under posix/ and right/; the zone's name is what follows.
+        let value = value
+            .strip_prefix("posix/")
+            .or_else(|| value.strip_prefix("right/"))
+            .unwrap_or(value);
+        let ok = !value.is_empty()
+            && value.len() <= 64
+            && value.as_bytes()[0].is_ascii_alphabetic()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-' | b'/'))
+            && (value.contains('/') || value == "UTC" || value == "GMT");
+        ok.then(|| value.to_string())
+    };
+    tz.and_then(named)
+        .or_else(|| {
+            localtime
+                .and_then(|path| path.split_once("zoneinfo/"))
+                .and_then(|(_, zone)| named(zone))
+        })
+        .unwrap_or_else(|| "UTC".to_string())
+}
 
 /// Turns `--at` into the `sendAt` the Worker takes. A relative time (`90s`, `10m`, `2h`, `1d`, or
 /// a sum such as `1h30m`, with an optional leading `+`) is added to `now_secs` and printed in UTC.
@@ -96,6 +267,141 @@ fn rfc3339(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeat_rules_become_the_body_the_worker_takes() {
+        let now = 1_795_000_000;
+        let daily = plan(
+            Some("9:00"),
+            Some("daily"),
+            Some("2026-12-31"),
+            Some("Europe/Lisbon"),
+            now,
+        )
+        .unwrap();
+        assert_eq!(daily.send_at, None);
+        assert_eq!(
+            daily.repeat.unwrap(),
+            json!({"every":"daily","at":"09:00","timeZone":"Europe/Lisbon","until":"2026-12-31"})
+        );
+        let weekdays = plan(Some("17:30:15"), Some("weekdays"), None, Some("UTC"), now).unwrap();
+        assert_eq!(
+            weekdays.repeat.unwrap(),
+            json!({"every":"weekdays","at":"17:30:15","timeZone":"UTC"})
+        );
+        // A delay or a zoned time is the first copy; the Worker repeats its wall-clock time.
+        let from_delay = plan(Some("10m"), Some("daily"), None, Some("UTC"), now).unwrap();
+        assert_eq!(from_delay.send_at.as_deref(), Some("2026-11-18T11:16:40Z"));
+        assert_eq!(
+            from_delay.repeat.unwrap(),
+            json!({"every":"daily","timeZone":"UTC"})
+        );
+        let hours = plan(None, Some("6h"), None, Some("UTC"), now).unwrap();
+        assert_eq!(hours.send_at, None);
+        assert_eq!(hours.guessed_zone, None);
+        // Without --tz the zone found for this computer is reported back.
+        let guessed = plan(None, Some("6h"), None, None, now).unwrap();
+        assert_eq!(
+            guessed.guessed_zone.as_deref(),
+            guessed.repeat.unwrap()["timeZone"].as_str()
+        );
+        assert_eq!(
+            hours.repeat.unwrap(),
+            json!({"every":"hours","hours":6,"timeZone":"UTC"})
+        );
+        let hours_from = plan(
+            Some("2026-11-21T09:00:00Z"),
+            Some("168h"),
+            None,
+            Some("UTC"),
+            now,
+        )
+        .unwrap();
+        assert_eq!(hours_from.send_at.as_deref(), Some("2026-11-21T09:00:00Z"));
+        let mut body = json!({"text":"x"});
+        hours_from.apply(&mut body);
+        assert_eq!(body["sendAt"], "2026-11-21T09:00:00Z");
+        assert_eq!(body["repeat"]["hours"], 168);
+    }
+
+    #[test]
+    fn repeat_rules_that_cannot_be_read_are_refused() {
+        for (at, repeat, until, tz) in [
+            (None, Some("daily"), None, None),
+            (None, Some("weekdays"), None, None),
+            (Some("tomorrow"), Some("daily"), None, None),
+            (Some("09:00"), Some("6h"), None, None),
+            (Some("09:00"), Some("weekly"), None, None),
+            (None, Some("0h"), None, None),
+            (None, Some("169h"), None, None),
+            (None, Some("h"), None, None),
+            (None, Some("1.5h"), None, None),
+            (None, Some("90m"), None, None),
+            (Some("10m"), None, Some("2026-12-31"), None),
+            (Some("10m"), None, None, Some("UTC")),
+        ] {
+            assert!(
+                plan(at, repeat, until, tz, 0).is_err(),
+                "{at:?} {repeat:?} {until:?} {tz:?}"
+            );
+        }
+        // Without --repeat it is the one-message path, unchanged.
+        let once = plan(Some("10m"), None, None, None, 0).unwrap();
+        assert_eq!(once.send_at.as_deref(), Some("1970-01-01T00:10:00Z"));
+        assert!(once.repeat.is_none());
+        assert!(!plan(None, None, None, None, 0).unwrap().is_some());
+    }
+
+    #[test]
+    fn wall_clock_times_are_padded_and_bounded() {
+        assert_eq!(wall_clock("9:05").as_deref(), Some("09:05"));
+        assert_eq!(wall_clock("23:59:59").as_deref(), Some("23:59:59"));
+        for bad in [
+            "24:00",
+            "9",
+            "09:60",
+            "09:5",
+            "09:00:60",
+            "10m",
+            "a:00",
+            "09:00:00:00",
+            "",
+        ] {
+            assert_eq!(wall_clock(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn local_zone_reads_tz_then_localtime_then_utc() {
+        assert_eq!(zone_from(Some("Europe/Lisbon"), None), "Europe/Lisbon");
+        assert_eq!(
+            zone_from(Some(":America/New_York"), None),
+            "America/New_York"
+        );
+        assert_eq!(
+            zone_from(Some("UTC"), Some("/usr/share/zoneinfo/Asia/Tokyo")),
+            "UTC"
+        );
+        // An abbreviation or a POSIX rule is not a zone name: fall through.
+        assert_eq!(
+            zone_from(
+                Some("EST5EDT"),
+                Some("/var/db/timezone/zoneinfo/Asia/Tokyo")
+            ),
+            "Asia/Tokyo"
+        );
+        assert_eq!(
+            zone_from(None, Some("/usr/share/zoneinfo/Etc/UTC")),
+            "Etc/UTC"
+        );
+        assert_eq!(zone_from(Some(""), Some("/etc/elsewhere")), "UTC");
+        assert_eq!(zone_from(None, None), "UTC");
+        assert_eq!(
+            zone_from(None, Some("/usr/share/zoneinfo/posix/Europe/Lisbon")),
+            "Europe/Lisbon"
+        );
+        assert_eq!(zone_from(Some("right/Asia/Tokyo"), None), "Asia/Tokyo");
+    }
 
     #[test]
     fn relative_times_add_to_now_in_utc() {

@@ -444,13 +444,19 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             labels,
             attach,
             at,
+            repeat,
+            until,
+            tz,
             replaces,
         } => {
             let replaces = replaces.as_deref().map(parse_message_id).transpose()?;
-            let send_at = at
-                .as_deref()
-                .map(|raw| scheduled::parse_when(raw, scheduled::now_secs()))
-                .transpose()?;
+            let later = scheduled::plan(
+                at.as_deref(),
+                repeat.as_deref(),
+                until.as_deref(),
+                tz.as_deref(),
+                scheduled::now_secs(),
+            )?;
             let labels = labels::parse_labels(&labels)?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -498,7 +504,7 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 },
                 &labels,
                 &files,
-                send_at.as_deref(),
+                &later,
             )
         }
         Command::Ask {
@@ -1574,7 +1580,7 @@ fn send(
     correlation: Correlation,
     labels: &labels::Labels,
     files: &[attachments::LocalFile],
-    send_at: Option<&str>,
+    later: &scheduled::Later,
 ) -> Result<(), CliError> {
     let client = MsnClient::new(url)?;
     let key = key
@@ -1582,17 +1588,21 @@ fn send(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     eprintln!("Idempotency-Key: {key}");
     // A delay like 10m resolves once (ADR 0060); a retry passes this absolute time with the key.
-    if let Some(send_at) = send_at {
+    if let Some(send_at) = &later.send_at {
         eprintln!("sendAt: {send_at}");
+    }
+    // The zone was not given (ADR 0072): say which one the times are read in.
+    if let Some(zone) = &later.guessed_zone {
+        eprintln!(
+            "timeZone: {zone} (this computer's zone, or UTC when it is not known; set --tz to choose)"
+        );
     }
     let _ = io::stderr().flush();
     // Uploads are content-addressed, so a retry with the same files and key replays one message.
     let uploaded = attachments::upload(&client, tenant, token, channel, files)?;
     let mut body = send_body_with(username, payload, &correlation, &uploaded);
     with_labels(&mut body, labels);
-    if let Some(send_at) = send_at {
-        body["sendAt"] = json!(send_at);
-    }
+    later.apply(&mut body);
     let response = client.post_json(
         &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
         token,

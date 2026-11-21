@@ -510,6 +510,19 @@ pub enum Command {
         /// printed to stderr as sendAt; to retry, pass it as --at with the same --key
         #[arg(long, value_name = "WHEN", conflicts_with = "attach")]
         at: Option<String>,
+        /// Post a copy on a schedule until --until: daily or weekdays (Monday to Friday) with
+        /// --at 09:00, a time of day in --tz; or every N hours as Nh (1h to 168h), from --at or
+        /// one interval from now. See and stop it with msn scheduled list|cancel
+        #[arg(long, value_name = "RULE", conflicts_with_all = ["attach", "replaces"])]
+        repeat: Option<String>,
+        /// Last day of --repeat, like 2026-12-31 (through that day in --tz), or a time with a
+        /// zone. Default and latest: 366 days from now
+        #[arg(long, value_name = "DATE", requires = "repeat")]
+        until: Option<String>,
+        /// IANA time zone for --repeat's --at and weekdays, like Europe/Lisbon. Default: this
+        /// computer's zone (TZ, then /etc/localtime), else UTC
+        #[arg(long, value_name = "ZONE", requires = "repeat")]
+        tz: Option<String>,
         /// Replace your earlier message ID with this one (ADR 0068): the old message stays and
         /// shows replacedBy, so readers skip to this one. Only your own message, only once
         #[arg(long, value_name = "ID", conflicts_with = "at")]

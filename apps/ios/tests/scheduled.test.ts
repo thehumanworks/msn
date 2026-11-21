@@ -37,3 +37,19 @@ test("decodeScheduledList keeps this board's rows and refuses others", () => {
   assert.throws(() => decodeScheduledList({ scheduled: [{ ...row, status: "sent" }] }, "general"));
   assert.throws(() => decodeScheduledList({}, "general"));
 });
+
+test("decodeScheduledList marks a repeating message (ADR 0072)", () => {
+  const row = {
+    id: 2,
+    channel: "general",
+    username: "tomas",
+    text: "standup",
+    sendAt: "2026-11-23T09:00:00.000Z",
+    status: "pending",
+    repeat: { every: "weekdays", at: "09:00", timeZone: "UTC", until: "2027-01-01T00:00:00.000Z" },
+  };
+  const [item] = decodeScheduledList({ scheduled: [row] }, "general");
+  assert.equal(item.repeats, true);
+  const [once] = decodeScheduledList({ scheduled: [{ ...row, repeat: undefined }] }, "general");
+  assert.equal(once.repeats, undefined);
+});
