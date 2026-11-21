@@ -1098,6 +1098,9 @@ impl MsnDesktopApp {
                                             actions,
                                         );
                                         mark_selected(ui, &shown, selected == Some(id), reveal);
+                                        if scroll_to == Some(id) {
+                                            scroll_now(&shown);
+                                        }
                                         render_editor(ui, id, &mut self.editing, actions);
                                         render_choices(ui, message, &me, can_react, actions);
                                         render_reactions(ui, message, &me, can_react, actions);
@@ -1141,7 +1144,7 @@ impl MsnDesktopApp {
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
                                         if scroll_to == Some(id) {
-                                            shown.response.scroll_to_me(Some(egui::Align::Center));
+                                            scroll_now(&shown.response);
                                         }
                                     }
                                 }
@@ -3180,6 +3183,15 @@ fn render_editor(
             }
         });
     });
+}
+
+/// Scroll a shown message to the middle at once. An animated scroll loses to the conversation's
+/// stick-to-bottom on the frames in between, so a jump from the bottom would never arrive.
+fn scroll_now(shown: &egui::Response) {
+    shown.scroll_to_me_animation(
+        Some(egui::Align::Center),
+        egui::style::ScrollAnimation::none(),
+    );
 }
 
 /// The message j and k selected (ADR 0054): an accent ring around it, scrolled into view when
