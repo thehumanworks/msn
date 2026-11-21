@@ -570,3 +570,49 @@ export function messageEdit(input: Record<string, unknown>): MessageEdit {
   }
   return edit;
 }
+
+/** The latest a message can be scheduled, from now (ADR 0060). */
+export const MAX_SCHEDULE_AHEAD_MS = 366 * 86400_000;
+
+/**
+ * `sendAt` on a send or a scheduled change (ADR 0060): an RFC 3339 time with a zone (`Z` or an
+ * offset), after now and at most 366 days ahead. A time without a zone is refused, because a
+ * client and the Worker would read it in different zones. Returns the time in UTC.
+ */
+export function sendAtTime(value: unknown, now = Date.now()): string {
+  const valid =
+    typeof value === "string" &&
+    value.length <= 64 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/i.test(value) &&
+    Number.isFinite(Date.parse(value));
+  if (!valid)
+    throw new HttpError(
+      400,
+      "invalid_send_at",
+      "sendAt must be an RFC 3339 time with a zone, like 2026-11-21T09:00:00Z or 2026-11-21T10:00:00+01:00.",
+    );
+  const at = Date.parse(value);
+  if (at <= now) throw new HttpError(400, "invalid_send_at", "sendAt must be in the future.");
+  if (at - now > MAX_SCHEDULE_AHEAD_MS)
+    throw new HttpError(400, "invalid_send_at", "sendAt must be at most 366 days ahead.");
+  return new Date(at).toISOString();
+}
+
+/**
+ * `PATCH …/scheduled/:id` body (ADR 0060): the sender's name, and new text, a new sendAt or both.
+ * A new sendAt also retries a scheduled message that failed.
+ */
+export type ScheduledChange = { username: string; text?: string; sendAt?: string };
+
+export function scheduledChange(input: Record<string, unknown>, now = Date.now()): ScheduledChange {
+  for (const field of Object.keys(input))
+    if (!["username", "text", "sendAt"].includes(field))
+      throw new HttpError(400, "invalid_scheduled", `Unknown field ${field}; use username, text and sendAt.`);
+  if (input.text === undefined && input.sendAt === undefined)
+    throw new HttpError(400, "invalid_scheduled", "Give text, sendAt or both.");
+  return {
+    username: text(input.username, "username", 128),
+    ...(input.text === undefined ? {} : { text: text(input.text, "text", 16384) }),
+    ...(input.sendAt === undefined ? {} : { sendAt: sendAtTime(input.sendAt, now) }),
+  };
+}

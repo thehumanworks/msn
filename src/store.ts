@@ -51,7 +51,10 @@ import {
   reactionChange,
   recipient,
   replyTarget,
+  type ScheduledChange,
+  scheduledChange,
   searchMatch,
+  sendAtTime,
   sha256,
   slug,
   snapshotInteger,
@@ -134,6 +137,11 @@ const SCHEMA_VERSION = 20;
 export const MAX_REACTORS = 100;
 /** Reactions stored per workspace at once (ADR 0047); removing one frees its place. */
 export const MAX_REACTIONS = 100000;
+/** Scheduled messages waiting per board, and per workspace (ADR 0060). */
+export const MAX_SCHEDULED_PER_BOARD = 100;
+export const MAX_SCHEDULED = 1000;
+/** Due scheduled messages posted per alarm run; the alarm runs again at once while more are due. */
+const SCHEDULED_BATCH = 50;
 /** Pinned messages per board (ADR 0038). */
 export const MAX_PINS = 10;
 /** Unread counts (ADR 0045): boards per request, and messages counted per board before "99+". */
@@ -299,6 +307,74 @@ function toMessage(row: MessageRow, tenant: string): Message {
   };
 }
 
+/** A message waiting to post at `sendAt` (ADR 0060). `tokenHash` is the digest of the key that
+ * scheduled it, checked again when it posts; it is never returned. */
+type ScheduledRow = {
+  id: number;
+  tenant: string;
+  channel: string;
+  username: string;
+  text: string;
+  contentType: ContentType;
+  sendAt: string;
+  createdAt: string;
+  updatedAt: string;
+  replyTo: number | null;
+  correlationId: string | null;
+  recipient: string | null;
+  personaId: string | null;
+  labels: string | null;
+  key: string | null;
+  digest: string;
+  tokenHash: string;
+  notify: number;
+  failedAt: string | null;
+  error: string | null;
+  errorMessage: string | null;
+};
+export type Scheduled = {
+  id: number;
+  tenant: string;
+  channel: string;
+  username: string;
+  text: string;
+  contentType: ContentType;
+  sendAt: string;
+  createdAt: string;
+  updatedAt: string;
+  replyTo?: number;
+  correlationId?: string;
+  to?: string;
+  personaId?: string;
+  labels?: Labels;
+  /** `pending` until it posts (then it is a message and leaves the list); `failed` if it could not. */
+  status: "pending" | "failed";
+  failedAt?: string;
+  error?: { code: string; message: string };
+};
+function toScheduled(row: ScheduledRow, tenant: string): Scheduled {
+  return {
+    id: row.id,
+    tenant,
+    channel: row.channel,
+    username: row.username,
+    text: row.text,
+    contentType: row.contentType,
+    sendAt: row.sendAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.replyTo === null ? {} : { replyTo: row.replyTo }),
+    ...(row.correlationId === null ? {} : { correlationId: row.correlationId }),
+    ...(row.recipient === null ? {} : { to: row.recipient }),
+    ...(row.personaId === null ? {} : { personaId: row.personaId }),
+    ...(row.labels === null ? {} : { labels: JSON.parse(row.labels) as Labels }),
+    status: row.failedAt === null ? "pending" : "failed",
+    ...(row.failedAt === null
+      ? {}
+      : { failedAt: row.failedAt, error: { code: row.error ?? "failed", message: row.errorMessage ?? "" } }),
+  };
+}
+
 /** Path ids are positive safe canonical integers; 0 and leading zeros are rejected. */
 function messageId(value: string): number {
   if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
@@ -448,6 +524,17 @@ export class MsnDurableObject extends DurableObject<Env> {
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), indexedThrough INTEGER NOT NULL,
           target INTEGER NOT NULL
         );
+        -- Scheduled messages (ADR 0060). A new table that starts empty, so no schema_version step:
+        -- safe in any merge order. dueMs is sendAt in epoch ms, for the alarm's due query.
+        CREATE TABLE IF NOT EXISTS scheduled_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL, channel TEXT NOT NULL, username TEXT NOT NULL,
+          text TEXT NOT NULL, contentType TEXT NOT NULL, sendAt TEXT NOT NULL, dueMs INTEGER NOT NULL,
+          createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, replyTo INTEGER, correlationId TEXT,
+          recipient TEXT, personaId TEXT, labels TEXT, key TEXT, digest TEXT NOT NULL,
+          tokenHash TEXT NOT NULL, notify INTEGER NOT NULL, failedAt TEXT, error TEXT, errorMessage TEXT
+        );
+        CREATE INDEX IF NOT EXISTS scheduled_due ON scheduled_messages(dueMs) WHERE failedAt IS NULL;
+        CREATE INDEX IF NOT EXISTS scheduled_channel ON scheduled_messages(channel, dueMs);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -648,9 +735,112 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
-  /** The only alarm user today: one backfill batch per run until the search index is complete. */
+  /**
+   * The object's one alarm serves two jobs: search backfill batches (ADR 0037) and scheduled
+   * messages (ADR 0060). Each run does a backfill batch, posts what is due, then sets the alarm
+   * for the earliest remaining work.
+   */
   async alarm(): Promise<void> {
-    if (!this.backfillSearch()) await this.ctx.storage.setAlarm(Date.now());
+    this.backfillSearch();
+    this.postDue();
+    await this.armAlarm();
+  }
+
+  /** Sets the alarm to now while backfill remains, else to the next pending scheduled message. */
+  private async armAlarm(): Promise<void> {
+    const next = this.searchIndexed()
+      ? this.ctx.storage.sql
+          .exec<{ due: number | null }>(
+            "SELECT MIN(dueMs) AS due FROM scheduled_messages WHERE failedAt IS NULL",
+          )
+          .one().due
+      : Date.now();
+    if (next === null) {
+      if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    if ((await this.ctx.storage.getAlarm()) !== next) await this.ctx.storage.setAlarm(next);
+  }
+
+  /**
+   * Posts every scheduled message whose time has come, oldest first (ADR 0060). Each one posts
+   * exactly as a send from the key that scheduled it would now: the key must still exist and
+   * reach the board, and the board must be active. The message insert and the removal from the
+   * schedule commit together. One that cannot post stays listed as failed, with the reason.
+   */
+  postDue(now = Date.now()): number {
+    const due = this.ctx.storage.sql
+      .exec<ScheduledRow>(
+        "SELECT * FROM scheduled_messages WHERE failedAt IS NULL AND dueMs <= ? ORDER BY dueMs, id LIMIT ?",
+        now,
+        SCHEDULED_BATCH,
+      )
+      .toArray();
+    let posted = 0;
+    for (const row of due) {
+      try {
+        let capability: TenantRow;
+        try {
+          capability = this.authorize(row.tokenHash);
+        } catch {
+          throw new HttpError(
+            403,
+            "key_revoked",
+            "The key that scheduled this message was revoked or rotated. Change its time with a current key to post it.",
+          );
+        }
+        this.requireScope(capability, row.channel);
+        this.requireBoundName(capability, row.username);
+        if (row.personaId !== null) {
+          const persona = this.ctx.storage.sql
+            .exec<{ displayName: string }>(
+              "SELECT displayName FROM personas WHERE channel = ? AND id = ?",
+              row.channel,
+              row.personaId,
+            )
+            .toArray()[0];
+          if (!persona || persona.displayName !== row.username)
+            throw new HttpError(
+              400,
+              "persona_mismatch",
+              "The persona that scheduled this message was removed or renamed.",
+            );
+        }
+        const response = this.send(
+          row.tenant,
+          row.channel,
+          row.username,
+          row.text,
+          row.contentType,
+          {
+            ...(row.replyTo === null ? {} : { replyTo: row.replyTo }),
+            ...(row.correlationId === null ? {} : { correlationId: row.correlationId }),
+            ...(row.recipient === null ? {} : { to: row.recipient }),
+          },
+          row.key,
+          row.digest,
+          row.personaId,
+          Boolean(row.notify),
+          row.labels === null ? undefined : (JSON.parse(row.labels) as Labels),
+          [],
+          row.id,
+        );
+        if (response.status < 300) posted++;
+      } catch (error) {
+        const failure =
+          error instanceof HttpError
+            ? { code: error.code, message: error.message }
+            : { code: "internal_error", message: "The message could not be posted." };
+        this.ctx.storage.sql.exec(
+          "UPDATE scheduled_messages SET failedAt = ?, error = ?, errorMessage = ? WHERE id = ?",
+          new Date().toISOString(),
+          failure.code,
+          failure.message,
+          row.id,
+        );
+      }
+    }
+    return posted;
   }
 
   async accountSession(tenant: string, username: string) {
@@ -2429,6 +2619,221 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
+  /**
+   * `POST …/messages` with `sendAt` (ADR 0060): stores the message to post at that time instead of
+   * now. Every check a send makes on the sender ran before this; the board must be active now and
+   * again when it posts. An Idempotency-Key replays the scheduled message (or the message it
+   * became) and is kept on the message when it posts.
+   */
+  private async schedule(
+    tenant: string,
+    channel: string,
+    message: {
+      username: string;
+      text: string;
+      type: ContentType;
+      correlation: Correlation;
+      personaId: string | null;
+      labels: Labels | undefined;
+      sendAt: string;
+    },
+    key: string | null,
+    payloadHash: string,
+    hash: string,
+    capability: TenantRow,
+  ): Promise<Response> {
+    const result = this.ctx.storage.transactionSync(() => {
+      this.requireActive(channel);
+      if (key) {
+        const waiting = this.ctx.storage.sql
+          .exec<ScheduledRow>("SELECT * FROM scheduled_messages WHERE channel = ? AND key = ?", channel, key)
+          .toArray()[0];
+        const posted = this.ctx.storage.sql
+          .exec<MessageRow & { digest: string; deleted: number }>(
+            `SELECT ${MESSAGE_COLUMNS}, digest, deleted FROM messages WHERE channel = ? AND key = ?`,
+            channel,
+            key,
+          )
+          .toArray()[0];
+        const digestOf = waiting?.digest ?? posted?.digest;
+        if (digestOf !== undefined && digestOf !== payloadHash)
+          throw new HttpError(
+            409,
+            "idempotency_conflict",
+            "This idempotency key was used for different content.",
+          );
+        if (waiting)
+          return { body: { scheduled: toScheduled(waiting, tenant), replayed: true }, status: 200 };
+        if (posted) {
+          if (posted.deleted)
+            throw new HttpError(
+              410,
+              "message_deleted",
+              "The original message was deleted; retries cannot resurrect it.",
+            );
+          const { digest: _digest, deleted: _deleted, ...row } = posted;
+          return {
+            body: { message: this.withLabels(channel, [toMessage(row, tenant)])[0], replayed: true },
+            status: 200,
+          };
+        }
+      }
+      if (
+        message.correlation.replyTo !== undefined &&
+        !this.ctx.storage.sql
+          .exec("SELECT id FROM messages WHERE channel = ? AND id = ?", channel, message.correlation.replyTo)
+          .toArray().length
+      )
+        throw new HttpError(
+          400,
+          "invalid_reply_to",
+          "replyTo must be the id of an existing message in this channel.",
+        );
+      const counts = this.ctx.storage.sql
+        .exec<{ board: number; all: number }>(
+          'SELECT COUNT(*) AS "all", COALESCE(SUM(channel = ?), 0) AS board FROM scheduled_messages',
+          channel,
+        )
+        .one();
+      if (counts.board >= MAX_SCHEDULED_PER_BOARD || counts.all >= MAX_SCHEDULED)
+        throw new HttpError(
+          409,
+          "scheduled_quota",
+          `Too many scheduled messages (${MAX_SCHEDULED_PER_BOARD} per board, ${MAX_SCHEDULED} per workspace). Cancel one or wait for one to post.`,
+        );
+      this.createChannel(channel);
+      const now = new Date().toISOString();
+      const row = this.ctx.storage.sql
+        .exec<ScheduledRow>(
+          `INSERT INTO scheduled_messages(tenant, channel, username, text, contentType, sendAt, dueMs, createdAt,
+             updatedAt, replyTo, correlationId, recipient, personaId, labels, key, digest, tokenHash, notify)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+          tenant,
+          channel,
+          message.username,
+          message.text,
+          message.type,
+          message.sendAt,
+          Date.parse(message.sendAt),
+          now,
+          now,
+          message.correlation.replyTo ?? null,
+          message.correlation.correlationId ?? null,
+          message.correlation.to ?? null,
+          message.personaId,
+          message.labels && Object.keys(message.labels).length ? JSON.stringify(message.labels) : null,
+          key,
+          payloadHash,
+          hash,
+          // The owner's own messages never notify the owner, as for a send.
+          capability.owner_access ? 0 : 1,
+        )
+        .one();
+      return { body: { scheduled: toScheduled(row, tenant), replayed: false }, status: 201 };
+    });
+    await this.armAlarm();
+    return json(result.body, result.status);
+  }
+
+  /**
+   * `…/channels/:channel/scheduled` (ADR 0060). GET lists the board's waiting and failed scheduled
+   * messages, soonest first; anyone who can read the board sees them. PATCH `…/:id` changes the text
+   * or time (sender only); a new time retries a failed one. DELETE `…/:id?username=NAME` cancels
+   * (sender, or the workspace owner).
+   */
+  private async scheduledRoute(
+    request: Request,
+    url: URL,
+    tenant: string,
+    channel: string,
+    rest: string[],
+    change: ScheduledChange | null,
+    capability: TenantRow,
+    hash: string,
+  ): Promise<Response> {
+    if (!rest.length && request.method === "GET") {
+      const rows = this.ctx.storage.sql
+        .exec<ScheduledRow>("SELECT * FROM scheduled_messages WHERE channel = ? ORDER BY dueMs, id", channel)
+        .toArray();
+      return json({ channel, scheduled: rows.map((row) => toScheduled(row, tenant)) });
+    }
+    if (rest.length !== 1 || (request.method !== "PATCH" && request.method !== "DELETE"))
+      throw new HttpError(
+        404,
+        "route_not_found",
+        "Use GET …/scheduled to list, PATCH …/scheduled/ID to change and DELETE …/scheduled/ID?username=NAME to cancel.",
+      );
+    const id = messageId(rest[0]);
+    const username =
+      change?.username ??
+      text(url.searchParams.get("username") ?? undefined, "username", 128, "invalid_scheduled");
+    const owner = Boolean(capability.owner_access);
+    // Cancelling is the owner's moderation too; changing someone else's words is not.
+    if (!(request.method === "DELETE" && owner)) this.requireBoundName(capability, username);
+    const result = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql
+        .exec<ScheduledRow>("SELECT * FROM scheduled_messages WHERE channel = ? AND id = ?", channel, id)
+        .toArray()[0];
+      if (!row)
+        throw new HttpError(
+          404,
+          "scheduled_not_found",
+          "No such scheduled message. It may have posted already (look for it on the board) or been cancelled.",
+        );
+      const sender = row.username === username;
+      if (!sender && !(request.method === "DELETE" && owner))
+        throw new HttpError(403, "not_sender", "Only the sender can change or cancel a scheduled message.");
+      if (sender && capability.shared_channel) {
+        const persona = this.ctx.storage.sql
+          .exec<{ id: string }>(
+            "SELECT id FROM personas WHERE channel = ? AND displayName = ?",
+            channel,
+            username,
+          )
+          .toArray()[0];
+        if (!persona)
+          throw new HttpError(400, "persona_required", "Register your persona with msn persona add first.");
+        if (row.personaId !== null && row.personaId !== persona.id)
+          throw new HttpError(403, "not_sender", "Only the sender can change or cancel a scheduled message.");
+      }
+      if (request.method === "DELETE") {
+        this.ctx.storage.sql.exec("DELETE FROM scheduled_messages WHERE id = ?", id);
+        return null;
+      }
+      this.requireActive(channel);
+      const update = change as ScheduledChange;
+      // JSON payloads stay JSON (ADR 0004); the content type never changes.
+      if (update.text !== undefined) contentType(row.contentType, update.text);
+      const sendAt = update.sendAt ?? row.sendAt;
+      // A failed message retries only at a new time; changing its text alone keeps it failed.
+      const retry = update.sendAt !== undefined;
+      return this.ctx.storage.sql
+        .exec<ScheduledRow>(
+          `UPDATE scheduled_messages SET text = ?, sendAt = ?, dueMs = ?, updatedAt = ?, tokenHash = ?, notify = ?,
+             failedAt = CASE WHEN ? THEN NULL ELSE failedAt END,
+             error = CASE WHEN ? THEN NULL ELSE error END,
+             errorMessage = CASE WHEN ? THEN NULL ELSE errorMessage END
+           WHERE id = ? RETURNING *`,
+          update.text ?? row.text,
+          sendAt,
+          Date.parse(sendAt),
+          new Date().toISOString(),
+          // The key that changed it is the one checked when it posts, so a sender whose old key was
+          // rotated can post it again with a current key.
+          hash,
+          capability.owner_access ? 0 : 1,
+          retry ? 1 : 0,
+          retry ? 1 : 0,
+          retry ? 1 : 0,
+          id,
+        )
+        .one();
+    });
+    await this.armAlarm();
+    if (!result) return new Response(null, { status: 204 });
+    return json({ scheduled: toScheduled(result, tenant) });
+  }
+
   private send(
     tenant: string,
     channel: string,
@@ -2442,10 +2847,15 @@ export class MsnDurableObject extends DurableObject<Env> {
     notify = true,
     labels: Labels | undefined = undefined,
     attachments: AttachmentRef[] = [],
+    scheduledId: number | null = null,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       // Rechecked inside the write: an archive that lands while a send awaits its body still wins.
       this.requireActive(channel);
+      // A scheduled message leaves the schedule in the same write that posts it (ADR 0060). A
+      // failure below rolls both back, so it is never posted twice or lost.
+      if (scheduledId !== null)
+        this.ctx.storage.sql.exec("DELETE FROM scheduled_messages WHERE id = ?", scheduledId);
       if (key) {
         const old = this.ctx.storage.sql
           .exec<MessageRow & { digest: string; deleted: number }>(
@@ -3827,7 +4237,10 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.requireScope(capability, channel);
             return this.archiveRoute(request, channel, capability);
           }
-          if (this.archivedAt(channel)) {
+          // Cancelling a scheduled message changes nothing on the board, so it works on an archived
+          // board too (ADR 0060); otherwise a message that failed there could never be cleared.
+          const cancelScheduled = rest.length === 4 && rest[2] === "scheduled" && request.method === "DELETE";
+          if (this.archivedAt(channel) && !cancelScheduled) {
             this.requireScope(this.authorize(hash), channel);
             this.requireActive(channel);
           }
@@ -3860,9 +4273,19 @@ export class MsnDurableObject extends DurableObject<Env> {
             : payload(username, content, type, correlation)
           : "";
         const files = input ? attachmentRefs(input.attachments) : [];
+        // `sendAt` schedules the send instead (ADR 0060). Uploads expire unused after 24 hours, so a
+        // scheduled message cannot carry files.
+        const sendAt = input?.sendAt === undefined || input.sendAt === null ? null : sendAtTime(input.sendAt);
+        if (sendAt && files.length)
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            "A scheduled message cannot carry attachments. Send the files now, or schedule the text alone.",
+          );
         // Sends without labels or files hash exactly as before ADR 0032, so older retries still replay.
         let hashInput = sendLabels ? JSON.stringify([base, sendLabels]) : base;
         if (files.length) hashInput = JSON.stringify([hashInput, files]);
+        if (sendAt) hashInput = JSON.stringify([hashInput, { sendAt }]);
         const payloadHash = input ? await digest(hashInput) : "";
         const change =
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "labels"
@@ -3875,6 +4298,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         const edit =
           request.method === "PATCH" && rest.length === 4 && rest[0] === "channels" && rest[2] === "messages"
             ? messageEdit(await body(request))
+            : null;
+        const reschedule =
+          request.method === "PATCH" && rest.length === 4 && rest[0] === "channels" && rest[2] === "scheduled"
+            ? scheduledChange(await body(request))
             : null;
         const snapshotInput =
           request.method === "POST" && rest.length === 3 && rest[2] === "snapshots"
@@ -3893,7 +4320,13 @@ export class MsnDurableObject extends DurableObject<Env> {
         const capability = this.authorize(hash);
         // The entrance gate ran before the awaits above; check again so a label, snapshot or send
         // whose body was still being read when the board was archived is refused too (ADR 0046).
-        if (request.method !== "GET" && rest[0] === "channels" && rest[1]) this.requireActive(slug(rest[1]));
+        if (
+          request.method !== "GET" &&
+          rest[0] === "channels" &&
+          rest[1] &&
+          !(rest.length === 4 && rest[2] === "scheduled" && request.method === "DELETE")
+        )
+          this.requireActive(slug(rest[1]));
         if (input && capability.shared_channel && !personaId) {
           const persona = this.ctx.storage.sql
             .exec<{ id: string }>(
@@ -4136,6 +4569,17 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.requireChannel(channel);
             return this.editMessage(tenant, channel, messageId(rest[3]), edit, capability);
           }
+          if (rest[2] === "scheduled")
+            return await this.scheduledRoute(
+              request,
+              url,
+              tenant,
+              channel,
+              rest.slice(3),
+              reschedule,
+              capability,
+              hash,
+            );
           if (rest.length === 3 && rest[2] === "edits" && request.method === "GET") {
             this.requireChannel(channel);
             return this.editPage(tenant, channel, url.searchParams);
@@ -4173,6 +4617,16 @@ export class MsnDurableObject extends DurableObject<Env> {
                   400,
                   "invalid_key",
                   "Idempotency-Key must be 1–128 letters, digits, underscores or hyphens.",
+                );
+              if (sendAt)
+                return await this.schedule(
+                  tenant,
+                  channel,
+                  { username, text: content, type, correlation, personaId, labels: sendLabels, sendAt },
+                  key,
+                  payloadHash,
+                  hash,
+                  capability,
                 );
               return this.send(
                 tenant,
