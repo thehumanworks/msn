@@ -178,6 +178,8 @@ pub enum Command {
         text: String,
         from: Option<String>,
         before: Option<u64>,
+        /// Every board the key can read, not only `channel` (ADR 0072).
+        all: bool,
     },
     /// Point-read of one message: the parent of a reply whose parent is not loaded (ADR 0041).
     LoadMessage {
@@ -1029,6 +1031,7 @@ fn handle_command(
             text,
             from,
             before,
+            all,
             ..
         } => match client_ops::search_messages(
             &cc.client,
@@ -1038,6 +1041,7 @@ fn handle_command(
             &text,
             from.as_deref(),
             before,
+            all,
         ) {
             Ok(page) => emit(
                 tx,
