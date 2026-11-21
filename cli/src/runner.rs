@@ -261,7 +261,7 @@ fn verify_runtime_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), CliEr
 }
 
 pub fn execute(cli: &Cli) -> Result<(), CliError> {
-    let Command::Run {
+    let Command::Run(crate::args::RunArgs {
         channel,
         state_dir,
         status,
@@ -270,7 +270,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
         prompt,
         local,
         command,
-    } = &cli.command
+    }) = &cli.command
     else {
         unreachable!()
     };
@@ -392,7 +392,7 @@ mod tests {
     fn run_defaults_to_resume() {
         let cli = Cli::try_parse_from(["msn", "run", "work"]).unwrap();
         assert!(
-            matches!(cli.command, Command::Run { status: false, install_service: false, command, .. } if command.is_empty())
+            matches!(cli.command, Command::Run(crate::args::RunArgs { status: false, install_service: false, command, .. }) if command.is_empty())
         );
     }
     #[test]
@@ -402,7 +402,7 @@ mod tests {
             args.extend(extra);
             let cli = Cli::try_parse_from(args).unwrap();
             assert!(
-                matches!(cli.command, Command::Run { state_dir: Some(path), .. } if path == "/state with spaces")
+                matches!(cli.command, Command::Run(crate::args::RunArgs { state_dir: Some(path), .. }) if path == "/state with spaces")
             );
         }
     }
@@ -420,7 +420,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(cli.command, Command::Run { prompt: true, command, .. } if command == ["/a b/agent", "--flag", "$literal"])
+            matches!(cli.command, Command::Run(crate::args::RunArgs { prompt: true, command, .. }) if command == ["/a b/agent", "--flag", "$literal"])
         );
     }
     #[test]

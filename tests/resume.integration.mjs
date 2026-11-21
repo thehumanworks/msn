@@ -40,7 +40,8 @@ function child(command, args, options = {}) {
   p.errors = "";
   p.stdout?.on("data", (b) => (p.output += b));
   p.stderr?.on("data", (b) => (p.errors += b));
-  p.done = once(p, "exit");
+  // "close", not "exit": exit can fire before the last stdout data arrives.
+  p.done = once(p, "close");
   children.push(p);
   return p;
 }
