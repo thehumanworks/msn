@@ -56,7 +56,7 @@ messages), process every message, then `commit` with that peek's nextCursor. `se
 message; reuse the same key and text if a send result was uncertain. `show_message` fetches exact \
 evidence, and `message_link` gives a link to one message to cite in a hand-off. Messages can carry key=value labels such as state=open: set them on `send` or later \
 with `label` (use `if` to claim safely), list matches with `find`, and block on one with \
-`wait_label`. `get_attachment` reads a file attached to a message, and `send` takes `attach` \
+`wait_label`. `wait_all` waits on every board at once for a message addressed to you. `get_attachment` reads a file attached to a message, and `send` takes `attach` \
 paths. `search` finds earlier messages by words, sender, kind or label, so you can look up a past \
 decision instead of re-reading the board. `receipts` lists which readers have explicitly committed \
 past a message (commits sent to the server, the default). `since` summarises what changed since \
@@ -78,6 +78,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
         channel: channel.as_deref().map(slug).transpose()?.map(str::to_owned),
         resolved_reader: None,
         edit_cursors: HashMap::new(),
+        watch_memo: crate::watch::Memo::default(),
         stop: Arc::new(AtomicBool::new(false)),
     };
     let stdin = io::stdin();
@@ -96,6 +97,8 @@ pub struct Server {
     /// Per-board edit cursor from the last start or catch_up (ADR 0052), so the next page reports
     /// edits to messages the agent already read without the agent passing editsAfter.
     edit_cursors: HashMap<String, u64>,
+    /// How far `wait_all` already read past each board's progress (ADR 0069).
+    watch_memo: crate::watch::Memo,
     stop: Arc<AtomicBool>,
 }
 
@@ -238,6 +241,7 @@ impl Server {
                     "wait_label" => self.wait_label(args),
                     "ask" => self.ask(args),
                     "wait_answer" => self.wait_answer(args),
+                    "wait_all" => self.wait_all(args),
                     "answer" => self.answer(args),
                     _ => unreachable!("every listed tool is dispatched"),
                 }
@@ -862,6 +866,45 @@ impl Server {
         })
     }
 
+    /// Waits up to `wait` seconds for the first message addressed to this agent on any board the
+    /// key can read (ADR 0069). Reads after each board's processing progress, as `peek` would,
+    /// and moves nothing: the agent peeks that board and commits as usual.
+    fn wait_all(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(MAX_WAIT);
+        let reader = self.processing_reader(&tenant, &token)?;
+        let name = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+        let client = Arc::new(MsnClient::new(&self.url)?);
+        let now = std::time::Instant::now();
+        // No tool call outlives one long poll: a down server or a full poll cap returns an
+        // error, and a slow catch-up returns matched false, within 25 seconds (or `wait`).
+        let boards = crate::watch::Boards::new(Arc::clone(&client), &tenant, &token, &self.stop)
+            .give_up_at(now + std::time::Duration::from_secs(wait.max(MAX_WAIT)));
+        let mode = resumable::mode_from_env();
+        let url = self.url.clone();
+        let mut progress = |channel: &str| {
+            resumable::committed_progress(mode, &client, &url, &tenant, &token, channel, &reader)
+        };
+        let deadline = now + std::time::Duration::from_secs(wait);
+        let hit = crate::watch::first_addressed(
+            &boards,
+            &name,
+            &mut progress,
+            &mut self.watch_memo,
+            MAX_WAIT,
+            Some(deadline),
+        )?;
+        Ok(match hit {
+            Some(hit) => json!({
+                "matched": true,
+                "channel": hit.channel,
+                "message": hit.message,
+                "committedThrough": hit.progress,
+            }),
+            None => json!({ "matched": false }),
+        })
+    }
+
     /// Asks the addressed name a question with buttons (ADR 0065), then waits up to `wait` seconds.
     fn ask(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         let (tenant, token) = self.credentials()?;
@@ -1404,6 +1447,23 @@ pub fn tools() -> Vec<Value> {
             &["id"],
             (true, true),
         ),
+        {
+            // Every board, so no channel argument (ADR 0069).
+            let mut wait_all = tool(
+                "wait_all",
+                "Wait on all boards",
+                "Wait up to `wait` seconds for the first new message addressed to you (to or one of its recipients is your name) on any board this key can read. New means after your committed progress on that board, as peek reads it. Returns matched true with {channel, message, committedThrough}, or matched false on timeout; call again to keep waiting. Moves nothing: peek that channel, process, then commit as usual. Until you commit past the message, wait_all returns it again.",
+                json!({
+                    "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait (default 25)."},
+                }),
+                &[],
+                (true, true),
+            );
+            if let Some(properties) = wait_all["inputSchema"]["properties"].as_object_mut() {
+                properties.remove("channel");
+            }
+            wait_all
+        },
         tool(
             "answer",
             "Answer a question",
@@ -1453,6 +1513,7 @@ mod tests {
             channel: None,
             resolved_reader: None,
             edit_cursors: HashMap::new(),
+            watch_memo: crate::watch::Memo::default(),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1556,12 +1617,17 @@ mod tests {
                 "wait_label",
                 "ask",
                 "wait_answer",
+                "wait_all",
                 "answer"
             ]
         );
         for tool in tools {
             assert_eq!(tool["inputSchema"]["type"], "object");
-            assert!(tool["inputSchema"]["properties"]["channel"].is_object());
+            // wait_all watches every board, so it alone takes no channel (ADR 0069).
+            assert_eq!(
+                tool["inputSchema"]["properties"]["channel"].is_object(),
+                tool["name"] != "wait_all"
+            );
             assert!(!tool["description"].as_str().unwrap().is_empty());
         }
     }

@@ -75,6 +75,7 @@ EXAMPLES:
   msn watch
   msn read general --reader reviewer
   msn wait general --reader reviewer
+  msn wait --all                    # first message addressed to you on any board
   msn whoami
   msn key-create reviewer --username reviewer
   msn key-create agents --username-prefix agent-
@@ -677,9 +678,19 @@ pub enum Command {
         #[arg(long = "cursor-file")]
         cursor_file: Option<String>,
     },
-    /// Block until new messages exist, print that page, persist the cursor, exit 0
+    /// Block until new messages exist, print that page, persist the cursor, exit 0. With --all,
+    /// block until a message addressed to you arrives on any board (ADR 0069)
     Wait {
-        channel: String,
+        #[arg(required_unless_present = "all")]
+        channel: Option<String>,
+        /// Wait on every board this key can read for the first new message addressed to you
+        /// (--username, else the key's name). Prints {channel, message, messages, nextCursor}:
+        /// messages are that board's new messages through the addressed one, and that board's
+        /// reader cursor moves to it, as `msn wait CHANNEL` would. Other boards' cursors stay put.
+        /// A board you never read starts at its first message, so the first run can print a
+        /// long history in messages. Fails if a running `msn wait` holds that board's cursor
+        #[arg(long, conflicts_with_all = ["channel", "thread", "after", "limit", "cursor_file"])]
+        all: bool,
         /// Follow one thread: only its root message and the replies to it, at any depth (a reply id means its thread). Keeps a cursor of its own (ADR 0063)
         #[arg(long, value_name = "ID")]
         thread: Option<String>,

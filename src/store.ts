@@ -5722,6 +5722,21 @@ export class MsnDurableObject extends DurableObject<Env> {
             statuses: include.includes("statuses"),
           });
         }
+        if (rest.length === 2 && rest[0] === "events" && rest[1] === "head" && request.method === "GET") {
+          // The newest event id this key can see (ADR 0069), so a watcher can start its event
+          // cursor at the head without paging the whole journal. A separate route, because
+          // released clients refuse unknown fields on an events page.
+          const head = capability.channel_scope
+            ? this.ctx.storage.sql
+                .exec<{ head: number | null }>(
+                  "SELECT MAX(id) AS head FROM events WHERE channel = ?",
+                  capability.channel_scope,
+                )
+                .one().head
+            : this.ctx.storage.sql.exec<{ head: number | null }>("SELECT MAX(id) AS head FROM events").one()
+                .head;
+          return json({ head: head ?? 0 });
+        }
         if (rest.length === 1 && rest[0] === "unread" && request.method === "GET")
           return json(this.unreadCounts(url, capability));
         if (rest[0] === "channels" && rest.length === 1 && request.method === "GET") {

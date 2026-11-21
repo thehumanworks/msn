@@ -528,3 +528,65 @@ test("CLI follow releases locks on local/output/auth errors without advancing or
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("wait --all needs a cursor file and matches every addressee ignoring case (ADR 0069)", async () => {
+  const { addressedTo } = await import("../scripts/msn.mjs");
+  assert.equal(addressedTo({ username: "lead", to: "a", recipients: ["a", " Tester "] }, "tester"), true);
+  assert.equal(addressedTo({ username: "lead", to: "Bob" }, "bob"), true);
+  assert.equal(addressedTo({ username: "lead" }, "bob"), false);
+  assert.equal(addressedTo({ username: "bob", to: "bob" }, "bob"), false);
+  await assert.rejects(harness(["wait", "general"]).execute(), /--all/);
+  await assert.rejects(harness(["wait", "--all"]).execute(), /--cursor-file/);
+  const dir = await mkdtemp(join(tmpdir(), "msn-wait-all-"));
+  try {
+    await assert.rejects(
+      harness(["wait", "--all", "--cursor-file", join(dir, "c.json"), "--after", "3"]).execute(),
+      /--after and --limit/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("wait --all retries every read, folds the sender and moves only the woken board (ADR 0069)", async () => {
+  const { addressedTo } = await import("../scripts/msn.mjs");
+  assert.equal(addressedTo({ username: " Reviewer", to: "reviewer" }, "REVIEWER"), false);
+  const dir = await mkdtemp(join(tmpdir(), "msn-wait-all-"));
+  const file = join(dir, "boards.json");
+  const hit = { id: 5, username: "lead", to: "x", recipients: ["x", "Tester"], text: "check" };
+  const replies = [
+    [503, { error: { message: "busy" } }],
+    [200, { head: 9 }],
+    [200, { channels: [{ name: "alpha" }, { name: "beta" }], hasMore: false }],
+    [200, { messages: [{ id: 2, username: "lead", text: "hi" }], nextCursor: 2, hasMore: false }],
+    [500, { error: { message: "oops" } }],
+    [200, { messages: [{ id: 4, username: "lead", text: "context" }, hit], nextCursor: 5, hasMore: false }],
+    [200, { messages: [{ id: 4, username: "lead", text: "context" }, hit], nextCursor: 5, hasMore: false }],
+  ];
+  const calls = [];
+  const output = [];
+  try {
+    await run({
+      argv: ["wait", "--all", "--cursor-file", file, "--username", "tester", "--wait", "0"],
+      env: { ...env, MSN_USERNAME: undefined },
+      out: (s) => output.push(s),
+      err: () => {},
+      fetcher: async (url) => {
+        calls.push(url);
+        const [status, body] = replies.shift();
+        return Response.json(body, { status });
+      },
+    });
+    const printed = JSON.parse(output[0]);
+    assert.equal(printed.channel, "beta");
+    assert.equal(printed.message.id, 5);
+    assert.deepEqual(
+      printed.messages.map((m) => m.id),
+      [4, 5],
+    );
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")).boards, { beta: 5 });
+    assert.equal(calls.filter((url) => url.endsWith("/events/head")).length, 2, "the 503 was retried");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

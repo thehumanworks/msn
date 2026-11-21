@@ -171,9 +171,15 @@ describe("several names on one message (ADR 0067)", () => {
 
   it("wakes each addressed persona's webhook once, and never the sender's own", async () => {
     const f = await fixture();
-    // Notices stay queued: delivery is covered by tests/webhooks.test.ts.
+    // The notice alarm is due at once, so it may deliver (and delete) notices before the read
+    // below; count delivered and still-queued notices together. Delivery itself is covered by
+    // tests/webhooks.test.ts.
+    const delivered: string[] = [];
     await runInDurableObject(f.stub, (instance: MsnDurableObject) => {
-      instance.webhookFetch = async () => new Response("ok");
+      instance.webhookFetch = async (input) => {
+        delivered.push(new URL(String(input instanceof Request ? input.url : input)).pathname.slice(1));
+        return new Response("ok");
+      };
     });
     for (const persona of ["rev", "work", "lead"])
       expect(
@@ -191,7 +197,7 @@ describe("several names on one message (ADR 0067)", () => {
         .toArray()
         .map((row) => row.personaId),
     );
-    expect(notices).toEqual(["rev", "work"]);
+    expect([...notices, ...delivered].sort()).toEqual(["rev", "work"]);
   });
 
   it("posts a scheduled message with all its names", async () => {

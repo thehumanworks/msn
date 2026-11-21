@@ -32,6 +32,7 @@ pub mod task_client;
 pub mod tasks;
 pub mod templates;
 pub mod transcript;
+pub mod watch;
 pub mod workspace;
 
 use std::fs;
@@ -1120,12 +1121,29 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
         }
         Command::Wait {
             channel,
+            all,
             thread,
             after,
             wait,
             limit,
             cursor_file,
         } => {
+            if all {
+                let tenant = require_tenant(cli.tenant.as_deref())?;
+                let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
+                let (wait, _) = parse_loop_bounds(wait.as_deref(), None)?;
+                let name =
+                    identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
+                let reader = match cli.reader.as_deref() {
+                    Some(reader) => {
+                        identity::resolve_username(&url, &tenant, &token, Some(reader))?
+                    }
+                    None => name.clone(),
+                };
+                return wait_all(&url, &tenant, &token, &name, &reader, wait, &stop);
+            }
+            let channel =
+                channel.ok_or_else(|| CliError::usage("Name a CHANNEL, or pass --all."))?;
             let thread = parse_thread(thread.as_deref())?;
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -2169,6 +2187,80 @@ fn follow(
             Ok(Flow::Continue)
         }
     })
+}
+
+/// `msn wait --all` (ADR 0069): blocks until a message addressed to `name` arrives on any board
+/// the key can read, prints `{channel, message, messages, nextCursor}` and moves that board's
+/// reader cursor to the message, exactly as `msn wait CHANNEL` would have after printing
+/// `messages`. Other boards' cursors do not move.
+fn wait_all(
+    url: &Url,
+    tenant: &str,
+    token: &str,
+    name: &str,
+    reader: &str,
+    poll: u64,
+    stop: &AtomicBool,
+) -> Result<(), CliError> {
+    let client = Arc::new(MsnClient::new(url)?);
+    let boards = watch::Boards::new(client, tenant, token, stop);
+    let cursor_path = |channel: &str| default_cursor_path(url, tenant, reader, channel);
+    let load = |channel: &str| -> Result<u64, CliError> {
+        load_cursor(
+            &cursor_path(channel)?,
+            &CursorBinding::new(url, tenant, channel, 0).with_reader(Some(reader)),
+        )
+    };
+    let mut memo = watch::Memo::default();
+    loop {
+        let mut progress = |channel: &str| load(channel);
+        let Some(hit) =
+            watch::first_addressed(&boards, name, &mut progress, &mut memo, poll, None)?
+        else {
+            return Ok(());
+        };
+        let path = cursor_path(&hit.channel)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        // Hold the board's cursor while printing and writing, as `msn wait CHANNEL` does.
+        let lock = CursorLock::acquire(&path)?;
+        let after = load(&hit.channel)?;
+        let message = if after == hit.progress {
+            Some(hit.message)
+        } else {
+            // Someone read the board meanwhile: look again from where they stopped.
+            match boards.scan(&hit.channel, after, name)? {
+                Some(watch::Scan::Found(message)) => Some(message),
+                Some(_) => None,
+                None => return Ok(()),
+            }
+        };
+        let Some(message) = message else {
+            continue;
+        };
+        let id = message["id"]
+            .as_u64()
+            .ok_or_else(|| CliError::generic("Message has no id."))?;
+        let Some(messages) = boards.through(&hit.channel, after, id)? else {
+            return Ok(());
+        };
+        let printed = json!({
+            "channel": hit.channel,
+            "message": message,
+            "messages": messages,
+            "nextCursor": id,
+        });
+        writeln!(io::stdout().lock(), "{printed}")?;
+        io::stdout()
+            .flush()
+            .map_err(|error| CliError::generic(error.to_string()))?;
+        write_cursor(
+            lock.cursor_path(),
+            &CursorBinding::new(url, tenant, &hit.channel, id).with_reader(Some(reader)),
+        )?;
+        return Ok(());
+    }
 }
 
 fn wait_for_messages(
