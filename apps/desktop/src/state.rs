@@ -661,6 +661,31 @@ impl AppState {
         }]
     }
 
+    /// Takes message `id` as the connected name, or releases it (ADR 0075). An archived board
+    /// takes no changes, so nothing is sent. The server decides who may: one holder per message,
+    /// and only the holder or the owner releases.
+    pub fn claim(&mut self, id: u64, release: bool) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        if self.is_archived(&channel) {
+            self.status = Some(format!("{channel} is archived and read only."));
+            return Vec::new();
+        }
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Vec::new();
+        };
+        vec![Command::Claim {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            id,
+            release,
+        }]
+    }
+
     /// Answers question `question` with `choice` as the connected name (ADR 0065). Only the
     /// addressed name is offered the buttons; the server checks it again.
     pub fn answer(&mut self, question: u64, choice: String) -> Vec<Command> {
@@ -1375,6 +1400,7 @@ impl AppState {
                 channel,
                 after,
                 reactions,
+                claims,
             } => {
                 if !self.is_current_channel(generation, channel_generation, &channel) {
                     return Vec::new();
@@ -1383,8 +1409,14 @@ impl AppState {
                     return Vec::new();
                 };
                 let found: BTreeMap<u64, Value> = reactions.into_iter().collect();
+                // Claims (ADR 0075) ride on the same refresh. Without a list, keep what is shown.
+                let claims: Option<BTreeMap<u64, Value>> =
+                    claims.map(|rows| rows.into_iter().collect());
                 for (id, message) in state.messages.range_mut(after + 1..) {
                     set_reactions(message, found.get(id).cloned().unwrap_or(Value::Null));
+                    if let Some(claims) = &claims {
+                        set_claim(message, claims.get(id).cloned().unwrap_or(Value::Null));
+                    }
                 }
                 if state.reactions_flight.finish() {
                     let after = state.messages.keys().next().map_or(0, |first| first - 1);
@@ -1459,6 +1491,23 @@ impl AppState {
                         .and_then(Value::as_object_mut)
                 {
                     message.insert("answered".into(), answered);
+                }
+                Vec::new()
+            }
+            UiEvent::Claimed {
+                generation,
+                channel_generation,
+                channel,
+                id,
+                claim,
+            } => {
+                if self.is_current_channel(generation, channel_generation, &channel)
+                    && let Some(message) = self
+                        .channel
+                        .as_mut()
+                        .and_then(|state| state.messages.get_mut(&id))
+                {
+                    set_claim(message, claim);
                 }
                 Vec::new()
             }
@@ -1868,6 +1917,8 @@ impl AppState {
                 }
             }
             "react" => self.status = Some(format!("Reaction not changed: {message}")),
+            // Take a request (ADR 0075): the refusal names the holder; the next refresh shows it.
+            "claim" => self.status = Some(format!("Not changed: {message}")),
             // Scheduled messages (ADR 0060): a failed refresh keeps the list shown.
             "scheduled" => {
                 if channel_generation == Some(self.channel_generation)
@@ -1934,6 +1985,22 @@ fn set_reactions(message: &mut Value, reactions: Value) {
         object.insert("reactions".into(), reactions);
     } else {
         object.remove("reactions");
+    }
+}
+
+/// Sets who holds a message (ADR 0075); `Null`, or anything without a holder's name, removes the
+/// field, so an untaken message keeps the shape it had.
+fn set_claim(message: &mut Value, claim: Value) {
+    let Some(object) = message.as_object_mut() else {
+        return;
+    };
+    if claim["username"]
+        .as_str()
+        .is_some_and(|name| !name.is_empty())
+    {
+        object.insert("claim".into(), claim);
+    } else {
+        object.remove("claim");
     }
 }
 
@@ -2595,6 +2662,103 @@ mod tests {
     }
 
     #[test]
+    fn claims_apply_from_the_users_own_change_and_from_the_refresh() {
+        // Take a request (ADR 0075).
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(
+            &mut state,
+            vec![msg(4, "a"), msg(5, "b"), msg(6, "c")],
+            6,
+            0,
+        );
+        let cg = state.channel_generation;
+        let commands = state.claim(4, false);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Claim { id: 4, username, release: false, .. }] if username == "alice"
+        ));
+        let taken = json!({"username": "alice", "claimedAt": "2026-11-21T18:00:00.000Z"});
+        state.apply(UiEvent::Claimed {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            id: 4,
+            claim: taken.clone(),
+        });
+        assert_eq!(state.channel.as_ref().unwrap().messages[&4]["claim"], taken);
+
+        // A refresh from a server that lists no claims keeps what is shown.
+        let refresh = |claims| UiEvent::Reactions {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            after: 3,
+            reactions: Vec::new(),
+            claims,
+        };
+        state.apply(refresh(None));
+        assert_eq!(state.channel.as_ref().unwrap().messages[&4]["claim"], taken);
+        // A refresh with the list is the truth: 4 was released elsewhere, bob took 6.
+        let bobs = json!({"username": "bob", "claimedAt": "2026-11-21T18:01:00.000Z"});
+        state.apply(refresh(Some(vec![(6, bobs.clone())])));
+        let messages = &state.channel.as_ref().unwrap().messages;
+        assert!(messages[&4].get("claim").is_none());
+        assert_eq!(messages[&6]["claim"], bobs);
+
+        // Releasing sends `release`, and a Null claim clears the field.
+        assert!(matches!(
+            state.claim(6, true).as_slice(),
+            [Command::Claim {
+                id: 6,
+                release: true,
+                ..
+            }]
+        ));
+        state.apply(UiEvent::Claimed {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            id: 6,
+            claim: Value::Null,
+        });
+        assert!(
+            state.channel.as_ref().unwrap().messages[&6]
+                .get("claim")
+                .is_none()
+        );
+        // A stale channel generation is ignored.
+        state.apply(UiEvent::Claimed {
+            generation: 1,
+            channel_generation: cg + 99,
+            channel: "general".into(),
+            id: 5,
+            claim: taken,
+        });
+        assert!(
+            state.channel.as_ref().unwrap().messages[&5]
+                .get("claim")
+                .is_none()
+        );
+        // A refusal is shown with the server's words, which name the holder.
+        state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: Some(cg),
+            context: "claim",
+            message: "409: Message 5 is already taken by \"bob\".".into(),
+            retryable: true,
+            key: None,
+        });
+        assert!(
+            state
+                .status
+                .as_deref()
+                .unwrap()
+                .contains("taken by \"bob\"")
+        );
+    }
+
+    #[test]
     fn reactions_refresh_cached_messages_and_own_changes_apply_in_place() {
         let mut state = ready_state(1);
         state.select_channel("general".into());
@@ -2616,6 +2780,7 @@ mod tests {
             channel: "general".into(),
             after: 3,
             reactions: vec![(5, json!({"done": ["lead"]}))],
+            claims: None,
         });
         assert!(matches!(
             rerun.as_slice(),
@@ -2652,6 +2817,7 @@ mod tests {
             channel: "general".into(),
             after: 3,
             reactions: Vec::new(),
+            claims: None,
         });
         let messages = &state.channel.as_ref().unwrap().messages;
         assert!(messages.values().all(|m| m.get("reactions").is_none()));

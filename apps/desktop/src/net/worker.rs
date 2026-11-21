@@ -136,6 +136,15 @@ pub enum Command {
         choice: String,
         key: String,
     },
+    /// Takes message `id` as `username`, or releases it (ADR 0075).
+    Claim {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        id: u64,
+        release: bool,
+    },
     /// Adds (`remove: false`) or removes one reaction as `username` (ADR 0047).
     React {
         generation: u64,
@@ -250,6 +259,7 @@ impl Command {
             | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
+            | Command::Claim { generation, .. }
             | Command::Answer { generation, .. }
             | Command::LoadEdits { generation, .. }
             | Command::EditMessage { generation, .. }
@@ -380,6 +390,16 @@ pub enum UiEvent {
         channel: String,
         after: u64,
         reactions: Vec<(u64, Value)>,
+        /// Who holds which message (ADR 0075); `None` when the server did not say.
+        claims: Option<Vec<(u64, Value)>>,
+    },
+    /// One message's claim after the user took or released it (`Null` when nobody holds it).
+    Claimed {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        id: u64,
+        claim: Value,
     },
     /// Messages edited since the last edit cursor, and the cursor to ask from next (ADR 0052).
     Edits {
@@ -866,7 +886,7 @@ fn handle_command(
             ..
         } => {
             match client_ops::fetch_reactions(&cc.client, &cc.tenant, &cc.token, &channel, after) {
-                Ok(reactions) => emit(
+                Ok((reactions, claims)) => emit(
                     tx,
                     wake,
                     UiEvent::Reactions {
@@ -875,6 +895,7 @@ fn handle_command(
                         channel,
                         after,
                         reactions,
+                        claims,
                     },
                 ),
                 Err(err) => emit_error(
@@ -984,6 +1005,38 @@ fn handle_command(
                 generation,
                 Some(channel_generation),
                 "answer",
+                err,
+                true,
+                None,
+            ),
+        },
+        Command::Claim {
+            channel_generation,
+            channel,
+            username,
+            id,
+            release,
+            ..
+        } => match client_ops::claim(
+            &cc.client, &cc.tenant, &cc.token, &channel, &username, id, release,
+        ) {
+            Ok(claim) => emit(
+                tx,
+                wake,
+                UiEvent::Claimed {
+                    generation,
+                    channel_generation,
+                    channel,
+                    id,
+                    claim,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "claim",
                 err,
                 true,
                 None,

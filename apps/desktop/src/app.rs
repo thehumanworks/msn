@@ -244,6 +244,8 @@ enum Action {
     ShowTask(String),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
     React(u64, &'static str, bool),
+    /// Take a message (`false`) or release it (`true`), so others skip or pick it up (ADR 0075).
+    TakeMessage(u64, bool),
     /// Answer question (id) with a choice (ADR 0065).
     Answer(u64, String),
     /// Archive (`true`) or unarchive the open board (ADR 0046).
@@ -1029,6 +1031,11 @@ impl MsnDesktopApp {
             .selected_channel
             .as_deref()
             .is_some_and(|channel| !self.state.is_archived(channel));
+        let viewer = Viewer {
+            me: &me,
+            can_post: can_react,
+            owner: self.state.connection.as_ref().is_some_and(|c| c.owner),
+        };
         let scroll_to = self.scroll_to.take();
         let selected = self.selected;
         let reveal = std::mem::take(&mut self.reveal_selected);
@@ -1108,8 +1115,7 @@ impl MsnDesktopApp {
                                         let shown = render_message(
                                             ui,
                                             message,
-                                            &me,
-                                            can_react,
+                                            viewer,
                                             Some(fold),
                                             actions,
                                         );
@@ -1148,8 +1154,7 @@ impl MsnDesktopApp {
                                             let shown = render_message(
                                                 ui,
                                                 reply,
-                                                &me,
-                                                can_react,
+                                                viewer,
                                                 Some(fold),
                                                 actions,
                                             );
@@ -1608,7 +1613,12 @@ impl MsnDesktopApp {
             .show(ui, |ui| {
                 // Search hits show in full: the match may be below the fold (ADR 0050).
                 for message in &search.results {
-                    render_message(ui, message, &me, can_post, None, actions);
+                    let viewer = Viewer {
+                        me: &me,
+                        can_post,
+                        owner: false,
+                    };
+                    render_message(ui, message, viewer, None, actions);
                     ui.add_space(4.0);
                 }
                 if search.has_more && !search.inflight && ui.button("Older matches").clicked() {
@@ -2164,6 +2174,10 @@ impl MsnDesktopApp {
             }
             Action::React(id, kind, remove) => {
                 let commands = self.state.react(id, kind, remove);
+                self.dispatch_all(commands);
+            }
+            Action::TakeMessage(id, release) => {
+                let commands = self.state.claim(id, release);
                 self.dispatch_all(commands);
             }
             Action::Answer(id, choice) => {
@@ -3130,14 +3144,77 @@ fn fold_clip(ui: &mut egui::Ui, fold: Option<&Fold>, add: impl FnOnce(&mut egui:
     long(height)
 }
 
+/// Who is looking at a message: their name, whether the board takes changes from them, and
+/// whether they own the workspace (the owner releases anyone's claim, ADR 0075).
+#[derive(Clone, Copy)]
+struct Viewer<'a> {
+    me: &'a str,
+    can_post: bool,
+    owner: bool,
+}
+
+/// What a message's claim offers this viewer (ADR 0075): take it, release it, or nothing.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum ClaimControl {
+    None,
+    Take,
+    Release,
+}
+
+/// The name holding a message, when someone took it (ADR 0075).
+fn claim_holder(message: &Value) -> Option<&str> {
+    message["claim"]["username"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+}
+
+/// Only in the log (`in_log`), on a board that takes changes. A free message that nothing
+/// replaced offers Take; a taken one offers Release to its holder and to the owner.
+fn claim_control(message: &Value, viewer: Viewer, in_log: bool) -> ClaimControl {
+    if !viewer.can_post || !in_log {
+        return ClaimControl::None;
+    }
+    match claim_holder(message) {
+        None if message["replacedBy"].is_u64() => ClaimControl::None,
+        None => ClaimControl::Take,
+        Some(holder) if holder == viewer.me || viewer.owner => ClaimControl::Release,
+        Some(_) => ClaimControl::None,
+    }
+}
+
+/// "Taking this" or "Release" beside a message's other actions (ADR 0075).
+fn claim_link(ui: &mut egui::Ui, id: u64, control: ClaimControl, actions: &mut Vec<Action>) {
+    let (label, hint, release) = match control {
+        ClaimControl::None => return,
+        ClaimControl::Take => (
+            "Taking this",
+            format!("Tell everyone you are handling message #{id}, so others skip it"),
+            false,
+        ),
+        ClaimControl::Release => (
+            "Release",
+            format!("Release message #{id}, so someone else can take it"),
+            true,
+        ),
+    };
+    if ui
+        .link(egui::RichText::new(label).small().color(theme::muted()))
+        .on_hover_text(hint)
+        .clicked()
+    {
+        actions.push(Action::TakeMessage(id, release));
+    }
+}
+
 fn render_message(
     ui: &mut egui::Ui,
     message: &Value,
-    me: &str,
-    can_post: bool,
+    viewer: Viewer,
     mut fold: Option<Fold>,
     actions: &mut Vec<Action>,
 ) -> egui::Response {
+    let Viewer { me, can_post, .. } = viewer;
+    let claim = claim_control(message, viewer, fold.is_some());
     let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
     let own = username == me;
@@ -3180,6 +3257,7 @@ fn render_message(
                 fold.as_mut(),
                 |ui| {
                     link_controls(ui, id, can_post, actions);
+                    claim_link(ui, id, claim, actions);
                     if editable {
                         edit_control(ui, id, actions);
                         if !message["replacedBy"].is_u64() {
@@ -3201,7 +3279,10 @@ fn render_message(
                     body,
                     false,
                     fold.as_mut(),
-                    |ui| link_controls(ui, id, can_post, actions),
+                    |ui| {
+                        link_controls(ui, id, can_post, actions);
+                        claim_link(ui, id, claim, actions);
+                    },
                 )
             })
             .inner
@@ -3232,6 +3313,17 @@ fn render_message(
         if ui.button("Copy link to this message").clicked() {
             actions.push(Action::CopyLink(id));
             ui.close();
+        }
+        match claim {
+            ClaimControl::Take if ui.button("Taking this").clicked() => {
+                actions.push(Action::TakeMessage(id, false));
+                ui.close();
+            }
+            ClaimControl::Release if ui.button("Release this message").clicked() => {
+                actions.push(Action::TakeMessage(id, true));
+                ui.close();
+            }
+            _ => {}
         }
         if editable && ui.button("Edit this message").clicked() {
             actions.push(Action::StartEdit(id));
@@ -3498,6 +3590,14 @@ fn message_header(
     if let Some(new) = message["replacedBy"].as_u64() {
         job.append(
             &format!(" · replaced by #{new}"),
+            0.0,
+            format(theme::accent()),
+        );
+    }
+    // Take a request (ADR 0075): who is handling this. The name is untrusted plain text.
+    if let Some(holder) = claim_holder(message) {
+        job.append(
+            &format!(" · taken by {holder}"),
             0.0,
             format(theme::accent()),
         );
@@ -4840,6 +4940,109 @@ mod draft_tests {
             (Some(3), Some(1), "Deploy to production")
         );
         assert_eq!(app.composer.replaces, None);
+    }
+
+    /// Take a request (ADR 0075): the header names the holder, and the control follows who looks.
+    #[test]
+    fn header_names_the_holder_and_the_control_follows_the_viewer() {
+        let free = json!({"id": 3, "username": "lead"});
+        let taken = json!({"id": 4, "username": "lead",
+            "claim": {"username": "dev <b>x</b>", "claimedAt": "2026-11-21T18:00:00.000Z"}});
+        let replaced = json!({"id": 5, "username": "lead", "replacedBy": 6});
+        let replaced_taken = json!({"id": 7, "username": "lead", "replacedBy": 8,
+            "claim": {"username": "alice", "claimedAt": "2026-11-21T18:00:00.000Z"}});
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            text = message_header(ui, &taken, "lead", false).text;
+            text.push('|');
+            text.push_str(&message_header(ui, &free, "lead", false).text);
+        });
+        output.textures_delta.clear();
+        // The name is plain text, never markup.
+        assert!(text.contains("#4 · taken by dev <b>x</b>|"), "{text}");
+        assert!(!text.ends_with("taken by"), "{text}");
+        assert_eq!(text.matches("taken by").count(), 1, "{text}");
+
+        let viewer = |me, can_post, owner| Viewer {
+            me,
+            can_post,
+            owner,
+        };
+        let alice = viewer("alice", true, false);
+        assert_eq!(claim_control(&free, alice, true), ClaimControl::Take);
+        // Someone else holds it: nothing to press, unless you own the workspace.
+        assert_eq!(claim_control(&taken, alice, true), ClaimControl::None);
+        assert_eq!(
+            claim_control(&taken, viewer("alice", true, true), true),
+            ClaimControl::Release
+        );
+        assert_eq!(
+            claim_control(&taken, viewer("dev <b>x</b>", true, false), true),
+            ClaimControl::Release
+        );
+        // A replaced message cannot be taken, but an earlier claim on it can be released.
+        assert_eq!(claim_control(&replaced, alice, true), ClaimControl::None);
+        assert_eq!(
+            claim_control(&replaced_taken, alice, true),
+            ClaimControl::Release
+        );
+        // Archived boards and search hits offer nothing.
+        assert_eq!(
+            claim_control(&free, viewer("alice", false, true), true),
+            ClaimControl::None
+        );
+        assert_eq!(claim_control(&free, alice, false), ClaimControl::None);
+    }
+
+    /// Pressing the links sends the take and the release for that message only (ADR 0075).
+    #[test]
+    fn claim_links_push_take_and_release() {
+        for (control, release) in [(ClaimControl::Take, false), (ClaimControl::Release, true)] {
+            let ctx = egui::Context::default();
+            let mut actions = Vec::new();
+            let draw = |ctx: &egui::Context, input: egui::RawInput, actions: &mut Vec<Action>| {
+                let mut rect = egui::Rect::NOTHING;
+                let mut output = ctx.run_ui(input, |ui| {
+                    ui.horizontal(|ui| {
+                        claim_link(ui, 1, ClaimControl::None, actions);
+                        let before = ui.cursor().min;
+                        claim_link(ui, 2, control, actions);
+                        rect = egui::Rect::from_min_max(before, ui.min_rect().max);
+                    });
+                });
+                output.textures_delta.clear();
+                rect
+            };
+            let rect = draw(&ctx, egui::RawInput::default(), &mut actions);
+            let at = rect.center();
+            let press = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            for events in [
+                vec![egui::Event::PointerMoved(at)],
+                vec![press(true)],
+                vec![press(false)],
+                vec![],
+            ] {
+                draw(
+                    &ctx,
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    &mut actions,
+                );
+            }
+            assert!(
+                matches!(actions.as_slice(), [Action::TakeMessage(2, r)] if *r == release),
+                "{control:?}: {} actions",
+                actions.len()
+            );
+        }
     }
 
     /// A replaced message names its replacement in its header (ADR 0068).
