@@ -242,6 +242,25 @@ describe("send a message later (ADR 0060)", () => {
     expect(lone.status).toBe(400);
   });
 
+  it("backs off when an alarm job keeps throwing instead of re-firing at once", async () => {
+    const f = await fixture();
+    await runInDurableObject(f.stub(), async (instance, state) => {
+      const object = instance as unknown as {
+        backfillSearch: () => void;
+        searchIndexed: () => boolean;
+        alarm: () => Promise<void>;
+      };
+      // Backfill that never finishes and always throws would otherwise set the alarm to now.
+      object.searchIndexed = () => false;
+      object.backfillSearch = () => {
+        throw new Error("boom");
+      };
+      const before = Date.now();
+      await object.alarm();
+      expect(await state.storage.getAlarm()).toBeGreaterThanOrEqual(before + 30_000);
+    });
+  });
+
   it("keeps the alarm set when one alarm job throws", async () => {
     const f = await fixture();
     const scheduled = await f.schedule("still armed");

@@ -148,6 +148,8 @@ export const MAX_SCHEDULED_PER_BOARD = 100;
 export const MAX_SCHEDULED = 1000;
 /** A scheduled message that failed to post is kept this long for its sender to see, then removed. */
 export const FAILED_SCHEDULED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** After an alarm job throws, the next alarm runs no sooner than this. */
+export const ALARM_RETRY_MS = 30_000;
 /** Due scheduled messages posted per alarm run; the alarm runs again at once while more are due. */
 const SCHEDULED_BATCH = 50;
 /** Pinned messages per board (ADR 0038). */
@@ -763,19 +765,24 @@ export class MsnDurableObject extends DurableObject<Env> {
    */
   async alarm(): Promise<void> {
     // Each job runs on its own: a failure in one never stops the other or leaves the alarm unset.
+    // After a failure the next run waits ALARM_RETRY_MS, so a job that always throws backs off
+    // instead of re-firing at once forever.
+    let failed = false;
     try {
       try {
         this.backfillSearch();
       } catch (error) {
+        failed = true;
         console.error("alarm: search backfill failed", error);
       }
       try {
         this.postDue();
       } catch (error) {
+        failed = true;
         console.error("alarm: scheduled delivery failed", error);
       }
     } finally {
-      await this.armAlarm();
+      await this.armAlarm(failed ? Date.now() + ALARM_RETRY_MS : 0);
     }
   }
 
@@ -783,7 +790,7 @@ export class MsnDurableObject extends DurableObject<Env> {
    * Sets the alarm to now while backfill remains, else to the next pending scheduled message or
    * the time the oldest failed one expires, whichever is first.
    */
-  private async armAlarm(): Promise<void> {
+  private async armAlarm(notBefore = 0): Promise<void> {
     let next: number | null = Date.now();
     if (this.searchIndexed()) {
       const times = this.ctx.storage.sql
@@ -799,6 +806,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
+    next = Math.max(next, notBefore);
     if ((await this.ctx.storage.getAlarm()) !== next) await this.ctx.storage.setAlarm(next);
   }
 
