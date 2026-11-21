@@ -378,6 +378,7 @@ export class HostStore {
         };
         if (action.to !== undefined) body.to = action.to;
         if (action.replyTo !== undefined) body.replyTo = action.replyTo;
+        if (action.quote !== undefined) body.quote = action.quote;
         else if (message && message.channel === action.channel) body.replyTo = message.id;
         this.queueOutput(`msn-host-${this.key(job.agent, job.id, index)}`, job.agent, action.channel, body);
       }

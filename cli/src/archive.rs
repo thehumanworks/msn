@@ -178,6 +178,9 @@ pub struct MessageRecord {
     pub edited_at: Option<String>,
     #[serde(rename = "replyTo", skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// The part of the replyTo message this reply quotes (ADR 0059).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
     #[serde(rename = "correlationId", skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

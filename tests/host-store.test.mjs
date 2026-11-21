@@ -970,3 +970,29 @@ test("explicit continuations consume the hard budget instead of looping forever"
   );
   assert.equal(f.store.claim("alice", 100, 2000), null);
 });
+
+test("a send action can quote the message it replies to; a quote without replyTo is refused (ADR 0059)", (t) => {
+  const f = fixture(t),
+    job = turn(f, "alice", 1);
+  f.store.finish(
+    job,
+    result(f.config, "alice", {
+      actions: [{ type: "send", channel: "work", text: "Done", replyTo: 1, quote: "Then tag the CLI." }],
+    }),
+    null,
+    10,
+  );
+  const output = f.store.claimOutput("alice", 10);
+  assert.equal(output.body.replyTo, 1);
+  assert.equal(output.body.quote, "Then tag the CLI.");
+  for (const action of [
+    { quote: "no target" },
+    { replyTo: 1, quote: " " },
+    { replyTo: 1, quote: "x".repeat(2049) },
+    { replyTo: 1, quote: 7 },
+  ])
+    assert.throws(
+      () => result(f.config, "alice", { actions: [{ type: "send", channel: "work", text: "x", ...action }] }),
+      /invalid_quote/,
+    );
+});

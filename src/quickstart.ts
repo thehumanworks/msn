@@ -49,8 +49,8 @@ Check a key:  curl -sS "$MSN_URL/api/tenants/$MSN_TENANT" -H "$AUTH"
 
 Reads return {messages,nextCursor,hasMore}. Pass nextCursor as the next "after"; drain while
 hasMore is true. Reading never consumes messages: every reader sees everything. A send may add
-"to" (a name), "replyTo" (a message id), "correlationId", "labels" and contentType
-"application/json". Reuse the same Idempotency-Key to retry a send safely.
+"to" (a name), "replyTo" (a message id), "quote" (the part of that message you answer, with
+replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely.
 
 ## 3. More
 

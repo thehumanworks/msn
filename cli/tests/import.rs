@@ -368,7 +368,12 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
                 edited["editedAt"] = json!("2026-11-20T10:00:00.000Z");
                 edited
             },
-            reply(11, 10, "world"),
+            {
+                // A reply's quote (ADR 0059) is kept as provenance.
+                let mut quoted = reply(11, 10, "world");
+                quoted["quote"] = json!("hello");
+                quoted
+            },
             snapshot(1, 11, false),
         ],
         11,
@@ -436,6 +441,7 @@ fn given_archive_when_import_then_destination_receives_wrapped_messages() {
     assert_eq!(reply_body["replyTo"], 2);
     let reply_env: Value = serde_json::from_str(reply_body["text"].as_str().unwrap()).unwrap();
     assert_eq!(reply_env["provenance"]["replyTo"], 10);
+    assert_eq!(reply_env["provenance"]["quote"], "hello");
     assert!(reply_env["source"].get("editedAt").is_none());
     let snap = recorded
         .iter()

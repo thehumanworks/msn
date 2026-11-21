@@ -12,6 +12,7 @@ test("single keys map to their shortcuts outside fields", () => {
     ["j", "next"],
     ["k", "previous"],
     ["r", "reply"],
+    ["q", "quote"],
     ["?", "help"],
     ["Escape", "close"],
   ])
@@ -40,7 +41,7 @@ test("shortcuts never fire while typing, or with Ctrl, Alt or the command key", 
     { tagName: "DIV", isContentEditable: true },
   ]) {
     assert.ok(isTyping(target), JSON.stringify(target));
-    for (const key of ["/", "j", "k", "r", "?", "g"])
+    for (const key of ["/", "j", "k", "r", "q", "?", "g"])
       assert.deepEqual(shortcut(press(key, { target })), { action: null, chord: null });
     // A g typed in a field never arms the chord.
     assert.equal(shortcut(press("b", { target }), 1000, 1001).action, null);
@@ -66,6 +67,6 @@ test("j and k step through messages and stop at the ends", () => {
 
 test("the help sheet lists every shortcut", () => {
   const keys = SHORTCUTS.map((entry) => entry.keys.join(" "));
-  assert.deepEqual(keys, ["/", "j", "k", "r", "g b", "Esc", "?"]);
+  assert.deepEqual(keys, ["/", "j", "k", "r", "q", "g b", "Esc", "?"]);
   for (const entry of SHORTCUTS) assert.ok(entry.does.length > 0);
 });

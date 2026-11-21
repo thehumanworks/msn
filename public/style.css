@@ -1558,7 +1558,8 @@ nav button.has-unread .channel-name {
   font-style: italic;
 }
 .message-meta .message-edit,
-.message-meta .reply-button {
+.message-meta .reply-button,
+.message-meta .quote-button {
   font: inherit;
   font-size: 11px;
   flex-shrink: 0;
@@ -1568,7 +1569,9 @@ nav button.has-unread .channel-name {
 .watching .message-edit,
 .archived .message-edit,
 .watching .reply-button,
-.archived .reply-button {
+.archived .reply-button,
+.watching .quote-button,
+.archived .quote-button {
   display: none;
 }
 .fold-toggle.editing {
@@ -1592,9 +1595,18 @@ nav button.has-unread .channel-name {
 }
 @media (pointer: coarse) {
   .message-meta .message-edit,
-  .message-meta .reply-button {
+  .message-meta .reply-button,
+  .message-meta .quote-button {
     min-height: 32px;
     padding: 0 8px;
+  }
+  /* Touch-size actions do not fit beside a name in a reply thread; they wrap, the name does not break. */
+  .message-meta {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+  .message-meta strong {
+    overflow-wrap: normal;
   }
 }
 .reply-note {
@@ -1615,9 +1627,62 @@ nav button.has-unread .channel-name {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#reply-cancel {
+#reply-cancel,
+#quote-remove {
   min-height: 0;
   padding: 0 6px;
+}
+/* Quote in a reply (ADR 0059): the composer's one-line preview and the quote above a reply. */
+.quote-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding-left: 8px;
+  border-left: 3px solid var(--accent);
+  font-size: 12px;
+  color: var(--muted);
+}
+.quote-note[hidden] {
+  display: none;
+}
+#quote-note-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message-quote {
+  margin: 4px 0 0;
+  padding: 0;
+  border-left: 3px solid var(--accent);
+}
+.quote-source {
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Long quotes stay short in the log; the source message has the rest. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+  overflow: hidden;
+}
+.quote-source:hover {
+  color: var(--text);
 }
 .keys-list {
   display: grid;

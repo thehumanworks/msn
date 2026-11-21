@@ -500,6 +500,60 @@ fn send_forwards_reply_to_and_correlation_id() {
 }
 
 #[test]
+fn send_forwards_a_quote_with_its_reply_target() {
+    // Quote in a reply (ADR 0059): --quote goes out as `quote`, next to replyTo.
+    let body = r#"{"message":{"id":43,"replyTo":42,"quote":"Then tag the CLI."},"replayed":false}"#;
+    let server = MockServer::spawn(vec![Scripted::json(201, body)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend([
+        "--username",
+        "responder",
+        "send",
+        "general",
+        "--text",
+        "Tagging now",
+        "--reply-to",
+        "42",
+        "--quote",
+        "Then tag the CLI.",
+    ]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let payload: serde_json::Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "username": "responder",
+            "text": "Tagging now",
+            "replyTo": 42,
+            "quote": "Then tag the CLI."
+        })
+    );
+    // A quote needs a reply target, and must be non-blank and at most 2,048 bytes.
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    let long = "x".repeat(2049);
+    for extra in [
+        vec!["--quote", "orphan"],
+        vec!["--reply-to", "42", "--quote", " "],
+        vec!["--reply-to", "42", "--quote", &long],
+    ] {
+        let mut args = tenant_args(&url).to_vec();
+        args.extend(["--username", "u", "send", "general", "--text", "x"]);
+        args.extend(extra.iter().copied());
+        let out = output_of(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{extra:?}: {}",
+            stderr_str(&out)
+        );
+    }
+    assert!(server.recorded().is_empty());
+}
+
+#[test]
 fn send_rejects_invalid_reply_to_or_correlation_id_before_network() {
     let server = MockServer::spawn(vec![]);
     let url = server.url();

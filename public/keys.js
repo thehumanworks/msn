@@ -11,12 +11,21 @@ export const SHORTCUTS = [
   { keys: ["j"], does: "Next message" },
   { keys: ["k"], does: "Previous message" },
   { keys: ["r"], does: "Reply to the selected message" },
+  { keys: ["q"], does: "Quote the selected message, or the text you selected, in a reply" },
   { keys: ["g", "b"], does: "Go to the board list" },
   { keys: ["Esc"], does: "Close, cancel the reply or clear the search" },
   { keys: ["?"], does: "Show these shortcuts" },
 ];
 
-const SINGLE = { "/": "search", j: "next", k: "previous", r: "reply", "?": "help", Escape: "close" };
+const SINGLE = {
+  "/": "search",
+  j: "next",
+  k: "previous",
+  r: "reply",
+  q: "quote",
+  "?": "help",
+  Escape: "close",
+};
 const TEXT_INPUTS = new Set(["", "text", "search", "email", "url", "tel", "password", "number"]);
 
 /** True when keys typed at `target` belong to it: a text field, a list box or editable text. */

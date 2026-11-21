@@ -131,6 +131,8 @@ pub fn require_username(value: Option<&str>) -> Result<String, CliError> {
 }
 
 pub const MAX_CORRELATION_BYTES: usize = 128;
+/// The server's limit on a reply's quote (ADR 0059).
+pub const MAX_QUOTE_BYTES: usize = 2048;
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 
 /// Mirrors the Worker's Idempotency-Key grammar so invalid snapshot retries never trigger an
@@ -154,6 +156,16 @@ pub fn require_correlation_id(value: &str) -> Result<String, CliError> {
     if value.trim().is_empty() || value.len() > MAX_CORRELATION_BYTES {
         return Err(CliError::usage(
             "--correlation-id must be non-blank text of at most 128 UTF-8 bytes.",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// A reply's quote (ADR 0059): non-blank, at most 2,048 UTF-8 bytes, kept exactly as given.
+pub fn require_quote(value: &str) -> Result<String, CliError> {
+    if value.trim().is_empty() || value.len() > MAX_QUOTE_BYTES {
+        return Err(CliError::usage(
+            "--quote must be non-blank text of at most 2,048 UTF-8 bytes.",
         ));
     }
     Ok(value.to_string())

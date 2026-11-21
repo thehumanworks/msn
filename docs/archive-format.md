@@ -108,7 +108,7 @@ defended against.
 }
 ```
 
-`replyTo`, `correlationId` and `to` are omitted when unset, exactly as the API omits them. `text` is
+`replyTo`, `quote` ([ADR 0059](adr/0059-quote-in-reply.md)), `correlationId` and `to` are omitted when unset, exactly as the API omits them. `text` is
 the verbatim payload; when `contentType` is `application/json` it is still transported as a string.
 Records appear in strictly ascending `sourceId`, each `> boundary.after` and `<= boundary.headCursor`.
 
@@ -209,6 +209,8 @@ participant as `contentType: application/json` with this envelope as the message
   "provenance": { "replyTo": 37, "correlationId": "task-7", "to": "reviewer" }
 }
 ```
+
+A source message's `quote` (ADR 0059), when it has one, is kept as `provenance.quote`.
 
 * The original author survives as `source.username`; the destination message's `username` is the
   importing participant. Readers must treat `source.username` as an unverified claim about another
