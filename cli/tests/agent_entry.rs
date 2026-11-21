@@ -465,3 +465,86 @@ fn mute_and_unmute_call_the_owner_mute_endpoints() {
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(server.recorded().len(), 1);
 }
+
+#[test]
+fn start_names_its_reader_so_the_first_page_can_say_the_brief_is_new() {
+    // ADR 0072: start passes the reader; the server answers with brief and briefChanged.
+    let page = json!({
+        "brief": {"version": 3, "text": "Run the tests first.", "bytes": 20, "updatedAt": "2026-11-21T00:00:00.000Z", "updatedBy": "human"},
+        "briefChanged": true,
+        "snapshot": null, "messages": [], "nextCursor": 0, "hasMore": false,
+        "historyRevision": 0, "headCursor": 0
+    });
+    let server = MockServer::spawn(vec![identity(), Scripted::json(200, &page.to_string())]);
+    let out = bin(&server)
+        .args(["--reader", "dev/worker 1", "start", "general"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["brief"]["text"], "Run the tests first.");
+    assert_eq!(value["brief"]["version"], 3);
+    assert_eq!(value["briefChanged"], true);
+    let requests = server.recorded();
+    assert!(
+        requests[1].path.ends_with("&reader=dev%2Fworker+1"),
+        "{}",
+        requests[1].path
+    );
+}
+
+#[test]
+fn start_rejects_a_brief_on_a_continuation_or_without_text() {
+    for (after, brief) in [
+        (Some("4"), json!({"version": 1, "text": "x"})),
+        (None, json!({"version": 1})),
+        (None, json!({"version": 0, "text": "x"})),
+    ] {
+        let cursor = if after.is_some() { 4 } else { 0 };
+        let page = json!({
+            "brief": brief, "snapshot": null, "messages": [], "nextCursor": cursor,
+            "hasMore": false, "historyRevision": 0, "headCursor": cursor
+        });
+        let server = MockServer::spawn(vec![identity(), Scripted::json(200, &page.to_string())]);
+        let mut cmd = bin(&server);
+        cmd.args(["start", "general"]);
+        if let Some(after) = after {
+            cmd.args(["--after", after]);
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+    }
+    // A brief whose text did not fit the budget is still a valid page.
+    let page = json!({
+        "brief": {"version": 2, "bytes": 4000, "omitted": true}, "briefChanged": true,
+        "snapshot": null, "messages": [], "nextCursor": 0, "hasMore": false,
+        "historyRevision": 0, "headCursor": 0
+    });
+    let server = MockServer::spawn(vec![identity(), Scripted::json(200, &page.to_string())]);
+    let out = bin(&server).args(["start", "general"]).output().unwrap();
+    assert!(out.status.success());
+}
+
+#[test]
+fn catchup_names_a_reader_only_when_one_is_given() {
+    for (reader, tail) in [(None, "maxBytes=32768"), (Some("lead"), "&reader=lead")] {
+        let server = MockServer::spawn(vec![catchup(0)]);
+        let mut cmd = bin(&server);
+        if let Some(reader) = reader {
+            cmd.args(["--reader", reader]);
+        }
+        let out = cmd.args(["catchup", "general"]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path = &server.recorded()[0].path;
+        assert!(path.ends_with(tail), "{path}");
+    }
+}

@@ -18,6 +18,9 @@ pub struct Template {
     pub title: String,
     pub summary: String,
     pub goal: String,
+    /// A saved template's board brief (ADR 0072); built-in templates have none.
+    #[serde(default)]
+    pub brief: Option<String>,
     pub personas: Vec<Persona>,
 }
 
@@ -135,6 +138,7 @@ mod tests {
                 title: "release-team".into(),
                 summary: "Saved from board work.".into(),
                 goal: "Ship it".into(),
+                brief: None,
                 personas: vec![Persona {
                     name: "lead".into(),
                     role: "Leads.".into(),

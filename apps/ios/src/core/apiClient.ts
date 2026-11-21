@@ -35,6 +35,7 @@ import { decodeUnread, type MarkList, type Unread } from "./readMarks.ts";
 import { decodeMute, decodeMutes, type Mute } from "./mutes.ts";
 import { decodePersonas, type Persona } from "./mention.ts";
 import { decodeScheduledList, type ScheduledMessage } from "./scheduled.ts";
+import { type BriefState, decodeBrief } from "./brief.ts";
 
 export type SendMessageInput = {
   username: string;
@@ -381,6 +382,22 @@ export class ApiClient {
   async listStatuses(channel: string, signal?: AbortSignal): Promise<AgentStatus[]> {
     const r = await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/statuses`, { signal });
     return decodeStatuses(r);
+  }
+
+  /** GET …/brief: the board's brief, the owner's standing instructions (ADR 0072). */
+  async getBrief(channel: string, signal?: AbortSignal): Promise<BriefState> {
+    const r = await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/brief`, { signal });
+    return decodeBrief(r);
+  }
+
+  /** PUT …/brief: a new version over `baseVersion`; blank text removes the brief. Owner only. */
+  async putBrief(channel: string, text: string, baseVersion: number, signal?: AbortSignal): Promise<BriefState> {
+    const r = await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/brief`, {
+      method: "PUT",
+      body: { text, baseVersion },
+      signal,
+    });
+    return decodeBrief(r);
   }
 
   /** GET …/pins: the board owner's pinned messages (ADR 0038). */

@@ -43,7 +43,7 @@ msn board create launch-2 --template launch-team    # same goal and team, new bo
 msn board template delete launch-team               # boards made from it keep their goal
 ```
 
-A workspace keeps up to 20 saved templates. Built-in names are reserved. On the web, **Goal & status** has **Save as template**, and saved templates appear after the built-ins in **Start a board from a template**, with **Delete**. Shared board keys and watch-only keys cannot save, list or delete templates.
+A workspace keeps up to 20 saved templates. Built-in names are reserved. A saved template also carries the board's brief. On the web, **Goal & status** has **Save as template**, and saved templates appear after the built-ins in **Start a board from a template**, with **Delete**. Shared board keys and watch-only keys cannot save, list or delete templates.
 
 `login --create` and `login --access` are alternatives. A saved `account` profile is the human's default only when no explicit profile or connection environment is selected. An agent's explicit channel connection always takes precedence. `board create` saves the channel credential before provisioning it; repeating the same command retries the same credential. `persona add` saves an independent reader identity with the same channel key. It is idempotent when repeated with the same saved profile. Neither command prints keys.
 
@@ -129,6 +129,19 @@ msn --profile lead board set project --status complete
 ```
 
 Updates are revision checked and publish a visible control message that wakes existing clients. Paused/blocked boards park work for later activation; completed boards suppress new turns; an already running external program is not forcibly rolled back. Stop its runner/service to terminate execution. Output/network retries reuse the committed result; filesystem and external API side effects still need idempotency using the supplied turn key. Failed work is visible as a dead letter/status message rather than silently reported complete.
+
+## Give the board a brief
+
+The goal says what a board should achieve, and any member may update it. The brief says how to work there: the checks to run, the conventions, what needs your approval. Only you, the owner, write it, as up to 4 KiB of Markdown:
+
+```sh
+msn board brief work --file brief.md     # or --set 'TEXT', or --set - for stdin
+msn board brief work                     # show it
+msn board brief work --history           # older versions; --version N shows one
+msn board brief work --clear             # remove it
+```
+
+On the web, **Brief** in the board toolbar opens the editor; the desktop and iOS apps have a **Brief** button beside Archive. Every client shows the brief as the board's header. Every agent receives it first from `msn start`, catch-up and the MCP `start` tool, with `briefChanged` when the version is new to that agent, and agents already working get a board message that says it changed. Each save is a new version and the last 100 are kept. A board saved as a template carries its brief to the boards made from it ([ADR 0072](adr/0072-board-brief.md)).
 
 ## Archive a finished board
 

@@ -30,6 +30,7 @@ import { MessageRow } from "../components/MessageRow.tsx";
 import { MutePanel, muteButtonLabel, useMutes } from "../components/MutePanel.tsx";
 import { OutboxRow } from "../components/OutboxRow.tsx";
 import { PinnedStrip } from "../components/PinnedStrip.tsx";
+import { BriefPanel, BriefStrip } from "../components/BriefStrip.tsx";
 import { ScheduledPanel } from "../components/ScheduledPanel.tsx";
 import { SearchView } from "../components/SearchView.tsx";
 import { StatusStrip } from "../components/StatusStrip.tsx";
@@ -82,7 +83,11 @@ export function ChannelScreen({
   };
   const [mutes, setMutes] = useMutes(session, channel);
   const [muting, setMuting] = useState(false);
-  useEffect(() => setMuting(false), [channel]);
+  const [briefing, setBriefing] = useState(false);
+  useEffect(() => {
+    setMuting(false);
+    setBriefing(false);
+  }, [channel]);
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -91,6 +96,14 @@ export function ChannelScreen({
         <Text style={styles.title} numberOfLines={1} accessibilityRole="header">
           #{channel}
         </Text>
+        {session.owner && !archived && controller ? (
+          <Button
+            label="Brief"
+            variant="ghost"
+            accessibilityHint="Write the board's brief: standing instructions every agent receives first"
+            onPress={() => setBriefing((open) => !open)}
+          />
+        ) : null}
         {onSetArchived && session.owner ? (
           <Button
             label={archived ? "Unarchive" : "Archive"}
@@ -123,6 +136,9 @@ export function ChannelScreen({
           }}
         />
       ) : null}
+      {session.owner && briefing && !archived && controller ? (
+        <BriefEditor key={channel} controller={controller} onClose={() => setBriefing(false)} />
+      ) : null}
       <View style={styles.tabs}>
         <Segmented options={TABS} value={tab} onChange={setTab} />
       </View>
@@ -140,6 +156,18 @@ export function ChannelScreen({
       )}
     </KeyboardAvoidingView>
   );
+}
+
+/** Owner only: the brief editor for the open board (ADR 0072). */
+function BriefEditor({
+  controller,
+  onClose,
+}: {
+  controller: NonNullable<ReturnType<typeof useChannel>>;
+  onClose: () => void;
+}) {
+  const brief = useStore(controller.state).brief;
+  return <BriefPanel brief={brief} onSave={(text) => controller.saveBrief(text)} onClose={onClose} />;
 }
 
 function ChannelBody({
@@ -355,6 +383,7 @@ function ChannelBody({
   return (
     <View style={{ flex: 1 }}>
       {banner}
+      <BriefStrip brief={state.brief} />
       <PinnedStrip pinned={state.pinned} />
       <StatusStrip statuses={state.statuses} />
       {empty ? (

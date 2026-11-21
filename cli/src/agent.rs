@@ -186,9 +186,11 @@ pub fn start_page(
             CliError::usage("Increase start max-bytes to fit identity and workflow metadata.")
         })?;
     let continuation = catchup_query(after, Some(edits_after));
+    // The reader lets the first page say whether the board's brief is new to it (ADR 0072).
+    let reader_query = reader_query(Some(&reader));
     let response = MsnClient::new(url)?.get(
         &format!(
-            "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={server_budget}{continuation}"
+            "/api/tenants/{tenant}/channels/{channel}/catchup?limit={limit}&maxBytes={server_budget}{continuation}{reader_query}"
         ),
         Some(token),
     )?;
@@ -218,6 +220,19 @@ pub fn start_page(
         ));
     }
     Ok(page)
+}
+
+/// The `&reader=…` part of a catch-up query (ADR 0072): with it, a first page that carries the
+/// board's brief also says `briefChanged`, and the server remembers that this reader received it.
+pub(crate) fn reader_query(reader: Option<&str>) -> String {
+    reader
+        .map(|reader| {
+            format!(
+                "&reader={}",
+                url::form_urlencoded::byte_serialize(reader.as_bytes()).collect::<String>()
+            )
+        })
+        .unwrap_or_default()
 }
 
 /// The `&after=…&editsAfter=…` tail of a catch-up query. `edits`: None asks for no edits,
@@ -264,6 +279,13 @@ pub(crate) fn validate_catchup(
     }
     if previous > head {
         return Err(invalid());
+    }
+    // The board's brief (ADR 0072) leads the first page only.
+    if let Some(brief) = page.get("brief").filter(|value| !value.is_null()) {
+        let shown = brief["text"].is_string() || brief["omitted"].as_bool() == Some(true);
+        if after.is_some() || number(brief, "version")? == 0 || !shown {
+            return Err(invalid());
+        }
     }
     // Pinned messages (ADR 0038) lead the first page only and never move the cursor.
     if let Some(pinned) = page.get("pinned").filter(|value| !value.is_null()) {

@@ -95,6 +95,20 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// The open board's brief (ADR 0072): the owner's standing instructions.
+    LoadBrief {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
+    /// Write a new brief version over `base_version` (owner only); blank text removes it.
+    SetBrief {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        text: String,
+        base_version: u64,
+    },
     /// The open board's personas, for @ suggestions (ADR 0055).
     LoadPersonas {
         generation: u64,
@@ -247,6 +261,8 @@ impl Command {
             | Command::LoadSnapshots { generation, .. }
             | Command::LoadReceipts { generation, .. }
             | Command::LoadStatuses { generation, .. }
+            | Command::LoadBrief { generation, .. }
+            | Command::SetBrief { generation, .. }
             | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
@@ -365,6 +381,16 @@ pub enum UiEvent {
         channel_generation: u64,
         channel: String,
         statuses: Vec<msn_cli::status::Status>,
+    },
+    /// The open board's brief and the version a write must build on (ADR 0072). `saved` is true
+    /// when this answers the owner's own write.
+    Brief {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        brief: Option<client_ops::Brief>,
+        current_version: u64,
+        saved: bool,
     },
     /// The open board's personas as (name, listening) (ADR 0055); empty on a plain channel.
     Personas {
@@ -854,6 +880,71 @@ fn handle_command(
                 generation,
                 Some(channel_generation),
                 "statuses",
+                err,
+                true,
+                None,
+            ),
+        },
+        Command::LoadBrief {
+            channel_generation,
+            channel,
+            ..
+        } => match client_ops::fetch_brief(&cc.client, &cc.tenant, &cc.token, &channel) {
+            Ok((brief, current_version)) => emit(
+                tx,
+                wake,
+                UiEvent::Brief {
+                    generation,
+                    channel_generation,
+                    channel,
+                    brief,
+                    current_version,
+                    saved: false,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "brief",
+                err,
+                true,
+                None,
+            ),
+        },
+        Command::SetBrief {
+            channel_generation,
+            channel,
+            text,
+            base_version,
+            ..
+        } => match client_ops::put_brief(
+            &cc.client,
+            &cc.tenant,
+            &cc.token,
+            &channel,
+            &text,
+            base_version,
+        ) {
+            Ok((brief, current_version)) => emit(
+                tx,
+                wake,
+                UiEvent::Brief {
+                    generation,
+                    channel_generation,
+                    channel,
+                    brief,
+                    current_version,
+                    saved: true,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "set-brief",
                 err,
                 true,
                 None,

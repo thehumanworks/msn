@@ -125,6 +125,16 @@ pub struct SearchState {
     pub active: bool,
 }
 
+/// A board message that announces a new brief version (`msn.brief.v1`, ADR 0072).
+pub fn is_brief_notice(message: &Value) -> bool {
+    message["username"].as_str() == Some("board")
+        && message["contentType"].as_str() == Some("application/json")
+        && message["text"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .is_some_and(|data| data["schema"].as_str() == Some("msn.brief.v1"))
+}
+
 #[derive(Debug, Default)]
 pub struct ChannelState {
     pub messages: BTreeMap<u64, Value>,
@@ -154,6 +164,16 @@ pub struct ChannelState {
     /// What each name says it is doing (ADR 0064), newest first; re-read on `status.changed`.
     pub statuses: Vec<msn_cli::status::Status>,
     pub statuses_flight: Flight,
+    /// The board's brief (ADR 0072): the owner's standing instructions, shown above the
+    /// conversation. `brief_version` is what a write builds on, and counts removed briefs too.
+    pub brief: Option<crate::net::client_ops::Brief>,
+    pub brief_version: u64,
+    pub brief_flight: Flight,
+    /// The owner's write in flight, and its failure for the editor to show.
+    pub brief_saving: bool,
+    pub brief_error: Option<String>,
+    /// Counts the owner's saves that landed, so the editor knows when to close.
+    pub brief_saves: u64,
     /// Reactions (ADR 0047) send no event, so they are re-read on the receipts timer.
     pub reactions_flight: Flight,
     /// Edits (ADR 0052) send no message either; re-read on the same timer from `edit_cursor`.
@@ -720,6 +740,59 @@ impl AppState {
             })
     }
 
+    /// Reloads the open board's brief (ADR 0072): when the board opens and when a brief change
+    /// is announced on it.
+    pub fn brief_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        state.brief_flight.request().then_some(Command::LoadBrief {
+            generation,
+            channel_generation,
+            channel,
+        })
+    }
+
+    /// Writes `text` as the board's new brief (ADR 0072); blank text removes it. The server
+    /// allows only the owner. Refused here on an archived board, a text over 4 KiB, or while a
+    /// write is in flight.
+    pub fn set_brief(&mut self, text: String) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        let archived = self.is_archived(&channel);
+        let channel_generation = self.channel_generation;
+        let Some(state) = self.channel.as_mut() else {
+            return Vec::new();
+        };
+        if state.brief_saving {
+            return Vec::new();
+        }
+        if archived {
+            state.brief_error = Some(format!("{channel} is archived and read only."));
+            return Vec::new();
+        }
+        if text.len() > crate::net::client_ops::BRIEF_MAX_BYTES {
+            state.brief_error = Some(format!(
+                "The brief is {} bytes; it holds at most {}.",
+                text.len(),
+                crate::net::client_ops::BRIEF_MAX_BYTES
+            ));
+            return Vec::new();
+        }
+        state.brief_saving = true;
+        state.brief_error = None;
+        vec![Command::SetBrief {
+            generation,
+            channel_generation,
+            channel,
+            text,
+            base_version: state.brief_version,
+        }]
+    }
+
     /// Asks for the open board's personas once per visit, the first time @ is typed (ADR 0055).
     pub fn personas_command(&mut self) -> Option<Command> {
         let generation = self.generation()?;
@@ -1134,6 +1207,17 @@ impl AppState {
                     state.statuses_flight.fail();
                 }
             }
+            Command::LoadBrief { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.brief_flight.fail();
+                }
+            }
+            Command::SetBrief { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.brief_saving = false;
+                    state.brief_error = Some("Could not send the brief. Try again.".into());
+                }
+            }
             Command::Disconnect => {}
             invalidation => {
                 let duplicate = self
@@ -1348,6 +1432,48 @@ impl AppState {
                 state.statuses = statuses;
                 if state.statuses_flight.finish() {
                     vec![Command::LoadStatuses {
+                        generation,
+                        channel_generation,
+                        channel,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::Brief {
+                generation,
+                channel_generation,
+                channel,
+                brief,
+                current_version,
+                saved,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                // An older answer never replaces a newer brief.
+                if current_version >= state.brief_version {
+                    state.brief = brief;
+                    state.brief_version = current_version;
+                }
+                if saved {
+                    state.brief_saving = false;
+                    state.brief_error = None;
+                    state.brief_saves += 1;
+                    self.status = Some(if state.brief.is_some() {
+                        format!(
+                            "Brief saved as version {current_version}. Agents are told it changed."
+                        )
+                    } else {
+                        "Brief removed.".into()
+                    });
+                    return Vec::new();
+                }
+                if state.brief_flight.finish() {
+                    vec![Command::LoadBrief {
                         generation,
                         channel_generation,
                         channel,
@@ -1615,6 +1741,11 @@ impl AppState {
                     retryable,
                     key,
                 );
+                // After a refused brief write (ADR 0072), read the brief again so the next Save
+                // builds on the version the server has now.
+                if context == "set-brief" {
+                    return self.brief_command().into_iter().collect();
+                }
                 Vec::new()
             }
             UiEvent::AuthFailed {
@@ -1678,6 +1809,12 @@ impl AppState {
         };
         let first = !state.loaded;
         state.replace_messages(messages);
+        // A brief change is announced by a board message (ADR 0072).
+        let brief_changed = !first
+            && state
+                .messages
+                .iter()
+                .any(|(id, message)| !before.contains(id) && is_brief_notice(message));
         // Someone else's reply that lands in a folded thread after the first load is unseen.
         let roots = state.roots();
         let me = self.connection.as_ref().map(|c| c.username.as_str());
@@ -1713,6 +1850,10 @@ impl AppState {
         commands.extend(self.receipts_command());
         if first {
             commands.extend(self.statuses_command());
+        }
+        // The brief (ADR 0072): read it when the board opens and when the board announces a change.
+        if first || brief_changed {
+            commands.extend(self.brief_command());
         }
         commands
     }
@@ -1849,6 +1990,23 @@ impl AppState {
                     && let Some(state) = self.channel.as_mut()
                 {
                     state.receipts_flight.fail();
+                }
+            }
+            // The brief too (ADR 0072): an older server or a failed load keeps what is shown.
+            "brief" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.brief_flight.fail();
+                }
+            }
+            // A refused brief write stays in the editor with the reason.
+            "set-brief" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.brief_saving = false;
+                    state.brief_error = Some(message);
                 }
             }
             // Statuses too (ADR 0064): an older server or a failed load keeps the last list.
@@ -2679,7 +2837,7 @@ mod tests {
         state.select_channel("general".into());
         let commands = synced(&mut state, vec![msg(1, "a")], 1, 0);
         assert!(
-            matches!(commands.as_slice(), [_, Command::LoadStatuses { channel, .. }] if channel == "general")
+            matches!(commands.as_slice(), [_, Command::LoadStatuses { channel, .. }, Command::LoadBrief { .. }] if channel == "general")
         );
         // Another board's change is not this board's; one in flight coalesces.
         let other = state.apply(UiEvent::CoordinationEvents {
@@ -2732,7 +2890,7 @@ mod tests {
         state.select_channel("general".into());
         let commands = synced(&mut state, vec![msg(1, "a")], 1, 0);
         assert!(
-            matches!(commands.as_slice(), [Command::LoadReceipts { channel, .. }, Command::LoadStatuses { .. }] if channel == "general")
+            matches!(commands.as_slice(), [Command::LoadReceipts { channel, .. }, Command::LoadStatuses { .. }, Command::LoadBrief { .. }] if channel == "general")
         );
         // A second request while one is in flight is coalesced, not sent twice.
         assert!(state.receipts_command().is_none());
@@ -3357,5 +3515,200 @@ mod tests {
         assert!(state.messages[&2].get("replacedBy").is_none());
         // The server's own link wins over a cached one.
         assert_eq!(state.messages[&3]["replacedBy"], 9);
+    }
+    #[test]
+    fn the_brief_loads_with_the_board_reloads_on_its_notice_and_only_newer_versions_replace_it() {
+        use crate::net::client_ops::Brief;
+        let message = |id: u64, username: &str, text: &str| json!({"id": id, "username": username, "text": text, "contentType": "text/plain"});
+        let mut state = ready_state(1);
+        state.select_channel("work".into());
+        let cg = state.channel_generation;
+        let sync = |messages: Vec<Value>, head: u64| UiEvent::ChannelSynced {
+            generation: 1,
+            channel_generation: cg,
+            channel: "work".into(),
+            messages,
+            head,
+            revision: 0,
+            board: Ok(json!({})),
+            pins: Vec::new(),
+        };
+        // The first sync of a board asks for its brief.
+        let commands = state.apply(sync(vec![message(1, "lead", "hello")], 1));
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::LoadBrief { channel, .. } if channel == "work"))
+        );
+        let brief = |version: u64, text: &str| Brief {
+            version,
+            text: text.into(),
+            updated_by: Some("human".into()),
+            updated_at: "2026-11-21T17:00:00.000Z".into(),
+        };
+        let loaded = |brief: Option<Brief>, current_version: u64, saved: bool| UiEvent::Brief {
+            generation: 1,
+            channel_generation: cg,
+            channel: "work".into(),
+            brief,
+            current_version,
+            saved,
+        };
+        state.apply(loaded(Some(brief(2, "Run the tests.")), 2, false));
+        let channel = state.channel.as_ref().unwrap();
+        assert_eq!(channel.brief.as_ref().unwrap().text, "Run the tests.");
+        assert_eq!(channel.brief_version, 2);
+        // A late answer for an older version changes nothing.
+        state.apply(loaded(Some(brief(1, "Old.")), 1, false));
+        assert_eq!(
+            state
+                .channel
+                .as_ref()
+                .unwrap()
+                .brief
+                .as_ref()
+                .unwrap()
+                .version,
+            2
+        );
+        // An ordinary new message does not reload the brief; the board's notice does.
+        let quiet = state.apply(sync(
+            vec![message(1, "lead", "hello"), message(2, "lead", "more")],
+            2,
+        ));
+        assert!(!quiet.iter().any(|c| matches!(c, Command::LoadBrief { .. })));
+        let notice = json!({
+            "id": 3, "username": "board", "contentType": "application/json",
+            "text": json!({"schema": "msn.brief.v1", "version": 3}).to_string(),
+        });
+        assert!(is_brief_notice(&notice));
+        assert!(!is_brief_notice(&message(4, "board", "msn.brief.v1")));
+        let woken = state.apply(sync(
+            vec![
+                message(1, "lead", "hello"),
+                message(2, "lead", "more"),
+                notice,
+            ],
+            3,
+        ));
+        assert!(woken.iter().any(|c| matches!(c, Command::LoadBrief { .. })));
+        // A removed brief clears the header and still moves the version on.
+        state.apply(loaded(None, 3, false));
+        let channel = state.channel.as_ref().unwrap();
+        assert!(channel.brief.is_none());
+        assert_eq!(channel.brief_version, 3);
+        // An answer for another board is ignored.
+        state.apply(UiEvent::Brief {
+            generation: 1,
+            channel_generation: cg + 1,
+            channel: "other".into(),
+            brief: Some(brief(9, "Other.")),
+            current_version: 9,
+            saved: false,
+        });
+        assert!(state.channel.as_ref().unwrap().brief.is_none());
+    }
+
+    #[test]
+    fn the_owner_saves_a_brief_over_the_version_shown_and_a_refusal_keeps_the_editor_open() {
+        use crate::net::client_ops::{BRIEF_MAX_BYTES, Brief};
+        let mut state = ready_state(1);
+        state.select_channel("work".into());
+        let cg = state.channel_generation;
+        state.channel.as_mut().unwrap().brief_version = 4;
+        // Too long: refused here, nothing is sent.
+        assert!(state.set_brief("x".repeat(BRIEF_MAX_BYTES + 1)).is_empty());
+        assert!(
+            state
+                .channel
+                .as_ref()
+                .unwrap()
+                .brief_error
+                .as_deref()
+                .unwrap()
+                .contains("at most 4096")
+        );
+        let commands = state.set_brief("Be kind.".into());
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::SetBrief { channel, text, base_version: 4, .. }]
+                if channel == "work" && text == "Be kind."
+        ));
+        assert!(state.channel.as_ref().unwrap().brief_saving);
+        assert!(state.channel.as_ref().unwrap().brief_error.is_none());
+        // One write at a time.
+        assert!(state.set_brief("Again.".into()).is_empty());
+        // Refused (changed on another device): the reason shows, and the brief is read again.
+        let reread = state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: Some(cg),
+            context: "set-brief",
+            message: "The brief was changed somewhere else.".into(),
+            retryable: true,
+            key: None,
+        });
+        assert!(matches!(reread.as_slice(), [Command::LoadBrief { .. }]));
+        let channel = state.channel.as_ref().unwrap();
+        assert!(!channel.brief_saving);
+        assert_eq!(channel.brief_saves, 0);
+        assert_eq!(
+            channel.brief_error.as_deref(),
+            Some("The brief was changed somewhere else.")
+        );
+        state.apply(UiEvent::Brief {
+            generation: 1,
+            channel_generation: cg,
+            channel: "work".into(),
+            brief: Some(Brief {
+                version: 5,
+                text: "Theirs.".into(),
+                updated_by: None,
+                updated_at: String::new(),
+            }),
+            current_version: 5,
+            saved: false,
+        });
+        let commands = state.set_brief("Be kind.".into());
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::SetBrief {
+                base_version: 5,
+                ..
+            }]
+        ));
+        state.apply(UiEvent::Brief {
+            generation: 1,
+            channel_generation: cg,
+            channel: "work".into(),
+            brief: Some(Brief {
+                version: 6,
+                text: "Be kind.".into(),
+                updated_by: Some("human".into()),
+                updated_at: String::new(),
+            }),
+            current_version: 6,
+            saved: true,
+        });
+        let channel = state.channel.as_ref().unwrap();
+        assert_eq!(channel.brief_saves, 1);
+        assert!(!channel.brief_saving);
+        assert_eq!(channel.brief.as_ref().unwrap().text, "Be kind.");
+        assert_eq!(
+            state.status.as_deref(),
+            Some("Brief saved as version 6. Agents are told it changed.")
+        );
+        // An archived board takes no brief.
+        state.archived.insert("work".into());
+        assert!(state.set_brief("No.".into()).is_empty());
+        assert!(
+            state
+                .channel
+                .as_ref()
+                .unwrap()
+                .brief_error
+                .as_deref()
+                .unwrap()
+                .contains("archived")
+        );
     }
 }

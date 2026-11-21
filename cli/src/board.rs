@@ -174,6 +174,8 @@ fn add_persona(
     Ok(persona)
 }
 
+/// The longest board brief in UTF-8 bytes (ADR 0072); the server checks again.
+pub const BRIEF_MAX_BYTES: usize = 4096;
 /// The longest goal excerpt an agent paragraph quotes; `start` returns the whole goal.
 const PARAGRAPH_GOAL_CHARS: usize = 1200;
 
@@ -231,6 +233,7 @@ so make sure that directory is on your PATH). \
 Join once (POSIX shell; on Windows use WSL) by running `printf '%s' {connection} | msn login --connection - --save-as {save_as}` \
 (repeating it is safe). \
 Then run `{me} start {channel}` for your identity, the full goal and recent messages. \
+If its result has `brief`, that is the board owner's standing instructions: read it first and follow it. \
 To wait for work, run `{me} peek {channel} --wait 25`: it returns as soon as a message arrives, \
 or after 25 seconds with none, so run it again. Handle every message it returns, then run \
 `{me} commit {channel} --through NEXT_CURSOR` with that result's nextCursor, and repeat. \
@@ -516,7 +519,11 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 &format!("{base}/channels/{channel}/board"),
                 Some(&p.token),
                 &[],
-                Some(&json!({"credential":agent.token,"goal":goal})),
+                Some(&match template.as_ref().and_then(|t| t.brief.as_deref()) {
+                    // A saved template carries its board's brief (ADR 0072).
+                    Some(brief) => json!({"credential":agent.token,"goal":goal,"brief":brief}),
+                    None => json!({"credential":agent.token,"goal":goal}),
+                }),
             )?)?;
             if created["board"]["goal"]
                 .as_str()
@@ -736,6 +743,56 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                 body["status"] = json!(status);
             }
             println!("{}", value(client.post_json(&path, &p.token, &[], &body)?)?);
+        }
+        Command::Board {
+            command: BoardCommand::Brief(args),
+        } => {
+            let path = format!("{base}/channels/{}/brief", slug(&args.channel)?);
+            if args.history {
+                let listed = client.get(&format!("{path}/versions"), Some(&p.token))?;
+                println!("{}", value(listed)?);
+                return Ok(());
+            }
+            if let Some(version) = &args.version {
+                let version = crate::config::parse_int(version, crate::config::MAX_SAFE_INTEGER)?;
+                let shown = client.get(&format!("{path}?version={version}"), Some(&p.token))?;
+                println!("{}", value(shown)?);
+                return Ok(());
+            }
+            let text = if args.clear {
+                Some(String::new())
+            } else if let Some(file) = &args.file {
+                Some(fs::read_to_string(file).map_err(|error| {
+                    CliError::usage(format!("Cannot read the brief from {file}: {error}."))
+                })?)
+            } else if args.set.as_deref() == Some("-") {
+                let mut text = String::new();
+                std::io::stdin().read_to_string(&mut text)?;
+                Some(text)
+            } else {
+                args.set.clone()
+            };
+            let Some(text) = text else {
+                println!("{}", value(client.get(&path, Some(&p.token))?)?);
+                return Ok(());
+            };
+            if text.len() > BRIEF_MAX_BYTES {
+                return Err(CliError::usage(format!(
+                    "The brief is {} bytes; a brief holds at most {BRIEF_MAX_BYTES} UTF-8 bytes.",
+                    text.len()
+                )));
+            }
+            if text.trim().is_empty() && !args.clear {
+                return Err(CliError::usage(
+                    "The brief text is blank. Use --clear to remove the brief.",
+                ));
+            }
+            let current = value(client.get(&path, Some(&p.token))?)?;
+            let body = json!({"text": text, "baseVersion": current["currentVersion"]});
+            println!(
+                "{}",
+                value(client.exchange("PUT", &path, Some(&p.token), &[], Some(&body))?)?
+            );
         }
         Command::Board {
             command: BoardCommand::Archive { channel },
