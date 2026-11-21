@@ -143,6 +143,7 @@ impl std::fmt::Display for EventsError {
 }
 
 /// One validated page of `GET /api/tenants/:tenant/events`. `wait` is 0..=25, `limit` 1..=100.
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_events(
     client: &MsnClient,
     tenant: &str,
@@ -151,12 +152,15 @@ pub fn fetch_events(
     limit: u64,
     wait: u64,
     channel: Option<&str>,
+    include_statuses: bool,
 ) -> Result<EventsPage, EventsError> {
     slug(tenant).map_err(EventsError::Terminal)?;
-    // Agent status changes (ADR 0064) are opt-in; this client knows the type.
-    let mut path = format!(
-        "/api/tenants/{tenant}/events?after={after}&limit={limit}&wait={wait}&include=statuses"
-    );
+    let mut path = format!("/api/tenants/{tenant}/events?after={after}&limit={limit}&wait={wait}");
+    // Agent status changes (ADR 0064) are opt-in. The live poll asks for them; the startup drain
+    // does not, so old status changes never count against its page cap.
+    if include_statuses {
+        path.push_str("&include=statuses");
+    }
     if let Some(channel) = channel {
         slug(channel).map_err(EventsError::Terminal)?;
         path.push_str("&channel=");

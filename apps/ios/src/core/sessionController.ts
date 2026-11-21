@@ -71,7 +71,8 @@ export class SessionController {
     this.marks = options.readMarks ?? null;
     this.api = new ApiClient(session.origin, session.tenant, session.token, options.fetchImpl, session.channel);
     this.stream = new EventStreamManager(
-      (after, limit, wait, channel, signal) => this.api.getEvents({ after, limit, wait, channel }, signal),
+      (after, limit, wait, channel, signal) =>
+        this.api.getEvents({ after, limit, wait, channel, statuses: true }, signal),
       {
         onEvents: (events) => this.dispatch(events),
         onAuthError: () => this.expire(),

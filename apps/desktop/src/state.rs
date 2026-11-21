@@ -158,6 +158,9 @@ pub struct ChannelState {
     pub edits_flight: Flight,
     /// The board's edit cursor from the last edits page; 0 reads every edit once.
     pub edit_cursor: u64,
+    /// The board's scheduled messages (ADR 0060), soonest first; re-read on the receipts timer.
+    pub scheduled: Vec<Value>,
+    pub scheduled_flight: Flight,
     /// Thread roots the person opened (ADR 0041). Display only; kept across syncs.
     pub expanded: BTreeSet<u64>,
     /// Long messages the person opened with Show more, or jumped to (ADR 0050). Display only.
@@ -433,6 +436,108 @@ impl AppState {
             channel,
             after: Some(after),
         })
+    }
+
+    /// Re-reads the open board's scheduled messages (ADR 0060) on the receipts timer.
+    pub fn scheduled_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        if !state.loaded {
+            return None;
+        }
+        state
+            .scheduled_flight
+            .request()
+            .then_some(Command::LoadScheduled {
+                generation,
+                channel_generation,
+                channel,
+            })
+    }
+
+    /// Schedules `text` on the open board at `when` (ADR 0060): a delay like 10m, 2h or 1d, or a
+    /// time with a zone. `Err` says why nothing was sent, for the composer to show.
+    pub fn schedule(
+        &mut self,
+        text: String,
+        when: &str,
+        reply_to: Option<u64>,
+        quote: Option<String>,
+        to: Option<String>,
+    ) -> Result<Command, String> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Err("Open a board first.".into());
+        };
+        if self.is_archived(&channel) {
+            return Err(format!("{channel} is archived and read only."));
+        }
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Err("Connect first.".into());
+        };
+        if text.trim().is_empty() {
+            return Err("Write the message first, then choose when to send it.".into());
+        }
+        let send_at = msn_cli::scheduled::parse_when(when, msn_cli::scheduled::now_secs())
+            .map_err(|error| error.to_string())?;
+        Ok(Command::Schedule {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            text,
+            key: uuid::Uuid::new_v4().to_string(),
+            send_at,
+            reply_to,
+            quote,
+            to,
+        })
+    }
+
+    /// Changes (new text and/or a new `when`) or cancels one scheduled message (ADR 0060).
+    pub fn change_scheduled(
+        &mut self,
+        id: u64,
+        text: Option<String>,
+        when: Option<&str>,
+        cancel: bool,
+    ) -> Vec<Command> {
+        let (Some(generation), Some(channel)) = (self.generation(), self.selected_channel.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(username) = self.connection.as_ref().map(|c| c.username.clone()) else {
+            return Vec::new();
+        };
+        let send_at = match when.map(str::trim).filter(|w| !w.is_empty()) {
+            Some(when) => {
+                match msn_cli::scheduled::parse_when(when, msn_cli::scheduled::now_secs()) {
+                    Ok(at) => Some(at),
+                    Err(error) => {
+                        self.status = Some(error.to_string());
+                        return Vec::new();
+                    }
+                }
+            }
+            None => None,
+        };
+        let text = text.filter(|t| !t.trim().is_empty());
+        if !cancel && text.is_none() && send_at.is_none() {
+            self.status = Some("Give new text or a new time.".into());
+            return Vec::new();
+        }
+        vec![Command::ChangeScheduled {
+            generation,
+            channel_generation: self.channel_generation,
+            channel,
+            username,
+            id,
+            text,
+            send_at,
+            cancel,
+        }]
     }
 
     /// Replaces the text of one of the connected name's messages (ADR 0052). Nothing is sent for
@@ -924,7 +1029,15 @@ impl AppState {
                 }
                 self.status = Some(BUSY.into());
             }
-            Command::React { .. } | Command::EditMessage { .. } => self.status = Some(BUSY.into()),
+            Command::React { .. }
+            | Command::EditMessage { .. }
+            | Command::Schedule { .. }
+            | Command::ChangeScheduled { .. } => self.status = Some(BUSY.into()),
+            Command::LoadScheduled { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.scheduled_flight.fail();
+                }
+            }
             Command::LoadEdits { .. } => {
                 if let Some(state) = self.channel.as_mut() {
                     state.edits_flight.fail();
@@ -956,6 +1069,34 @@ impl AppState {
     /// Folds one background event into state, returning any follow-up commands to issue.
     pub fn apply(&mut self, event: UiEvent) -> Vec<Command> {
         match event {
+            UiEvent::ScheduledList {
+                generation,
+                channel_generation,
+                channel,
+                list,
+                note,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                state.scheduled = list;
+                if let Some(note) = note {
+                    self.status = Some(note);
+                    return Vec::new();
+                }
+                if state.scheduled_flight.finish() {
+                    vec![Command::LoadScheduled {
+                        generation,
+                        channel_generation,
+                        channel,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
             UiEvent::Connected {
                 generation,
                 username,
@@ -1627,6 +1768,15 @@ impl AppState {
                 }
             }
             "react" => self.status = Some(format!("Reaction not changed: {message}")),
+            // Scheduled messages (ADR 0060): a failed refresh keeps the list shown.
+            "scheduled" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.scheduled_flight.fail();
+                }
+            }
+            "schedule" => self.status = Some(format!("Scheduled message not changed: {message}")),
             // Edits (ADR 0052): a failed refresh keeps what is shown.
             "edits" => {
                 if channel_generation == Some(self.channel_generation)
@@ -2129,6 +2279,60 @@ mod tests {
         });
         assert_eq!(state.selected_channel.as_deref(), Some("random"));
         assert!(state.channel.as_ref().unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn scheduling_checks_the_time_and_the_list_refreshes_on_the_timer() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(&mut state, vec![msg(4, "a")], 4, 0);
+        assert!(state.schedule("  ".into(), "1h", None, None, None).is_err());
+        assert!(
+            state
+                .schedule("hi".into(), "2026-11-21T09:00", None, None, None)
+                .is_err()
+        );
+        let Ok(Command::Schedule {
+            send_at,
+            text,
+            key,
+            quote,
+            ..
+        }) = state.schedule("hi".into(), "1h", Some(4), Some("a".into()), None)
+        else {
+            panic!("expected a schedule command");
+        };
+        assert_eq!(text, "hi");
+        assert_eq!(quote.as_deref(), Some("a"));
+        assert!(send_at.ends_with('Z'));
+        assert!(!key.is_empty());
+        let Some(Command::LoadScheduled { .. }) = state.scheduled_command() else {
+            panic!("expected a list request");
+        };
+        assert!(state.scheduled_command().is_none());
+        let cg = state.channel_generation;
+        let item = json!({"id": 1, "channel": "general", "text": "hi", "sendAt": "2026-11-21T09:00:00.000Z"});
+        let rerun = state.apply(UiEvent::ScheduledList {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            list: vec![item.clone()],
+            note: None,
+        });
+        assert_eq!(rerun.len(), 1, "the queued request reruns");
+        assert_eq!(state.channel.as_ref().unwrap().scheduled, vec![item]);
+        // Changing needs new text or a valid new time; cancelling needs neither.
+        assert!(state.change_scheduled(1, None, Some(""), false).is_empty());
+        assert!(
+            state
+                .change_scheduled(1, None, Some("soon"), false)
+                .is_empty()
+        );
+        assert_eq!(state.change_scheduled(1, None, Some("2h"), false).len(), 1);
+        assert!(matches!(
+            state.change_scheduled(1, None, None, true).as_slice(),
+            [Command::ChangeScheduled { cancel: true, .. }]
+        ));
     }
 
     #[test]

@@ -34,6 +34,7 @@ import { ProtocolError } from "./errors.ts";
 import { decodeUnread, type MarkList, type Unread } from "./readMarks.ts";
 import { decodeMute, decodeMutes, type Mute } from "./mutes.ts";
 import { decodePersonas, type Persona } from "./mention.ts";
+import { decodeScheduledList, type ScheduledMessage } from "./scheduled.ts";
 
 export type SendMessageInput = {
   username: string;
@@ -243,6 +244,52 @@ export class ApiClient {
     return message;
   }
 
+  /** GET …/scheduled (ADR 0060): the board's scheduled messages, soonest first. */
+  async listScheduled(channel: string, signal?: AbortSignal): Promise<ScheduledMessage[]> {
+    return decodeScheduledList(
+      await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/scheduled`, { signal }),
+      channel,
+    );
+  }
+
+  /** POST …/messages with sendAt (ADR 0060): the message waits on the server until then. */
+  async scheduleMessage(
+    channel: string,
+    input: SendMessageInput & { sendAt: string },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/messages`, {
+      method: "POST",
+      body: input,
+      idempotencyKey,
+      signal,
+    });
+  }
+
+  /** PATCH …/scheduled/{id} (ADR 0060): new text and/or time; a new time retries a failed one. */
+  async changeScheduled(
+    channel: string,
+    id: number,
+    change: { username: string; text?: string; sendAt?: string },
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/scheduled/${id}`, {
+      method: "PATCH",
+      body: change,
+      signal,
+    });
+  }
+
+  /** DELETE …/scheduled/{id} (ADR 0060) as `username`. */
+  async cancelScheduled(channel: string, id: number, username: string, signal?: AbortSignal): Promise<void> {
+    await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/scheduled/${id}`, {
+      method: "DELETE",
+      query: { username },
+      signal,
+    });
+  }
+
   /** PATCH …/messages/{id} (ADR 0052): replaces the text of a message `username` sent. */
   async editMessage(
     channel: string,
@@ -339,13 +386,20 @@ export class ApiClient {
    * `channel` filter here: the server already restricts it, and a conflicting filter is a 403.
    */
   async getEvents(
-    options: { after: number; limit: number; wait: number; channel?: string },
+    options: { after: number; limit: number; wait: number; channel?: string; statuses?: boolean },
     signal?: AbortSignal,
   ): Promise<EventPage> {
     const channel = this.scopeChannel ? undefined : options.channel;
     const raw = await this.http.request<unknown>("/events", {
-      // status.changed (ADR 0064) is opt-in; this client decodes it.
-      query: { after: options.after, limit: options.limit, wait: options.wait, channel, include: "statuses" },
+      // status.changed (ADR 0064) is opt-in: the live stream asks for it; the startup drain does
+      // not, so old status changes never count against its page cap.
+      query: {
+        after: options.after,
+        limit: options.limit,
+        wait: options.wait,
+        channel,
+        include: options.statuses ? "statuses" : undefined,
+      },
       timeoutMs: (options.wait + 15) * 1000,
       signal,
     });

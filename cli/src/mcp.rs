@@ -243,16 +243,28 @@ impl Server {
                 "structuredContent": value,
                 "isError": false,
             }),
-            Err(ToolError { error, key }) => {
+            Err(ToolError {
+                error,
+                key,
+                send_at,
+            }) => {
                 let mut text = format!("{} error: {error}", kind(&error));
                 let mut structured =
                     json!({"error": {"kind": kind(&error), "message": error.to_string()}});
                 if let Some(key) = key {
                     // The send may still have reached the board: the key makes a retry safe.
-                    text.push_str(&format!(
-                        " The message may have been posted. Retry with key {key} and identical content; the board keeps one message."
-                    ));
+                    match &send_at {
+                        Some(send_at) => text.push_str(&format!(
+                            " The message may have been scheduled. Retry with key {key}, sendAt {send_at} and identical content; the board keeps one message."
+                        )),
+                        None => text.push_str(&format!(
+                            " The message may have been posted. Retry with key {key} and identical content; the board keeps one message."
+                        )),
+                    }
                     structured["idempotencyKey"] = json!(key);
+                }
+                if let Some(send_at) = send_at {
+                    structured["sendAt"] = json!(send_at);
                 }
                 json!({
                     "content": [{"type":"text","text": text}],
@@ -423,6 +435,13 @@ impl Server {
                 return Err(CliError::usage("attach must be a list of local file paths.").into());
             }
         };
+        // ADR 0060: post later instead of now. Same forms as `msn send --at`.
+        let send_at = optional_str(args, "sendAt")?
+            .map(|raw| crate::scheduled::parse_when(raw, crate::scheduled::now_secs()))
+            .transpose()?;
+        if send_at.is_some() && !paths.is_empty() {
+            return Err(CliError::usage("A scheduled message cannot carry attachments.").into());
+        }
         // Bad paths fail here, before anything reaches the board, so no key is needed to retry.
         let files = attachments::read_files(&paths)?;
         // From here on the outcome can be uncertain, so every error carries the key.
@@ -432,6 +451,9 @@ impl Server {
             let uploaded = attachments::upload(&client, &tenant, &token, &channel, &files)?;
             let mut body = send_body_with(&username, &payload, &correlation, &uploaded);
             with_labels(&mut body, &labels);
+            if let Some(send_at) = &send_at {
+                body["sendAt"] = json!(send_at);
+            }
             let response = client.post_json(
                 &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
                 &token,
@@ -445,9 +467,13 @@ impl Server {
         let mut value = posted.map_err(|error| ToolError {
             error,
             key: Some(key.clone()),
+            send_at: send_at.clone(),
         })?;
         if let Some(object) = value.as_object_mut() {
             object.insert("idempotencyKey".into(), json!(key));
+            if let Some(send_at) = &send_at {
+                object.insert("sendAt".into(), json!(send_at));
+            }
         }
         Ok(value)
     }
@@ -818,11 +844,18 @@ impl Server {
 struct ToolError {
     error: CliError,
     key: Option<String>,
+    /// The absolute time a scheduled send asked for (ADR 0060). A retry must send this, not the
+    /// relative delay, or the content differs and the key conflicts.
+    send_at: Option<String>,
 }
 
 impl From<CliError> for ToolError {
     fn from(error: CliError) -> Self {
-        Self { error, key: None }
+        Self {
+            error,
+            key: None,
+            send_at: None,
+        }
     }
 }
 
@@ -1017,7 +1050,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "send",
             "Send a message",
-            "Post a message as your persona. Pass text, or json for a structured payload. The result, including an error result, has idempotencyKey; if a send failed or its result is uncertain, retry with the same key and identical content and the board keeps one message.",
+            "Post a message as your persona. Pass text, or json for a structured payload. The result, including an error result, has idempotencyKey; if a send failed or its result is uncertain, retry with the same key and identical content and the board keeps one message. With sendAt the message waits and posts at that time instead; the result is {scheduled} and `msn scheduled list|change|cancel CHANNEL` manages it. A delay like 10m is turned into an absolute time once, returned as sendAt in the result and in an error result: retry with that sendAt, not the delay, or the key conflicts.",
             json!({
                 "text": {"type":"string","description":"Message text (text/plain)."},
                 "json": {"description":"Any JSON value, sent as application/json."},
@@ -1028,6 +1061,7 @@ pub fn tools() -> Vec<Value> {
                 "to": {"type":"string","description":"Address a username. Visible to everyone; not private."},
                 "attach": {"type":"array","maxItems":4,"items":{"type":"string"},"description":"Local file paths to attach (up to 4, 1 MiB each), e.g. a log, screenshot or patch."},
                 "labels": label_object("Labels to put on the message, such as {\"state\":\"open\"}. At most 16."),
+                "sendAt": {"type":"string","description":"Post later: a delay like 10m, 2h or 1d, or a time with a zone like 2026-11-21T09:00:00Z. No attachments."},
             }),
             &[],
             (false, false),
@@ -1155,7 +1189,7 @@ pub fn tools() -> Vec<Value> {
             "Set or read agent status",
             "Say in one short line what you are doing now, such as \"running tests on PR 54\"; people and agents see it beside your name with the time you set it. It stays until you change it or pass clear: true, so clear or update it when you stop or move on. At most 80 characters, one line. Sends no message. With neither text nor clear, lists every name's status on the board (name, text, setAt).",
             json!({
-                "text": {"type":"string","minLength":1,"maxLength":80,"description":"Your new status."},
+                "text": {"type":"string","minLength":1,"description":"Your new status: one line, at most 80 characters after trimming."},
                 "clear": {"type":"boolean","description":"Remove your status."},
             }),
             &[],
@@ -1493,5 +1527,25 @@ mod tests {
             .unwrap();
         assert_eq!(result["structuredContent"]["error"]["kind"], "network");
         assert!(result["content"][0]["text"].as_str().unwrap().contains(key));
+    }
+
+    #[test]
+    fn failed_scheduled_send_returns_the_absolute_time_to_retry_with() {
+        // ADR 0060: a delay resolves once; the error carries the time a retry must reuse.
+        let mut s = server();
+        s.url = Url::parse("http://127.0.0.1:9").unwrap();
+        s.tenant = Some("team".into());
+        s.token = Some("t".into());
+        s.username = Some("alice".into());
+        let reply = s
+            .handle_line(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send","arguments":{"channel":"general","text":"hi","sendAt":"10m"}}}).to_string())
+            .unwrap();
+        let result = &reply["result"];
+        assert_eq!(result["isError"], true);
+        let send_at = result["structuredContent"]["sendAt"].as_str().unwrap();
+        assert!(send_at.ends_with('Z') && send_at.len() == 20, "{send_at}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(&format!("sendAt {send_at}")), "{text}");
+        assert!(result["structuredContent"]["idempotencyKey"].is_string());
     }
 }

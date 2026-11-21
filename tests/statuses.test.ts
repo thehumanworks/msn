@@ -164,10 +164,28 @@ describe("agent status (ADR 0064)", () => {
 
   it("refuses bad text, unknown fields and unknown boards", async () => {
     const f = await fixture();
-    for (const text of ["", "   ", "two\nlines", "tab\there", "x".repeat(81), 5])
+    for (const text of [
+      "",
+      "   ",
+      "two\nlines",
+      "tab\there",
+      "x".repeat(81),
+      5,
+      "a\u2028b",
+      "a\u2029b",
+      "evil\u202Etxt",
+      "iso\u2066late",
+      "mark\u200Fhere",
+      "zero\u200Bwidth",
+      "mid\uFEFFbom",
+    ])
       expect(
         (await call(f.tenant, "/channels/work/status", f.agent, "PUT", { username: "lead", text })).status,
       ).toBe(400);
+    // Emoji sequences keep their zero-width joiner; a leading byte order mark is trimmed.
+    expect((await set(f, f.agent, "lead", "👨\u200D💻 coding")).status).toBe(200);
+    const trimmed = (await (await set(f, f.agent, "lead", "\uFEFFok")).json()) as { status: Status };
+    expect(trimmed.status.text).toBe("ok");
     // 80 characters is the limit in code points, not bytes.
     expect((await set(f, f.agent, "lead", "é".repeat(80))).status).toBe(200);
     expect(
@@ -235,5 +253,51 @@ describe("agent status (ADR 0064)", () => {
     const spent = await set(f, key.token, "n1", "again");
     expect(spent.status).toBe(409);
     expect(await spent.json()).toMatchObject({ error: { code: "status_quota" } });
+    // Past the cap a clear still goes through, with its event, so no line outlives the quota.
+    const cleared = await set(f, key.token, "n0", null);
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ status: null, changed: true });
+    const viaDelete = await call(f.tenant, "/channels/work/status?username=n1", key.token, "DELETE");
+    expect(await viaDelete.json()).toMatchObject({ changed: true });
+    const { events } = (await (
+      await call(f.tenant, "/events?channel=work&include=statuses", f.owner)
+    ).json()) as { events: { type: string; resourceId: number }[] };
+    expect(events.filter((e) => e.type === "status.changed").map((e) => e.resourceId)).toEqual([
+      1, 100001, 100002,
+    ]);
+    expect((await list(f, f.agent)).statuses.some((s) => s.name === "n0" || s.name === "n1")).toBe(false);
+  });
+});
+
+describe("agent status and since you last looked (ADR 0061, ADR 0064)", () => {
+  it("many status changes do not crowd label changes out of the since window", async () => {
+    const f = await fixture();
+    const send = async (text: string) =>
+      (
+        (await (
+          await call(f.tenant, "/channels/work/messages", f.agent, "POST", { username: "lead", text })
+        ).json()) as { message: { id: number } }
+      ).message.id;
+    const mark = await send("mark");
+    const task = await send("task");
+    await call(f.tenant, `/channels/work/messages/${task}/labels`, f.agent, "POST", {
+      set: { state: "done" },
+    });
+    // More status events than the 2,000-event window, all newer than the label change.
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    await runInDurableObject(stub, (_instance, state) => {
+      const now = new Date().toISOString();
+      for (let i = 1; i <= 2100; i++)
+        state.storage.sql.exec(
+          "INSERT INTO events (channel, type, resourceId, historyRevision, createdAt) VALUES ('work', 'status.changed', ?, 0, ?)",
+          i,
+          now,
+        );
+    });
+    const since = (await (
+      await call(f.tenant, `/channels/work/since?reader=dev&after=${mark}`, f.agent)
+    ).json()) as { labels: { messages: { id: number }[]; changes: number } };
+    expect(since.labels.messages.map((m) => m.id)).toEqual([task]);
+    expect(since.labels.changes).toBe(1);
   });
 });

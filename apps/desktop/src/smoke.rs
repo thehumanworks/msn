@@ -129,9 +129,18 @@ pub fn run() -> ExitCode {
         std::thread::spawn(move || {
             let client = MsnClient::new(&origin).map_err(|e| e.to_string())?;
             let started = Instant::now();
-            events::fetch_events(&client, &tenant, &token, cursor, 100, 15, Some(&channel))
-                .map(|page| (page, started.elapsed()))
-                .map_err(|e| e.to_string())
+            events::fetch_events(
+                &client,
+                &tenant,
+                &token,
+                cursor,
+                100,
+                15,
+                Some(&channel),
+                false,
+            )
+            .map(|page| (page, started.elapsed()))
+            .map_err(|e| e.to_string())
         })
     };
     std::thread::sleep(Duration::from_millis(500));
@@ -265,7 +274,16 @@ pub fn run() -> ExitCode {
     }
 
     // The replayed send must not have produced a second event.
-    match events::fetch_events(&client, &tenant, &token, cursor, 100, 0, Some(&channel)) {
+    match events::fetch_events(
+        &client,
+        &tenant,
+        &token,
+        cursor,
+        100,
+        0,
+        Some(&channel),
+        false,
+    ) {
         Ok(page) => {
             let count = page
                 .events
@@ -301,7 +319,7 @@ pub fn run() -> ExitCode {
 fn drain_events(client: &MsnClient, tenant: &str, token: &str) -> Result<u64, String> {
     let mut cursor = 0;
     for _ in 0..MAX_DRAIN_PAGES {
-        let page = events::fetch_events(client, tenant, token, cursor, 100, 0, None)
+        let page = events::fetch_events(client, tenant, token, cursor, 100, 0, None, false)
             .map_err(|e| e.to_string())?;
         cursor = page.next_cursor;
         if !page.has_more {

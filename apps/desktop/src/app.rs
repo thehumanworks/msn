@@ -41,6 +41,10 @@ pub struct MsnDesktopApp {
     editing: Option<(u64, String)>,
     /// The `editedAt` of the message when its editor opened (ADR 0052).
     edit_base: Option<String>,
+    /// Send later (ADR 0060): when the composer's next scheduled message posts, as typed.
+    schedule_when: String,
+    /// The scheduled message being changed: id, new text, new time (blank keeps it).
+    scheduled_edit: Option<(u64, String, String)>,
     /// `None` when neither `XDG_CONFIG_HOME` nor `HOME` is set.
     profile_store: Option<profile::ProfileStore>,
     /// This connection's read-mark file (ADR 0045), once the connection's name is known.
@@ -215,6 +219,12 @@ enum Action {
     StartEdit(u64),
     SaveEdit,
     CancelEdit,
+    /// Send later (ADR 0060): schedule the composer's text, or change or cancel a scheduled one.
+    SendLater,
+    StartScheduledEdit(u64),
+    SaveScheduledEdit,
+    CloseScheduledEdit,
+    CancelScheduled(u64),
     /// Address the next message as a reply to this one (ADR 0054).
     Reply(u64),
     /// Reply to this message quoting its text (ADR 0059).
@@ -271,6 +281,8 @@ impl MsnDesktopApp {
             receipts_at: None,
             editing: None,
             edit_base: None,
+            schedule_when: String::from("1h"),
+            scheduled_edit: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,
@@ -372,6 +384,9 @@ impl MsnDesktopApp {
             self.dispatch_all(command.into_iter().collect());
             // Edits send no new message either (ADR 0052).
             let command = self.state.edits_command();
+            self.dispatch_all(command.into_iter().collect());
+            // Scheduled messages (ADR 0060) post on the server; the list is re-read here too.
+            let command = self.state.scheduled_command();
             self.dispatch_all(command.into_iter().collect());
         }
     }
@@ -978,6 +993,9 @@ impl MsnDesktopApp {
                 .show_separator_line(false)
                 .frame(egui::Frame::new())
                 .show(ui, |ui| render_statuses(ui, &state.statuses, unix_now()));
+            // "3 min ago" moves on with the clock, not only when something else repaints.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(30));
         }
         let me = self
             .state
@@ -1146,6 +1164,8 @@ impl MsnDesktopApp {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.add_space(12.0);
                 ui.weak("Archived · this board is read only. Unarchive it to post again.");
+                // A message that failed here can still be cancelled (ADR 0060).
+                self.scheduled_panel(ui, actions);
             });
             return;
         }
@@ -1323,9 +1343,149 @@ impl MsnDesktopApp {
                     self.composer.quote.clear();
                 }
             }
+            // Send later (ADR 0060): the composer's text posts at this time instead of now.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Send later at").small().color(theme::muted()));
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.schedule_when)
+                        .id(egui::Id::new("schedule-when"))
+                        .margin(egui::Margin::symmetric(10, 5))
+                        .font(egui::TextStyle::Small)
+                        .hint_text(egui::RichText::new("10m, 2h, 1d or 2026-11-21T09:00Z").small())
+                        .desired_width((ui.available_width() - 110.0).clamp(80.0, 220.0)),
+                )
+                .on_hover_text("A delay like 10m, 2h or 1d, or a time with a zone such as 2026-11-21T09:00:00Z or 2026-11-21T10:00+01:00");
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let armed = !self.composer.text.trim().is_empty();
+                if ui
+                    .add_enabled(armed, egui::Button::new("Send later").small())
+                    .on_hover_text("Schedule the message above; it posts on the server even if this app is closed")
+                    .clicked()
+                    || (enter && armed)
+                {
+                    actions.push(Action::SendLater);
+                }
+            });
             if let Some(error) = &self.composer.error {
                 ui.colored_label(theme::error(), error);
             }
+            self.scheduled_panel(ui, actions);
+        });
+    }
+
+    /// The open board's scheduled messages (ADR 0060): when each posts and who sent it. The
+    /// sender changes or cancels their own; the owner may cancel any.
+    fn scheduled_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let Some(state) = self.state.channel.as_ref() else {
+            return;
+        };
+        if state.scheduled.is_empty() {
+            return;
+        }
+        let me = self
+            .state
+            .connection
+            .as_ref()
+            .map(|c| c.username.clone())
+            .unwrap_or_default();
+        let owner = self.state.connection.as_ref().is_some_and(|c| c.owner);
+        let failed = state
+            .scheduled
+            .iter()
+            .filter(|item| item["status"].as_str() == Some("failed"))
+            .count();
+        let title = scheduled_title(state.scheduled.len() - failed, failed);
+        ui.vertical(|ui| {
+            egui::CollapsingHeader::new(egui::RichText::new(title).small())
+                .id_salt("scheduled-panel")
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("scheduled-list")
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for item in &state.scheduled {
+                                let id = item["id"].as_u64().unwrap_or(0);
+                                let who = item["username"].as_str().unwrap_or("?");
+                                // Message times on the desktop are UTC; say so instead of showing ISO.
+                                let at = item["sendAt"]
+                                    .as_str()
+                                    .and_then(|at| at.get(0..16))
+                                    .map(|at| format!("{} UTC", at.replace('T', " ")))
+                                    .unwrap_or_default();
+                                let failed = item["status"].as_str() == Some("failed");
+                                let when = if failed { "Was due" } else { "Posts" };
+                                ui.label(
+                                    egui::RichText::new(format!("{when} {at} · {who}"))
+                                        .small()
+                                        .color(theme::muted()),
+                                );
+                                ui.label(item["text"].as_str().unwrap_or(""));
+                                if failed {
+                                    let reason = item["error"]["message"]
+                                        .as_str()
+                                        .or(item["error"]["code"].as_str())
+                                        .unwrap_or("unknown error");
+                                    ui.colored_label(
+                                        theme::error(),
+                                        format!("Not posted: {reason}"),
+                                    );
+                                }
+                                let mine = who == me;
+                                let editing = self
+                                    .scheduled_edit
+                                    .as_ref()
+                                    .is_some_and(|(edit, _, _)| *edit == id);
+                                if editing
+                                    && let Some((_, text, when)) = self.scheduled_edit.as_mut()
+                                {
+                                    ui.add(
+                                        egui::TextEdit::multiline(text)
+                                            .id(egui::Id::new(("scheduled-text", id)))
+                                            .desired_rows(2),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("New time").small());
+                                        ui.add(
+                                            egui::TextEdit::singleline(when)
+                                                .id(egui::Id::new(("scheduled-when", id)))
+                                                .hint_text(if failed {
+                                                    "needed: 1h, 1d…"
+                                                } else {
+                                                    "keep"
+                                                })
+                                                .desired_width(140.0),
+                                        );
+                                        if ui.button("Save").clicked() {
+                                            actions.push(Action::SaveScheduledEdit);
+                                        }
+                                        if ui.button("Close").clicked() {
+                                            actions.push(Action::CloseScheduledEdit);
+                                        }
+                                    });
+                                } else if mine || owner {
+                                    ui.horizontal(|ui| {
+                                        if mine
+                                            && ui
+                                                .small_button(if failed {
+                                                    "Pick a new time"
+                                                } else {
+                                                    "Change"
+                                                })
+                                                .clicked()
+                                        {
+                                            actions.push(Action::StartScheduledEdit(id));
+                                        }
+                                        if ui.small_button("Cancel message").clicked() {
+                                            actions.push(Action::CancelScheduled(id));
+                                        }
+                                    });
+                                }
+                                ui.separator();
+                            }
+                        });
+                });
         });
     }
 
@@ -1887,7 +2047,45 @@ impl MsnDesktopApp {
                 let commands = self.state.clear_mute();
                 self.dispatch_all(commands);
             }
-            Action::Send => self.send_composer_message(),
+            Action::Send => self.send_composer_message(false),
+            Action::SendLater => self.send_composer_message(true),
+            Action::StartScheduledEdit(id) => {
+                let text = self.state.channel.as_ref().and_then(|state| {
+                    state
+                        .scheduled
+                        .iter()
+                        .find(|item| item["id"].as_u64() == Some(id))
+                        .and_then(|item| item["text"].as_str())
+                        .map(str::to_string)
+                });
+                if let Some(text) = text {
+                    self.scheduled_edit = Some((id, text, String::new()));
+                }
+            }
+            Action::SaveScheduledEdit => {
+                if let Some((id, text, when)) = self.scheduled_edit.take() {
+                    let old = self.state.channel.as_ref().and_then(|state| {
+                        state
+                            .scheduled
+                            .iter()
+                            .find(|item| item["id"].as_u64() == Some(id))
+                            .and_then(|item| item["text"].as_str())
+                            .map(str::to_string)
+                    });
+                    let changed = (old.as_deref() != Some(text.as_str())).then(|| text.clone());
+                    let commands = self.state.change_scheduled(id, changed, Some(&when), false);
+                    if commands.is_empty() {
+                        // Nothing valid to send: the editor stays open with what was typed.
+                        self.scheduled_edit = Some((id, text, when));
+                    }
+                    self.dispatch_all(commands);
+                }
+            }
+            Action::CloseScheduledEdit => self.scheduled_edit = None,
+            Action::CancelScheduled(id) => {
+                let commands = self.state.change_scheduled(id, None, None, true);
+                self.dispatch_all(commands);
+            }
             Action::RetrySend(key) => self.retry_send(&key),
             Action::DiscardSend(key) => {
                 self.state.pending_sends.remove(&key);
@@ -1900,7 +2098,8 @@ impl MsnDesktopApp {
         }
     }
 
-    fn send_composer_message(&mut self) {
+    /// Sends the composer's message now, or with `later` schedules it at `schedule_when` (ADR 0060).
+    fn send_composer_message(&mut self, later: bool) {
         let (Some(connection), Some(channel)) = (
             self.state.connection.clone(),
             self.state.selected_channel.clone(),
@@ -1944,6 +2143,21 @@ impl MsnDesktopApp {
             }
             _ => Some(self.composer.quote.clone()),
         };
+        if later {
+            match self.state.schedule(
+                text.clone(),
+                &self.schedule_when,
+                reply_to,
+                quote.clone(),
+                to.clone(),
+            ) {
+                Ok(command) => self.dispatch(command),
+                Err(error) => {
+                    self.composer.error = Some(error);
+                    return;
+                }
+            }
+        }
         self.composer.error = None;
         self.composer.text.clear();
         // To filled by an @ pick belongs to that message (ADR 0055); a typed To stays.
@@ -1955,6 +2169,9 @@ impl MsnDesktopApp {
         // A reply target is for one message (ADR 0054); the next message starts unaddressed.
         self.composer.reply_to.clear();
         self.composer.quote.clear();
+        if later {
+            return;
+        }
         // Your reply folds into its thread; open it so the reply does not seem to vanish.
         if let Some(parent) = reply_to {
             self.state.open_thread_of(parent);
@@ -2784,6 +3001,18 @@ fn render_message(
     shown
 }
 
+/// "2 scheduled", "1 scheduled · 1 failed to post" (ADR 0060), as in the web app.
+fn scheduled_title(waiting: usize, failed: usize) -> String {
+    let mut parts = Vec::new();
+    if waiting > 0 {
+        parts.push(format!("{waiting} scheduled"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed to post"));
+    }
+    parts.join(" · ")
+}
+
 /// "Edit" beside "Link" on your own messages (ADR 0052).
 fn edit_control(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     if ui
@@ -3355,6 +3584,8 @@ mod layout_tests {
             receipts_at: None,
             editing: None,
             edit_base: None,
+            schedule_when: String::from("1h"),
+            scheduled_edit: None,
             read_marks_path: None,
             unread_at: None,
             pending_marks: None,

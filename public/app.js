@@ -6,6 +6,7 @@ import { renderMarkdown } from "./markdown.js";
 import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { quoteOf, quotePreview } from "./quote.js";
+import { localInput, presets, SCHEDULED_REFRESH_MS, sendAtFrom, summary, whenText } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
@@ -1969,6 +1970,13 @@ async function poll(live = false) {
         void loadReactions(connection, selected, state);
       // Edits send no new message either (ADR 0052).
       if (Date.now() - (state.editsAt ?? 0) > EDIT_REFRESH_MS) void loadEdits(connection, selected, state);
+      // Scheduled messages (ADR 0060): re-read now and then, and as soon as one should have posted.
+      if (
+        Date.now() - (state.scheduledAt ?? 0) > SCHEDULED_REFRESH_MS ||
+        (data.messages.length &&
+          state.scheduled?.some((item) => item.status === "pending" && Date.parse(item.sendAt) <= Date.now()))
+      )
+        void loadScheduled(connection, selected);
       if (Date.now() - (connection.unreadAt ?? 0) > UNREAD_REFRESH_MS) void loadUnread(connection);
       if (state.context) showCheckpoint(state);
       $("cursor").textContent = `Cursor ${state.cursor}`;
@@ -2077,6 +2085,8 @@ function selectChannel(name, { reset = false } = {}) {
   void loadStatuses(session, name);
   void loadReactions(session, name, state);
   void loadEdits(session, name, state);
+  showScheduled(state);
+  void loadScheduled(session, name);
   // Capture where the reader stopped before this visit's own reading moves the mark.
   const mark = state.since?.mark ?? readMark(name);
   showSince(state);
@@ -2089,7 +2099,8 @@ function selectChannel(name, { reset = false } = {}) {
   $("cursor").textContent = `Cursor ${state.cursor}`;
   $("more").hidden = !state.hasMore;
   showJump(state);
-  for (const id of ["poll", "catchup", "reread", "recipient", "message", "attach"]) $(id).disabled = false;
+  for (const id of ["poll", "catchup", "reread", "recipient", "message", "attach", "send-later"])
+    $(id).disabled = false;
   $("send").disabled = draft().sending;
   for (const button of $("channels").children)
     button.setAttribute("aria-current", String(button.dataset.channel === name));
@@ -2773,6 +2784,9 @@ $("send-form").addEventListener("submit", async (event) => {
   const selected = channel;
   const state = draft();
   if (state.sending) return;
+  // Set by the Send later dialog for this one submit (ADR 0060).
+  const sendAt = scheduleRequest;
+  scheduleRequest = null;
   const content = $("message").value;
   const recipient = $("recipient").value;
   const replyId = state.replyTo;
@@ -2788,6 +2802,10 @@ $("send-form").addEventListener("submit", async (event) => {
     return;
   }
   const files = [...state.files];
+  if (sendAt && (files.length || state.missingFiles > 0)) {
+    status("A scheduled message cannot carry files. Send the files now, or remove them first.", true);
+    return;
+  }
   // An uncertain send kept across a reload lost its File objects, not its uploads (ADR 0057):
   // unchanged, it is retried with its exact payload and key, so it cannot post twice.
   const kept =
@@ -2826,6 +2844,7 @@ $("send-form").addEventListener("submit", async (event) => {
           ...(replyId !== null ? { replyTo: replyId } : {}),
           ...(quote !== null ? { quote } : {}),
           ...(attachments.length ? { attachments } : {}),
+          ...(sendAt ? { sendAt } : {}),
         });
     if (!state.retry || state.retry.payload !== payload) state.retry = { payload, key: crypto.randomUUID() };
     const attempt = state.retry;
@@ -2860,8 +2879,13 @@ $("send-form").addEventListener("submit", async (event) => {
     $("recipient").value = state.recipient;
     showFiles(state);
     showReplyTo(state);
-    if (replyId !== null) openThreadOf(replyId);
     autosize();
+    if (sendAt) {
+      status(`Scheduled for ${whenText(sendAt)}. It posts as a normal message then.`);
+      void loadScheduled(connection, selected);
+      return;
+    }
+    if (replyId !== null) openThreadOf(replyId);
     poll($("live").checked); // Read from the last cursor, not the sent ID: no skipped concurrent replies.
   } catch (error) {
     if (session === connection && selected === channel)
@@ -4081,3 +4105,213 @@ $("mention-list").addEventListener("click", (event) => {
 });
 $("message").addEventListener("click", showMentions);
 $("message").addEventListener("blur", closeMentions);
+
+// Send a message later (ADR 0060). The composer's clock button schedules what is in the composer;
+// the bar above it opens the board's list, where the sender changes or cancels a message.
+let scheduleRequest = null;
+/** null schedules the composer's text; an item changes that scheduled message. */
+let scheduleTarget = null;
+
+async function loadScheduled(connection = session, name = channel) {
+  try {
+    const data = await api(`/channels/${name}/scheduled`, {}, connection);
+    const state = connection.channels.get(name);
+    if (!state) return;
+    state.scheduled = data.scheduled;
+    state.scheduledAt = Date.now();
+    if (session === connection && channel === name) showScheduled(state);
+  } catch {
+    // Older Workers have no schedule; the bar stays hidden and the next refresh tries again.
+  }
+}
+
+function showScheduled(state) {
+  const list = state?.scheduled ?? [];
+  const text = summary(list);
+  $("scheduled-bar").hidden = !text;
+  $("scheduled-bar").classList.toggle(
+    "failed",
+    list.some((item) => item.status === "failed"),
+  );
+  $("scheduled-open").textContent = text ? `${text} · show` : "";
+  if ($("scheduled-dialog").open) renderScheduledList(list);
+}
+
+function ownScheduled(item) {
+  return item.username === session?.username;
+}
+
+function renderScheduledList(list) {
+  const rows = list.map((item) => {
+    const row = document.createElement("li");
+    const when = document.createElement("span");
+    when.className = "scheduled-when";
+    when.textContent = `${item.status === "failed" ? "Was due" : "Posts"} ${whenText(item.sendAt)} · ${item.username}${item.to ? ` → ${item.to}` : ""}`;
+    when.title = new Date(item.sendAt).toLocaleString();
+    const body = document.createElement("p");
+    body.className = "scheduled-text";
+    body.textContent = item.text;
+    row.append(when, body);
+    if (item.status === "failed") {
+      const reason = document.createElement("p");
+      reason.className = "scheduled-error";
+      reason.textContent = `Not posted: ${item.error?.message || item.error?.code || "unknown error"}`;
+      row.append(reason);
+    }
+    const mine = ownScheduled(item);
+    if (mine || session?.owner) {
+      const actions = document.createElement("div");
+      actions.className = "scheduled-actions";
+      if (mine && !archivedBoards.has(channel)) {
+        const change = document.createElement("button");
+        change.type = "button";
+        change.className = "quiet";
+        change.textContent = item.status === "failed" ? "Pick a new time" : "Change";
+        change.addEventListener("click", () => openSchedule(item));
+        actions.append(change);
+      }
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "quiet";
+      cancel.textContent = "Cancel message";
+      cancel.addEventListener("click", () => void cancelScheduled(item, cancel));
+      actions.append(cancel);
+      row.append(actions);
+    }
+    return row;
+  });
+  if (!rows.length) {
+    const empty = document.createElement("li");
+    empty.textContent = "Nothing scheduled on this board.";
+    rows.push(empty);
+  }
+  $("scheduled-list").replaceChildren(...rows);
+}
+
+async function cancelScheduled(item, button) {
+  const connection = session;
+  const name = channel;
+  button.disabled = true;
+  try {
+    await api(
+      `/channels/${name}/scheduled/${item.id}?username=${encodeURIComponent(connection.username)}`,
+      { method: "DELETE" },
+      connection,
+    );
+    status(`Cancelled the message scheduled for ${whenText(item.sendAt)}.`);
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    button.disabled = false;
+    await loadScheduled(connection, name);
+  }
+}
+
+function scheduleError(message) {
+  $("schedule-error").textContent = message ?? "";
+  $("schedule-error").hidden = !message;
+}
+
+function openSchedule(item = null) {
+  if (!session || !channel) return;
+  if (!item) {
+    if (!canPost()) return;
+    const content = $("message").value;
+    if (!content.trim()) {
+      status("Write the message first, then choose when to send it.", true);
+      $("message").focus();
+      return;
+    }
+    const state = draft();
+    if (state.files.length || state.missingFiles > 0) {
+      status("A scheduled message cannot carry files. Send the files now, or remove them first.", true);
+      return;
+    }
+  }
+  scheduleTarget = item;
+  scheduleError(null);
+  const now = new Date();
+  const choices = presets(now);
+  $("schedule-title").textContent = item ? "Change scheduled message" : "Send later";
+  $("schedule-submit").textContent = item ? "Save" : "Schedule";
+  $("schedule-text-row").hidden = !item;
+  $("schedule-text").value = item?.text ?? "";
+  $("schedule-text").required = Boolean(item);
+  const due = item && item.status === "pending" ? new Date(item.sendAt) : choices[0].at;
+  $("schedule-at").min = localInput(now);
+  $("schedule-at").value = localInput(due);
+  const legend = document.createElement("legend");
+  legend.className = "sr-only";
+  legend.textContent = "Quick times";
+  $("schedule-presets").replaceChildren(
+    legend,
+    ...choices.map((choice) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "quiet";
+      button.textContent = choice.label;
+      button.addEventListener("click", () => {
+        $("schedule-at").value = localInput(choice.at);
+        scheduleError(null);
+      });
+      return button;
+    }),
+  );
+  $("schedule-dialog").showModal();
+  (item ? $("schedule-text") : $("schedule-at")).focus();
+}
+
+$("send-later").addEventListener("click", () => openSchedule());
+$("close-schedule").addEventListener("click", () => $("schedule-dialog").close());
+$("schedule-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const sendAt = sendAtFrom($("schedule-at").value);
+  if (!sendAt) {
+    scheduleError("Pick a time in the future, at most a year ahead.");
+    return;
+  }
+  const item = scheduleTarget;
+  if (!item) {
+    $("schedule-dialog").close();
+    scheduleRequest = sendAt;
+    $("send-form").requestSubmit();
+    return;
+  }
+  const connection = session;
+  const name = channel;
+  const text = $("schedule-text").value;
+  if (!text.trim() || new TextEncoder().encode(text).length > 16384) {
+    scheduleError("Message must be 1–16,384 UTF-8 bytes.");
+    return;
+  }
+  const change = { username: connection.username };
+  if (text !== item.text) change.text = text;
+  // A failed message needs a new time to post; an unchanged time on a waiting one is left alone.
+  if (sendAt !== item.sendAt || item.status === "failed") change.sendAt = sendAt;
+  if (!change.text && !change.sendAt) {
+    $("schedule-dialog").close();
+    return;
+  }
+  $("schedule-submit").disabled = true;
+  try {
+    await api(
+      `/channels/${name}/scheduled/${item.id}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change) },
+      connection,
+    );
+    $("schedule-dialog").close();
+    status(`Scheduled for ${whenText(change.sendAt ?? item.sendAt)}.`);
+    await loadScheduled(connection, name);
+  } catch (error) {
+    scheduleError(error.message);
+  } finally {
+    $("schedule-submit").disabled = false;
+  }
+});
+$("scheduled-open").addEventListener("click", () => {
+  if (!session || !channel) return;
+  renderScheduledList(session.channels.get(channel)?.scheduled ?? []);
+  $("scheduled-dialog").showModal();
+  void loadScheduled(session, channel);
+});
+$("close-scheduled").addEventListener("click", () => $("scheduled-dialog").close());

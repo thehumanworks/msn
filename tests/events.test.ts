@@ -292,8 +292,8 @@ describe("durable coordination event feed", () => {
     const t = await tenant();
     await call(`${t.path}/channels/general`, t.token, { method: "PUT" });
     // Mirrors store.ts: MAX_MESSAGES * 2 + MAX_CHANNELS + MAX_SNAPSHOTS + MAX_LABEL_CHANGES + MAX_EDITS
-    // + MAX_STATUS_CHANGES (ADR 0064).
-    const MAX_EVENTS = 100000 * 2 + 1000 + 1000 + 100000 + 100000 + 100000;
+    // + MAX_STATUS_CHANGES + MAX_STATUSES * MAX_CHANNELS (ADR 0064).
+    const MAX_EVENTS = 100000 * 2 + 1000 + 1000 + 100000 + 100000 + 100000 + 200 * 1000;
     await runInDurableObject(t.stub, (_, state) => {
       state.storage.transactionSync(() => {
         const existing = state.storage.sql

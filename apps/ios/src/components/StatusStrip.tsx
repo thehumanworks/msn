@@ -41,11 +41,11 @@ export function StatusStrip({ statuses }: { statuses: AgentStatus[] }) {
               accessible
               accessibilityLabel={`${status.name}: ${status.text}, set ${formatAgo(status.setAt, now)}`}
             >
-              <Text style={styles.text}>
-                <Text style={styles.name}>{status.name} </Text>“{status.text}”{" "}
-                <Text style={styles.when}>
-                  {formatAgo(status.setAt, now)} · {formatTime(status.setAt)}
-                </Text>
+              {/* Three separate Text views, so nothing in one can reorder the others. */}
+              <Text style={styles.name}>{status.name}</Text>
+              <Text style={styles.text}>“{status.text}”</Text>
+              <Text style={styles.when}>
+                {formatAgo(status.setAt, now)} · {formatTime(status.setAt)}
               </Text>
             </View>
           ))}
@@ -68,8 +68,8 @@ const styles = StyleSheet.create({
   header: { minHeight: 32, justifyContent: "center" },
   title: { color: colors.accent, fontWeight: "700", fontSize: 14 },
   list: { maxHeight: 140, marginTop: spacing.xs },
-  row: { paddingVertical: 2 },
+  row: { paddingVertical: 2, flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", columnGap: 6 },
   text: { fontSize: 14, lineHeight: 19 },
   name: { fontWeight: "700", fontSize: 14 },
-  when: { color: colors.muted, fontSize: 12 },
+  when: { color: colors.muted, fontSize: 12, lineHeight: 19 },
 });

@@ -9,15 +9,16 @@ pub const MAX_STATUS_CHARS: usize = 80;
 
 /// Trims and checks a status text the way the server does, so mistakes fail before a request.
 pub fn parse_text(raw: &str) -> Result<String, CliError> {
-    let text = raw.trim();
+    // Trim what the server's String.prototype.trim does: Unicode whitespace and U+FEFF.
+    let text = raw.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     if text.is_empty() {
         return Err(CliError::usage(
             "A status must not be blank; use --clear to remove it.",
         ));
     }
-    if text.chars().any(char::is_control) {
+    if text.chars().any(forbidden) {
         return Err(CliError::usage(
-            "A status is one line: no newlines, tabs or control characters.",
+            "A status is one line of plain text: no newlines, tabs, control, direction or invisible characters.",
         ));
     }
     if text.chars().count() > MAX_STATUS_CHARS {
@@ -26,6 +27,26 @@ pub fn parse_text(raw: &str) -> Result<String, CliError> {
         )));
     }
     Ok(text.to_owned())
+}
+
+/// The characters the server refuses in a status: controls, line and paragraph separators,
+/// direction marks, embeddings, overrides and isolates, and invisible ones. Zero-width joiner and
+/// non-joiner stay allowed for emoji sequences and scripts that need them.
+fn forbidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{200b}'
+                | '\u{2060}'
+                | '\u{feff}'
+        )
 }
 
 /// PUT …/channels/{channel}/status sets or (with no text) clears one name's status.
@@ -127,7 +148,23 @@ mod tests {
             "running tests on PR 54"
         );
         assert_eq!(parse_text(&"é".repeat(80)).unwrap(), "é".repeat(80));
-        for bad in ["", "   ", "two\nlines", "tab\there"] {
+        assert_eq!(parse_text("\u{feff} ok \u{feff}").unwrap(), "ok");
+        assert_eq!(
+            parse_text("👨\u{200d}💻 coding").unwrap(),
+            "👨\u{200d}💻 coding"
+        );
+        for bad in [
+            "",
+            "   ",
+            "two\nlines",
+            "tab\there",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "evil\u{202e}txt",
+            "iso\u{2066}late",
+            "zero\u{200b}width",
+            "mid\u{feff}bom",
+        ] {
             assert!(parse_text(bad).is_err(), "{bad:?}");
         }
         assert!(parse_text(&"x".repeat(81)).is_err());

@@ -527,6 +527,126 @@ pub fn parse_edits(value: &Value, channel: &str) -> Result<(Vec<Value>, u64, boo
     Ok((rows.clone(), cursor, more))
 }
 
+/// The board's scheduled messages (ADR 0060), soonest first; each is checked to be this board's.
+pub fn fetch_scheduled(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+) -> Result<Vec<Value>, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let value = get_json(
+        client,
+        &format!("/api/tenants/{tenant}/channels/{channel}/scheduled"),
+        token,
+    )?;
+    parse_scheduled(&value, channel)
+}
+
+/// `{scheduled: [...]}`: every row needs an id, this channel, text and a sendAt.
+pub fn parse_scheduled(value: &Value, channel: &str) -> Result<Vec<Value>, CliError> {
+    let bad = || CliError::generic("Invalid scheduled messages response.");
+    let rows = value["scheduled"].as_array().ok_or_else(bad)?;
+    for row in rows {
+        if row["id"].as_u64().is_none()
+            || row["channel"].as_str() != Some(channel)
+            || !row["text"].is_string()
+            || !row["sendAt"].is_string()
+        {
+            return Err(bad());
+        }
+    }
+    Ok(rows.clone())
+}
+
+/// Schedules `text` to post at `send_at` (ADR 0060) with one Idempotency-Key. One attempt: the
+/// list shows whether it arrived, and a retry with the same key replays it.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_message(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    text: &str,
+    key: &str,
+    send_at: &str,
+    correlation: Correlation,
+) -> Result<(), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let mut body = send_body(
+        username,
+        &Payload {
+            text: text.to_string(),
+            content_type: None,
+        },
+        &correlation,
+    );
+    body["sendAt"] = json!(send_at);
+    let response = client.post_json(
+        &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+        token,
+        &[("Idempotency-Key", key)],
+        &body,
+    )?;
+    classify(response.status, &response.body)
+}
+
+/// Changes the text and/or time of a scheduled message (ADR 0060); a new time retries a failed one.
+#[allow(clippy::too_many_arguments)]
+pub fn change_scheduled(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+    text: Option<&str>,
+    send_at: Option<&str>,
+) -> Result<(), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let mut body = json!({ "username": username });
+    if let Some(text) = text {
+        body["text"] = json!(text);
+    }
+    if let Some(send_at) = send_at {
+        body["sendAt"] = json!(send_at);
+    }
+    let response = client.send_optional_json(
+        "PATCH",
+        &format!("/api/tenants/{tenant}/channels/{channel}/scheduled/{id}"),
+        token,
+        Some(&body),
+    )?;
+    classify(response.status, &response.body)
+}
+
+/// Cancels a scheduled message as `username` (ADR 0060).
+pub fn cancel_scheduled(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+) -> Result<(), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("username", username);
+    let response = client.delete(
+        &format!(
+            "/api/tenants/{tenant}/channels/{channel}/scheduled/{id}?{}",
+            query.finish()
+        ),
+        token,
+    )?;
+    classify(response.status, &response.body)
+}
+
 /// Current reactions (ADR 0047) for messages after `after`, by message id; at most a few pages.
 pub fn fetch_reactions(
     client: &MsnClient,
@@ -1262,6 +1382,24 @@ mod tests {
         );
         assert!(parse_send_outcome(&ok, "acme", "other").is_err());
         assert!(parse_send_outcome(&json!({"message": message(7)}), "acme", "general").is_err());
+    }
+
+    #[test]
+    fn scheduled_lists_keep_only_this_boards_rows() {
+        let row = json!({"id": 3, "channel": "general", "text": "later", "sendAt": "2026-11-21T09:00:00.000Z", "status": "pending"});
+        assert_eq!(
+            parse_scheduled(&json!({"scheduled": [row.clone()]}), "general").unwrap(),
+            vec![row.clone()]
+        );
+        assert!(parse_scheduled(&json!({"scheduled": [row]}), "other").is_err());
+        assert!(parse_scheduled(&json!({}), "general").is_err());
+        assert!(
+            parse_scheduled(
+                &json!({"scheduled": [{"id": 1, "channel": "general", "text": "x"}]}),
+                "general"
+            )
+            .is_err()
+        );
     }
 
     #[test]

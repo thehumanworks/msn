@@ -601,6 +601,15 @@ export function statusChange(input: Record<string, unknown>): StatusChange {
   return { username: text(input.username, "username", 128), text: statusText(input.text) };
 }
 
+/**
+ * Characters a status may not hold (ADR 0064): controls (newlines, tabs), line and paragraph
+ * separators, direction marks, embeddings, overrides and isolates, which could reorder the name or
+ * time beside the status, and invisible ones (zero-width space, word joiner, byte order mark).
+ * Zero-width joiner and non-joiner stay allowed: emoji sequences and some scripts need them.
+ */
+const STATUS_FORBIDDEN =
+  /[\p{Cc}\p{Zl}\p{Zp}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/u;
+
 /** A status text, or null to clear. Control characters (newlines, tabs) are refused. */
 export function statusText(value: unknown): string | null {
   if (value === null) return null;
@@ -608,13 +617,85 @@ export function statusText(value: unknown): string | null {
     throw new HttpError(400, "invalid_status", "text must be a string, or null to clear the status.");
   const trimmed = value.trim();
   if (!trimmed) throw new HttpError(400, "invalid_status", "text must not be blank; send null to clear.");
-  if (/\p{Cc}/u.test(trimmed))
+  if (STATUS_FORBIDDEN.test(trimmed))
     throw new HttpError(
       400,
       "invalid_status",
-      "A status is one line: no newlines, tabs or control characters.",
+      "A status is one line of plain text: no newlines, tabs, control, direction or invisible characters.",
     );
   if ([...trimmed].length > MAX_STATUS_CHARS)
     throw new HttpError(400, "invalid_status", `A status is at most ${MAX_STATUS_CHARS} characters.`);
   return trimmed;
+}
+
+/** The latest a message can be scheduled, from now (ADR 0060). */
+export const MAX_SCHEDULE_AHEAD_MS = 366 * 86400_000;
+
+/**
+ * `sendAt` on a send or a scheduled change (ADR 0060): an RFC 3339 time with a zone (`Z` or an
+ * offset), after now and at most 366 days ahead. A time without a zone is refused, because a
+ * client and the Worker would read it in different zones. Returns the time in UTC.
+ */
+export function sendAtTime(value: unknown, now = Date.now()): string {
+  return sendAtWindow(sendAtValue(value), now);
+}
+
+/**
+ * The format half of `sendAtTime`: an RFC 3339 time with a zone and a real calendar date (no
+ * 02-30), as an ISO string in UTC. The send path checks the window only after an idempotency
+ * lookup, so a retry that arrives after its time still replays.
+ */
+export function sendAtValue(value: unknown): string {
+  const parts =
+    typeof value === "string" && value.length <= 64
+      ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(:(\d{2})(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/i.exec(value)
+      : null;
+  const [year, month, day, hour, minute, second] = parts
+    ? [parts[1], parts[2], parts[3], parts[4], parts[5], parts[7] ?? "0"].map(Number)
+    : [];
+  const real =
+    parts !== null &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= new Date(Date.UTC(year, month, 0)).getUTCDate() &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    Number.isFinite(Date.parse(value as string));
+  if (!real)
+    throw new HttpError(
+      400,
+      "invalid_send_at",
+      "sendAt must be an RFC 3339 time with a zone, like 2026-11-21T09:00:00Z or 2026-11-21T10:00:00+01:00.",
+    );
+  return new Date(Date.parse(value as string)).toISOString();
+}
+
+/** The time half of `sendAtTime`: in the future and at most 366 days ahead. */
+export function sendAtWindow(iso: string, now = Date.now()): string {
+  const at = Date.parse(iso);
+  if (at <= now) throw new HttpError(400, "invalid_send_at", "sendAt must be in the future.");
+  if (at - now > MAX_SCHEDULE_AHEAD_MS)
+    throw new HttpError(400, "invalid_send_at", "sendAt must be at most 366 days ahead.");
+  return iso;
+}
+
+/**
+ * `PATCH …/scheduled/:id` body (ADR 0060): the sender's name, and new text, a new sendAt or both.
+ * A new sendAt also retries a scheduled message that failed.
+ */
+export type ScheduledChange = { username: string; text?: string; sendAt?: string };
+
+export function scheduledChange(input: Record<string, unknown>, now = Date.now()): ScheduledChange {
+  for (const field of Object.keys(input))
+    if (!["username", "text", "sendAt"].includes(field))
+      throw new HttpError(400, "invalid_scheduled", `Unknown field ${field}; use username, text and sendAt.`);
+  if (input.text === undefined && input.sendAt === undefined)
+    throw new HttpError(400, "invalid_scheduled", "Give text, sendAt or both.");
+  return {
+    username: text(input.username, "username", 128),
+    ...(input.text === undefined ? {} : { text: text(input.text, "text", 16384) }),
+    ...(input.sendAt === undefined ? {} : { sendAt: sendAtTime(input.sendAt, now) }),
+  };
 }

@@ -53,6 +53,9 @@ export type MockServerHandle = {
   remove: (id: number) => void;
   publishSnapshot: (channel: string, text: string) => StoredSnapshot;
   createChannel: (channel: string) => void;
+  /** Scheduled messages (ADR 0060); `deliverScheduled` posts every pending one now. */
+  scheduled: Array<Record<string, unknown>>;
+  deliverScheduled: () => void;
   /** Edit a stored message as its sender would (ADR 0052); sends no message or event. */
   editText: (id: number, text: string) => void;
   /** Reactions by message id (ADR 0047). Like the Worker, reacting sends no message or event. */
@@ -101,6 +104,8 @@ export async function startMockServer(): Promise<MockServerHandle> {
   let statusSeq = 0;
   const reactions = new Map<number, Record<string, string[]>>();
   let edits = 0;
+  const scheduled: Array<Record<string, unknown>> = [];
+  let scheduledSeq = 0;
   const editText = (id: number, text: string) => {
     const message = messages.find((m) => m.id === id);
     if (!message) return;
@@ -296,6 +301,20 @@ export async function startMockServer(): Promise<MockServerHandle> {
       if (rest[2] === "messages" && rest.length === 3) {
         if (method === "POST") {
           const body = await readBody(req);
+          if (body.sendAt !== undefined) {
+            const row = {
+              id: ++scheduledSeq,
+              channel,
+              username: body.username,
+              text: body.text,
+              sendAt: body.sendAt,
+              status: "pending",
+              ...(body.to ? { to: body.to } : {}),
+              ...(body.replyTo ? { replyTo: body.replyTo } : {}),
+            };
+            scheduled.push(row);
+            return json(res, 201, { scheduled: row, replayed: false });
+          }
           const key = (req.headers["idempotency-key"] as string | undefined) ?? null;
           const digest = JSON.stringify([body.username, body.text, body.to ?? null, body.replyTo ?? null]);
           const existing = key ? messages.find((m) => m.channel === channel && m.key === key) : undefined;
@@ -322,6 +341,24 @@ export async function startMockServer(): Promise<MockServerHandle> {
             hasMore: rows.length > limit,
           });
         }
+      }
+      if (rest[2] === "scheduled" && rest.length === 3 && method === "GET")
+        return json(res, 200, { channel, scheduled: scheduled.filter((s) => s.channel === channel) });
+      if (rest[2] === "scheduled" && rest.length === 4 && (method === "PATCH" || method === "DELETE")) {
+        const index = scheduled.findIndex((s) => s.id === Number(rest[3]) && s.channel === channel);
+        if (index < 0) return json(res, 404, { error: { code: "scheduled_not_found", message: "Gone." } });
+        if (method === "DELETE") {
+          scheduled.splice(index, 1);
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+        const body = await readBody(req);
+        if (scheduled[index].username !== body.username)
+          return json(res, 403, { error: { code: "not_sender", message: "Only the sender can change it." } });
+        if (body.text !== undefined) scheduled[index].text = body.text;
+        if (body.sendAt !== undefined) Object.assign(scheduled[index], { sendAt: body.sendAt, status: "pending" });
+        return json(res, 200, { scheduled: scheduled[index] });
       }
       if (rest[2] === "edits" && rest.length === 3 && method === "GET") {
         const after = Number(url.searchParams.get("after") ?? 0);
@@ -516,6 +553,11 @@ export async function startMockServer(): Promise<MockServerHandle> {
       else board.set(name, { text, setAt: new Date().toISOString(), seq: statusSeq });
       statuses.set(channel, board);
       appendEvent(channel, "status.changed", statusSeq);
+    },
+    scheduled,
+    deliverScheduled: () => {
+      for (const row of scheduled.splice(0))
+        insert(String(row.channel), String(row.username), String(row.text), "text/plain", null, "", {});
     },
     setPin: (id, pinned) => {
       if (pinned) pins.add(id);
