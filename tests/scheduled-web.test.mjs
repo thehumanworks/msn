@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { localInput, presets, sendAtFrom, summary, whenText } from "../public/scheduled.js";
+import {
+  localInput,
+  presets,
+  repeatFrom,
+  repeatText,
+  sendAtFrom,
+  summary,
+  whenText,
+} from "../public/scheduled.js";
 
 // The suite runs with TZ unset in CI; these tests only rely on round trips through the local zone.
 
@@ -56,4 +64,69 @@ test("summary counts waiting and failed messages", () => {
   assert.equal(summary([{ status: "pending" }, { status: "pending" }]), "2 scheduled");
   assert.equal(summary([{ status: "pending" }, { status: "failed" }]), "1 scheduled · 1 failed to post");
   assert.equal(summary([{ status: "failed" }]), "1 failed to post");
+});
+
+test("summary says how many of the waiting messages repeat (ADR 0072)", () => {
+  const repeat = { every: "daily" };
+  assert.equal(summary([{ status: "pending", repeat }, { status: "pending" }]), "2 scheduled (1 repeating)");
+  assert.equal(summary([{ status: "failed", repeat }]), "1 failed to post");
+});
+
+test("repeatFrom builds the rule a send carries, in the given zone", () => {
+  const first = "2026-11-23T09:00"; // A Monday.
+  assert.deepEqual(repeatFrom({ every: "", hours: "6", until: "", first }), { repeat: null });
+  assert.deepEqual(repeatFrom({ every: "daily", hours: "6", until: "", first }, "Europe/Lisbon"), {
+    repeat: { every: "daily", timeZone: "Europe/Lisbon" },
+  });
+  assert.deepEqual(repeatFrom({ every: "weekdays", until: "2026-12-31", first }, "UTC"), {
+    repeat: { every: "weekdays", timeZone: "UTC", until: "2026-12-31" },
+  });
+  assert.deepEqual(repeatFrom({ every: "hours", hours: " 6 ", until: "", first }, "UTC"), {
+    repeat: { every: "hours", hours: 6, timeZone: "UTC" },
+  });
+  // The last day may be the day of the first copy.
+  assert.ok(repeatFrom({ every: "daily", until: "2026-11-23", first }, "UTC").repeat);
+});
+
+test("repeatFrom explains what it cannot take", () => {
+  const first = "2026-11-23T09:00";
+  for (const hours of ["", "0", "169", "1.5", "six", "-2"])
+    assert.match(repeatFrom({ every: "hours", hours, until: "", first }).error, /1 to 168/, hours);
+  assert.match(repeatFrom({ every: "weekdays", until: "", first: "2026-11-21T09:00" }).error, /weekday/);
+  assert.match(repeatFrom({ every: "weekdays", until: "", first: "2026-11-22T09:00" }).error, /weekday/);
+  assert.match(repeatFrom({ every: "daily", until: "2026-11-22", first }).error, /before the first/);
+  assert.match(repeatFrom({ every: "daily", until: "soon", first }).error, /date/);
+  assert.match(repeatFrom({ every: "weekly", until: "", first }).error, /how often/);
+});
+
+test("repeatText says the rule, its zone and its last day", () => {
+  const until = "2026-12-31T23:59:59.999Z";
+  assert.equal(repeatText(null), "");
+  assert.match(
+    repeatText({ every: "daily", at: "09:00", timeZone: "UTC", until }),
+    /^Repeats every day at 09:00 \(UTC time\) · until .*31.*2026/,
+  );
+  assert.match(
+    repeatText({ every: "weekdays", at: "17:30:15", timeZone: "Europe/Lisbon", until }),
+    /^Repeats Monday to Friday at 17:30 \(Europe\/Lisbon time\) · until /,
+  );
+  assert.match(
+    repeatText({ every: "hours", hours: 6, timeZone: "UTC", until }),
+    /^Repeats every 6 hours · until /,
+  );
+  assert.match(
+    repeatText({ every: "hours", hours: 1, timeZone: "UTC", until }),
+    /^Repeats every hour · until /,
+  );
+  // The last day reads in the rule's zone: the end of 31 December in New York is 1 January UTC.
+  assert.match(
+    repeatText({
+      every: "daily",
+      at: "09:00",
+      timeZone: "America/New_York",
+      until: "2027-01-01T04:59:59.999Z",
+    }),
+    /31.*2026/,
+  );
+  assert.equal(repeatText({ every: "hours", hours: 2, timeZone: "UTC" }), "Repeats every 2 hours");
 });

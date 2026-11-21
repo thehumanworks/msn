@@ -4886,6 +4886,112 @@ test("a message scheduled from the composer waits, can be changed and cancelled,
     .toEqual([]);
 });
 
+test("a message set to repeat lists its rule and next time, posts a copy, and can be stopped (ADR 0072)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  await openChannel(page, "general");
+  await page.getByLabel("Message", { exact: true }).fill("Morning check-in: post your plan for today");
+  await page.getByRole("button", { name: "Send later" }).click();
+  const dialog = page.locator("#schedule-dialog");
+  await expect(dialog).toBeVisible();
+  // The repeat fields stay out of the way until a rule is chosen.
+  await expect(dialog.getByLabel("Hours between copies")).toBeHidden();
+  await expect(dialog.locator("#schedule-until")).toBeHidden();
+  await dialog.getByRole("button", { name: "Tomorrow, 9:00" }).click();
+  // A first copy on a weekend cannot start a weekday repeat.
+  const saturday = await page.evaluate(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7));
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T09:00`;
+  });
+  const tomorrow = await dialog.getByLabel("Post at").inputValue();
+  await dialog.getByLabel("Post at").fill(saturday);
+  await dialog.locator("#schedule-repeat").selectOption("weekdays");
+  await dialog.getByRole("button", { name: "Schedule" }).click();
+  await expect(dialog.locator("#schedule-error")).toHaveText("Pick a weekday for the first copy.");
+  await dialog.locator("#schedule-repeat").selectOption("hours");
+  await expect(dialog.getByLabel("Hours between copies")).toBeVisible();
+  await dialog.getByLabel("Post at").fill(tomorrow);
+  await dialog.locator("#schedule-repeat").selectOption("daily");
+  await expect(dialog.getByLabel("Hours between copies")).toBeHidden();
+  const zone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+  await expect(dialog.locator("#schedule-repeat-note")).toContainText(`${zone} time`);
+  const lastDay = `${tomorrow.slice(0, 4)}-${tomorrow.slice(5, 7)}-${tomorrow.slice(8, 10)}`;
+  const until = await page.evaluate((first) => {
+    const d = new Date(`${first}T12:00`);
+    d.setDate(d.getDate() + 30);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }, lastDay);
+  await dialog.locator("#schedule-until").fill(until);
+  if (testInfo.project.name === "mobile") {
+    const small = await dialog.locator("button, input, select, textarea").evaluateAll((els) =>
+      els
+        .filter((el) => el.getBoundingClientRect().height > 0)
+        .filter((el) => el.getBoundingClientRect().height < 43.5)
+        .map((el) => el.id || el.textContent),
+    );
+    expect(small).toEqual([]);
+    // Nothing in the dialog is wider than the screen.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath("repeat-dialog.png") });
+  await dialog.getByRole("button", { name: "Schedule" }).click();
+  await expect(page.locator("#status")).toContainText("Repeating from tomorrow 09:00");
+  await expect(page.locator("#messages .message")).toHaveCount(0);
+  const bar = page.locator("#scheduled-open");
+  await expect(bar).toHaveText("1 scheduled (1 repeating) · show");
+  const stored = await (
+    await request.get(`${t.path}/channels/general/scheduled`, { headers: t.headers })
+  ).json();
+  expect(stored.scheduled).toHaveLength(1);
+  expect(stored.scheduled[0].repeat).toMatchObject({ every: "daily", at: "09:00", timeZone: zone });
+  expect(new Date(stored.scheduled[0].sendAt).getTime()).toBe(
+    await page.evaluate((value) => new Date(value).getTime(), tomorrow),
+  );
+  // One that repeats every hour, due in a moment, posts a copy and stays listed.
+  const soon = await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: {
+      username: "Tomas",
+      text: "Hourly: any blockers?",
+      sendAt: new Date(Date.now() + 2500).toISOString(),
+      repeat: { every: "hours", hours: 1 },
+    },
+  });
+  expect(soon.status()).toBe(201);
+  await expect(page.locator("#messages .message")).toHaveCount(1, { timeout: 15000 });
+  await expect(page.locator("#messages .message")).toContainText("Hourly: any blockers?");
+  // Opening the list re-reads it, so the one added from elsewhere shows at once.
+  await bar.click();
+  const list = page.locator("#scheduled-dialog");
+  await expect(list.locator("#scheduled-list > li")).toHaveCount(2);
+  await expect(list).toContainText("Next tomorrow 09:00 · Tomas");
+  await expect(list).toContainText(`Repeats every day at 09:00 (${zone} time) · until`);
+  await expect(list).toContainText("Repeats every hour");
+  await page.screenshot({ path: testInfo.outputPath("repeat-list.png") });
+  // Change shows the rule and moves only the next copy.
+  await list
+    .locator("#scheduled-list > li", { hasText: "Morning check-in" })
+    .getByRole("button", { name: "Change" })
+    .click();
+  await expect(dialog.getByLabel("Next copy posts at")).toHaveValue(tomorrow);
+  await expect(dialog.locator("#schedule-repeat")).toBeHidden();
+  await expect(dialog.locator("#schedule-repeat-note")).toContainText("A new time moves the next copy only");
+  await dialog.getByRole("button", { name: "Close" }).click();
+  // Stop both. The copy that posted stays on the board.
+  await list.getByRole("button", { name: "Stop repeating" }).first().click();
+  await expect(list.locator("#scheduled-list > li")).toHaveCount(1);
+  await list.getByRole("button", { name: "Stop repeating" }).click();
+  await expect(list).toContainText("Nothing scheduled on this board.");
+  await list.getByRole("button", { name: "Close" }).click();
+  await expect(page.locator("#scheduled-bar")).toBeHidden();
+  await expect(page.locator("#messages .message")).toHaveCount(1);
+});
+
 test("files cannot be scheduled, and a failed scheduled message says why (ADR 0060)", async ({
   page,
   request,

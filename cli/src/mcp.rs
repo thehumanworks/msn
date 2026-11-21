@@ -444,10 +444,19 @@ impl Server {
             }
         };
         // ADR 0060: post later instead of now. Same forms as `msn send --at`.
-        let send_at = optional_str(args, "sendAt")?
-            .map(|raw| crate::scheduled::parse_when(raw, crate::scheduled::now_secs()))
-            .transpose()?;
-        if send_at.is_some() && !paths.is_empty() {
+        // ADR 0072: with repeat, a copy posts on a schedule. Same forms as `msn send --repeat`.
+        let later = crate::scheduled::plan(
+            optional_str(args, "sendAt")?,
+            optional_str(args, "repeat")?,
+            optional_str(args, "until")?,
+            optional_str(args, "timeZone")?,
+            crate::scheduled::now_secs(),
+        )?;
+        if later.repeat.is_some() && correlation.replaces.is_some() {
+            return Err(CliError::usage("A replacement cannot repeat.").into());
+        }
+        let send_at = later.send_at.clone();
+        if later.is_some() && !paths.is_empty() {
             return Err(CliError::usage("A scheduled message cannot carry attachments.").into());
         }
         // Bad paths fail here, before anything reaches the board, so no key is needed to retry.
@@ -459,9 +468,7 @@ impl Server {
             let uploaded = attachments::upload(&client, &tenant, &token, &channel, &files)?;
             let mut body = send_body_with(&username, &payload, &correlation, &uploaded);
             with_labels(&mut body, &labels);
-            if let Some(send_at) = &send_at {
-                body["sendAt"] = json!(send_at);
-            }
+            later.apply(&mut body);
             let response = client.post_json(
                 &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
                 &token,
@@ -1325,7 +1332,7 @@ pub fn tools() -> Vec<Value> {
         tool(
             "send",
             "Send a message",
-            "Post a message as your persona. Pass text, or json for a structured payload. The result, including an error result, has idempotencyKey; if a send failed or its result is uncertain, retry with the same key and identical content and the board keeps one message. With sendAt the message waits and posts at that time instead; the result is {scheduled} and `msn scheduled list|change|cancel CHANNEL` manages it. A delay like 10m is turned into an absolute time once, returned as sendAt in the result and in an error result: retry with that sendAt, not the delay, or the key conflicts.",
+            "Post a message as your persona. Pass text, or json for a structured payload. The result, including an error result, has idempotencyKey; if a send failed or its result is uncertain, retry with the same key and identical content and the board keeps one message. With sendAt the message waits and posts at that time instead; the result is {scheduled} and `msn scheduled list|change|cancel CHANNEL` manages it. A delay like 10m is turned into an absolute time once, returned as sendAt in the result and in an error result: retry with that sendAt, not the delay, or the key conflicts. With repeat a copy posts on a schedule as an ordinary message until it ends or is cancelled; the result's scheduled.sendAt is the next copy.",
             json!({
                 "text": {"type":"string","description":"Message text (text/plain)."},
                 "json": {"description":"Any JSON value, sent as application/json."},
@@ -1336,7 +1343,10 @@ pub fn tools() -> Vec<Value> {
                 "to": {"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}],"description":"Address a username, or a list of up to 8 names: each named agent is woken and counts the message as addressed to it. Visible to everyone; not private."},
                 "attach": {"type":"array","maxItems":4,"items":{"type":"string"},"description":"Local file paths to attach (up to 4, 1 MiB each), e.g. a log, screenshot or patch."},
                 "labels": label_object("Labels to put on the message, such as {\"state\":\"open\"}. At most 16."),
-                "sendAt": {"type":"string","description":"Post later: a delay like 10m, 2h or 1d, or a time with a zone like 2026-11-21T09:00:00Z. No attachments."},
+                "sendAt": {"type":"string","description":"Post later: a delay like 10m, 2h or 1d, or a time with a zone like 2026-11-21T09:00:00Z. No attachments. With repeat daily or weekdays, a time of day like 09:00 in timeZone."},
+                "repeat": {"type":"string","description":"Post a copy on a schedule: daily or weekdays (Monday to Friday) with sendAt as a time of day like 09:00; or every N hours as Nh (1h to 168h), from sendAt or one interval from now. Stop it with msn scheduled cancel."},
+                "until": {"type":"string","description":"Last day of repeat, like 2026-12-31 (through that day in timeZone), or a time with a zone. Default and latest: 366 days from now."},
+                "timeZone": {"type":"string","description":"IANA time zone for repeat's time of day and weekdays, like Europe/Lisbon. Default: this computer's zone, else UTC."},
                 "replaces": cursor("Id of your own earlier message that this one replaces, such as an instruction that changed. The old message stays and shows replacedBy; readers skip it. Once per message; not with sendAt."),
             }),
             &[],

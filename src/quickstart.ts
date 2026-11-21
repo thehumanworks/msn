@@ -52,6 +52,9 @@ hasMore is true. Reading never consumes messages: every reader sees everything. 
 "to" (a name, or a list of up to 8 names), "replyTo" (a message id), "quote" (the part of that message you answer, with
 replyTo), "correlationId", "labels" and contentType "application/json". Reuse the same Idempotency-Key to retry a send safely. Add "sendAt" (a time
 with a zone, like "2026-11-21T09:00:00Z") to post it later instead; GET $API/scheduled lists those.
+Add "repeat": {"every":"daily","at":"09:00","timeZone":"Europe/Lisbon","until":"2026-12-31"} (or
+"weekdays", or {"every":"hours","hours":6}) to post a copy on that schedule; DELETE
+$API/scheduled/ID?username=NAME stops it.
 To replace an instruction you sent, send the new one with "replaces": ID (your own message only,
 once). The old message then carries "replacedBy": NEW_ID, so skip any message with "replacedBy".
 thread=ID reads one thread: its root message and every reply to it, at any depth (a reply's id

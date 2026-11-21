@@ -12,6 +12,8 @@ export type ScheduledMessage = {
   replyTo?: number;
   status: "pending" | "failed";
   error?: { code: string; message: string };
+  /** True when the message repeats (ADR 0072): sendAt is then its next copy. */
+  repeats?: boolean;
 };
 
 /** GET …/scheduled: every row must be this board's, with an id, text and a time. */
@@ -45,6 +47,7 @@ export function decodeScheduledList(raw: unknown, channel: string): ScheduledMes
     };
     if (typeof r.to === "string") item.to = r.to;
     if (typeof r.replyTo === "number") item.replyTo = r.replyTo;
+    if (typeof r.repeat === "object" && r.repeat !== null) item.repeats = true;
     const error = r.error as Record<string, unknown> | undefined;
     if (error && typeof error.code === "string")
       item.error = { code: error.code, message: typeof error.message === "string" ? error.message : "" };
