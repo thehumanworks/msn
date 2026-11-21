@@ -1,4 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
+import { answerBody, answeredBy, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
@@ -646,6 +647,13 @@ function appendMessage(message, target = $("messages")) {
   article.append(...(target === $("search-results") ? [content] : foldable(content)));
   if (Array.isArray(message.attachments) && message.attachments.length)
     article.append(attachmentList(message));
+  // A question's buttons (ADR 0065). Live only in the log; pins and search show the state.
+  if (choicesOf(message)) {
+    const row = document.createElement("div");
+    row.className = "message-choices";
+    fillChoices(row, message, target === $("messages"));
+    article.append(row);
+  }
   // key=value labels (ADR 0032). Each chip lists the channel's messages with that label now.
   const labels = Object.entries(message.labels ?? {});
   if (labels.length) {
@@ -1187,6 +1195,85 @@ async function react(message, kind, add) {
       showReactions(state, message.id, data.message?.reactions);
   } catch (error) {
     if (error.name !== "AbortError") status(error.message, true);
+  }
+}
+
+/**
+ * A question's buttons (ADR 0065). The addressed name taps one to answer; everyone else sees who
+ * is asked. Once answered, the buttons lock and the chosen one is marked. Choices are untrusted:
+ * textContent and attributes only.
+ */
+function fillChoices(row, message, interactive = true) {
+  const choices = choicesOf(message);
+  const live = interactive && Boolean(session) && !session.watchOnly && !archivedBoards.has(message.channel);
+  const mode = choiceState(message, session?.username, { interactive: live });
+  row.replaceChildren();
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `Answers to message #${message.id}`);
+  row.dataset.state = mode;
+  for (const choice of choices) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "choice-button";
+    button.textContent = choice;
+    const chosen = mode === "answered" && message.answered.choice === choice;
+    if (mode === "answered") button.setAttribute("aria-pressed", String(chosen));
+    if (chosen) button.classList.add("chosen");
+    if (mode === "open") {
+      button.title = `Answer ${choice}`;
+      button.addEventListener("click", () => answerQuestion(message, choice, row));
+    } else button.disabled = true;
+    row.append(button);
+  }
+  const note = document.createElement("span");
+  note.className = "choice-note";
+  if (mode === "answered")
+    note.textContent = `${message.answered.username} answered ${message.answered.choice}`;
+  else if (mode === "waiting") note.textContent = `Waiting for ${message.to}`;
+  else note.textContent = "Your answer";
+  row.append(note);
+}
+
+/** Marks a question answered in the cache and in every row that shows it (ADR 0065). */
+function showAnswered(state, questionId, answered) {
+  // A question that is not loaded shows its answer when it is read; it carries `answered`.
+  const question = state.messages.find((item) => item.id === questionId);
+  if (!question || question.answered || !choicesOf(question)) return;
+  question.answered = answered;
+  for (const row of document.querySelectorAll(`article[data-id="${questionId}"] > .message-choices`))
+    fillChoices(row, question, row.closest("#messages") !== null);
+}
+
+/** One tap answers a question (ADR 0065): a reply whose text and answer are the choice. */
+async function answerQuestion(message, choice, row) {
+  if (!session || !channel) return;
+  const connection = session;
+  const name = channel;
+  for (const button of row.querySelectorAll("button")) button.disabled = true;
+  try {
+    const data = await api(
+      `/channels/${name}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(answerBody(connection.username, message, choice)),
+      },
+      connection,
+    );
+    const state = connection.channels.get(name);
+    const answered = answeredBy(data.message);
+    if (state && answered) showAnswered(state, message.id, answered);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    const state = connection.channels.get(name);
+    // Someone answered first: show their answer instead of the buttons.
+    if (error.code === "already_answered" && state) {
+      try {
+        const fresh = await api(`/channels/${name}/messages/${message.id}`, {}, connection);
+        if (fresh.message?.answered) showAnswered(state, message.id, fresh.message.answered);
+      } catch {}
+    } else fillChoices(row, message, true);
+    status(error.message, true);
   }
 }
 
@@ -1850,6 +1937,9 @@ function render(messages, state) {
     state.seen.add(message.id);
     state.messages.push(message);
     const article = appendMessage(message);
+    // An answer locks its question's buttons (ADR 0065); only the first answer counts.
+    const answered = answeredBy(message);
+    if (answered) showAnswered(state, message.replyTo, answered);
     if (article.classList.contains("reply")) {
       // Someone else's reply after your read mark, in a folded thread, is unseen until the
       // thread is opened: the toggle and the thread pointer say so, and the read mark waits

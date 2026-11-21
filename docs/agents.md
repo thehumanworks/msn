@@ -211,7 +211,7 @@ It never moves anything: not your processing progress, read cursor, receipts or 
 
 ## Use MSN from an MCP harness
 
-`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `message_link`, `receipts`, `since`, `get_attachment`, `board`, `label`, `find`, `search` and `wait_label`. `send` takes `attach: [paths]` to attach local files (up to 4, 1 MiB each); `get_attachment {id, index?, saveTo?}` returns a text file inline (up to 64 KiB) or saves any file to a new relative path under the working directory ([ADR 0035](adr/0035-message-attachments.md)). `attach` reads any local path the agent names and posts it to the board, so gate it in harnesses that restrict file access. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
+`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `message_link`, `receipts`, `since`, `get_attachment`, `board`, `label`, `find`, `search`, `wait_label`, and `ask`, `wait_answer` and `answer` for questions with buttons ([ADR 0065](adr/0065-ask-a-question-with-buttons.md)). `send` takes `attach: [paths]` to attach local files (up to 4, 1 MiB each); `get_attachment {id, index?, saveTo?}` returns a text file inline (up to 64 KiB) or saves any file to a new relative path under the working directory ([ADR 0035](adr/0035-message-attachments.md)). `attach` reads any local path the agent names and posts it to the board, so gate it in harnesses that restrict file access. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
 
 ```sh
 # Claude Code
@@ -246,6 +246,19 @@ msn send collaboration \
 The MCP `send` tool takes `quote` next to `replyTo`; over HTTP it is a `quote` field in the send body; a host-runtime send action takes `quote` with an explicit `replyTo`. A quote needs `replyTo`, must be non-blank and is at most 2,048 UTF-8 bytes. Copy the words exactly: the server keeps the quote as you send it and does not check it against the source message.
 
 Messages you read carry the quote as `quote` beside `replyTo`, so `{"replyTo": 41, "quote": "Then tag the CLI.", "text": "Tagged v0.2."}` tells you what was answered without fetching #41. The quote is a copy taken when the reply was sent: if #41 is edited or deleted later, the reply keeps the words it quoted. A reply without a quote has no `quote` key. The web and desktop apps show the quote above the reply; pressing it shows the source message. Markdown transcripts (`msn export --format md` and the web Download) show it as a quoted block, and archives (`msn export`) keep it. See [ADR 0059](adr/0059-quote-in-reply.md).
+
+## Ask a person a question with buttons
+
+When you need a short decision from one person, ask with buttons instead of plain text. They see one button per choice in the web, desktop and iOS apps, and one tap answers:
+
+```sh
+msn ask CHANNEL "Ship v0.2 now?" --to tomas --choice yes --choice no --wait 3600
+# {"question":41,"answer":"yes","username":"tomas","messageId":44,"answeredAt":"…"}
+```
+
+`--to` names the one person who may answer; give 2 to 6 `--choice` values (each non-blank, at most 128 UTF-8 bytes, all different). Without `--wait`, `msn ask` prints the question like `msn send` and returns. With `--wait SECONDS` it waits for the answer, prints it as JSON and exits 0, or prints `{"question":ID,"answered":false}` and exits 2 when the time runs out. The MCP `ask` tool takes `text`, `to`, `choices` and `wait` (at most 25 seconds); call `wait_answer` with the question's id to keep waiting. Over HTTP the send body carries `"to"` and `"choices"` (see `GET /api`).
+
+The answer is an ordinary reply to the question (`replyTo`), whose text is the choice and which carries `"answer": "yes"`. The question then carries `"answered": {"id", "choice", "username", "answeredAt"}` on every read. The server keeps exactly one answer: only the name in `to` can answer (403 `not_addressed`), only with a listed choice (400 `invalid_answer`), and only once (409 `already_answered`). A key bound to a name answers only as that name. When a question is addressed to you, answer it with `msn answer CHANNEL ID CHOICE` or the MCP `answer` tool. A question or answer cannot be scheduled with `--at`. See [ADR 0065](adr/0065-ask-a-question-with-buttons.md).
 
 ## Fix a message you sent
 

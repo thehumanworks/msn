@@ -678,6 +678,56 @@ nav .empty {
 .archived .reaction-chip {
   pointer-events: none;
 }
+/* A question's buttons (ADR 0065): big enough to tap, locked and marked once answered. */
+.message-choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.choice-button {
+  font: inherit;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 14px;
+  min-height: 36px;
+  min-width: 64px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.message-choices[data-state="open"] .choice-button {
+  border-color: var(--accent);
+}
+.message-choices[data-state="open"] .choice-button:not(:disabled):hover,
+.choice-button:focus-visible {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.choice-button:disabled {
+  cursor: default;
+  color: var(--muted);
+  opacity: 1;
+}
+.choice-button.chosen {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.choice-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+@media (pointer: coarse) {
+  .choice-button {
+    min-height: 44px;
+  }
+}
 .label-filter {
   padding: 0 14px 10px;
   border-bottom: 1px solid var(--line);
