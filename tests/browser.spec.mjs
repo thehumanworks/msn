@@ -3537,6 +3537,111 @@ test("a watch-only invitation lets someone read a board live without posting", a
   }
 });
 
+test("All boards searches every board at once, names each hit's board and opens it there", async ({
+  page,
+  request,
+  browser,
+}, testInfo) => {
+  const t = await provision(request);
+  const send = async (channel, text, username = "agent", extra = {}) => {
+    const response = await request.post(`${t.path}/channels/${channel}/messages`, {
+      headers: t.headers,
+      data: { username, text, ...extra },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message;
+  };
+  const attack = '<img src=x onerror="window.pwned=true"> rollout';
+  const first = await send("ops", "Rollout plan: ship to staging on Friday", "lead", {
+    labels: { state: "open" },
+  });
+  await send("general", "Lunch at noon");
+  const reply = await send("ops", "rollout approved, go ahead", "reviewer", { replyTo: first.id });
+  await send("plans", attack);
+  const here = await send("general", "Rollout notes are on the ops board", "lead");
+  await connect(page, t);
+  await openChannel(page, "general");
+  // One board by default: nothing from the other boards.
+  await expect(page.locator("#search-all")).not.toBeChecked();
+  await page.locator("#search").fill("rollout");
+  await page.locator("#search").press("Enter");
+  await expect(page.locator("#search-title")).toHaveText("1 message matching “rollout”, newest first");
+  await expect(page.locator("#search-results .search-board")).toHaveCount(0);
+  // Ticking the box searches again, on every board.
+  await page.getByLabel("All boards").check();
+  await expect(page.locator("#search-title")).toHaveText(
+    "4 messages on all boards matching “rollout”, newest first",
+  );
+  await expect(page.locator("#search-results .search-board")).toHaveText([
+    "#general",
+    "#plans",
+    "#ops",
+    "#ops",
+  ]);
+  await expect(page.locator("#search-results article").first()).toHaveAttribute(
+    "data-id",
+    String(here.id),
+  );
+  await expect(page.locator("#search-results img")).toHaveCount(0);
+  // A label from another board is shown but does not filter this board.
+  await expect(page.locator("#search-results .label-chip")).toHaveText(["state=open"]);
+  await expect(page.locator("#search-results .label-chip")).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("search-all.png") });
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.screenshot({ path: testInfo.outputPath("search-all-light.png") });
+  await page.emulateMedia({ colorScheme: null });
+  // The sender filter works across boards too.
+  await page.locator("#search").fill("rollout from:reviewer");
+  await page.locator("#search").press("Enter");
+  await expect(page.locator("#search-title")).toHaveText(
+    "1 message on all boards matching “rollout” from reviewer, newest first",
+  );
+  // Pressing the board name opens the message on its own board.
+  await page.locator("#search-results .search-board").click();
+  await expect(page.locator("#channel-title")).toHaveText("# ops");
+  await expect(page.locator("#search-panel")).toBeHidden();
+  await expect(page.locator(`#messages article[data-id="${reply.id}"]`)).toBeVisible();
+  await expect(page.locator(`#messages article[data-id="${reply.id}"]`)).toContainText(
+    "rollout approved, go ahead",
+  );
+  // The choice is kept on the next board, and older pages work across boards.
+  await expect(page.locator("#search-all")).toBeChecked();
+  for (let i = 0; i < 21; i++) await send(i % 2 ? "plans" : "general", `canary step ${i}`, "bot");
+  await page.locator("#search").fill("canary");
+  await page.locator("#search").press("Enter");
+  await expect(page.locator("#search-title")).toHaveText(
+    "20+ messages on all boards matching “canary”, newest first",
+  );
+  await page.getByRole("button", { name: "Older matches" }).click();
+  await expect(page.locator("#search-title")).toHaveText(
+    "21 messages on all boards matching “canary”, newest first",
+  );
+  await expect(page.locator("#search-results .message p").last()).toHaveText("canary step 0");
+  expect(await page.evaluate(() => window.pwned)).toBeUndefined();
+
+  // A key for one board has no other board to search: the choice is not offered.
+  const invite = await request.post(`${t.path}/invites`, { headers: t.headers, data: { channel: "ops" } });
+  expect(invite.status()).toBe(201);
+  const redeemed = await request.post(`${t.path}/invites/redeem`, {
+    data: { code: (await invite.json()).code, username: "guest" },
+  });
+  expect(redeemed.status()).toBe(201);
+  const context = await browser.newContext({ ...testInfo.project.use });
+  try {
+    const guest = await context.newPage();
+    await connect(guest, { tenant: t.tenant, token: (await redeemed.json()).token }, "guest");
+    await expect(guest.locator("#channel-title")).toHaveText("# ops");
+    await expect(guest.locator("#search-all-label")).toBeHidden();
+    await guest.locator("#search").fill("rollout");
+    await guest.locator("#search").press("Enter");
+    await expect(guest.locator("#search-title")).toHaveText("2 messages matching “rollout”, newest first");
+    await expect(guest.locator("#search-results .search-board")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 test("the search box finds a board's messages by words and sender, newest first, with older pages", async ({
   page,
   request,
