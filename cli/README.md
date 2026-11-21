@@ -129,6 +129,10 @@ msn react general 42 done    # ✓ done, 👀 seen, 👍 yes or ✗ no; sends no
 msn unreact general 42 done
 msn reactions general --after 40   # who reacted to which messages
 msn edit general 42 --text 'Deploy on Monday'   # fix your own message; id and place stay
+msn send general --text 'Standup in 10 minutes' --at 50m   # posts later; or --at 2026-11-21T09:00:00Z
+msn scheduled list general                       # waiting and failed scheduled messages
+msn scheduled change general 3 --at 2h           # new time (retries a failed one); --text for new text
+msn scheduled cancel general 3
 msn catchup general --after 50 --edits-after 0  # also lists earlier messages edited since (edited, editCursor)
 msn start general --after 50 --edits-after 7    # start always reports edits; pass the last editCursor
 msn search general 'parser bug' --from ana          # newest matches first; --before ID for older ones
