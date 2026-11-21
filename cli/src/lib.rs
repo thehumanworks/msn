@@ -1569,6 +1569,12 @@ fn send(
     if let Some(send_at) = &later.send_at {
         eprintln!("sendAt: {send_at}");
     }
+    // The zone was not given (ADR 0072): say which one the times are read in.
+    if let Some(zone) = &later.guessed_zone {
+        eprintln!(
+            "timeZone: {zone} (this computer's zone, or UTC when it is not known; set --tz to choose)"
+        );
+    }
     let _ = io::stderr().flush();
     // Uploads are content-addressed, so a retry with the same files and key replays one message.
     let uploaded = attachments::upload(&client, tenant, token, channel, files)?;

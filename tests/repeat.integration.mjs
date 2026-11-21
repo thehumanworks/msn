@@ -135,9 +135,20 @@ try {
   assert.ok(Date.parse(daily.sendAt) > Date.now());
 
   // Without --tz the rule takes this computer's zone (TZ here).
-  const weekdays = (
-    await ok(["send", "general", "--text", "Weekday wrap-up", "--repeat", "weekdays", "--at", "17:30"])
-  ).scheduled;
+  const guessed = await run([
+    "send",
+    "general",
+    "--text",
+    "Weekday wrap-up",
+    "--repeat",
+    "weekdays",
+    "--at",
+    "17:30",
+  ]);
+  assert.equal(guessed.code, 0, guessed.errors);
+  // The zone it found is said on stderr, so a fallback is never silent.
+  assert.match(guessed.errors, /timeZone: America\/New_York/);
+  const weekdays = JSON.parse(guessed.output).scheduled;
   assert.equal(weekdays.repeat.timeZone, "America/New_York");
   assert.equal(weekdays.repeat.at, "17:30");
   const day = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(

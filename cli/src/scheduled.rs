@@ -14,6 +14,9 @@ pub struct Later {
     pub send_at: Option<String>,
     /// The repeat rule the Worker takes (ADR 0072).
     pub repeat: Option<Value>,
+    /// The time zone that was found for this computer because none was given. The caller says
+    /// it, so a fallback to UTC is never silent.
+    pub guessed_zone: Option<String>,
 }
 
 impl Later {
@@ -54,7 +57,7 @@ pub fn plan(
         }
         return Ok(Later {
             send_at: at.map(|raw| parse_when(raw, now_secs)).transpose()?,
-            repeat: None,
+            ..Later::default()
         });
     };
     let zone = tz
@@ -106,6 +109,7 @@ pub fn plan(
     Ok(Later {
         send_at,
         repeat: Some(body),
+        guessed_zone: tz.is_none().then_some(zone),
     })
 }
 
@@ -148,6 +152,11 @@ pub fn local_zone() -> String {
 fn zone_from(tz: Option<&str>, localtime: Option<&str>) -> String {
     let named = |value: &str| {
         let value = value.strip_prefix(':').unwrap_or(value);
+        // zoneinfo keeps copies under posix/ and right/; the zone's name is what follows.
+        let value = value
+            .strip_prefix("posix/")
+            .or_else(|| value.strip_prefix("right/"))
+            .unwrap_or(value);
         let ok = !value.is_empty()
             && value.len() <= 64
             && value.as_bytes()[0].is_ascii_alphabetic()
@@ -289,6 +298,13 @@ mod tests {
         );
         let hours = plan(None, Some("6h"), None, Some("UTC"), now).unwrap();
         assert_eq!(hours.send_at, None);
+        assert_eq!(hours.guessed_zone, None);
+        // Without --tz the zone found for this computer is reported back.
+        let guessed = plan(None, Some("6h"), None, None, now).unwrap();
+        assert_eq!(
+            guessed.guessed_zone.as_deref(),
+            guessed.repeat.unwrap()["timeZone"].as_str()
+        );
         assert_eq!(
             hours.repeat.unwrap(),
             json!({"every":"hours","hours":6,"timeZone":"UTC"})
@@ -380,6 +396,11 @@ mod tests {
         );
         assert_eq!(zone_from(Some(""), Some("/etc/elsewhere")), "UTC");
         assert_eq!(zone_from(None, None), "UTC");
+        assert_eq!(
+            zone_from(None, Some("/usr/share/zoneinfo/posix/Europe/Lisbon")),
+            "Europe/Lisbon"
+        );
+        assert_eq!(zone_from(Some("right/Asia/Tokyo"), None), "Asia/Tokyo");
     }
 
     #[test]

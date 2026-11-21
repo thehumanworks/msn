@@ -78,7 +78,16 @@ import {
   sendPush,
   type VapidKeys,
 } from "./push";
-import { nextRepeat, type Repeat, type RepeatRequest, repeatRequest, repeatStart } from "./repeat";
+import {
+  copiesPerDay,
+  MAX_REPEAT_COPIES_PER_DAY,
+  nextRepeat,
+  onWeekend,
+  type Repeat,
+  type RepeatRequest,
+  repeatRequest,
+  repeatStart,
+} from "./repeat";
 import {
   SINCE_EVENTS,
   SINCE_LABEL_BATCH,
@@ -3665,6 +3674,20 @@ export class MsnDurableObject extends DurableObject<Env> {
           "scheduled_quota",
           `Too many scheduled messages (${MAX_SCHEDULED_PER_SENDER} per sender and ${MAX_SCHEDULED_PER_BOARD} per board waiting, ${MAX_SCHEDULED} per workspace). Cancel one or wait for one to post.`,
         );
+      // Repeating messages together post a bounded number of copies a day (ADR 0072), so a
+      // schedule cannot use up the workspace's lifetime message quota.
+      if (start) {
+        const perDay = this.ctx.storage.sql
+          .exec<{ repeat: string }>("SELECT repeat FROM scheduled_messages WHERE repeat IS NOT NULL")
+          .toArray()
+          .reduce((sum, other) => sum + copiesPerDay(JSON.parse(other.repeat) as Repeat), 0);
+        if (perDay + copiesPerDay(start.repeat) > MAX_REPEAT_COPIES_PER_DAY)
+          throw new HttpError(
+            409,
+            "scheduled_quota",
+            `This workspace's repeating messages may post at most ${MAX_REPEAT_COPIES_PER_DAY} copies a day in total (now ${Math.round(perDay * 10) / 10}; this one adds ${Math.round(copiesPerDay(start.repeat) * 10) / 10}). Stop one, or repeat less often.`,
+          );
+      }
       this.createChannel(channel);
       const now = new Date().toISOString();
       const row = this.ctx.storage.sql
@@ -3777,17 +3800,23 @@ export class MsnDurableObject extends DurableObject<Env> {
       // JSON payloads stay JSON (ADR 0004); the content type never changes.
       if (update.text !== undefined) contentType(row.contentType, update.text);
       const sendAt = update.sendAt ?? row.sendAt;
-      // A new time moves only the next copy of a repeating message (ADR 0072), within its end.
-      if (
-        update.sendAt !== undefined &&
-        row.repeat !== null &&
-        Date.parse(sendAt) > Date.parse((JSON.parse(row.repeat) as Repeat).until)
-      )
-        throw new HttpError(
-          400,
-          "invalid_send_at",
-          "sendAt is after this repeating message's end. Stop it and schedule a new one to run longer.",
-        );
+      // A new time moves only the next copy of a repeating message (ADR 0072), within its end
+      // and, for weekdays, on a weekday of its zone, as when it was scheduled.
+      if (update.sendAt !== undefined && row.repeat !== null) {
+        const rule = JSON.parse(row.repeat) as Repeat;
+        if (Date.parse(sendAt) > Date.parse(rule.until))
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            "sendAt is after this repeating message's end. Stop it and schedule a new one to run longer.",
+          );
+        if (rule.every === "weekdays" && onWeekend(Date.parse(sendAt), rule.timeZone))
+          throw new HttpError(
+            400,
+            "invalid_send_at",
+            `sendAt falls on a weekend in ${rule.timeZone}, and this message repeats Monday to Friday. Give a weekday.`,
+          );
+      }
       // A failed message retries only at a new time; changing its text alone keeps it failed.
       const retry = update.sendAt !== undefined;
       return this.ctx.storage.sql
@@ -3841,9 +3870,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       // A repeating one (ADR 0072) moves to its next time in this write instead.
       if (scheduledId !== null && scheduledNext !== null)
         this.ctx.storage.sql.exec(
-          "UPDATE scheduled_messages SET sendAt = ?, dueMs = ? WHERE id = ?",
+          "UPDATE scheduled_messages SET sendAt = ?, dueMs = ?, updatedAt = ? WHERE id = ?",
           new Date(scheduledNext).toISOString(),
           scheduledNext,
+          new Date().toISOString(),
           scheduledId,
         );
       else if (scheduledId !== null)

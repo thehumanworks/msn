@@ -8,7 +8,25 @@ import { HttpError, MAX_SCHEDULE_AHEAD_MS, sendAtValue, sendAtWindow } from "./h
 export const MIN_REPEAT_HOURS = 1;
 export const MAX_REPEAT_HOURS = 168;
 
+/**
+ * Copies that all of a workspace's repeating messages together may post per day. A workspace holds
+ * 100,000 messages for its lifetime, so the schedule is bounded to a share of it: 48 a day is at
+ * most 17,568 a year. One hourly message uses 24 of the 48.
+ */
+export const MAX_REPEAT_COPIES_PER_DAY = 48;
+
 const HOUR_MS = 3600_000;
+
+/** Copies a rule posts per day: 24 / hours, or one for daily and weekdays. */
+export function copiesPerDay(repeat: { every: string; hours?: number }): number {
+  return repeat.every === "hours" ? 24 / (repeat.hours as number) : 1;
+}
+
+/** True when an instant falls on a Saturday or Sunday of the zone's calendar. */
+export function onWeekend(ms: number, timeZone: string): boolean {
+  const day = new Date(civil(localParts(ms, timeZone))).getUTCDay();
+  return day === 0 || day === 6;
+}
 
 /** What a send asks for, checked for form only. Part of the idempotency digest. */
 export type RepeatRequest = {
@@ -226,8 +244,7 @@ export function repeatStart(
     if (request.every !== "hours") {
       const local = localParts(first, timeZone);
       at = hhmmss(local);
-      const day = new Date(civil(local)).getUTCDay();
-      if (request.every === "weekdays" && (day === 0 || day === 6))
+      if (request.every === "weekdays" && onWeekend(first, timeZone))
         throw invalid(
           `sendAt falls on a weekend in ${timeZone}. Give a weekday for the first copy, or repeat.at instead.`,
         );

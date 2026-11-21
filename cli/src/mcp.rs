@@ -489,6 +489,10 @@ impl Server {
             if let Some(send_at) = &send_at {
                 object.insert("sendAt".into(), json!(send_at));
             }
+            // The zone was not given (ADR 0072): say which one the times are read in.
+            if let Some(zone) = &later.guessed_zone {
+                object.insert("timeZone".into(), json!(zone));
+            }
         }
         Ok(value)
     }

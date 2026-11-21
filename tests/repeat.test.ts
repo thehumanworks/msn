@@ -1,7 +1,16 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { localParts, nextRepeat, type Repeat, repeatRequest, repeatStart, zonedTime } from "../src/repeat";
+import {
+  copiesPerDay,
+  localParts,
+  MAX_REPEAT_COPIES_PER_DAY,
+  nextRepeat,
+  type Repeat,
+  repeatRequest,
+  repeatStart,
+  zonedTime,
+} from "../src/repeat";
 
 // Repeat a message on a schedule (ADR 0072): a scheduled message with `repeat` posts a copy each
 // time and stays on the schedule until its end, and a retried alarm never posts a copy twice.
@@ -447,5 +456,72 @@ describe("repeating messages", () => {
     }
     expect((await f.list()).length).toBe(1);
     void ADMIN;
+  });
+});
+
+describe("repeat bounds", () => {
+  it("refuses to move a weekdays copy to a weekend of its zone", async () => {
+    const f = await fixture();
+    const scheduled = await f.schedule({ text: "weekdays only", repeat: { every: "weekdays", at: "09:00" } });
+    // The Saturday after the next copy, 09:00 UTC.
+    const next = new Date(scheduled.sendAt);
+    const saturday = new Date(next.getTime() + ((6 - next.getUTCDay() + 7) % 7 || 7) * 86400_000);
+    const patch = (sendAt: string) =>
+      call(f.tenant, `/channels/work/scheduled/${scheduled.id}`, f.agent, "PATCH", {
+        username: "lead",
+        sendAt,
+      });
+    const refused = await patch(saturday.toISOString());
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("invalid_send_at");
+    expect((await f.list())[0].sendAt).toBe(scheduled.sendAt);
+    // The Monday after it is fine.
+    const monday = new Date(saturday.getTime() + 2 * 86400_000);
+    expect((await patch(monday.toISOString())).status).toBe(200);
+    expect((await f.list())[0].sendAt).toBe(monday.toISOString());
+  });
+
+  it("caps the copies a workspace's repeating messages post per day", async () => {
+    expect(copiesPerDay({ every: "hours", hours: 1 })).toBe(24);
+    expect(copiesPerDay({ every: "hours", hours: 48 })).toBe(0.5);
+    expect(copiesPerDay({ every: "weekdays" })).toBe(1);
+    const f = await fixture();
+    // Two hourly messages use all 48, on different boards and by different senders.
+    await f.schedule({ text: "hourly one", repeat: { every: "hours", hours: 1 } });
+    expect(
+      (
+        await call(f.tenant, "/channels/other/messages", f.owner, "POST", {
+          username: "human",
+          text: "hourly two",
+          repeat: { every: "hours", hours: 1 },
+        })
+      ).status,
+    ).toBe(201);
+    const over = await f.post({ text: "one more", repeat: { every: "daily", at: "09:00" } });
+    expect(over.status).toBe(409);
+    const error = ((await over.json()) as { error: { code: string; message: string } }).error;
+    expect(error.code).toBe("scheduled_quota");
+    expect(error.message).toContain(`${MAX_REPEAT_COPIES_PER_DAY} copies a day`);
+    // A message that posts once is not a repeat and still schedules.
+    expect(
+      (await f.post({ text: "once", sendAt: new Date(Date.now() + 3600_000).toISOString() })).status,
+    ).toBe(201);
+    // Stopping one frees its share.
+    const [first] = await f.list();
+    expect(
+      (await call(f.tenant, `/channels/work/scheduled/${first.id}?username=lead`, f.agent, "DELETE")).status,
+    ).toBe(204);
+    expect((await f.post({ text: "one more", repeat: { every: "daily", at: "09:00" } })).status).toBe(201);
+  });
+
+  it("marks the row changed when a copy posts", async () => {
+    const f = await fixture();
+    const scheduled = await f.schedule({ text: "stamp", repeat: { every: "hours", hours: 6 } });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await f.arrive();
+    const [row] = (await f.list()) as (Scheduled & { updatedAt: string })[];
+    expect(Date.parse(row.updatedAt)).toBeGreaterThan(
+      Date.parse((scheduled as Scheduled & { updatedAt: string }).updatedAt),
+    );
   });
 });

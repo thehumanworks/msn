@@ -4703,6 +4703,8 @@ function openSchedule(item = null) {
   $("schedule-repeat").value = "";
   $("schedule-until").value = "";
   $("schedule-until").min = localInput(now).slice(0, 10);
+  // The server takes an end at most 366 days ahead; 365 days is inside that in every zone.
+  $("schedule-until").max = localInput(new Date(now.getTime() + 365 * 86400000)).slice(0, 10);
   $("schedule-at-label").textContent = item?.repeat ? "Next copy posts at" : "Post at";
   $("schedule-repeat-note").textContent = item?.repeat
     ? `${repeatText(item.repeat)}. A new time moves the next copy only. To change the rule, stop it and schedule a new one.`
@@ -4738,7 +4740,7 @@ function showRepeatFields() {
   if (!changing)
     $("schedule-repeat-note").textContent = every
       ? every === "hours"
-        ? "Each copy posts as a normal message. Without a last day it repeats for a year."
+        ? "Each copy posts as a normal message and counts toward the workspace's 100,000 messages: every hour is 8,784 a year. Without a last day it repeats for a year."
         : `Each copy posts as a normal message at this time in ${deviceZone()} time, also after a clock change. Without a last day it repeats for a year.`
       : "";
   $("schedule-repeat-note").hidden = !$("schedule-repeat-note").textContent;
