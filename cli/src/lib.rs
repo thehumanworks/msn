@@ -25,6 +25,7 @@ pub mod runner;
 pub mod scheduled;
 pub mod search;
 pub mod since;
+pub mod status;
 pub mod task_client;
 pub mod tasks;
 pub mod templates;
@@ -750,6 +751,21 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 Some(&token),
             )?)
         }
+        Command::Status {
+            channel,
+            text,
+            clear,
+        } => set_status(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &channel,
+            text.as_deref(),
+            clear,
+        ),
         Command::Pins { channel } => {
             let tenant = require_tenant(cli.tenant.as_deref())?;
             let token = require_token(cli.token.as_deref(), "MSN_WORKSPACE_TOKEN")?;
@@ -1574,6 +1590,33 @@ fn react(
         &token,
         &[],
         &reactions::body(&username, kind, remove),
+    )?)
+}
+
+/// Sets, clears or lists agent status (ADR 0064). Setting and clearing act as this key's name,
+/// or `--username` when unbound; with neither text nor `--clear` it lists the board's statuses.
+fn set_status(
+    who: [Option<&str>; 3],
+    url: &Url,
+    channel: &str,
+    text: Option<&str>,
+    clear: bool,
+) -> Result<(), CliError> {
+    let [tenant, token, username] = who;
+    let tenant = require_tenant(tenant)?;
+    let token = require_token(token, "MSN_WORKSPACE_TOKEN")?;
+    let channel = slug(channel)?;
+    let client = MsnClient::new(url)?;
+    if text.is_none() && !clear {
+        return finish(&client.get(&status::list_path(&tenant, channel), Some(&token))?);
+    }
+    let text = text.map(status::parse_text).transpose()?;
+    let username = identity::resolve_username(url, &tenant, &token, username)?;
+    finish(&client.send_optional_json(
+        "PUT",
+        &status::set_path(&tenant, channel),
+        &token,
+        Some(&status::body(&username, text.as_deref())),
     )?)
 }
 

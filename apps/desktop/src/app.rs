@@ -983,6 +983,20 @@ impl MsnDesktopApp {
                 .frame(egui::Frame::new())
                 .show(ui, |ui| render_pins(ui, &state.pins));
         }
+        if let Some(state) = self
+            .state
+            .channel
+            .as_ref()
+            .filter(|s| !s.statuses.is_empty())
+        {
+            egui::Panel::top("agent-statuses")
+                .show_separator_line(false)
+                .frame(egui::Frame::new())
+                .show(ui, |ui| render_statuses(ui, &state.statuses, unix_now()));
+            // "3 min ago" moves on with the clock, not only when something else repaints.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(30));
+        }
         let me = self
             .state
             .connection
@@ -2563,6 +2577,54 @@ fn render_pins(ui: &mut egui::Ui, pins: &[Value]) {
     });
 }
 
+/// What each name on the board says it is doing (ADR 0064): name, the status as said, and how
+/// long ago it was set. Only shown, never interpreted; nothing is inferred from silence.
+fn render_statuses(ui: &mut egui::Ui, statuses: &[msn_cli::status::Status], now: i64) {
+    theme::card().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("Agent status · {}", statuses.len()))
+                .color(theme::accent()),
+        )
+        .id_salt("agent-status-header")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("agent-status-list")
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for status in statuses {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(&status.name).strong());
+                            ui.label(status_line(status));
+                            ui.label(
+                                egui::RichText::new(msn_cli::status::ago(&status.set_at, now))
+                                    .color(theme::muted())
+                                    .small(),
+                            )
+                            .on_hover_text(format!(
+                                "Set {}",
+                                msn_cli::transcript::utc(&status.set_at)
+                            ));
+                        });
+                    }
+                });
+        });
+    });
+}
+
+/// The status in quotes, so it reads as the agent's own words.
+fn status_line(status: &msn_cli::status::Status) -> String {
+    format!("“{}”", status.text)
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// A board in the list: its name, then the unread count and how many are to you (ADR 0045).
 fn channel_label(name: &str, unread: Option<&read_marks::Unread>) -> egui::WidgetText {
     let Some((count, mine)) = unread.and_then(read_marks::Unread::badge) else {
@@ -3436,8 +3498,41 @@ fn render_task(ui: &mut egui::Ui, task: &Value, actions: &mut Vec<Action>) {
 
 #[cfg(test)]
 mod pin_tests {
-    use super::pin_line;
+    use super::{egui, pin_line, render_statuses, status_line};
     use serde_json::json;
+
+    #[test]
+    fn status_line_quotes_the_agents_words() {
+        let status = msn_cli::status::Status {
+            name: "lead".into(),
+            text: "<b>running</b> tests".into(),
+            set_at: "2026-11-21T02:00:00Z".into(),
+        };
+        assert_eq!(status_line(&status), "“<b>running</b> tests”");
+    }
+
+    #[test]
+    fn statuses_panel_shows_each_name_text_and_age() {
+        let ctx = egui::Context::default();
+        let statuses = vec![msn_cli::status::Status {
+            name: "lead".into(),
+            text: "running tests on PR 54".into(),
+            set_at: "2026-11-21T02:00:00Z".into(),
+        }];
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            render_statuses(ui, &statuses, 1_795_226_400 + 180);
+        });
+        output.textures_delta.clear();
+        let shapes = format!("{:?}", output.shapes);
+        for expected in [
+            "Agent status · 1",
+            "lead",
+            "running tests on PR 54",
+            "3 min ago",
+        ] {
+            assert!(shapes.contains(expected), "missing {expected}");
+        }
+    }
 
     #[test]
     fn pin_line_shows_id_author_and_a_short_first_line() {

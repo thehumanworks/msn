@@ -32,6 +32,7 @@ import { OutboxRow } from "../components/OutboxRow.tsx";
 import { PinnedStrip } from "../components/PinnedStrip.tsx";
 import { ScheduledPanel } from "../components/ScheduledPanel.tsx";
 import { SearchView } from "../components/SearchView.tsx";
+import { StatusStrip } from "../components/StatusStrip.tsx";
 import { SnapshotView } from "../components/SnapshotView.tsx";
 import { TaskActivityView } from "../components/TaskActivityView.tsx";
 import { colors, spacing } from "../components/theme.ts";
@@ -317,6 +318,7 @@ function ChannelBody({
     <View style={{ flex: 1 }}>
       {banner}
       <PinnedStrip pinned={state.pinned} />
+      <StatusStrip statuses={state.statuses} />
       {empty ? (
         <EmptyState title="No messages yet" body="Say something to start the conversation." />
       ) : (

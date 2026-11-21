@@ -24,6 +24,9 @@ pub enum EventKind {
     MessageDeleted,
     #[serde(rename = "snapshot.published")]
     SnapshotPublished,
+    /// Someone's agent status changed (ADR 0064); asked for with `include=statuses`.
+    #[serde(rename = "status.changed")]
+    StatusChanged,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,9 +104,8 @@ pub fn parse_events_page(body: &str, expect: &PageExpectation<'_>) -> Result<Eve
             EventKind::ChannelCreated => event.resource_id.is_none(),
             EventKind::MessageCreated
             | EventKind::MessageDeleted
-            | EventKind::SnapshotPublished => {
-                event.resource_id.is_some_and(|id| id >= 1 && safe(id))
-            }
+            | EventKind::SnapshotPublished
+            | EventKind::StatusChanged => event.resource_id.is_some_and(|id| id >= 1 && safe(id)),
         };
         if !resource_ok {
             return Err(invalid("resourceId does not match the event type"));
@@ -141,6 +143,7 @@ impl std::fmt::Display for EventsError {
 }
 
 /// One validated page of `GET /api/tenants/:tenant/events`. `wait` is 0..=25, `limit` 1..=100.
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_events(
     client: &MsnClient,
     tenant: &str,
@@ -149,9 +152,15 @@ pub fn fetch_events(
     limit: u64,
     wait: u64,
     channel: Option<&str>,
+    include_statuses: bool,
 ) -> Result<EventsPage, EventsError> {
     slug(tenant).map_err(EventsError::Terminal)?;
     let mut path = format!("/api/tenants/{tenant}/events?after={after}&limit={limit}&wait={wait}");
+    // Agent status changes (ADR 0064) are opt-in. The live poll asks for them; the startup drain
+    // does not, so old status changes never count against its page cap.
+    if include_statuses {
+        path.push_str("&include=statuses");
+    }
     if let Some(channel) = channel {
         slug(channel).map_err(EventsError::Terminal)?;
         path.push_str("&channel=");
@@ -225,6 +234,15 @@ mod tests {
         let parsed = parse_events_page(&body, &expect(2)).unwrap();
         assert_eq!(parsed.events.len(), 2);
         assert_eq!(parsed.next_cursor, 4);
+    }
+
+    #[test]
+    fn status_changed_needs_a_sequence_number() {
+        let ok = page(&[event(3, "status.changed", "5")], 3, false);
+        let parsed = parse_events_page(&ok, &expect(2)).unwrap();
+        assert_eq!(parsed.events[0].kind, EventKind::StatusChanged);
+        let bad = page(&[event(3, "status.changed", "null")], 3, false);
+        assert!(parse_events_page(&bad, &expect(2)).is_err());
     }
 
     #[test]

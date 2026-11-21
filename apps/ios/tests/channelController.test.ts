@@ -459,6 +459,42 @@ test("edits change your own message in place and others' edits arrive on a later
   }
 });
 
+test("agent statuses load with the board and follow status.changed events, no message needed (ADR 0064)", async () => {
+  const server = await startMockServer();
+  try {
+    server.createChannel("general");
+    server.setStatus("general", "lead", "running tests on PR 54");
+    server.post("general", "asha", "hello");
+    const { ctl, channelCtl } = await open(server);
+    await waitFor(() => channelCtl.state.get().statuses.length === 1, "statuses loaded");
+    assert.deepEqual(
+      channelCtl.state.get().statuses.map((s) => [s.name, s.text]),
+      [["lead", "running tests on PR 54"]],
+    );
+    // A change posts no message: the event alone brings it in, and messages do not move.
+    server.setStatus("general", "dev", "reviewing");
+    await waitFor(() => channelCtl.state.get().statuses.length === 2, "new status");
+    assert.deepEqual(channelCtl.state.get().statuses.map((s) => s.name), ["dev", "lead"]);
+    server.setStatus("general", "lead", null);
+    await waitFor(() => channelCtl.state.get().statuses.length === 1, "cleared status");
+    // Another board's change is not this board's.
+    server.createChannel("other");
+    server.setStatus("other", "ops", "deploying");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(channelCtl.state.get().statuses.map((s) => s.name), ["dev"]);
+    assert.deepEqual(ids(channelCtl), [1]);
+    // Only the live stream asks the events feed for status changes; the startup drain (wait=0)
+    // does not, so old status changes never count against its page cap.
+    const polls = server.requests.filter((r) => r.path.endsWith("/events"));
+    assert.ok(polls.some((r) => r.query.includes("include=statuses")));
+    assert.ok(polls.filter((r) => r.query.includes("wait=0")).every((r) => !r.query.includes("include=")));
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});
+
 test("a scheduled message is listed, changed and cancelled, and leaves the list once posted (ADR 0060)", async () => {
   const server = await startMockServer();
   try {

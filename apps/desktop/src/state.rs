@@ -149,6 +149,9 @@ pub struct ChannelState {
     /// The board's personas for @ suggestions (ADR 0055): `None` until asked for once.
     pub personas: Option<Vec<(String, bool)>>,
     pub personas_requested: bool,
+    /// What each name says it is doing (ADR 0064), newest first; re-read on `status.changed`.
+    pub statuses: Vec<msn_cli::status::Status>,
+    pub statuses_flight: Flight,
     /// Reactions (ADR 0047) send no event, so they are re-read on the receipts timer.
     pub reactions_flight: Flight,
     /// Edits (ADR 0052) send no message either; re-read on the same timer from `edit_cursor`.
@@ -620,6 +623,23 @@ impl AppState {
             })
     }
 
+    /// Reloads the open board's agent statuses (ADR 0064): after each sync and on each
+    /// `status.changed` event for this board.
+    pub fn statuses_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let state = self.channel.as_mut()?;
+        state
+            .statuses_flight
+            .request()
+            .then_some(Command::LoadStatuses {
+                generation,
+                channel_generation,
+                channel,
+            })
+    }
+
     /// Asks for the open board's personas once per visit, the first time @ is typed (ADR 0055).
     pub fn personas_command(&mut self) -> Option<Command> {
         let generation = self.generation()?;
@@ -1028,6 +1048,11 @@ impl AppState {
                     state.reactions_flight.fail();
                 }
             }
+            Command::LoadStatuses { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.statuses_flight.fail();
+                }
+            }
             Command::Disconnect => {}
             invalidation => {
                 let duplicate = self
@@ -1219,6 +1244,29 @@ impl AppState {
                 state.receipts = receipts;
                 if state.receipts_flight.finish() {
                     vec![Command::LoadReceipts {
+                        generation,
+                        channel_generation,
+                        channel,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::Statuses {
+                generation,
+                channel_generation,
+                channel,
+                statuses,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                state.statuses = statuses;
+                if state.statuses_flight.finish() {
+                    vec![Command::LoadStatuses {
                         generation,
                         channel_generation,
                         channel,
@@ -1563,6 +1611,9 @@ impl AppState {
         }
         let mut commands = if rerun { vec![again] } else { Vec::new() };
         commands.extend(self.receipts_command());
+        if first {
+            commands.extend(self.statuses_command());
+        }
         commands
     }
 
@@ -1577,6 +1628,7 @@ impl AppState {
         let mut list = false;
         let mut sync = false;
         let mut snapshots = false;
+        let mut statuses = false;
         for event in events {
             // A message added to or removed from another board changes its count.
             if matches!(
@@ -1614,6 +1666,7 @@ impl AppState {
                     snapshots = true;
                 }
                 EventKind::SnapshotPublished => snapshots = true,
+                EventKind::StatusChanged => statuses = true,
             }
         }
         let mut commands = Vec::new();
@@ -1625,6 +1678,9 @@ impl AppState {
         }
         if snapshots {
             commands.extend(self.snapshots_command());
+        }
+        if statuses {
+            commands.extend(self.statuses_command());
         }
         commands
     }
@@ -1693,6 +1749,14 @@ impl AppState {
                     && let Some(state) = self.channel.as_mut()
                 {
                     state.receipts_flight.fail();
+                }
+            }
+            // Statuses too (ADR 0064): an older server or a failed load keeps the last list.
+            "statuses" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.statuses_flight.fail();
                 }
             }
             // Reactions too (ADR 0047): a failed refresh keeps the chips shown.
@@ -2418,12 +2482,65 @@ mod tests {
     }
 
     #[test]
+    fn a_status_change_on_the_open_board_reloads_its_statuses_once() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        let commands = synced(&mut state, vec![msg(1, "a")], 1, 0);
+        assert!(
+            matches!(commands.as_slice(), [_, Command::LoadStatuses { channel, .. }] if channel == "general")
+        );
+        // Another board's change is not this board's; one in flight coalesces.
+        let other = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![event(EventKind::StatusChanged, "ops", Some(2), 0)],
+        });
+        assert!(other.is_empty());
+        let coalesced = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![event(EventKind::StatusChanged, "general", Some(3), 0)],
+        });
+        assert!(coalesced.is_empty());
+        let cg = state.channel_generation;
+        let status = msn_cli::status::Status {
+            name: "lead".into(),
+            text: "merging".into(),
+            set_at: "2026-11-21T02:00:00Z".into(),
+        };
+        let rerun = state.apply(UiEvent::Statuses {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            statuses: vec![status.clone()],
+        });
+        assert!(matches!(rerun.as_slice(), [Command::LoadStatuses { .. }]));
+        assert_eq!(state.channel.as_ref().unwrap().statuses, vec![status]);
+        // A later sync of the same board does not reread statuses; the events do.
+        state.apply(UiEvent::Statuses {
+            generation: 1,
+            channel_generation: cg,
+            channel: "general".into(),
+            statuses: Vec::new(),
+        });
+        let later = synced(&mut state, vec![msg(1, "a"), msg(2, "b")], 2, 0);
+        assert!(
+            !later
+                .iter()
+                .any(|c| matches!(c, Command::LoadStatuses { .. }))
+        );
+        let fresh = state.apply(UiEvent::CoordinationEvents {
+            generation: 1,
+            events: vec![event(EventKind::StatusChanged, "general", Some(4), 0)],
+        });
+        assert!(matches!(fresh.as_slice(), [Command::LoadStatuses { .. }]));
+    }
+
+    #[test]
     fn a_sync_reloads_receipts_once_and_only_the_open_channel_keeps_them() {
         let mut state = ready_state(1);
         state.select_channel("general".into());
         let commands = synced(&mut state, vec![msg(1, "a")], 1, 0);
         assert!(
-            matches!(commands.as_slice(), [Command::LoadReceipts { channel, .. }] if channel == "general")
+            matches!(commands.as_slice(), [Command::LoadReceipts { channel, .. }, Command::LoadStatuses { .. }] if channel == "general")
         );
         // A second request while one is in flight is coalesced, not sent twice.
         assert!(state.receipts_command().is_none());

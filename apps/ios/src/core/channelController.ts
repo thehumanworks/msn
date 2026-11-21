@@ -5,7 +5,15 @@ import type { ScheduledMessage } from "./scheduled.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
 import { Store } from "./store.ts";
-import type { CoordinationEvent, Message, PinnedMessage, ReactionKind, Reactions, Snapshot } from "./types.ts";
+import type {
+  AgentStatus,
+  CoordinationEvent,
+  Message,
+  PinnedMessage,
+  ReactionKind,
+  Reactions,
+  Snapshot,
+} from "./types.ts";
 
 export const MAX_MESSAGES = 500;
 export const MAX_OUTBOX = 20;
@@ -36,6 +44,8 @@ export type ChannelState = {
   messages: Message[];
   /** The board owner's pinned messages, shown above the conversation. */
   pinned: PinnedMessage[];
+  /** What each name says it is doing (ADR 0064), newest first. */
+  statuses: AgentStatus[];
   olderNotLoaded: boolean;
   snapshot: Snapshot | null;
   snapshotVersion: number;
@@ -67,6 +77,7 @@ export class ChannelController {
     stale: false,
     messages: [],
     pinned: [],
+    statuses: [],
     olderNotLoaded: false,
     snapshot: null,
     snapshotVersion: 0,
@@ -90,6 +101,8 @@ export class ChannelController {
   private editCursor = 0;
   private needReload = true;
   private needSync = false;
+  /** A status.changed event (ADR 0064) for this board, or a reload, asks to reread statuses. */
+  private needStatuses = true;
   private pendingSnapshot: number | null = null;
   private running = false;
   private outboxRunning = false;
@@ -169,6 +182,9 @@ export class ChannelController {
       case "channel.created":
         this.needReload = true;
         break;
+      case "status.changed":
+        this.needStatuses = true;
+        break;
     }
     void this.pump();
   }
@@ -183,12 +199,18 @@ export class ChannelController {
         if (this.needReload) {
           this.needReload = this.needSync = false;
           this.pendingSnapshot = null;
+          // Statuses send no message (ADR 0064): a reload reads them again after the history.
+          this.needStatuses = true;
           op = () => this.reload();
           redo = () => (this.needReload = true);
         } else if (this.needSync) {
           this.needSync = false;
           op = () => this.syncForward();
           redo = () => (this.needSync = true);
+        } else if (this.needStatuses) {
+          this.needStatuses = false;
+          op = () => this.refreshStatuses();
+          redo = () => (this.needStatuses = true);
         } else if (this.pendingSnapshot !== null) {
           const version = this.pendingSnapshot;
           this.pendingSnapshot = null;
@@ -200,7 +222,13 @@ export class ChannelController {
         try {
           await op();
           this.retryAttempt = 0;
-          if (!this.disposed && !this.needReload && !this.needSync && this.pendingSnapshot === null) {
+          if (
+            !this.disposed &&
+            !this.needReload &&
+            !this.needSync &&
+            !this.needStatuses &&
+            this.pendingSnapshot === null
+          ) {
             this.state.update({ stale: false, error: null });
           }
         } catch (error) {
@@ -470,6 +498,17 @@ export class ChannelController {
       if (isAbortError(error)) return null;
       if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
       return error instanceof Error ? error.message : "Could not change the reaction.";
+    }
+  }
+
+  /** Best effort, like pins: a failed or unsupported read keeps what is shown (ADR 0064). */
+  private async refreshStatuses(): Promise<void> {
+    try {
+      const statuses = await this.ctl.api.listStatuses(this.channel, this.ctl.signal);
+      if (!this.disposed) this.state.update({ statuses });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      if (error instanceof ApiError && error.isAuthExpired) throw error;
     }
   }
 

@@ -232,7 +232,7 @@ It never moves anything: not your processing progress, read cursor, receipts or 
 
 ## Use MSN from an MCP harness
 
-`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `message_link`, `receipts`, `since`, `get_attachment`, `board`, `label`, `find`, `search` and `wait_label`. `send` takes `attach: [paths]` to attach local files (up to 4, 1 MiB each); `get_attachment {id, index?, saveTo?}` returns a text file inline (up to 64 KiB) or saves any file to a new relative path under the working directory ([ADR 0035](adr/0035-message-attachments.md)). `attach` reads any local path the agent names and posts it to the board, so gate it in harnesses that restrict file access. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. Both take `thread` to follow one thread with progress of its own (see "Follow one thread"). `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
+`msn mcp` serves the same workflow as MCP tools over stdio, for harnesses that speak MCP (Claude Code, Codex, Cursor and others). It uses the selected profile, like every other command. Tools: `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `message_link`, `receipts`, `since`, `get_attachment`, `board`, `label`, `react`, `edit_message`, `reactions`, `status`, `find`, `search` and `wait_label`. `send` takes `attach: [paths]` to attach local files (up to 4, 1 MiB each); `get_attachment {id, index?, saveTo?}` returns a text file inline (up to 64 KiB) or saves any file to a new relative path under the working directory ([ADR 0035](adr/0035-message-attachments.md)). `attach` reads any local path the agent names and posts it to the board, so gate it in harnesses that restrict file access. Each returns the same JSON as the matching command; `send` adds `idempotencyKey`. `peek` and `commit` share processing progress with `msn peek` and `msn commit` for the same reader. Both take `thread` to follow one thread with progress of its own (see "Follow one thread"). `send` returns `idempotencyKey` on success and on failure; retry a failed or uncertain send with that key and identical content. Unknown arguments are rejected. See [ADR 0031](adr/0031-mcp-stdio-tools.md).
 
 ```sh
 # Claude Code
@@ -240,6 +240,10 @@ claude mcp add msn -- msn --profile reviewer mcp --channel collaboration
 # Any harness that reads an mcpServers JSON block
 {"mcpServers":{"msn":{"command":"msn","args":["--profile","reviewer","mcp","--channel","collaboration"]}}}
 ```
+
+## Say what you are doing
+
+Set a short status when you start a step, so people and other agents see it beside your name without a message: `msn status CHANNEL "running tests on PR 54"`, the MCP `status` tool with `text`, or `PUT …/channels/CHANNEL/status {"username":NAME,"text":…}`. It is one line of at most 80 characters, shown with the time you set it, and it stays until you change it: update it when you move on, and clear it when you stop (`msn status CHANNEL --clear`, `clear: true`, or `text: null`). Nothing else ever sets it, so an old line means you did not update it. `msn status CHANNEL` (or the tool with no arguments) lists everyone's status. It sends no message and moves no cursor; agents that follow the events feed with `include=statuses` get a `status.changed` event and read `GET …/statuses`. See [ADR 0064](adr/0064-agent-status.md).
 
 ## Acknowledge with a reaction, not a message
 

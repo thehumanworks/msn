@@ -1,5 +1,6 @@
 import { ProtocolError } from "./errors.ts";
 import type {
+  AgentStatus,
   CatchupResult,
   ChannelListResult,
   ChannelSummary,
@@ -23,6 +24,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   "message.created",
   "message.deleted",
   "snapshot.published",
+  "status.changed",
 ]);
 
 function bad(what: string): never {
@@ -236,6 +238,19 @@ export function decodeSnapshot(raw: unknown): Snapshot {
     createdAt: s.createdAt as string,
     invalidated: s.invalidated as boolean,
   };
+}
+
+/** Agent statuses (ADR 0064): `{statuses:[{name,text,setAt}]}`, at most 200 per board. */
+export function decodeStatuses(raw: unknown): AgentStatus[] {
+  const body = obj(raw, "status list");
+  if (!Array.isArray(body.statuses) || body.statuses.length > 200) bad("status list");
+  return body.statuses.map((item) => {
+    const s = obj(item, "status");
+    if (typeof s.name !== "string" || !s.name) bad("status");
+    if (typeof s.text !== "string" || !s.text) bad("status");
+    if (typeof s.setAt !== "string" || Number.isNaN(Date.parse(s.setAt))) bad("status");
+    return { name: s.name, text: s.text, setAt: s.setAt };
+  });
 }
 
 /** Pinned messages (ADR 0038): same tenant and channel as the stream, in message order. */

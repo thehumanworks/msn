@@ -145,7 +145,7 @@ fn slugs_are_validated_before_path_interpolation() {
     assert!(client_ops::list_channels(&c, "../evil", TOKEN).is_err());
     assert!(client_ops::create_channel(&c, TENANT, TOKEN, "Bad/Channel").is_err());
     assert!(client_ops::fetch_history(&c, TENANT, TOKEN, "a/../b", &never).is_err());
-    assert!(events::fetch_events(&c, "acme?x=1", TOKEN, 0, 1, 0, None).is_err());
+    assert!(events::fetch_events(&c, "acme?x=1", TOKEN, 0, 1, 0, None, false).is_err());
     assert!(
         server.fake.log.lock().unwrap().is_empty(),
         "no request left the client"
@@ -270,30 +270,30 @@ fn events_are_validated_and_classified_over_http() {
     server.fake.create_channel("general");
     server.fake.add_message("general", "bob", "hi");
     let c = client(&server);
-    let page = events::fetch_events(&c, TENANT, TOKEN, 0, 100, 0, None).unwrap();
+    let page = events::fetch_events(&c, TENANT, TOKEN, 0, 100, 0, None, false).unwrap();
     assert_eq!(page.events.len(), 2);
     assert!(matches!(page.events[0].kind, EventKind::ChannelCreated));
     assert_eq!(page.events[1].resource_id, Some(1));
     // Cursor-filtered replay is strict: nothing at or before `after`.
-    let later = events::fetch_events(&c, TENANT, TOKEN, 1, 100, 0, Some("general")).unwrap();
+    let later = events::fetch_events(&c, TENANT, TOKEN, 1, 100, 0, Some("general"), false).unwrap();
     assert_eq!(later.events.len(), 1);
 
     server.fake.corrupt_events.store(true, Ordering::SeqCst);
     assert!(matches!(
-        events::fetch_events(&c, TENANT, TOKEN, 0, 100, 0, None),
+        events::fetch_events(&c, TENANT, TOKEN, 0, 100, 0, None, false),
         Err(EventsError::Terminal(_))
     ));
     server.fake.corrupt_events.store(false, Ordering::SeqCst);
 
     server.fake.revoke_token();
     assert!(matches!(
-        events::fetch_events(&c, TENANT, TOKEN, 0, 100, 0, None),
+        events::fetch_events(&c, TENANT, TOKEN, 0, 100, 0, None, false),
         Err(EventsError::Auth(_))
     ));
 
     let dead = MsnClient::new(&url::Url::parse("http://127.0.0.1:1").unwrap()).unwrap();
     assert!(matches!(
-        events::fetch_events(&dead, TENANT, TOKEN, 0, 100, 0, None),
+        events::fetch_events(&dead, TENANT, TOKEN, 0, 100, 0, None, false),
         Err(EventsError::Retry(_))
     ));
 }
@@ -306,7 +306,7 @@ fn long_poll_wakes_on_change_with_a_single_request() {
     let waiter = std::thread::spawn(move || {
         let client = MsnClient::new(&origin).unwrap();
         let started = Instant::now();
-        let page = events::fetch_events(&client, TENANT, TOKEN, 1, 100, 20, None).unwrap();
+        let page = events::fetch_events(&client, TENANT, TOKEN, 1, 100, 20, None, false).unwrap();
         (page, started.elapsed())
     });
     std::thread::sleep(Duration::from_millis(400));
@@ -364,6 +364,14 @@ fn drain_is_silent_then_ready_then_only_new_events_stream_and_idle_costs_nothing
         4,
         "3 drain pages + 1 parked long-poll; no periodic scans"
     );
+    // Agent status changes (ADR 0064): only the live long poll asks for them, never the drain.
+    let includes: Vec<bool> = server
+        .fake
+        .logged("GET", "/events")
+        .iter()
+        .map(|l| l.query.get("include").map(String::as_str) == Some("statuses"))
+        .collect();
+    assert_eq!(includes, [false, false, false, true]);
 
     server.fake.add_message("general", "bob", "live");
     let event = rig
