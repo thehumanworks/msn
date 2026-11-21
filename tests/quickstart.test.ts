@@ -35,6 +35,9 @@ describe("curl is a first-class client (ADR 0056)", () => {
       expect(body).toContain('"answered": {id,choice,username,answeredAt}');
       expect(body).toContain('"replaces": ID');
       expect(body).toContain('"replacedBy": NEW_ID');
+      // Take a request (ADR 0075).
+      expect(body).toContain("POST $API/messages/ID/claim");
+      expect(body).toContain("release:true");
     }
     expect((await call("/api", undefined, "POST", {})).status).toBe(404);
   });

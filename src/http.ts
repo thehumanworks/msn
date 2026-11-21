@@ -692,6 +692,21 @@ export function reactionChange(input: Record<string, unknown>): ReactionChange {
 }
 
 /**
+ * `POST …/messages/:id/claim` body (ADR 0075): the name taking the message, or giving it back
+ * with `release`. The name follows the send rules, so a bound key claims only as its name.
+ */
+export type ClaimChange = { username: string; release: boolean };
+
+export function claimChange(input: Record<string, unknown>): ClaimChange {
+  for (const field of Object.keys(input))
+    if (!["username", "release"].includes(field))
+      throw new HttpError(400, "invalid_claim", `Unknown field ${field}; use username and release.`);
+  if (input.release !== undefined && typeof input.release !== "boolean")
+    throw new HttpError(400, "invalid_claim", "release must be true or false.");
+  return { username: text(input.username, "username", 128), release: input.release === true };
+}
+
+/**
  * `PATCH …/messages/:id` body (ADR 0052): the sender's name and the new text. `ifEditedAt`, when
  * present, is the `editedAt` the editor started from (null for a never-edited message); the edit
  * is refused with 409 edit_conflict when the message changed since.

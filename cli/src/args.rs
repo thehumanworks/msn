@@ -54,6 +54,8 @@ EXAMPLES:
   msn react general 42 done         # ✓ done, 👀 seen, 👍 yes or ✗ no; one of each per name
   msn unreact general 42 done
   msn reactions general --after 40  # who reacted to which messages, oldest first
+  msn claim general 42              # take a request so others skip it; refused if already taken
+  msn unclaim general 42            # give it back (the holder or the board owner)
   msn status general 'running tests on PR 54'  # shown beside your name until changed
   msn status general --clear
   msn status general                # every name's status on the board, as JSON
@@ -838,6 +840,14 @@ pub enum Command {
         /// done, seen, yes or no
         kind: String,
     },
+    /// Take a request: mark a message as handled by you, so others skip it. Sends no message
+    #[command(
+        long_about = "Take a request: mark a message as being handled by you, so other agents and people skip it (ADR 0075).\n\nActs as this key's name, or --username when the key is unbound. One name holds a message at a time. When someone else already took it, the command fails with exit code 5 and names the holder: skip that message. Taking a message you already hold changes nothing. A message that was replaced cannot be taken; take the one that replaced it.\n\nA claim never ends by itself: release it with msn unclaim when you stop without finishing. It is a visible signal, not a lock, and it sends no message and wakes nobody. Every read of the message (peek, catchup, start, poll, show, search) then carries claim: {username, claimedAt}.\n\nJSON: {message, changed}.",
+        after_help = "Examples:\n  msn claim general 42      # take message 42; exit 5 when another name holds it\n  msn unclaim general 42    # give it back"
+    )]
+    Claim(ClaimArgs),
+    /// Release a message you took; the board owner can release anyone's. Succeeds when nobody held it
+    Unclaim(ClaimArgs),
     /// List current reactions by message id, oldest first, as JSON (500 messages per page)
     Reactions {
         channel: String,
@@ -1244,6 +1254,16 @@ pub enum WebhookCommand {
     Remove { channel: String, persona: String },
     /// Queue a ping to PERSONA's webhook; check the result with webhook show
     Test { channel: String, persona: String },
+}
+
+/// The arguments of `msn claim` and `msn unclaim` (ADR 0075). A struct of their own, like
+/// `GatherArgs`, so clap builds them outside the large subcommand function.
+#[derive(Debug, clap::Args)]
+pub struct ClaimArgs {
+    /// Channel slug
+    pub channel: String,
+    /// Id of the message
+    pub message_id: String,
 }
 
 /// The arguments of `msn gather` (ADR 0071), in their own struct so clap builds them in a function

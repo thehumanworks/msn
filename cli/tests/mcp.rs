@@ -259,6 +259,59 @@ fn send_carries_replaces() {
 }
 
 #[test]
+fn claim_takes_and_releases_and_reports_the_holder_on_refusal() {
+    // Take a request (ADR 0075).
+    let home = Home::new();
+    let server = MockServer::spawn(vec![
+        Scripted::json(
+            200,
+            r#"{"message":{"id":9,"claim":{"username":"alice","claimedAt":"2026-11-21T18:00:00.000Z"}},"changed":true}"#,
+        ),
+        Scripted::json(200, r#"{"message":{"id":9},"changed":true}"#),
+        Scripted::json(
+            409,
+            r#"{"error":{"code":"already_claimed","message":"Message 9 is already taken by \"bob\". Skip it, or ask that name or the board owner to release it."}}"#,
+        ),
+    ]);
+    let replies = session(
+        &home,
+        &server,
+        &[
+            call(1, "claim", json!({"id":9})),
+            call(2, "claim", json!({"id":9,"release":true})),
+            call(3, "claim", json!({"id":9})),
+            call(4, "claim", json!({"id":9,"release":"yes"})),
+            call(5, "claim", json!({})),
+        ],
+    );
+    assert_eq!(ok(&replies[1])["message"]["claim"]["username"], "alice");
+    assert_eq!(ok(&replies[2])["changed"], true);
+    assert_eq!(replies[3]["result"]["isError"], true);
+    assert!(
+        replies[3]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("already taken by \"bob\"")
+    );
+    assert_eq!(replies[4]["result"]["isError"], true);
+    assert_eq!(replies[5]["result"]["isError"], true);
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].path,
+        "/api/tenants/team/channels/general/messages/9/claim"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        json!({"username":"alice"})
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[1].body).unwrap(),
+        json!({"username":"alice","release":true})
+    );
+}
+
+#[test]
 fn peek_then_commit_moves_processing_progress() {
     let home = Home::local();
     let page = r#"{"messages":[{"id":5,"tenant":"team","channel":"general"},{"id":7,"tenant":"team","channel":"general"}],"nextCursor":7,"hasMore":false}"#;

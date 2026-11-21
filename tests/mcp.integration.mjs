@@ -142,6 +142,7 @@ try {
       "board",
       "label",
       "react",
+      "claim",
       "edit_message",
       "reactions",
       "status",

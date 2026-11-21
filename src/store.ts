@@ -24,8 +24,10 @@ import {
   bearer,
   binding,
   body,
+  type ClaimChange,
   type ContentType,
   choiceList,
+  claimChange,
   contentDisposition,
   contentType,
   correlationId,
@@ -151,7 +153,11 @@ export type Message = {
   replaces?: number;
   /** The newer message that replaces this one (ADR 0068); absent until it is replaced. */
   replacedBy?: number;
+  /** Who said they are handling this message (ADR 0075); absent while nobody has taken it. */
+  claim?: Claim;
 };
+/** The one name handling a message, and since when (ADR 0075). A signal, not a lock. */
+export type Claim = { username: string; claimedAt: string };
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
 export type Answered = { id: number; choice: string; username: string; answeredAt: string };
 /** Attachment metadata on a message; the bytes come from the per-message download route. */
@@ -196,9 +202,12 @@ type MessageRow = {
   /** The earlier message this one replaces, and the newer one that replaced this (ADR 0068). */
   replaces: number | null;
   replacedBy: number | null;
+  /** The name handling this message and when it took it (ADR 0075); both NULL when untaken. */
+  claimedBy: string | null;
+  claimedAt: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, recipients, personaId, editedAt, quote, choices, answer, answered, answerer, replaces, replacedBy";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, recipients, personaId, editedAt, quote, choices, answer, answered, answerer, replaces, replacedBy, claimedBy, claimedAt";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -447,6 +456,8 @@ function toMessage(row: MessageRow, tenant: string): Message {
     answerer,
     replaces,
     replacedBy,
+    claimedBy,
+    claimedAt,
     ...rest
   } = row;
   return {
@@ -465,6 +476,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(answerer == null ? {} : { answerer }),
     ...(replaces == null ? {} : { replaces }),
     ...(replacedBy == null ? {} : { replacedBy }),
+    ...(claimedBy == null || claimedAt == null ? {} : { claim: { username: claimedBy, claimedAt } }),
   };
 }
 
@@ -806,6 +818,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Additive, so no schema_version step and safe in any merge order.
         ["messages", "replaces", "INTEGER"],
         ["messages", "replacedBy", "INTEGER"],
+        // Take a request (ADR 0075): the one name handling a message, NULL while nobody is.
+        // Additive, so no schema_version step and safe in any merge order.
+        ["messages", "claimedBy", "TEXT"],
+        ["messages", "claimedAt", "TEXT"],
       ]) {
         if (
           !ctx.storage.sql
@@ -822,6 +838,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       // After the column loop too. Only edited messages are indexed; serves catch-up's edits.
       ctx.storage.sql.exec(
         "CREATE INDEX IF NOT EXISTS message_edits ON messages(channel, editSeq) WHERE editSeq IS NOT NULL",
+      );
+      // Claimed messages (ADR 0075) by id, so the claims refresh reads only those.
+      ctx.storage.sql.exec(
+        "CREATE INDEX IF NOT EXISTS message_claims ON messages(channel, id) WHERE claimedBy IS NOT NULL",
       );
       if (version === null) {
         for (let applied = 1; applied <= SCHEMA_VERSION; applied++)
@@ -3102,6 +3122,72 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
+   * Takes a message or gives it back (ADR 0075). One name holds a message at a time: a second
+   * claim is refused and names the holder. Only the holder or the workspace owner releases it;
+   * nothing else ever does, so no silence or timeout frees a message. Both directions are
+   * idempotent for the holder: `changed` says whether anything moved. Like a reaction it writes no
+   * message and no event, so ids, cursors, receipts and unread counts never move. A claim is a
+   * visible signal, not a lock: no other write checks it.
+   */
+  private claim(
+    tenant: string,
+    channel: string,
+    id: number,
+    change: ClaimChange,
+    capability: TenantRow,
+  ): Response {
+    const changed = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql
+        .exec<{ deleted: number; replacedBy: number | null; claimedBy: string | null }>(
+          "SELECT deleted, replacedBy, claimedBy FROM messages WHERE channel = ? AND id = ?",
+          channel,
+          id,
+        )
+        .toArray()[0];
+      if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+      if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+      if (change.release) {
+        if (row.claimedBy === null) return false;
+        // The owner releases any claim, as it moderates the board; anyone else only their own.
+        if (row.claimedBy !== change.username && !capability.owner_access)
+          throw new HttpError(
+            403,
+            "not_holder",
+            `Message ${id} is taken by ${JSON.stringify(row.claimedBy)}. Only that name or the board owner can release it.`,
+          );
+        this.ctx.storage.sql.exec("UPDATE messages SET claimedBy = NULL, claimedAt = NULL WHERE id = ?", id);
+        return true;
+      }
+      if (row.claimedBy === change.username) return false;
+      if (row.claimedBy !== null)
+        throw new HttpError(
+          409,
+          "already_claimed",
+          `Message ${id} is already taken by ${JSON.stringify(row.claimedBy)}. Skip it, or ask that name or the board owner to release it.`,
+        );
+      // A replaced message is no longer the instruction to act on (ADR 0068). A claim made before
+      // the replacement stays on the old message; a new one belongs on the current message.
+      if (row.replacedBy !== null)
+        throw new HttpError(
+          409,
+          "message_replaced",
+          `Message ${id} was replaced by message ${row.replacedBy}. Take that one instead.`,
+        );
+      this.ctx.storage.sql.exec(
+        "UPDATE messages SET claimedBy = ?, claimedAt = ? WHERE id = ?",
+        change.username,
+        new Date().toISOString(),
+        id,
+      );
+      return true;
+    });
+    const row = this.ctx.storage.sql
+      .exec<MessageRow>(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND id = ?`, channel, id)
+      .one();
+    return json({ message: this.withLabels(channel, [toMessage(row, tenant)])[0], changed });
+  }
+
+  /**
    * Replaces a message's text (ADR 0052). Only its sender may: the name must be the message's
    * author, a bound key edits only as its name, and a board's shared credential only as the persona
    * that sent it. The id, createdAt and everything keyed by id stay, so order, read and processing
@@ -3319,11 +3405,30 @@ export class MsnDurableObject extends DurableObject<Env> {
     const before = integer(params.get("before"), Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
     const limit = 500;
     const found = this.reactionsIn(channel, after, before, limit + 1);
-    const entries = [...found].slice(0, limit).map(([id, reactions]) => ({ id, reactions }));
+    const reacted = [...found].map(([id, reactions]) => ({ id, reactions }));
+    // Claims (ADR 0075) in the same range, so the refresh every client already makes also shows
+    // who took or released a message, with no second request.
+    const claimed = this.ctx.storage.sql
+      .exec<{ id: number; claimedBy: string; claimedAt: string }>(
+        "SELECT id, claimedBy, claimedAt FROM messages INDEXED BY message_claims WHERE channel = ? AND id > ? AND id < ? AND claimedBy IS NOT NULL ORDER BY id LIMIT ?",
+        channel,
+        after,
+        before,
+        limit + 1,
+      )
+      .toArray()
+      .map((row) => ({ id: row.id, claim: { username: row.claimedBy, claimedAt: row.claimedAt } }));
+    // A full page stops at the lower of the two cut-offs and covers every id up to it, so a
+    // client can clear what it shows for ids in (after, nextAfter] that the page does not list.
+    const cuts = [reacted, claimed].filter((list) => list.length > limit).map((list) => list[limit - 1].id);
+    const through = cuts.length ? Math.min(...cuts) : null;
+    const covered = <T extends { id: number }>(list: T[]) =>
+      through === null ? list : list.filter((entry) => entry.id <= through);
     return json({
-      reactions: entries,
-      hasMore: found.size > limit,
-      ...(found.size > limit ? { nextAfter: entries.at(-1)?.id } : {}),
+      reactions: covered(reacted),
+      claims: covered(claimed),
+      hasMore: through !== null,
+      ...(through === null ? {} : { nextAfter: through }),
     });
   }
 
@@ -5472,7 +5577,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, recipients = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, replaces = NULL, replacedBy = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, recipients = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, replaces = NULL, replacedBy = NULL, claimedBy = NULL, claimedAt = NULL, bytes = 0 WHERE id = ?",
               id,
             );
             // Deleting a replacement makes the message it replaced current again (ADR 0068). In a
@@ -5659,6 +5764,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "reactions"
             ? reactionChange(await body(request))
             : null;
+        const claim =
+          request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "claim"
+            ? claimChange(await body(request))
+            : null;
         const edit =
           request.method === "PATCH" && rest.length === 4 && rest[0] === "channels" && rest[2] === "messages"
             ? messageEdit(await body(request))
@@ -5711,12 +5820,15 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (input) this.requireBoundName(capability, username);
         // A reaction names its sender like a send does (ADR 0047): a bound key reacts only as its
         // name, and a board's shared credential only as one of the board's registered personas.
-        if (reaction) {
+        // A claim (ADR 0075) names its holder by the same rule, so a key cannot take or release a
+        // message as another name. The owner may release someone else's claim, under its own name.
+        const named = reaction ?? claim;
+        if (named) {
           // Scope first, so a key for another board learns nothing about this board's personas.
           this.requireScope(capability, slug(rest[1]));
-          this.requireBoundName(capability, reaction.username);
+          this.requireBoundName(capability, named.username);
           // Like sends, only signed GitHub deliveries speak as `github` (ADR 0036).
-          if (reaction.username === GITHUB_SENDER)
+          if (named.username === GITHUB_SENDER)
             throw new HttpError(
               403,
               "reserved_name",
@@ -5725,13 +5837,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (
             capability.shared_channel &&
             !this.ctx.storage.sql
-              .exec("SELECT 1 FROM personas WHERE channel=? AND displayName=?", rest[1], reaction.username)
+              .exec("SELECT 1 FROM personas WHERE channel=? AND displayName=?", rest[1], named.username)
               .toArray().length
           )
             throw new HttpError(
               400,
               "persona_required",
-              `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${rest[1]}/personas/ID with {"displayName":${JSON.stringify(reaction.username)}} (CLI: msn persona add). Steps: GET /api.`,
+              `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${rest[1]}/personas/ID with {"displayName":${JSON.stringify(named.username)}} (CLI: msn persona add). Steps: GET /api.`,
             );
         }
         // Only signed GitHub deliveries post as `github` (ADR 0036).
@@ -5944,6 +6056,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           if (reaction) {
             this.requireChannel(channel);
             return this.react(tenant, channel, messageId(rest[3]), reaction);
+          }
+          if (claim) {
+            this.requireChannel(channel);
+            return this.claim(tenant, channel, messageId(rest[3]), claim, capability);
           }
           if (edit) {
             this.requireChannel(channel);

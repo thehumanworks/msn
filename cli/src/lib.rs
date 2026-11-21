@@ -855,6 +855,26 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             &kind,
             true,
         ),
+        Command::Claim(args) => claim(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &args,
+            false,
+        ),
+        Command::Unclaim(args) => claim(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &args,
+            true,
+        ),
         Command::Reactions {
             channel,
             after,
@@ -1741,6 +1761,43 @@ fn react(
         &[],
         &reactions::body(&username, kind, remove),
     )?)
+}
+
+/// Takes a message or releases it (ADR 0075) as this key's name, or `--username` when unbound.
+/// A message someone else holds is a conflict (exit 5) whose text names the holder.
+/// `who` is the global `--tenant`, `--token` and `--username` options.
+fn claim(
+    who: [Option<&str>; 3],
+    url: &Url,
+    args: &args::ClaimArgs,
+    release: bool,
+) -> Result<(), CliError> {
+    let id = parse_message_id(&args.message_id)?;
+    let [tenant, token, username] = who;
+    let tenant = require_tenant(tenant)?;
+    let token = require_token(token, "MSN_WORKSPACE_TOKEN")?;
+    let channel = slug(&args.channel)?;
+    let username = identity::resolve_username(url, &tenant, &token, username)?;
+    finish(&MsnClient::new(url)?.post_json(
+        &claim_path(&tenant, channel, id),
+        &token,
+        &[],
+        &claim_body(&username, release),
+    )?)
+}
+
+/// POST path of a message's claim (ADR 0075).
+pub fn claim_path(tenant: &str, channel: &str, id: u64) -> String {
+    format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/claim")
+}
+
+/// Body of POST …/messages/{id}/claim: take the message, or give it back with `release`.
+pub fn claim_body(username: &str, release: bool) -> Value {
+    if release {
+        json!({ "username": username, "release": true })
+    } else {
+        json!({ "username": username })
+    }
 }
 
 /// Sets, clears or lists agent status (ADR 0064). Setting and clearing act as this key's name,

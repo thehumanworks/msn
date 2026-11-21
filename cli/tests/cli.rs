@@ -2905,3 +2905,67 @@ fn send_forwards_replaces_and_refuses_a_bad_id_or_a_schedule() {
     }
     assert!(server.recorded().is_empty());
 }
+
+#[test]
+fn claim_takes_a_message_and_unclaim_releases_it() {
+    // Take a request (ADR 0075): both post to …/claim; unclaim adds `release`.
+    let taken = r#"{"message":{"id":42,"claim":{"username":"dev","claimedAt":"2026-11-21T18:00:00.000Z"}},"changed":true}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(200, taken),
+        Scripted::json(200, r#"{"message":{"id":42},"changed":true}"#),
+    ]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "dev", "claim", "general", "42"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let printed: serde_json::Value = serde_json::from_str(&stdout_str(&out)).unwrap();
+    assert_eq!(printed["message"]["claim"]["username"], "dev");
+    assert_eq!(printed["changed"], true);
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "dev", "unclaim", "general", "42"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            request.path,
+            "/api/tenants/team/channels/general/messages/42/claim"
+        );
+    }
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+        serde_json::json!({"username": "dev"})
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap(),
+        serde_json::json!({"username": "dev", "release": true})
+    );
+}
+
+#[test]
+fn claim_refused_exits_5_and_names_the_holder() {
+    let refusal = r#"{"error":{"code":"already_claimed","message":"Message 42 is already taken by \"qa\". Skip it, or ask that name or the board owner to release it."}}"#;
+    let server = MockServer::spawn(vec![Scripted::json(409, refusal)]);
+    let url = server.url();
+    let mut args = tenant_args(&url).to_vec();
+    args.extend(["--username", "dev", "claim", "general", "42"]);
+    let out = output_of(&args);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr_str(&out));
+    assert!(stderr_str(&out).contains("already taken by \"qa\""));
+    assert!(stdout_str(&out).is_empty());
+    // A bad id never reaches the server.
+    let server = MockServer::spawn(vec![]);
+    let url = server.url();
+    for id in ["0", "x", "-1"] {
+        for command in ["claim", "unclaim"] {
+            let mut args = tenant_args(&url).to_vec();
+            args.extend(["--username", "dev", command, "general", id]);
+            let out = output_of(&args);
+            assert_ne!(out.status.code(), Some(0), "{command} {id}");
+        }
+    }
+    assert!(server.recorded().is_empty());
+}
