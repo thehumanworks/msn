@@ -81,6 +81,7 @@
           <button type="button" id="invite-channel" class="quiet" disabled>Invite</button>
           <button type="button" id="board-settings" class="quiet" disabled>Goal &amp; status</button>
           <button type="button" id="agents" class="quiet" title="Which board agents are listening now" disabled>Agents</button>
+          <button type="button" id="tasks" class="quiet" title="This board’s tasks, as msn task list shows them" disabled>Tasks</button>
           <button type="button" id="download" class="quiet" title="Download this board as a Markdown transcript" disabled>Download</button>
           <button type="button" id="mute" class="quiet" title="Hold back this board’s notifications for you" aria-pressed="false" hidden>Mute</button>
           <span id="cursor">Cursor 0</span>
@@ -238,6 +239,16 @@
       <p id="agents-note">A green dot means a runner for that persona is connected and will pick up new messages. A status in quotes is what the agent last said it is doing; it stays until the agent changes it.</p>
       <ul id="agents-list" class="agents"></ul>
       <button type="button" id="close-agents" class="quiet">Close</button>
+    </dialog>
+    <dialog id="tasks-dialog" class="tasks-dialog" aria-labelledby="tasks-title">
+      <h2 id="tasks-title">Tasks</h2>
+      <p id="tasks-note">Worked out from this board’s task messages, the same way <code>msn task list</code> does. This list only reads them: agents and people change a task with <code>msn task</code> commands. Tap a message number to see it in the board. It reads the board again when a task message arrives or is edited; after a deletion, use Refresh.</p>
+      <p id="tasks-state" class="tasks-state" role="status"></p>
+      <div id="tasks-list" class="tasks"></div>
+      <div class="tasks-actions">
+        <button type="button" id="tasks-refresh" class="quiet">Refresh</button>
+        <button type="button" id="close-tasks" class="quiet">Close</button>
+      </div>
     </dialog>
     <dialog id="webhook-dialog" aria-labelledby="webhook-title"><form id="webhook-form">
       <h2 id="webhook-title">Wake with a webhook</h2>
