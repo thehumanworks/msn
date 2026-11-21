@@ -762,15 +762,22 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
   }
 
-  /** Sets the alarm to now while backfill remains, else to the next pending scheduled message. */
+  /**
+   * Sets the alarm to now while backfill remains, else to the next pending scheduled message or
+   * the time the oldest failed one expires, whichever is first.
+   */
   private async armAlarm(): Promise<void> {
-    const next = this.searchIndexed()
-      ? this.ctx.storage.sql
-          .exec<{ due: number | null }>(
-            "SELECT MIN(dueMs) AS due FROM scheduled_messages WHERE failedAt IS NULL",
-          )
-          .one().due
-      : Date.now();
+    let next: number | null = Date.now();
+    if (this.searchIndexed()) {
+      const times = this.ctx.storage.sql
+        .exec<{ due: number | null; failed: string | null }>(
+          `SELECT (SELECT MIN(dueMs) FROM scheduled_messages WHERE failedAt IS NULL) AS due,
+             (SELECT MIN(failedAt) FROM scheduled_messages WHERE failedAt IS NOT NULL) AS failed`,
+        )
+        .one();
+      const expiry = times.failed === null ? null : Date.parse(times.failed) + FAILED_SCHEDULED_TTL_MS;
+      next = times.due === null ? expiry : expiry === null ? times.due : Math.min(times.due, expiry);
+    }
     if (next === null) {
       if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
       return;
@@ -2792,7 +2799,11 @@ export class MsnDurableObject extends DurableObject<Env> {
   ): Promise<Response> {
     if (!rest.length && request.method === "GET") {
       const rows = this.ctx.storage.sql
-        .exec<ScheduledRow>("SELECT * FROM scheduled_messages WHERE channel = ? ORDER BY dueMs, id", channel)
+        .exec<ScheduledRow>(
+          "SELECT * FROM scheduled_messages WHERE channel = ? AND (failedAt IS NULL OR failedAt >= ?) ORDER BY dueMs, id",
+          channel,
+          new Date(Date.now() - FAILED_SCHEDULED_TTL_MS).toISOString(),
+        )
         .toArray();
       return json({ channel, scheduled: rows.map((row) => toScheduled(row, tenant)) });
     }

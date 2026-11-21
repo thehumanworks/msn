@@ -153,6 +153,41 @@ describe("send a message later (ADR 0060)", () => {
     expect(await f.list()).toEqual([]);
   });
 
+  it("sets the alarm for a failed message's expiry and removes it when the alarm runs", async () => {
+    const f = await fixture();
+    const scheduled = await f.schedule("will fail");
+    expect((await call(f.tenant, "/channels/work/archive", f.owner, "PUT")).status).toBe(200);
+    await f.arrive();
+    const [failed] = await f.list();
+    expect(failed.status).toBe("failed");
+    // Nothing waits, but the failed row still needs the alarm to expire it.
+    const failedAt = await runInDurableObject(
+      f.stub(),
+      (_, state) =>
+        state.storage.sql
+          .exec<{ failedAt: string }>("SELECT failedAt FROM scheduled_messages WHERE id = ?", scheduled.id)
+          .one().failedAt,
+    );
+    expect(await f.alarm()).toBe(Date.parse(failedAt) + 7 * 24 * 3600_000);
+    // Past the TTL, the list hides it at once and the alarm removes it.
+    await runInDurableObject(f.stub(), (_, state) => {
+      state.storage.sql.exec(
+        "UPDATE scheduled_messages SET failedAt = ? WHERE id = ?",
+        new Date(Date.now() - 8 * 24 * 3600_000).toISOString(),
+        scheduled.id,
+      );
+    });
+    expect(await f.list()).toEqual([]);
+    await runInDurableObject(f.stub(), (_, state) => state.storage.setAlarm(Date.now() + 3600_000));
+    await runDurableObjectAlarm(f.stub());
+    const left = await runInDurableObject(
+      f.stub(),
+      (_, state) => state.storage.sql.exec("SELECT id FROM scheduled_messages").toArray().length,
+    );
+    expect(left).toBe(0);
+    expect(await f.alarm()).toBeNull();
+  });
+
   it("keeps the alarm set when one alarm job throws", async () => {
     const f = await fixture();
     const scheduled = await f.schedule("still armed");
@@ -397,8 +432,8 @@ describe("send a message later (ADR 0060)", () => {
     const [failed] = await f.list();
     expect(failed).toMatchObject({ id: scheduled.id, status: "failed", error: { code: "board_archived" } });
     expect(await f.messages()).toEqual([]);
-    // A failed message no longer holds the alarm.
-    expect(await f.alarm()).toBeNull();
+    // A failed message holds the alarm only for its 7-day expiry, not for posting.
+    expect(await f.alarm()).toBeGreaterThan(Date.now() + 6 * 24 * 3600_000);
     // Changing it on an archived board is refused, but cancelling is allowed.
     expect(
       (
@@ -531,10 +566,19 @@ describe("send a message later (ADR 0060)", () => {
       );
     });
     expect((await post("lead")).status).toBe(201);
-    // A failed message older than 7 days is removed the next time the schedule changes.
+    // A failed message older than 7 days is hidden from the list at once and removed the next
+    // time the schedule changes.
     await insert(new Date(Date.now() - 8 * 24 * 3600_000).toISOString());
-    expect((await f.list()).filter((item) => item.status === "failed").length).toBe(26);
-    expect((await post("lead")).status).toBe(201);
+    const rows = () =>
+      runInDurableObject(
+        f.stub(),
+        (_, state) =>
+          state.storage.sql.exec("SELECT id FROM scheduled_messages WHERE failedAt IS NOT NULL").toArray()
+            .length,
+      );
+    expect(await rows()).toBe(26);
     expect((await f.list()).filter((item) => item.status === "failed").length).toBe(25);
+    expect((await post("lead")).status).toBe(201);
+    expect(await rows()).toBe(25);
   });
 });
