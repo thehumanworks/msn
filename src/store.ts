@@ -145,6 +145,8 @@ const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
 const SCHEMA_VERSION = 20;
+/** After an alarm run in which a job threw, the next run waits at least this long. */
+export const ALARM_FAILURE_BACKOFF_MS = 30_000;
 /** Names per reaction kind on one message (ADR 0047). */
 export const MAX_REACTORS = 100;
 /** Reactions stored per workspace at once (ADR 0047); removing one frees its place. */
@@ -690,28 +692,32 @@ export class MsnDurableObject extends DurableObject<Env> {
    * set again whatever happens, so one failing job never stops the other.
    */
   async alarm(): Promise<void> {
+    let failed = false;
     try {
       try {
         this.backfillSearch();
       } catch (error) {
+        failed = true;
         console.error("alarm: search backfill failed", error);
       }
       try {
         await this.sendDueNotices();
       } catch (error) {
+        failed = true;
         console.error("alarm: webhook delivery failed", error);
       }
     } finally {
-      await this.armAlarm();
+      // A job that keeps failing must not spin the alarm: wait before the next run.
+      await this.armAlarm(failed ? ALARM_FAILURE_BACKOFF_MS : 0);
     }
   }
 
   /**
    * Sets the alarm to now while backfill remains, else to the next webhook notice due, or
    * deletes it when nothing is left. Every job that adds work calls this. An idle workspace has
-   * no alarm.
+   * no alarm. `notBeforeMs` delays the next run after a failed one.
    */
-  private async armAlarm(): Promise<void> {
+  async armAlarm(notBeforeMs = 0): Promise<void> {
     let next: number | null = this.searchIndexed() ? null : Date.now();
     const due = this.ctx.storage.sql
       .exec<{ due: number | null }>("SELECT MIN(nextAttemptMs) AS due FROM webhook_notices")
@@ -721,6 +727,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       if ((await this.ctx.storage.getAlarm()) !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
+    if (notBeforeMs) next = Math.max(next, Date.now() + notBeforeMs);
     if ((await this.ctx.storage.getAlarm()) !== next) await this.ctx.storage.setAlarm(next);
   }
 
@@ -1252,15 +1259,18 @@ export class MsnDurableObject extends DurableObject<Env> {
    */
   private queueAddressedNotice(message: Message, eventId: number): boolean {
     if (message.to === undefined) return false;
+    // Names match trimmed and ignoring case, as unread counts do: "@Reviewer" wakes "reviewer".
+    const fold = (name: string) => name.trim().toLowerCase();
+    const to = fold(message.to);
     const hook = this.ctx.storage.sql
-      .exec<{ personaId: string; origin: string }>(
-        `SELECT w.personaId, w.origin FROM webhooks w JOIN personas p ON p.channel = w.channel AND p.id = w.personaId
-         WHERE w.channel = ? AND p.displayName = ?`,
+      .exec<{ personaId: string; origin: string; displayName: string }>(
+        `SELECT w.personaId, w.origin, p.displayName FROM webhooks w JOIN personas p ON p.channel = w.channel AND p.id = w.personaId
+         WHERE w.channel = ?`,
         message.channel,
-        message.to,
       )
-      .toArray()[0];
-    if (!hook || message.personaId === hook.personaId || message.username === message.to) return false;
+      .toArray()
+      .find((row) => fold(row.displayName) === to);
+    if (!hook || message.personaId === hook.personaId || fold(message.username) === to) return false;
     const path = `/api/tenants/${message.tenant}/channels/${message.channel}/messages/${message.id}`;
     return this.queueNotice(message.channel, hook.personaId, {
       schema: "msn.webhook.v1",
@@ -1459,7 +1469,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       return json({ webhook: view });
     }
     if (rest.length === 0 && request.method === "PUT") {
-      const target = webhookUrl(input?.url, url.hostname);
+      const target = webhookUrl(input?.url, this.selfHosts(url));
       const secret = newWebhookSecret();
       const replaced = this.ctx.storage.transactionSync(() => {
         const existing = this.ctx.storage.sql
@@ -1538,6 +1548,15 @@ export class MsnDurableObject extends DurableObject<Env> {
       return json({ queued: true, noticeId: id }, 202);
     }
     throw new HttpError(404, "route_not_found", "Unknown webhook operation.");
+  }
+
+  /**
+   * Hosts that reach this app: the request's own host, plus WEBHOOK_SELF_HOSTS (comma-separated,
+   * optional) for its other names, such as its workers.dev address.
+   */
+  private selfHosts(url: URL): string[] {
+    const extra = (this.env as Env & { WEBHOOK_SELF_HOSTS?: string }).WEBHOOK_SELF_HOSTS ?? "";
+    return [url.hostname, ...extra.split(",")].map((host) => host.trim()).filter(Boolean);
   }
 
   /** The tenant slug from a tenant route URL (`/api/tenants/T/…`). */
@@ -4064,6 +4083,10 @@ export class MsnDurableObject extends DurableObject<Env> {
             // The webhook secret was readable with the old owner credential; GitHub deliveries
             // fail until the owner copies the new one (links stay).
             this.ctx.storage.sql.exec("DELETE FROM github_hook");
+            // Persona webhooks (ADR 0062) were set with owner credentials; a leaked owner key could
+            // have pointed one at its own URL to keep learning about new messages. They go too.
+            this.ctx.storage.sql.exec("DELETE FROM webhooks");
+            this.ctx.storage.sql.exec("DELETE FROM webhook_notices");
           });
           this.wakeAllWaiters();
           return json(this.identity(tenant, this.authorize(hash), token));

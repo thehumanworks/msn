@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import type { MsnDurableObject } from "../src/store";
+import { ALARM_FAILURE_BACKOFF_MS, type MsnDurableObject } from "../src/store";
 import {
   MAX_PENDING_NOTICES,
   postNotice,
@@ -113,10 +113,10 @@ const say = (
 
 describe("webhook URLs", () => {
   it("accepts public https hosts only", () => {
-    expect(webhookUrl("https://agent.example.com/wake?x=1", "msn.test")).toBe(
+    expect(webhookUrl("https://agent.example.com/wake?x=1", ["msn.test"])).toBe(
       "https://agent.example.com/wake?x=1",
     );
-    expect(webhookUrl("https://AGENT.example.com:443/w", "msn.test")).toBe("https://agent.example.com/w");
+    expect(webhookUrl("https://AGENT.example.com:443/w", ["msn.test"])).toBe("https://agent.example.com/w");
     const refused: [string, string][] = [
       ["http://agent.example.com/wake", "webhook_https_required"],
       ["ftp://agent.example.com/wake", "webhook_https_required"],
@@ -141,6 +141,12 @@ describe("webhook URLs", () => {
       ["https://[fe80::1]/wake", "webhook_host_refused"],
       ["https://[2001:db8::1]/wake", "webhook_host_refused"],
       ["https://msn.test/api/x", "webhook_host_refused"],
+      ["https://msn.test./api/x", "webhook_host_refused"],
+      ["https://MSN.EXAMPLE.ORG./api/x", "webhook_host_refused"],
+      ["https://msn.someone.workers.dev/api/x", "webhook_host_refused"],
+      ["https://[2002:a00:1::1]/wake", "webhook_host_refused"],
+      ["https://[2001:0:4136:e378::1]/wake", "webhook_host_refused"],
+      ["https://[2001::1]/wake", "webhook_host_refused"],
       ["https://agent.example.com:8443/wake", "webhook_port_refused"],
       ["https://user:pw@agent.example.com/wake", "invalid_webhook"],
       ["https://agent.example.com/wake#frag", "invalid_webhook"],
@@ -150,7 +156,7 @@ describe("webhook URLs", () => {
     for (const [url, code] of refused) {
       let thrown: unknown;
       try {
-        webhookUrl(url, "msn.test");
+        webhookUrl(url, ["msn.test", "msn.example.org"]);
       } catch (error) {
         thrown = error;
       }
@@ -158,6 +164,11 @@ describe("webhook URLs", () => {
     }
     expect(privateHost("8.8.8.8")).toBe(false);
     expect(privateHost("[2606:4700::1111]")).toBe(false);
+    expect(privateHost("[2001:4860:4860::8888]")).toBe(false);
+    // A receiver on someone's own workers.dev Worker is fine.
+    expect(webhookUrl("https://agent.someone.workers.dev/wake", ["msn.test"])).toBe(
+      "https://agent.someone.workers.dev/wake",
+    );
   });
 
   it("signs notices so a receiver can check them, and never follows redirects", async () => {
@@ -311,7 +322,8 @@ describe("persona webhooks", () => {
     expect((await say(f, "to nobody")).status).toBe(201);
     expect((await say(f, "to the lead", { to: "lead" })).status).toBe(201);
     expect((await say(f, "note to self", { to: "reviewer" }, "reviewer")).status).toBe(201);
-    expect((await say(f, "unknown name", { to: "Reviewer" })).status).toBe(201);
+    expect((await say(f, "unknown name", { to: "review" })).status).toBe(201);
+    expect((await say(f, "self, other case", { to: " Reviewer " }, "reviewer")).status).toBe(201);
     expect(await f.waiting()).toBe(0);
     expect(await f.deliver()).toBe(0);
     expect(f.sent).toHaveLength(0);
@@ -333,6 +345,64 @@ describe("persona webhooks", () => {
     await vi.waitFor(() => expect(f.sent).toHaveLength(1));
     expect(await f.deliver()).toBe(0);
     expect(f.sent).toHaveLength(1);
+  });
+
+  it("matches the addressed name trimmed and ignoring case", async () => {
+    const f = await fixture();
+    await f.register();
+    expect((await say(f, "case", { to: " Reviewer " })).status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(JSON.parse(f.sent[0].body).persona).toBe("rev");
+  });
+
+  it("an owner key reset removes every webhook and waiting notice", async () => {
+    const f = await fixture();
+    f.answerWith(() => new Response(null, { status: 500 }));
+    await f.register();
+    await say(f, "wake", { to: "reviewer" });
+    await vi.waitFor(async () => expect((await f.hook()).lastDelivery?.status).toBe("retrying"));
+    const reset = await exports.default.fetch(`https://msn.test/api/admin/tenants/${f.tenant}/token`, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-admin-secret-000000000000000000000" },
+    });
+    expect(reset.status).toBe(200);
+    const { token } = await reset.json<{ token: string }>();
+    expect(await f.waiting()).toBe(0);
+    const list = await (await call(f.tenant, "/channels/work/webhooks", token)).json<{ webhooks: Hook[] }>();
+    expect(list.webhooks).toEqual([]);
+  });
+
+  it("an alarm run in which a job throws waits before the next run", async () => {
+    const f = await fixture();
+    f.answerWith(() => new Response(null, { status: 500 }));
+    await f.register();
+    await say(f, "wake", { to: "reviewer" });
+    await vi.waitFor(async () => expect((await f.hook()).lastDelivery?.status).toBe("retrying"));
+    const next = await runInDurableObject(f.stub, async (instance: MsnDurableObject, state) => {
+      state.storage.sql.exec("UPDATE webhook_notices SET nextAttemptMs = 0");
+      instance.sendDueNotices = async () => {
+        throw new Error("boom");
+      };
+      const before = Date.now();
+      await instance.alarm();
+      return { before, alarm: await state.storage.getAlarm() };
+    });
+    expect(next.alarm).not.toBeNull();
+    expect((next.alarm as number) - next.before).toBeGreaterThanOrEqual(ALARM_FAILURE_BACKOFF_MS - 50);
+  });
+
+  it("setting, testing or removing a webhook on an archived board is refused until unarchived", async () => {
+    const f = await fixture();
+    await f.register();
+    expect((await call(f.tenant, "/channels/work/archive", f.owner, "PUT")).status).toBe(200);
+    const path = "/channels/work/personas/rev/webhook";
+    for (const [method, suffix, input] of [
+      ["PUT", "", { url: "https://agent.example.com/x" }],
+      ["POST", "/test", undefined],
+      ["DELETE", "", undefined],
+    ] as const)
+      expect((await call(f.tenant, path + suffix, f.owner, method, input)).status, method).toBe(409);
+    expect((await call(f.tenant, path, f.owner)).status).toBe(200);
   });
 
   it("retries failures with backoff, records the outcome, and gives up after five attempts", async () => {

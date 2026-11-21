@@ -23,6 +23,9 @@ export const SIGNATURE_HEADER = "MSN-Webhook-Signature";
 export const TIMESTAMP_HEADER = "MSN-Webhook-Timestamp";
 export const ID_HEADER = "MSN-Webhook-Id";
 
+/** This Worker's own workers.dev address (the Worker is named "msn" in wrangler.jsonc). */
+const OWN_WORKERS_DEV = /^msn\.[a-z0-9-]+\.workers\.dev$/;
+
 /** Host names that never point at the public internet. */
 const PRIVATE_SUFFIXES = [
   ".localhost",
@@ -61,19 +64,22 @@ function privateIpv4(host: string): boolean | null {
 }
 
 /**
- * IPv6 literals: only global unicast (2000::/3) outside documentation space is allowed. That
- * refuses loopback (::1), unspecified (::), IPv4-mapped (::ffff:…), unique local (fc00::/7),
- * link-local (fe80::/10) and multicast (ff00::/8).
+ * IPv6 literals: only global unicast (2000::/3) outside documentation, 6to4 and Teredo space is
+ * allowed. That refuses loopback (::1), unspecified (::), IPv4-mapped (::ffff:…), unique local
+ * (fc00::/7), link-local (fe80::/10) and multicast (ff00::/8).
  */
 function privateIpv6(host: string): boolean | null {
   if (!host.startsWith("[")) return null;
   const inner = host.slice(1, -1).toLowerCase();
-  const first = inner.split(":")[0];
-  if (!first) return true;
+  const [first, second] = inner.split(":");
+  if (!first || first.length > 4) return true;
   const word = Number.parseInt(first, 16);
-  if (!Number.isFinite(word) || first.length > 4) return true;
-  if (word < 0x2000 || word > 0x3fff) return true;
-  return inner.startsWith("2001:db8:") || inner.startsWith("2001:0db8:");
+  if (!Number.isFinite(word) || word < 0x2000 || word > 0x3fff) return true;
+  // 6to4 (2002::/16) and Teredo (2001::/32) embed IPv4 addresses that may be private.
+  if (word === 0x2002) return true;
+  if (word === 0x2001 && (!second || Number.parseInt(second, 16) === 0)) return true;
+  // Documentation space.
+  return word === 0x2001 && Number.parseInt(second, 16) === 0xdb8;
 }
 
 /** True when the URL's host is loopback, private, link-local or otherwise not public. */
@@ -91,7 +97,7 @@ export function privateHost(hostname: string): boolean {
  * Validates an owner-supplied webhook URL. https only, on the default port, with no user name,
  * password or fragment, and a public host that is not this server. Returns the normalized URL.
  */
-export function webhookUrl(value: unknown, selfHost: string): string {
+export function webhookUrl(value: unknown, selfHosts: string[]): string {
   if (typeof value !== "string" || !value.trim() || value.length > MAX_WEBHOOK_URL)
     throw new HttpError(
       400,
@@ -119,7 +125,13 @@ export function webhookUrl(value: unknown, selfHost: string): string {
       "Use the default https port (443); other ports are refused.",
     );
   if (url.hash) throw new HttpError(400, "invalid_webhook", "Remove the #fragment from the URL.");
-  if (privateHost(url.hostname) || url.hostname.toLowerCase() === selfHost.toLowerCase())
+  // A trailing dot names the same host ("msn.example.com." is "msn.example.com").
+  const bare = (host: string) => host.toLowerCase().replace(/\.+$/, "");
+  if (
+    privateHost(url.hostname) ||
+    selfHosts.some((host) => bare(host) === bare(url.hostname)) ||
+    OWN_WORKERS_DEV.test(bare(url.hostname))
+  )
     throw new HttpError(
       400,
       "webhook_host_refused",
