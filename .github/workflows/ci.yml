@@ -114,6 +114,7 @@ jobs:
       - run: bun run test:resume
       - run: bun run test:thread
       - run: bun run test:wait-all
+      - run: bun run test:repeat
 
   # Releases the Worker from GitHub, never from a personal computer.
   # Pull requests: bundle and validate the Worker with a dry run (no credentials).
