@@ -41,6 +41,8 @@ export type SendMessageInput = {
   to?: string;
   replyTo?: number;
   correlationId?: string;
+  /** The choice a reply picks from its replyTo question (ADR 0065). */
+  answer?: string;
 };
 
 export type SendMessageResult = { message: Message; replayed: boolean };
@@ -153,6 +155,25 @@ export class ApiClient {
       { signal },
     );
     return { message: decodeMessage(r?.message), historyRevision: r.historyRevision };
+  }
+
+  /**
+   * Answers question `question` with `choice` as `username` (ADR 0065): a reply whose text and
+   * answer are the choice. Only the question's `to` name may answer, and only once.
+   */
+  async answer(
+    channel: string,
+    question: number,
+    input: { username: string; choice: string },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<SendMessageResult> {
+    return this.sendMessage(
+      channel,
+      { username: input.username, text: input.choice, replyTo: question, answer: input.choice },
+      idempotencyKey,
+      signal,
+    );
   }
 
   /** The owner's active board mutes (ADR 0044). Owner keys only; others get 403. */

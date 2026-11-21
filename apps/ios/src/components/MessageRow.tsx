@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, View } from "react-native";
 import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
 import { REACTION_KINDS, type Message, type ReactionKind } from "../core/types.ts";
+import { choiceMode, choiceNote } from "../core/questions.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
@@ -44,6 +45,8 @@ type Props = {
   onReact?: (message: Message, kind: ReactionKind) => void;
   /** Opens the editor on this message (ADR 0052); only passed for your own, writable messages. */
   onEditMessage?: (message: Message) => void;
+  /** Answers a question (ADR 0065); absent where nothing can be posted (archived boards, search). */
+  onAnswer?: (message: Message, choice: string) => void;
 };
 
 // The body's font size is 16; React Native's default line is about 1.2 times that.
@@ -99,6 +102,7 @@ function MessageRowImpl({
   me,
   onReact,
   onEditMessage,
+  onAnswer,
 }: Props) {
   const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
   const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
@@ -113,6 +117,9 @@ function MessageRowImpl({
   const spoken = tree ? plainText(tree) : message.text;
   const links = tree ? linksOf(tree).slice(0, 5) : [];
   const who = own ? "You" : message.username;
+  // A question's buttons (ADR 0065): open only for the addressed name, locked once answered.
+  const choices = message.choices && message.choices.length >= 2 ? message.choices : null;
+  const mode = choices ? choiceMode(message, me, onAnswer !== undefined) : null;
   const canLoadParent =
     message.replyTo !== undefined &&
     onLoadParent !== undefined &&
@@ -124,7 +131,9 @@ function MessageRowImpl({
       accessibilityRole="button"
       accessibilityLabel={`${who}${message.to ? ` to ${message.to}` : ""} at ${formatTime(message.createdAt)}: ${
         task ? `task ${task.body.action} ${task.body.task}` : preview(spoken)
-      }${message.editedAt ? ", edited" : ""}${summary ? `. Reactions: ${summary}` : ""}`}
+      }${message.editedAt ? ", edited" : ""}${
+        choices && mode ? `. Choices: ${choices.join(", ")}. ${choiceNote(message, mode)}` : ""
+      }${summary ? `. Reactions: ${summary}` : ""}`}
       accessibilityHint={`${replyable ? "Double tap to reply. " : ""}Swipe up or down for more actions.`}
       // VoiceOver reads the row as one element, so its inner controls are offered as actions.
       accessibilityActions={[
@@ -136,6 +145,9 @@ function MessageRowImpl({
         ...(canLoadParent ? [{ name: "loadParent", label: `Load message #${message.replyTo}` }] : []),
         ...(onShareLink ? [{ name: "shareLink", label: "Copy or share link" }] : []),
         ...(onEditMessage ? [{ name: "editMessage", label: "Edit" }] : []),
+        ...(choices && mode === "open"
+          ? choices.map((choice, index) => ({ name: `answer${index}`, label: `Answer ${choice}` }))
+          : []),
         ...(onReact
           ? REACTION_KINDS.map((kind) => ({
               name: `react_${kind}`,
@@ -152,7 +164,10 @@ function MessageRowImpl({
           onLoadParent?.(message.replyTo);
         else if (nativeEvent.actionName === "shareLink") onShareLink?.(message);
         else if (nativeEvent.actionName === "editMessage") onEditMessage?.(message);
-        else if (nativeEvent.actionName.startsWith("react_"))
+        else if (nativeEvent.actionName.startsWith("answer") && choices && mode === "open") {
+          const choice = choices[Number(nativeEvent.actionName.slice("answer".length))];
+          if (choice !== undefined) onAnswer?.(message, choice);
+        } else if (nativeEvent.actionName.startsWith("react_"))
           onReact?.(message, nativeEvent.actionName.slice("react_".length) as ReactionKind);
         else if (nativeEvent.actionName.startsWith("openLink")) {
           const link = links[Number(nativeEvent.actionName.slice("openLink".length))];
@@ -248,6 +263,27 @@ function MessageRowImpl({
           <Text style={styles.foldText}>{foldLabel}</Text>
         </Pressable>
       ) : null}
+      {choices && mode ? (
+        <View style={styles.choices}>
+          {choices.map((choice) => {
+            const chosen = mode === "answered" && message.answered?.choice === choice;
+            return (
+              <Pressable
+                key={choice}
+                accessibilityRole="button"
+                accessibilityLabel={`Answer ${choice}`}
+                accessibilityState={{ selected: chosen, disabled: mode !== "open" }}
+                disabled={mode !== "open"}
+                onPress={() => onAnswer?.(message, choice)}
+                style={[styles.choice, mode === "open" && styles.choiceOpen, chosen && styles.choiceChosen]}
+              >
+                <Text style={[styles.choiceText, chosen && { color: colors.accent, fontWeight: "700" }]}>{choice}</Text>
+              </Pressable>
+            );
+          })}
+          <Text style={styles.choiceNote}>{choiceNote(message, mode)}</Text>
+        </View>
+      ) : null}
       {reacted.length || onReact ? (
         <View style={styles.reactions}>
           {REACTION_KINDS.map((kind) => {
@@ -333,6 +369,21 @@ const styles = StyleSheet.create({
   foldText: { color: colors.accent, fontSize: 14, fontWeight: "600" },
   receipts: { color: colors.muted, fontSize: 12 },
   reactions: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs },
+  choices: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: spacing.sm },
+  choice: {
+    minHeight: 44,
+    minWidth: 64,
+    paddingHorizontal: spacing.md,
+    justifyContent: "center",
+    alignItems: "center",
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  choiceOpen: { borderColor: colors.accent },
+  choiceChosen: { borderColor: colors.accent, borderWidth: 2 },
+  choiceText: { fontSize: 15 },
+  choiceNote: { color: colors.muted, fontSize: 12 },
   chip: {
     minHeight: 32,
     minWidth: 40,
