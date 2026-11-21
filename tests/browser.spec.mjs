@@ -2449,6 +2449,160 @@ test("the Agents list shows which board personas are listening and when each las
   expect((await poll).status()).toBe(200);
 });
 
+test("the Tasks list shows the board's tasks like msn task list, and links to their messages (ADR 0067)", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request);
+  expect((await request.put(`${t.path}/channels/work`, { headers: t.headers })).status()).toBe(201);
+  const post = async (username, body, contentType = "application/json") => {
+    const response = await request.post(`${t.path}/channels/work/messages`, {
+      headers: t.headers,
+      data: {
+        username,
+        contentType,
+        text: contentType === "application/json" ? JSON.stringify({ schema: "msn.task.v1", ...body }) : body,
+      },
+    });
+    expect(response.status()).toBe(201);
+    return (await response.json()).message.id;
+  };
+  await post("alice", {
+    task: "spec",
+    action: "open",
+    title: "Write the spec",
+    reviewer: "bob",
+    acceptance: "spec.md is merged",
+  });
+  await post("carol", { task: "spec", action: "claim" });
+  const evidence = await post("carol", "spec.md is up for review", "text/plain");
+  await post("carol", { task: "spec", action: "ready", evidence: [evidence] });
+  await post("alice", {
+    task: "build",
+    action: "open",
+    title: "Build it",
+    reviewer: "bob",
+    dependsOn: ["spec"],
+  });
+  await post("alice", {
+    task: "deploy",
+    action: "open",
+    title: "Deploy it",
+    reviewer: "bob",
+    dependsOn: ["build"],
+  });
+  await post("alice", { task: "docs", action: "open", title: "Write the docs", reviewer: "bob" });
+  await post("dave", { task: "docs", action: "claim" });
+  await post("erin", { task: "docs", action: "claim" });
+  await post("alice", { task: "tests", action: "open", title: "Add tests", reviewer: "bob", owner: "carol" });
+  await post("alice", { task: "review", action: "open", title: "Review the plan", reviewer: "bob" });
+  await post("dave", { task: "review", action: "claim" });
+  await post("dave", { task: "review", action: "ready", evidence: [evidence] });
+  await post("alice", { task: "old", action: "open", title: "Old idea", reviewer: "bob" });
+  await post("alice", { task: "old", action: "cancel", reason: "not needed" });
+  await post("bob", { task: "spec", action: "close" });
+  // A task message that breaks the rules is skipped and counted, never shown as a task.
+  await post("mallory", { task: "build", action: "close" });
+
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#tasks").click();
+  await expect(page.locator("#tasks-title")).toHaveText("Tasks in # work");
+  const sections = page.locator("#tasks-list .task-section h3");
+  await expect(sections).toHaveText([
+    "Needs a look · 1",
+    "Ready for review · 1",
+    "Blocked · 1",
+    "Claimed · 1",
+    "Open · 1",
+    "Closed · 2",
+  ]);
+  await expect(page.locator("#tasks-state")).toContainText("7 tasks");
+  await expect(page.locator("#tasks-state")).toContainText(
+    "Skipped 1 message that was deleted or broke the task rules",
+  );
+  const card = (id) => page.locator(`#tasks-list .task[data-task="${id}"]`);
+  await expect(card("docs")).toContainText("Needs a look: claimed by more than one person.");
+  await expect(card("docs")).toContainText("Owner nobody yet");
+  await expect(card("tests").locator(".task-chip")).toHaveText("Claimed");
+  await expect(card("tests")).toContainText("Owner carol · Reviewer bob · Opened by alice");
+  await expect(card("deploy").locator(".task-chip")).toHaveText("Blocked");
+  await expect(card("old")).toContainText("Cancelled: not needed");
+  await expect(card("old").locator(".task-chip")).toHaveText("Cancelled");
+  await expect(card("spec").locator(".task-chip")).toHaveText("Closed");
+  await expect(card("build").getByRole("button", { name: "Show spec: closed" })).toHaveText("spec · done");
+  await card("spec").getByText("Done when").click();
+  await expect(card("spec")).toContainText("spec.md is merged");
+  // A dependency button shows that task's card.
+  await card("deploy").getByRole("button", { name: "Show build: not closed cleanly yet" }).click();
+  await expect(card("build")).toHaveClass(/flash/);
+  if (testInfo.project.name === "mobile") {
+    const small = await page
+      .locator("#tasks-dialog")
+      .evaluate((dialog) =>
+        [...dialog.querySelectorAll("button, summary")]
+          .filter((el) => el.getBoundingClientRect().height && el.getBoundingClientRect().height < 43.5)
+          .map((el) => el.textContent),
+      );
+    expect(small).toEqual([]);
+  }
+  await card("deploy").scrollIntoViewIfNeeded();
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.screenshot({ path: testInfo.outputPath("tasks-dark.png") });
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.screenshot({ path: testInfo.outputPath("tasks-light.png") });
+  await page.emulateMedia({ colorScheme: "dark" });
+
+  // A new task event while the list is open reads the board again.
+  await post("dave", { task: "build", action: "claim" });
+  await expect(card("build").locator(".task-chip")).toHaveText("Claimed", { timeout: 15000 });
+  await expect(sections).toHaveText([
+    "Needs a look · 1",
+    "Ready for review · 1",
+    "Blocked · 1",
+    "Claimed · 2",
+    "Closed · 2",
+  ]);
+  // The evidence button closes the list and shows that message in the board.
+  await card("spec")
+    .getByRole("button", { name: `Show message #${evidence}, evidence for spec` })
+    .click();
+  await expect(page.locator("#tasks-dialog")).not.toBeVisible();
+  await expect(page.locator(`#messages [data-id="${evidence}"]`)).toHaveClass(/flash/);
+  await expect(page.locator(`#messages [data-id="${evidence}"]`)).toBeInViewport();
+});
+
+test("a board without tasks says so, and one whose history changes mid-read asks to try again (ADR 0067)", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request, { username: "human" });
+  await request.put(`${t.path}/channels/quiet`, { headers: t.headers });
+  await request.post(`${t.path}/channels/quiet/messages`, {
+    headers: t.headers,
+    data: { username: "human", text: "hello" },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "quiet");
+  await page.locator("#tasks").click();
+  await expect(page.locator("#tasks-state")).toHaveText("No tasks on #quiet yet. Read 1 message up to #1.");
+  await expect(page.locator("#tasks-list .task")).toHaveCount(0);
+  // Every catchup read reports a new history revision, as if a message were deleted meanwhile.
+  let revision = 0;
+  await page.route("**/channels/quiet/catchup?*", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, historyRevision: ++revision } });
+  });
+  await page.locator("#tasks-refresh").click();
+  await expect(page.locator("#tasks-state")).toHaveText(
+    "#quiet history changed while reading its tasks. Try again.",
+  );
+  await expect(page.locator("#tasks-state")).toHaveClass(/error/);
+  await page.locator("#close-tasks").click();
+  await expect(page.locator("#tasks-dialog")).not.toBeVisible();
+});
+
 test("each agent's status shows on the board and in Agents with its age, as plain text (ADR 0064)", async ({
   page,
   request,

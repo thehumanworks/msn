@@ -231,6 +231,8 @@ enum Action {
     Quote(u64),
     /// Show the message a quote came from, loading it when it is not loaded (ADR 0059).
     ShowQuoted(u64),
+    /// Show a task's message in Chat, from the Tasks tab (ADR 0067).
+    ShowTaskMessage(u64),
     /// Add (`false`) or remove (`true`) your reaction of one kind on a message (ADR 0047).
     React(u64, &'static str, bool),
     /// Answer question (id) with a choice (ADR 0065).
@@ -1630,9 +1632,19 @@ impl MsnDesktopApp {
                 format!("{warnings} projection warning(s) in history"),
             );
         }
+        let known: Vec<&str> = tasks
+            .iter()
+            .filter_map(|task| task["id"].as_str())
+            .collect();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for task in tasks {
-                render_task(ui, task, actions);
+            for (title, section) in task_sections(tasks) {
+                ui.add_space(6.0);
+                ui.strong(format!("{title} · {}", section.len()));
+                for task in section {
+                    let id = task["id"].as_str().unwrap_or("?");
+                    // An explicit id per task, so equal-looking buttons in two cards never clash.
+                    ui.push_id(("task", id), |ui| render_task(ui, task, &known, actions));
+                }
             }
         });
         for (key, pending) in &self.state.pending_task_events {
@@ -2019,6 +2031,10 @@ impl MsnDesktopApp {
             Action::CancelEdit => self.editing = None,
             Action::Reply(id) => self.reply_to(id),
             Action::Quote(id) => self.quote_message(id),
+            Action::ShowTaskMessage(id) => {
+                self.active_tab = Tab::Chat;
+                self.perform(Action::ShowQuoted(id));
+            }
             Action::ShowQuoted(id) => {
                 let loaded = self
                     .state
@@ -3544,47 +3560,188 @@ fn summarize_json(text: &str) -> String {
     }
 }
 
-fn render_task(ui: &mut egui::Ui, task: &Value, actions: &mut Vec<Action>) {
+/// The Tasks tab's sections (ADR 0067), in the order they show; the web list uses the same ones.
+const TASK_SECTIONS: [&str; 6] = [
+    "Needs a look",
+    "Ready for review",
+    "Blocked",
+    "Claimed",
+    "Open",
+    "Closed",
+];
+
+fn task_section(task: &Value) -> usize {
+    let claimed = task["owner"].is_string();
+    match task["state"].as_str().unwrap_or("") {
+        "ready" => 1,
+        "blocked" => 2,
+        "open" if claimed => 3,
+        "open" => 4,
+        "closed" | "cancelled" => 5,
+        _ => 0,
+    }
+}
+
+/// The non-empty sections with their tasks, each sorted by id.
+fn task_sections(tasks: &[Value]) -> Vec<(&'static str, Vec<&Value>)> {
+    let mut sorted: Vec<&Value> = tasks.iter().collect();
+    sorted.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    TASK_SECTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            let members = sorted
+                .iter()
+                .copied()
+                .filter(|task| task_section(task) == index)
+                .collect::<Vec<_>>();
+            (*title, members)
+        })
+        .filter(|(_, members)| !members.is_empty())
+        .collect()
+}
+
+fn task_state_text(task: &Value) -> &'static str {
+    match task["state"].as_str().unwrap_or("") {
+        "open" if task["owner"].is_string() => "Claimed",
+        "open" => "Open",
+        "ready" => "Ready for review",
+        "blocked" => "Blocked",
+        "closed" => "Closed",
+        "cancelled" => "Cancelled",
+        "conflict" => "Conflict",
+        _ => "Unknown",
+    }
+}
+
+fn conflict_text(code: &str) -> &str {
+    match code {
+        "duplicate-open" => "opened more than once",
+        "claim-conflict" => "claimed by more than one person",
+        "dependency-cycle" => "its dependencies form a loop",
+        "dependency-missing" => "depends on a task that was never opened",
+        "unsatisfied-dependencies" => "finished before its dependencies were closed",
+        "orphan-evidence" => "its evidence message was deleted",
+        other => other,
+    }
+}
+
+fn render_task(ui: &mut egui::Ui, task: &Value, known: &[&str], actions: &mut Vec<Action>) {
     let id = task["id"].as_str().unwrap_or("?");
     let state = task["state"].as_str().unwrap_or("?");
-    let asserted = task["assertedState"].as_str().unwrap_or(state);
+    let strs = |key: &str| -> Vec<&str> {
+        task[key]
+            .as_array()
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    };
+    let ids = |key: &str| -> Vec<u64> {
+        task[key]
+            .as_array()
+            .map(|items| items.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default()
+    };
     theme::card().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            ui.strong(format!("{id}: {}", task["title"].as_str().unwrap_or("")));
-            ui.label(format!("[{state}]"));
-            if state != asserted {
-                ui.weak(format!("(asserted {asserted})"));
-            }
+            ui.strong(task["title"].as_str().unwrap_or(""));
+            let chip = egui::RichText::new(task_state_text(task)).small();
+            let chip = match state {
+                "ready" => chip.color(theme::accent()),
+                "blocked" | "conflict" | "unknown" => chip.color(theme::error()),
+                _ => chip.color(theme::muted()),
+            };
+            ui.label(chip);
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "owner: {}",
-                task["owner"].as_str().unwrap_or("unassigned")
-            ));
-            ui.label(format!(
-                "reviewer: {}",
-                task["reviewer"].as_str().unwrap_or("?")
-            ));
-        });
-        if let Some(blocked) = task["blockedOn"].as_array().filter(|b| !b.is_empty()) {
-            let names: Vec<&str> = blocked.iter().filter_map(Value::as_str).collect();
-            ui.colored_label(theme::warn(), format!("blocked on: {}", names.join(", ")));
-        }
-        if let Some(conflicts) = task["conflicts"].as_array().filter(|c| !c.is_empty()) {
-            let names: Vec<&str> = conflicts.iter().filter_map(Value::as_str).collect();
-            ui.colored_label(theme::warn(), format!("conflicts: {}", names.join(", ")));
-        }
-        if let Some(evidence) = task["evidence"].as_array().filter(|e| !e.is_empty()) {
-            let ids: Vec<String> = evidence
-                .iter()
-                .filter_map(Value::as_u64)
-                .map(|n| format!("#{n}"))
-                .collect();
-            ui.label(format!("evidence: {}", ids.join(", ")));
-        }
+        ui.label(
+            egui::RichText::new(id)
+                .monospace()
+                .small()
+                .color(theme::muted()),
+        );
+        ui.label(
+            egui::RichText::new(format!(
+                "Owner {} · Reviewer {} · Opened by {}",
+                task["owner"].as_str().unwrap_or("nobody yet"),
+                task["reviewer"].as_str().unwrap_or("?"),
+                task["creator"].as_str().unwrap_or("?"),
+            ))
+            .small()
+            .color(theme::muted()),
+        );
         if let Some(reason) = task["reason"].as_str() {
-            ui.label(format!("reason: {reason}"));
+            let label = match task["assertedState"].as_str() {
+                Some("blocked") => "Blocked",
+                Some("cancelled") => "Cancelled",
+                _ => "Note",
+            };
+            ui.label(format!("{label}: {reason}"));
+        }
+        let conflicts = strs("conflicts");
+        if !conflicts.is_empty() {
+            let words: Vec<&str> = conflicts.iter().map(|code| conflict_text(code)).collect();
+            ui.colored_label(
+                theme::error(),
+                format!("Needs a look: {}.", words.join("; ")),
+            );
+        }
+        let depends_on = strs("dependsOn");
+        if !depends_on.is_empty() {
+            let blocked_on = strs("blockedOn");
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Depends on");
+                for dep in depends_on {
+                    let text = if !known.contains(&dep) {
+                        format!("{dep} · missing")
+                    } else if blocked_on.contains(&dep) {
+                        format!("{dep} · waiting")
+                    } else {
+                        format!("{dep} · done")
+                    };
+                    ui.label(egui::RichText::new(text).monospace().small());
+                }
+            });
+        }
+        if let Some(acceptance) = task["acceptance"].as_str() {
+            egui::CollapsingHeader::new("Done when")
+                .id_salt(("acceptance", id))
+                .show(ui, |ui| {
+                    ui.label(acceptance);
+                });
+        }
+        for (label, key, color) in [
+            ("Messages", "messageIds", None),
+            ("Evidence", "evidence", Some(theme::accent())),
+        ] {
+            let list = ids(key);
+            if list.is_empty() {
+                continue;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(label);
+                for message in list {
+                    let text = egui::RichText::new(format!("#{message}"))
+                        .monospace()
+                        .small();
+                    let text = match color {
+                        Some(color) => text.color(color),
+                        None => text,
+                    };
+                    let rect = ui
+                        .add(egui::Label::new(text).sense(egui::Sense::hover()))
+                        .rect;
+                    // Task ids are unique on a board, so this id is too; tests find the link by it.
+                    let link_id = egui::Id::new(("task-link", id, key, message));
+                    let link = ui.interact(rect, link_id, egui::Sense::click());
+                    if link
+                        .on_hover_text(format!("Show message #{message} in Chat"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        actions.push(Action::ShowTaskMessage(message));
+                    }
+                }
+            });
         }
         if matches!(state, "open") && ui.button("Claim").clicked() {
             actions.push(Action::Claim(id.to_string()));
@@ -4615,5 +4772,135 @@ mod choice_tests {
             output.textures_delta.clear();
         }
         assert!(actions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod task_tab_tests {
+    use super::layout_tests::fixture;
+    use super::*;
+
+    fn event(id: u64, username: &str, body: Value) -> Value {
+        let mut body = body;
+        body["schema"] = json!("msn.task.v1");
+        json!({"id": id, "username": username, "contentType": "application/json", "text": body.to_string()})
+    }
+
+    fn board() -> Value {
+        msn_cli::tasks::project(&[
+            event(
+                1,
+                "alice",
+                json!({"task":"spec","action":"open","title":"Spec","reviewer":"bob"}),
+            ),
+            event(2, "carol", json!({"task":"spec","action":"claim"})),
+            event(
+                3,
+                "alice",
+                json!({"task":"build","action":"open","title":"Build","reviewer":"bob","dependsOn":["spec"]}),
+            ),
+            event(
+                4,
+                "alice",
+                json!({"task":"docs","action":"open","title":"Docs","reviewer":"bob"}),
+            ),
+            event(
+                5,
+                "alice",
+                json!({"task":"old","action":"open","title":"Old","reviewer":"bob"}),
+            ),
+            event(
+                6,
+                "alice",
+                json!({"task":"old","action":"cancel","reason":"not needed"}),
+            ),
+            event(7, "dave", json!({"task":"docs","action":"claim"})),
+            event(8, "erin", json!({"task":"docs","action":"claim"})),
+        ])
+    }
+
+    #[test]
+    fn tasks_group_into_the_same_sections_as_the_web_list() {
+        let board = board();
+        let sections: Vec<(&str, Vec<&str>)> = task_sections(board["tasks"].as_array().unwrap())
+            .into_iter()
+            .map(|(title, tasks)| {
+                (
+                    title,
+                    tasks.iter().map(|t| t["id"].as_str().unwrap()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            vec![
+                ("Needs a look", vec!["docs"]),
+                ("Blocked", vec!["build"]),
+                ("Claimed", vec!["spec"]),
+                ("Closed", vec!["old"]),
+            ]
+        );
+        let tasks = board["tasks"].as_array().unwrap();
+        assert_eq!(task_state_text(&tasks[0]), "Claimed");
+        assert_eq!(
+            conflict_text("claim-conflict"),
+            "claimed by more than one person"
+        );
+    }
+
+    #[test]
+    fn a_task_message_opens_chat_scrolled_to_it() {
+        let mut app = fixture(8);
+        app.active_tab = Tab::Tasks;
+        app.perform(Action::ShowTaskMessage(6));
+        assert!(app.active_tab == Tab::Chat);
+        assert_eq!(app.scroll_to, Some(6));
+        assert_eq!(app.selected, Some(6));
+    }
+
+    #[test]
+    fn the_tasks_tab_draws_every_section_without_id_clashes() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = fixture(8);
+        app.active_tab = Tab::Tasks;
+        app.state.channel.as_mut().unwrap().task_board = Some(board());
+        for _ in 0..2 {
+            let mut actions = Vec::new();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.tasks_tab(ui, &mut actions)
+            });
+            output.textures_delta.clear();
+            assert!(actions.is_empty());
+        }
+        // Click spec's #2 (its claim): the tab asks to show that message.
+        let rect = ctx
+            .read_response(egui::Id::new(("task-link", "spec", "messageIds", 2u64)))
+            .expect("spec lists its claim message")
+            .rect;
+        let mut actions = Vec::new();
+        for event in [
+            egui::Event::PointerMoved(rect.center()),
+            egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos: rect.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ] {
+            let input = egui::RawInput {
+                events: vec![event],
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.tasks_tab(ui, &mut actions));
+            output.textures_delta.clear();
+        }
+        assert!(matches!(actions.as_slice(), [Action::ShowTaskMessage(2)]));
     }
 }

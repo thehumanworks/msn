@@ -2193,3 +2193,136 @@ nav button.has-unread .channel-name {
 #schedule-submit {
   min-height: 44px;
 }
+/* The board's tasks (ADR 0067): sections of task cards, read only. */
+.tasks-dialog {
+  width: min(560px, calc(100vw - 32px - var(--safe-left) - var(--safe-right)));
+}
+.tasks-state {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.tasks-state.error {
+  color: var(--error);
+}
+.tasks {
+  display: grid;
+  gap: 16px;
+  margin-top: 12px;
+}
+#tasks-dialog .task-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+#tasks-dialog .task-section ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+#tasks-dialog .task {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  scroll-margin: 12px;
+}
+#tasks-dialog .task.flash {
+  border-color: var(--accent);
+}
+.task-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.task-head strong {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.task-chip {
+  flex: none;
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.task-chip[data-state="ready"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.task-chip[data-state="open"].claimed {
+  color: var(--presence);
+  border-color: color-mix(in srgb, var(--presence) 50%, transparent);
+}
+.task-chip[data-state="blocked"],
+.task-chip[data-state="conflict"],
+.task-chip[data-state="unknown"] {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 50%, transparent);
+}
+#tasks-dialog .task small,
+#tasks-dialog .task p {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+#tasks-dialog .task .task-id {
+  font-family: var(--mono);
+}
+#tasks-dialog .task .task-problem {
+  color: var(--error);
+  font-size: 13px;
+}
+#tasks-dialog .task details {
+  font-size: 13px;
+}
+#tasks-dialog .task details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+#tasks-dialog .task details p {
+  white-space: pre-wrap;
+  color: var(--text);
+}
+#tasks-dialog .task-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+#tasks-dialog .task-links button {
+  border-color: var(--line);
+  font: 12px var(--mono);
+  padding: 4px 6px;
+  min-height: 28px;
+}
+#tasks-dialog .task-links .evidence {
+  color: var(--accent);
+}
+.tasks-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+@media (pointer: coarse) {
+  #tasks-dialog .task-links button,
+  #tasks-dialog .tasks-actions button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  #tasks-dialog .task details summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}

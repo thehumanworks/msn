@@ -9,6 +9,7 @@ import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } 
 import { quoteOf, quotePreview } from "./quote.js";
 import { localInput, presets, SCHEDULED_REFRESH_MS, sendAtFrom, summary, whenText } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
+import { conflictText, groupTasks, scanTasks, stateText } from "./tasks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -313,10 +314,12 @@ function endSession(connection, message, { stopPush = false } = {}) {
     "send",
     "attach",
     "invite-channel",
+    "tasks",
     "search",
     "search-submit",
   ])
     $(id).disabled = true;
+  if ($("tasks-dialog").open) $("tasks-dialog").close();
   clearSearch();
   $("notify").hidden = true;
   $("workspace").hidden = true;
@@ -2056,6 +2059,7 @@ function render(messages, state) {
   // A reply target kept across a reload (ADR 0057) gets its author's name once its row loads.
   if (added && session?.channels.get(channel) === state && session.drafts.get(channel)?.replyTo != null)
     showReplyTo(draft());
+  if (added) tasksChanged(messages, state);
   trimCache();
 }
 
@@ -2162,6 +2166,7 @@ function selectChannel(name, { reset = false } = {}) {
   $("invite-channel").disabled = false;
   $("board-settings").disabled = false;
   $("agents").disabled = false;
+  $("tasks").disabled = false;
   $("download").disabled = false;
   showMute(name);
   $("search").disabled = false;
@@ -3597,6 +3602,198 @@ $("agents-dialog").addEventListener("close", () => {
   agentsTimer = null;
 });
 $("close-agents").addEventListener("click", () => $("agents-dialog").close());
+
+// The board's tasks (ADR 0067). Read only: the page reads the whole history like `msn task list`
+// and works the board out with the same reducer (public/tasks.js). It never posts a task event.
+let tasksChannel = null;
+let tasksRun = 0;
+let tasksTimer = null;
+function tasksState(text, error = false) {
+  $("tasks-state").textContent = text;
+  $("tasks-state").classList.toggle("error", error);
+}
+async function showTasks() {
+  const connection = session;
+  const target = tasksChannel;
+  if (!connection || !target) return;
+  clearTimeout(tasksTimer);
+  const run = ++tasksRun;
+  const current = () =>
+    run === tasksRun && session === connection && tasksChannel === target && $("tasks-dialog").open;
+  $("tasks-refresh").disabled = true;
+  tasksState(`Reading #${target}…`);
+  try {
+    const board = await scanTasks((path) => api(path, {}, connection), {
+      tenant: connection.tenant,
+      channel: target,
+      current,
+      progress: (count) => current() && tasksState(`Reading #${target} · ${count} messages so far`),
+    });
+    if (board && current()) renderTasks(board, target);
+  } catch (error) {
+    if (current()) tasksState(error.message, true);
+  } finally {
+    if (run === tasksRun) $("tasks-refresh").disabled = false;
+  }
+}
+function plural(count, one, many = `${one}s`) {
+  return `${count} ${count === 1 ? one : many}`;
+}
+function renderTasks(board, target) {
+  const list = $("tasks-list");
+  list.replaceChildren();
+  const read = `Read ${plural(board.messages, "message")} up to #${board.headCursor}.`;
+  const skipped = board.warnings.length
+    ? ` Skipped ${board.warnings.length === 1 ? "1 message that was" : `${board.warnings.length} messages that were`} deleted or broke the task rules; msn task list ${target} says why.`
+    : "";
+  if (!board.tasks.length) {
+    tasksState(`No tasks on #${target} yet. ${read}${skipped}`);
+    return;
+  }
+  tasksState(`${plural(board.tasks.length, "task")}. ${read}${skipped}`);
+  for (const section of groupTasks(board.tasks)) {
+    const box = document.createElement("section");
+    box.className = "task-section";
+    box.dataset.section = section.key;
+    const title = document.createElement("h3");
+    title.textContent = `${section.title} · ${section.tasks.length}`;
+    const items = document.createElement("ul");
+    for (const task of section.tasks) items.append(taskCard(task, target, board));
+    box.append(title, items);
+    list.append(box);
+  }
+}
+function linkRow(label, ids, className, onClick, describe) {
+  const row = document.createElement("div");
+  row.className = "task-links";
+  const name = document.createElement("small");
+  name.textContent = label;
+  row.append(name);
+  for (const id of ids) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `quiet ${className}`;
+    const { text, title, disabled = false } = describe(id);
+    button.textContent = text;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.disabled = disabled;
+    button.addEventListener("click", () => onClick(id));
+    row.append(button);
+  }
+  return row;
+}
+const REASON_LABEL = { blocked: "Blocked", cancelled: "Cancelled" };
+function taskCard(task, target, board) {
+  const card = document.createElement("li");
+  card.className = "task";
+  card.dataset.task = task.id;
+  // Untrusted content: textContent only.
+  const head = document.createElement("div");
+  head.className = "task-head";
+  const title = document.createElement("strong");
+  title.textContent = task.title;
+  const chip = document.createElement("span");
+  chip.className = "task-chip";
+  chip.dataset.state = task.state;
+  chip.classList.toggle("claimed", task.state === "open" && task.owner !== null);
+  chip.textContent = stateText(task);
+  head.append(title, chip);
+  const id = document.createElement("small");
+  id.className = "task-id";
+  id.textContent = task.id;
+  const people = document.createElement("small");
+  people.textContent = `Owner ${task.owner ?? "nobody yet"} · Reviewer ${task.reviewer} · Opened by ${task.creator}`;
+  card.append(head, id, people);
+  if (task.reason) {
+    const reason = document.createElement("p");
+    reason.className = "task-reason";
+    reason.textContent = `${REASON_LABEL[task.assertedState] ?? "Note"}: ${task.reason}`;
+    card.append(reason);
+  }
+  if (task.conflicts.length) {
+    const problem = document.createElement("p");
+    problem.className = "task-problem";
+    problem.textContent = `Needs a look: ${task.conflicts.map(conflictText).join("; ")}.`;
+    card.append(problem);
+  }
+  if (task.dependsOn.length) {
+    const known = new Set(board.tasks.map((item) => item.id));
+    card.append(
+      linkRow("Depends on", task.dependsOn, "task-dep", focusTask, (dep) => {
+        const waiting = task.blockedOn.includes(dep);
+        if (!known.has(dep))
+          return { text: `${dep} · missing`, title: `${dep} was never opened`, disabled: true };
+        return {
+          text: `${dep} · ${waiting ? "waiting" : "done"}`,
+          title: waiting ? `Show ${dep}: not closed cleanly yet` : `Show ${dep}: closed`,
+        };
+      }),
+    );
+  }
+  if (task.acceptance) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Done when";
+    const text = document.createElement("p");
+    text.textContent = task.acceptance;
+    details.append(summary, text);
+    card.append(details);
+  }
+  const open = (message) => {
+    $("tasks-dialog").close();
+    void openLink({ channel: target, id: message });
+  };
+  card.append(
+    linkRow("Messages", task.messageIds, "task-message", open, (message) => ({
+      text: `#${message}`,
+      title: `Show message #${message}, a ${task.id} task event`,
+    })),
+  );
+  if (task.evidence.length)
+    card.append(
+      linkRow("Evidence", task.evidence, "evidence", open, (message) => ({
+        text: `#${message}`,
+        title: `Show message #${message}, evidence for ${task.id}`,
+      })),
+    );
+  return card;
+}
+function focusTask(id) {
+  const card = $("tasks-list").querySelector(`[data-task="${CSS.escape(id)}"]`);
+  if (!card) return;
+  card.scrollIntoView({ block: "nearest" });
+  card.classList.remove("flash");
+  void card.offsetWidth;
+  card.classList.add("flash");
+  card.querySelector("button")?.focus({ preventScroll: true });
+}
+const SCHEMA_TAG = "msn.task.v1";
+/** A task event arrived on the open board while its list shows: read it again, once. */
+function tasksChanged(messages, state) {
+  if (!$("tasks-dialog").open || session?.channels.get(tasksChannel) !== state) return;
+  if (
+    !messages.some(
+      (message) => message.contentType === "application/json" && message.text?.includes(SCHEMA_TAG),
+    )
+  )
+    return;
+  clearTimeout(tasksTimer);
+  tasksTimer = setTimeout(showTasks, 800);
+}
+$("tasks").addEventListener("click", () => {
+  tasksChannel = channel;
+  $("tasks-list").replaceChildren();
+  $("tasks-title").textContent = `Tasks in # ${channel}`;
+  $("tasks-dialog").showModal();
+  void showTasks();
+});
+$("tasks-refresh").addEventListener("click", () => void showTasks());
+$("close-tasks").addEventListener("click", () => $("tasks-dialog").close());
+$("tasks-dialog").addEventListener("close", () => {
+  clearTimeout(tasksTimer);
+  tasksRun++;
+});
 
 // Wake an agent with a webhook (ADR 0062): the owner sets, tests and removes a persona's webhook.
 // The bearer key goes to the server on Save and is never shown or kept by the page.
