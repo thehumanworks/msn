@@ -174,14 +174,9 @@ export const MAX_CHOICES = 6;
 export const MAX_CHOICE_BYTES = 128;
 
 /**
- * Characters a choice may not hold (ADR 0065), the same set as an agent status (ADR 0064):
- * controls (newlines, tabs), line and paragraph separators, the Arabic letter mark, embeddings,
- * overrides and isolates, which could reorder the text around a button, and invisible ones
- * (zero-width space, word joiner, byte order mark). Joiners and direction marks stay allowed.
+ * One choice or answer: a string, trimmed, non-blank, one line of plain text (the characters an
+ * agent status refuses are refused here too, ADR 0064), at most 128 UTF-8 bytes.
  */
-export const CHOICE_FORBIDDEN = /[\p{Cc}\p{Zl}\p{Zp}\u061C\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/u;
-
-/** One choice or answer: a string, trimmed, non-blank, one line of plain text, ≤128 bytes. */
 function choiceText(value: unknown, field: string, code: string): string {
   if (typeof value !== "string") throw new HttpError(400, code, `${field} must be text.`);
   const trimmed = value.trim();
@@ -191,7 +186,7 @@ function choiceText(value: unknown, field: string, code: string): string {
       code,
       `${field} must be non-blank text, at most ${MAX_CHOICE_BYTES} UTF-8 bytes.`,
     );
-  if (CHOICE_FORBIDDEN.test(trimmed))
+  if (STATUS_FORBIDDEN.test(trimmed))
     throw new HttpError(
       400,
       code,
@@ -658,6 +653,49 @@ export function messageEdit(input: Record<string, unknown>): MessageEdit {
     edit.ifEditedAt = base;
   }
   return edit;
+}
+
+/** Longest agent status (ADR 0064), in Unicode code points. */
+export const MAX_STATUS_CHARS = 80;
+
+/**
+ * `PUT …/channels/:channel/status` body (ADR 0064): the name the status belongs to and its text.
+ * `text: null` clears it. The text is trimmed, one line, at most 80 code points.
+ */
+export type StatusChange = { username: string; text: string | null };
+
+export function statusChange(input: Record<string, unknown>): StatusChange {
+  for (const field of Object.keys(input))
+    if (!["username", "text"].includes(field))
+      throw new HttpError(400, "invalid_status", `Unknown field ${field}; use username and text.`);
+  return { username: text(input.username, "username", 128), text: statusText(input.text) };
+}
+
+/**
+ * Characters a status may not hold (ADR 0064): controls (newlines, tabs), line and paragraph
+ * separators, the Arabic letter mark, embeddings, overrides and isolates, which could reorder the name or
+ * time beside the status, and invisible ones (zero-width space, word joiner, byte order mark).
+ * Zero-width joiner and non-joiner, and the left-to-right and right-to-left marks, stay allowed:
+ * emoji sequences, some scripts and mixed right-to-left text need them.
+ */
+export const STATUS_FORBIDDEN = /[\p{Cc}\p{Zl}\p{Zp}\u061C\u202A-\u202E\u2066-\u2069\u200B\u2060\uFEFF]/u;
+
+/** A status text, or null to clear. Control characters (newlines, tabs) are refused. */
+export function statusText(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string")
+    throw new HttpError(400, "invalid_status", "text must be a string, or null to clear the status.");
+  const trimmed = value.trim();
+  if (!trimmed) throw new HttpError(400, "invalid_status", "text must not be blank; send null to clear.");
+  if (STATUS_FORBIDDEN.test(trimmed))
+    throw new HttpError(
+      400,
+      "invalid_status",
+      "A status is one line of plain text: no newlines, tabs, control, direction or invisible characters.",
+    );
+  if ([...trimmed].length > MAX_STATUS_CHARS)
+    throw new HttpError(400, "invalid_status", `A status is at most ${MAX_STATUS_CHARS} characters.`);
+  return trimmed;
 }
 
 /** The latest a message can be scheduled, from now (ADR 0060). */

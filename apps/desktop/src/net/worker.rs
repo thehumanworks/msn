@@ -89,6 +89,12 @@ pub enum Command {
         channel_generation: u64,
         channel: String,
     },
+    /// What each name on the open board says it is doing (ADR 0064).
+    LoadStatuses {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+    },
     /// The open board's personas, for @ suggestions (ADR 0055).
     LoadPersonas {
         generation: u64,
@@ -238,6 +244,7 @@ impl Command {
             | Command::SyncChannel { generation, .. }
             | Command::LoadSnapshots { generation, .. }
             | Command::LoadReceipts { generation, .. }
+            | Command::LoadStatuses { generation, .. }
             | Command::LoadPersonas { generation, .. }
             | Command::LoadReactions { generation, .. }
             | Command::React { generation, .. }
@@ -349,6 +356,13 @@ pub enum UiEvent {
         channel_generation: u64,
         channel: String,
         receipts: Vec<msn_cli::receipts::Receipt>,
+    },
+    /// The open board's agent statuses (ADR 0064), newest first.
+    Statuses {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        statuses: Vec<msn_cli::status::Status>,
     },
     /// The open board's personas as (name, listening) (ADR 0055); empty on a plain channel.
     Personas {
@@ -815,6 +829,32 @@ fn handle_command(
                     channel,
                     personas: result.unwrap_or_default(),
                 },
+            ),
+        },
+        Command::LoadStatuses {
+            channel_generation,
+            channel,
+            ..
+        } => match client_ops::fetch_statuses(&cc.client, &cc.tenant, &cc.token, &channel) {
+            Ok(statuses) => emit(
+                tx,
+                wake,
+                UiEvent::Statuses {
+                    generation,
+                    channel_generation,
+                    channel,
+                    statuses,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "statuses",
+                err,
+                true,
+                None,
             ),
         },
         Command::LoadReactions {
@@ -1395,6 +1435,7 @@ fn spawn_events_subscription(
                     events::EVENTS_PAGE_LIMIT,
                     wait,
                     None,
+                    ready,
                 ) {
                     Ok(page) => {
                         if marker.load(Ordering::SeqCst) != generation {

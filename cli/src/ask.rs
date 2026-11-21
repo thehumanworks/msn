@@ -5,38 +5,22 @@
 use serde_json::{Value, json};
 
 use crate::error::CliError;
+use crate::status;
 
 pub const MIN_CHOICES: usize = 2;
 pub const MAX_CHOICES: usize = 6;
 pub const MAX_CHOICE_BYTES: usize = 128;
 
-/// Characters a choice or answer may not hold, as on the server (ADR 0065, the same set as an
-/// agent status): controls, line and paragraph separators, the Arabic letter mark, embeddings,
-/// overrides and isolates, and invisible ones. Joiners and direction marks stay allowed.
-pub fn forbidden_char(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{2028}'
-                | '\u{2029}'
-                | '\u{061C}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{200B}'
-                | '\u{2060}'
-                | '\u{FEFF}'
-        )
-}
-
 /// One choice or answer, trimmed: non-blank, one line of plain text, at most 128 UTF-8 bytes.
 fn choice_text(value: &str, what: &str) -> Result<String, CliError> {
-    let trimmed = value.trim();
+    // Trimmed and checked like an agent status (ADR 0064), as the server does.
+    let trimmed = status::js_trim(value);
     if trimmed.is_empty() || trimmed.len() > MAX_CHOICE_BYTES {
         return Err(CliError::usage(format!(
             "{what} must be non-blank and at most {MAX_CHOICE_BYTES} UTF-8 bytes."
         )));
     }
-    if trimmed.chars().any(forbidden_char) {
+    if trimmed.chars().any(status::forbidden) {
         return Err(CliError::usage(format!(
             "{what} must be one line of plain text: no newlines, tabs, control, direction or invisible characters."
         )));
@@ -73,7 +57,7 @@ pub fn validate_answer(choice: &str) -> Result<String, CliError> {
 /// Whether `username` is the name a question is addressed to: exactly, or trimmed and ignoring
 /// case, as the server matches it (ADR 0065).
 pub fn addressed_to(username: &str, to: &str) -> bool {
-    username == to || username.trim().to_lowercase() == to.trim().to_lowercase()
+    username == to || status::js_trim(username).to_lowercase() == status::js_trim(to).to_lowercase()
 }
 
 /// The POST body of a question.
@@ -203,6 +187,9 @@ mod tests {
             );
         }
         assert!(validate_choices(&strings(&["yes", "👨\u{200D}💻"])).is_ok());
+        // Trimmed as JavaScript trims: U+FEFF goes, U+0085 stays and is refused, as on the server.
+        assert_eq!(validate_answer("\u{feff}yes").unwrap(), "yes");
+        assert!(validate_answer("yes\u{85}").is_err());
         assert_eq!(validate_answer(" yes ").unwrap(), "yes");
         assert!(validate_answer("y\u{200B}es").is_err());
     }

@@ -231,6 +231,7 @@ impl Server {
                     "react" => self.react(args),
                     "edit_message" => self.edit_message(args),
                     "reactions" => self.reactions(args),
+                    "status" => self.status(args),
                     "find" => self.find(args),
                     "search" => self.search(args),
                     "wait_label" => self.wait_label(args),
@@ -670,6 +671,43 @@ impl Server {
             &[],
             &crate::reactions::body(&username, kind, remove),
         )?;
+        classify(response.status, &response.body)?;
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?)
+    }
+
+    /// Sets, clears or lists agent status (ADR 0064). Setting and clearing act as this session's
+    /// name; with neither `text` nor `clear` it lists every status on the board.
+    fn status(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let clear = match args.get("clear") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(clear)) => *clear,
+            Some(_) => return Err(CliError::usage("clear must be true or false.").into()),
+        };
+        let text = match args.get("text") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(crate::status::parse_text(text)?),
+            Some(_) => return Err(CliError::usage("text must be a string.").into()),
+        };
+        if clear && text.is_some() {
+            return Err(
+                CliError::usage("Pass text to set a status, or clear: true, not both.").into(),
+            );
+        }
+        let client = MsnClient::new(&self.url)?;
+        let response = if text.is_none() && !clear {
+            client.get(&crate::status::list_path(&tenant, &channel), Some(&token))?
+        } else {
+            let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+            client.send_optional_json(
+                "PUT",
+                &crate::status::set_path(&tenant, &channel),
+                &token,
+                Some(&crate::status::body(&username, text.as_deref())),
+            )?
+        };
         classify(response.status, &response.body)?;
         Ok(serde_json::from_str(&response.body)
             .map_err(|_| CliError::generic("Response was not JSON."))?)
@@ -1294,6 +1332,17 @@ pub fn tools() -> Vec<Value> {
             (true, true),
         ),
         tool(
+            "status",
+            "Set or read agent status",
+            "Say in one short line what you are doing now, such as \"running tests on PR 54\"; people and agents see it beside your name with the time you set it. It stays until you change it or pass clear: true, so clear or update it when you stop or move on. At most 80 characters, one line. Sends no message. With neither text nor clear, lists every name's status on the board (name, text, setAt).",
+            json!({
+                "text": {"type":"string","minLength":1,"description":"Your new status: one line, at most 80 characters after trimming."},
+                "clear": {"type":"boolean","description":"Remove your status."},
+            }),
+            &[],
+            (false, true),
+        ),
+        tool(
             "find",
             "Find labeled messages",
             "List messages whose current labels match every filter, oldest first. A filter is key (any value), key=value, or key=a|b (either value). Continue with after=nextCursor while hasMore is true.",
@@ -1503,6 +1552,7 @@ mod tests {
                 "react",
                 "edit_message",
                 "reactions",
+                "status",
                 "find",
                 "search",
                 "wait_label",

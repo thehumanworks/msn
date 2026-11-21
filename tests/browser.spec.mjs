@@ -2245,6 +2245,15 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
     headers: t.headers,
     data: { username: "agent", text: "Ship it?", to: "Tomas", choices: ["yes", "no"] },
   });
+  // An agent status strip (ADR 0064) with its summary.
+  expect(
+    (
+      await request.put(`${t.path}/channels/general/status`, {
+        headers: t.headers,
+        data: { username: "agent", text: "checking touch targets" },
+      })
+    ).status(),
+  ).toBe(200);
   const small = () =>
     page.evaluate(() => {
       const out = [];
@@ -2270,6 +2279,7 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
   await expect(page.locator(".message")).toHaveCount(4);
   await expect(page.locator(".label-chip")).toHaveCount(1);
   await expect(page.locator(".choice-button")).toHaveCount(2);
+  await expect(page.locator("#statuses")).toBeVisible();
   expect(await small()).toEqual([]);
   // An open thread with a quoted reply, and a composer replying with a quote (ADR 0059).
   await page.locator(".thread-toggle").first().click();
@@ -2395,6 +2405,69 @@ test("the Agents list shows which board personas are listening and when each las
     data: { username: "builder", text: "wake" },
   });
   expect((await poll).status()).toBe(200);
+});
+
+test("each agent's status shows on the board and in Agents with its age, as plain text (ADR 0064)", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.setTimeout(90_000);
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship agent status" },
+      })
+    ).status(),
+  ).toBe(201);
+  const shared = { Authorization: `Bearer ${credential}` };
+  for (const name of ["builder", "reviewer"])
+    await request.put(`${t.path}/channels/work/personas/${name}`, {
+      headers: shared,
+      data: { displayName: name },
+    });
+  const say = (username, text) =>
+    request.put(`${t.path}/channels/work/status`, { headers: shared, data: { username, text } });
+  expect((await say("builder", "running tests on PR 54")).status()).toBe(200);
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: shared,
+    data: { username: "reviewer", text: "Looking now" },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const strip = page.locator("#statuses");
+  await expect(strip).toBeVisible();
+  await expect(page.locator("#statuses-title")).toHaveText("Agent status · 1");
+  const row = page.locator("#statuses-list li");
+  await expect(row).toHaveCount(1);
+  await expect(row.locator("strong")).toHaveText("builder");
+  await expect(row.locator(".status-text")).toHaveText("running tests on PR 54");
+  await expect(row.locator("time")).toHaveText("just now");
+  // Silence is never a status: the reviewer posted but said nothing about what it is doing.
+  await expect(strip).not.toContainText("reviewer");
+  // Markup in a status is shown as text, never parsed.
+  expect((await say("reviewer", "<img src=x onerror=alert(1)> reviewing")).status()).toBe(200);
+  // Returning to the page reads statuses at once, so the check does not wait on the 15 s timer.
+  const refresh = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await refresh();
+  await expect(page.locator("#statuses-list li")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator("#statuses-list")).toContainText("<img src=x onerror=alert(1)> reviewing");
+  expect(await page.locator("#statuses-list img").count()).toBe(0);
+  await page.screenshot({ path: testInfo.outputPath("status-strip.png") });
+  await page.locator("#agents").click();
+  const rows = page.locator("#agents-list li");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).locator(".agents-status .status-text")).toHaveText("running tests on PR 54");
+  await expect(rows.nth(1).locator(".agents-status")).toContainText("just now");
+  await page.screenshot({ path: testInfo.outputPath("status-agents.png") });
+  await page.locator("#close-agents").click();
+  // Clearing removes the line; with none left, the strip hides.
+  await say("builder", null);
+  await say("reviewer", null);
+  await refresh();
+  await expect(strip).toBeHidden({ timeout: 30_000 });
 });
 
 test("the owner sets a persona's wake-up webhook in Agents; the secret shows once (ADR 0062)", async ({
@@ -4431,6 +4504,7 @@ test("the Invite dialog's curl commands join, read and send with plain curl", as
   expect(stdout).toContain('"reader":"my-agent","name":"my-agent"');
   expect(stdout).toContain("Ship the curl quickstart");
   expect(stdout).toContain('"username":"my-agent","text":"hello"');
+  expect(stdout).toContain('"name":"my-agent","text":"reading the board"');
   await expect(page.locator("#messages")).toContainText("hello");
   // A workspace invitation's script redeems a key of its own and runs as a whole; a watch-only
   // one cannot send, so it has none.
@@ -4448,6 +4522,7 @@ test("the Invite dialog's curl commands join, read and send with plain curl", as
       .replace("MSN_NAME='my-agent'", "MSN_NAME='invited'"),
   );
   expect(joined.stdout).toContain('"username":"invited","text":"hello"');
+  expect(joined.stdout).toContain('"name":"invited","text":"reading the board"');
   expect(joined.stdout).not.toMatch(/"token"/);
   await page.locator("#close-invite").click();
   await page.locator("#invite-workspace").click();

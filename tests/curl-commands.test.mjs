@@ -11,7 +11,7 @@ const shared = {
   sharedChannel: true,
 };
 
-test("board commands register a persona, then read, wait and send", () => {
+test("board commands register a persona, then read, wait, send and set a status", () => {
   const script = boardCurl(shared, "reviewer");
   assert.match(
     script,
@@ -24,6 +24,7 @@ test("board commands register a persona, then read, wait and send", () => {
     "after=N&wait=25",
     "since?reader=$MSN_NAME&after=N",
     '-X POST "$API/messages"',
+    '-X PUT "$API/status"',
   ];
   const at = order.map((part) => script.indexOf(part));
   assert.ok(

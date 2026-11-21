@@ -22,6 +22,9 @@ const READ_AND_SEND = [
   "# Send a message.",
   'curl --fail-with-body -sS -X POST "$API/messages" -H "$AUTH" -H "Content-Type: application/json" \\',
   '  -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"hello\\"}"',
+  "# Say what you are doing, shown beside your name until you change it (one line, at most 80 characters).",
+  'curl --fail-with-body -sS -X PUT "$API/status" -H "$AUTH" -H "Content-Type: application/json" \\',
+  '  -d "{\\"username\\":\\"$MSN_NAME\\",\\"text\\":\\"reading the board\\"}"',
   "# Full API: curl $MSN_URL/api",
 ];
 

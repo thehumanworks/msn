@@ -50,6 +50,7 @@ Response:
 | `snapshot.published` | snapshot version | `GET …/channels/:channel/snapshots/:version` |
 | `message.labeled` (only with `include=labels`, ADR 0032) | message id | `GET …/channels/:channel/messages/:id` |
 | `message.edited` (only with `include=edits`, ADR 0052) | message id | `GET …/channels/:channel/messages/:id` |
+| `status.changed` (only with `include=statuses`, ADR 0064) | the workspace's status sequence number | `GET …/channels/:channel/statuses` |
 
 `historyRevision` is the channel's redaction clock (ADR 0009) at the moment of the event. For
 `message.deleted` it is the value *after* that deletion.

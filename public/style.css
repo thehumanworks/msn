@@ -918,7 +918,7 @@ nav .empty {
 }
 /* While the keyboard is up and the person is writing, the board's chrome yields to the
    conversation: the header and the composer stay, the toolbar strip and panels step aside. */
-.keyboard-open .pane-chat:has(.compose :focus) :is(.toolbar, search, .pins, .checkpoint, .since) {
+.keyboard-open .pane-chat:has(.compose :focus) :is(.toolbar, search, .pins, .statuses, .checkpoint, .since) {
   display: none;
 }
 /* With the keyboard up, the home indicator is covered: its safe-area padding is empty space. */
@@ -1330,6 +1330,57 @@ body > footer {
 .message-meta .pin-toggle {
   padding: 0 4px;
   min-height: 0;
+}
+
+/* Agent status (ADR 0064): what each name says it is doing, beside the name, with its age. */
+.statuses {
+  padding: 6px 14px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  font-size: 12px;
+  flex-shrink: 0;
+  max-height: 25%;
+  overflow-y: auto;
+}
+.statuses summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+}
+.statuses ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  padding: 2px 0;
+}
+.status-row strong {
+  overflow-wrap: anywhere;
+}
+.status-row .status-text {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.status-row .status-text::before {
+  content: "“";
+}
+.status-row .status-text::after {
+  content: "”";
+}
+.status-row time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.agents .agents-status {
+  grid-column: 2;
+  margin-top: 4px;
+  padding: 0;
 }
 
 /* Watch-only keys (ADR 0039) cannot post, invite or change a board; the server refuses it anyway. */
@@ -1944,7 +1995,8 @@ nav button.has-unread .channel-name {
     width: 44px;
     min-height: 44px;
   }
-  .access-details summary {
+  .access-details summary,
+  .statuses summary {
     display: flex;
     align-items: center;
     min-height: 44px;

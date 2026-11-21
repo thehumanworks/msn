@@ -144,6 +144,7 @@ try {
       "react",
       "edit_message",
       "reactions",
+      "status",
       "find",
       "search",
       "wait_label",
@@ -420,6 +421,24 @@ try {
   await cli(["--profile", "reviewer", "unreact", "work", String(task.message.id), "yes"]);
   const badKind = await labeler.tool("react", { id: task.message.id, kind: "heart" });
   assert.equal(badKind.isError, true);
+  // Agent status (ADR 0064): the MCP tool and the CLI set their own name's status; no message.
+  const said = await labeler.ok("status", { text: "running tests on PR 54" });
+  assert.equal(said.changed, true);
+  assert.equal(said.status.name, "lead");
+  assert.equal(said.status.text, "running tests on PR 54");
+  const saidByCli = await cli(["--profile", "reviewer", "status", "work", "reviewing the deploy"]);
+  assert.equal(saidByCli.status.name, "reviewer");
+  const statuses = await labeler.ok("status", {});
+  assert.deepEqual(statuses.statuses.map((s) => [s.name, s.text]).sort(), [
+    ["lead", "running tests on PR 54"],
+    ["reviewer", "reviewing the deploy"],
+  ]);
+  const byCliStatuses = await cli(["--profile", "lead", "status", "work"]);
+  assert.equal(byCliStatuses.statuses.length, 2);
+  assert.equal((await labeler.ok("status", { clear: true })).status, null);
+  assert.equal((await cli(["--profile", "reviewer", "status", "work", "--clear"])).changed, true);
+  assert.equal((await labeler.tool("status", { text: "x".repeat(81) })).isError, true);
+  assert.deepEqual((await labeler.ok("status", {})).statuses, []);
   // Edits (ADR 0052): the sender fixes its message over MCP and the CLI; another name cannot.
   // A reviewer processes everything first, so the edit lands on a message it already handled.
   const editReader = mcp("reviewer");

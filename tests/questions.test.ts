@@ -277,14 +277,15 @@ describe("ask a question with buttons (ADR 0065)", () => {
       ["yes", "n\u200Bo"],
       ["yes", "n\u2028o"],
       ["yes", "n\uFEFFo"],
+      ["yes", "no\u0085"],
     ]) {
       const response = await f.post({ text: "Q?", to: "tomas", choices });
       expect(response.status, JSON.stringify(choices)).toBe(400);
       expect(((await response.json()) as ErrorBody).error.code).toBe("invalid_choices");
     }
-    // Surrounding spaces go; joiners inside an emoji stay.
-    const question = await f.send({ text: "Q?", to: "tomas", choices: ["  yes ", "👍🏽", "👨\u200D💻"] });
-    expect(question.choices).toEqual(["yes", "👍🏽", "👨\u200D💻"]);
+    // Surrounding spaces and a leading byte order mark go; joiners inside an emoji stay.
+    const question = await f.send({ text: "Q?", to: "tomas", choices: ["  yes ", "👍🏽", "👨\u200D💻", "\uFEFFok"] });
+    expect(question.choices).toEqual(["yes", "👍🏽", "👨\u200D💻", "ok"]);
     const bad = await f.post({ username: "tomas", replyTo: question.id, answer: "y\u200Bes" });
     expect(bad.status).toBe(400);
     const reply = await f.send({ username: "tomas", replyTo: question.id, answer: " yes " });

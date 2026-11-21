@@ -11,7 +11,7 @@ export const TEST_TOKEN = "a".repeat(64);
 export const SCOPED_TOKEN = "b".repeat(64);
 const SCOPED_CHANNEL = "scoped";
 
-type EventType = "channel.created" | "message.created" | "message.deleted" | "snapshot.published";
+type EventType = "channel.created" | "message.created" | "message.deleted" | "snapshot.published" | "status.changed";
 export type MockEvent = {
   id: number;
   tenant: string;
@@ -68,6 +68,8 @@ export type MockServerHandle = {
   editText: (id: number, text: string) => void;
   /** Reactions by message id (ADR 0047). Like the Worker, reacting sends no message or event. */
   reactions: Map<number, Record<string, string[]>>;
+  /** Set (or with null clear) a name's status (ADR 0064); emits status.changed like the Worker. */
+  setStatus: (channel: string, name: string, text: string | null) => void;
   /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
   setPin: (id: number, pinned: boolean) => void;
   /** Make the token stop working, waking any pending event poll (like rotation/revocation). */
@@ -106,6 +108,8 @@ export async function startMockServer(): Promise<MockServerHandle> {
   const events: MockEvent[] = [];
   const snapshots: StoredSnapshot[] = [];
   const pins = new Set<number>();
+  const statuses = new Map<string, Map<string, { text: string; setAt: string; seq: number }>>();
+  let statusSeq = 0;
   const reactions = new Map<number, Record<string, string[]>>();
   let edits = 0;
   const scheduled: Array<Record<string, unknown>> = [];
@@ -427,6 +431,12 @@ export async function startMockServer(): Promise<MockServerHandle> {
         else reactions.delete(id);
         return json(res, 200, { message: toMessage(message), changed: true });
       }
+      if (rest[2] === "statuses" && rest.length === 3 && method === "GET") {
+        const rows = [...(statuses.get(channel) ?? new Map()).entries()]
+          .map(([name, value]) => ({ name, ...value }))
+          .sort((a, b) => b.seq - a.seq);
+        return json(res, 200, { channel, statuses: rows, statusSeq });
+      }
       if (rest[2] === "pins" && rest.length === 3 && method === "GET") {
         return json(res, 200, { pins: pinnedRows(channel), limit: 10 });
       }
@@ -521,7 +531,15 @@ export async function startMockServer(): Promise<MockServerHandle> {
       const after = Number(url.searchParams.get("after") ?? "0");
       const limit = Number(url.searchParams.get("limit") ?? "100");
       const wait = Number(url.searchParams.get("wait") ?? "0");
-      const page = () => events.filter((e) => e.id > after && (!effective || e.channel === effective));
+      // Like the Worker, status.changed is only listed for include=statuses (ADR 0064).
+      const statusesToo = url.searchParams.getAll("include").some((v) => v.split(",").includes("statuses"));
+      const page = () =>
+        events.filter(
+          (e) =>
+            e.id > after &&
+            (!effective || e.channel === effective) &&
+            (statusesToo || e.type !== "status.changed"),
+        );
       const respond = () => {
         if (!validTokens.has(auth)) {
           return json(res, 401, { error: { code: "unauthorized", message: "Unknown tenant or invalid access key." } });
@@ -559,6 +577,14 @@ export async function startMockServer(): Promise<MockServerHandle> {
     requests,
     reactions,
     editText: (id, text) => editText(id, text),
+    setStatus: (channel, name, text) => {
+      statusSeq += 1;
+      const board = statuses.get(channel) ?? new Map();
+      if (text === null) board.delete(name);
+      else board.set(name, { text, setAt: new Date().toISOString(), seq: statusSeq });
+      statuses.set(channel, board);
+      appendEvent(channel, "status.changed", statusSeq);
+    },
     scheduled,
     deliverScheduled: () => {
       for (const row of scheduled.splice(0))
