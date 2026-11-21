@@ -2512,7 +2512,7 @@ test("each agent's status shows on the board and in Agents with its age, as plai
   await expect(strip).toBeHidden({ timeout: 30_000 });
 });
 
-test("the owner sets a persona's wake-up webhook in Agents; the secret shows once (ADR 0062)", async ({
+test("the owner sets a persona's wake-up webhook in Agents; the bearer key never comes back (ADR 0062)", async ({
   page,
   request,
 }, testInfo) => {
@@ -2538,43 +2538,43 @@ test("the owner sets a persona's wake-up webhook in Agents; the secret shows onc
   await page.locator("#webhook-url").fill("https://127.0.0.1/wake");
   await page.locator("#webhook-save").click();
   await expect(page.locator("#webhook-state")).toContainText("must point at a public host");
-  await expect(page.locator("#webhook-secret-row")).toBeHidden();
+  // A receiver that checks a bearer key: the key goes to the server and leaves the page.
+  const key = "receiver-key-0123456789";
   await page.locator("#webhook-url").fill("https://agent.example.com/wake");
+  await page.locator("#webhook-bearer").fill(key);
   await page.locator("#webhook-save").click();
-  await expect(page.locator("#webhook-state")).toHaveText(
-    "Saved. Copy the secret now: it is not shown again.",
-  );
-  await expect(page.locator("#webhook-secret")).toHaveText(/^whsec_[0-9a-f]{64}$/);
-  const secret = await page.locator("#webhook-secret").textContent();
+  await expect(page.locator("#webhook-state")).toHaveText("Saved. Sent with a bearer key.");
+  await expect(page.locator("#webhook-bearer")).toHaveValue("");
+  await expect(page.locator("#webhook-bearer-note")).toContainText("A bearer key is saved");
   await expect(page.locator("#webhook-test")).toBeVisible();
-  await expect(page.locator("#webhook-save")).toHaveText("Save and make a new secret");
   if (testInfo.project.name === "mobile")
-    for (const id of [
-      "#webhook-save",
-      "#webhook-test",
-      "#webhook-remove",
-      "#copy-webhook-secret",
-      "#close-webhook",
-    ])
+    for (const id of ["#webhook-save", "#webhook-test", "#webhook-remove", "#close-webhook"])
       expect((await page.locator(id).boundingBox()).height, id).toBeGreaterThanOrEqual(43.5);
-  await page.screenshot({ path: testInfo.outputPath("webhook-secret.png") });
+  await page.screenshot({ path: testInfo.outputPath("webhook-bearer.png") });
   // The Agents list behind the dialog now says where the persona wakes.
   await expect(row).toContainText("Wakes agent.example.com");
   await page.locator("#close-webhook").click();
   await expect(page.locator("#webhook-dialog")).toHaveJSProperty("open", false);
-  // Reopening never shows the secret again, and the server never returns it.
+  // Reopening never shows the key, and the server never returns it.
   await row.getByRole("button", { name: "Webhook for reviewer" }).click();
   await expect(page.locator("#webhook-url")).toHaveValue("https://agent.example.com/wake");
-  await expect(page.locator("#webhook-secret-row")).toBeHidden();
+  await expect(page.locator("#webhook-bearer")).toHaveValue("");
+  await expect(page.locator("#webhook-state")).toContainText("Sent with a bearer key.");
   const read = await (
     await request.get(`${t.path}/channels/work/personas/reviewer/webhook`, { headers: t.headers })
-  ).text();
-  expect(read).not.toContain(secret);
+  ).json();
+  expect(read.webhook).toMatchObject({ bearer: true });
+  expect(JSON.stringify(read)).not.toContain(key);
   // The shared board key cannot read or change it.
   expect((await request.get(`${t.path}/channels/work/webhooks`, { headers: shared })).status()).toBe(403);
   await page.locator("#webhook-test").click();
   await expect(page.locator("#webhook-state")).toContainText("Test notice queued");
   await expect(page.locator("#webhook-state")).toContainText("Wakes agent.example.com", { timeout: 10000 });
+  // Saving again without the key removes it, and the panel says so.
+  await page.locator("#webhook-save").click();
+  await expect(page.locator("#webhook-state")).toHaveText(
+    "Saved. No bearer key: the receiver cannot tell these notices are from this board.",
+  );
   await page.locator("#webhook-remove").click();
   await expect(page.locator("#webhook-state")).toHaveText("Webhook removed. Waiting notices were dropped.");
   await expect(page.locator("#webhook-test")).toBeHidden();

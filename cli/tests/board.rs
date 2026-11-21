@@ -243,7 +243,7 @@ fn persona_webhook_commands_use_the_owner_key_and_webhook_routes() {
     let server = MockServer::spawn(vec![
         Scripted::json(
             201,
-            r#"{"webhook":{"persona":"reviewer","url":"https://agent.example.com/wake"},"secret":"whsec_x"}"#,
+            r#"{"webhook":{"persona":"reviewer","url":"https://agent.example.com/wake","bearer":false}}"#,
         ),
         Scripted::json(200, r#"{"webhook":{"persona":"reviewer"}}"#),
         Scripted::json(200, r#"{"webhooks":[]}"#),
@@ -262,7 +262,7 @@ fn persona_webhook_commands_use_the_owner_key_and_webhook_routes() {
     ];
     let run = |rest: &[&str]| home.run(&[&base[..], rest].concat());
     let made = run(&["set", "work", "reviewer", "https://agent.example.com/wake"]);
-    assert_eq!(made["secret"], "whsec_x");
+    assert_eq!(made["webhook"]["bearer"], false);
     run(&["show", "work", "reviewer"]);
     run(&["list", "work"]);
     assert_eq!(run(&["test", "work", "reviewer"])["queued"], true);
@@ -287,4 +287,72 @@ fn persona_webhook_commands_use_the_owner_key_and_webhook_routes() {
     }
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body, json!({"url": "https://agent.example.com/wake"}));
+}
+
+#[test]
+fn persona_webhook_set_reads_the_bearer_key_from_the_environment() {
+    let home = Home::new();
+    let server = MockServer::spawn(vec![Scripted::json(
+        201,
+        r#"{"webhook":{"persona":"reviewer","bearer":true}}"#,
+    )]);
+    let out = Command::new(env!("CARGO_BIN_EXE_msn"))
+        .env_clear()
+        .env("HOME", &home.0)
+        .env("XDG_CONFIG_HOME", home.0.join("config"))
+        .env("XDG_STATE_HOME", home.0.join("state"))
+        .env("RECEIVER_KEY", "rcv_secret_key_123")
+        .args([
+            "--url",
+            &server.url(),
+            "--tenant",
+            "team",
+            "--token",
+            "owner-secret",
+            "persona",
+            "webhook",
+            "set",
+            "work",
+            "reviewer",
+            "https://agent.example.com/wake",
+            "--bearer-env",
+            "RECEIVER_KEY",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("rcv_secret_key_123"));
+    let body: Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
+    assert_eq!(
+        body,
+        json!({"url": "https://agent.example.com/wake", "bearer": "rcv_secret_key_123"})
+    );
+    // A missing variable is a usage error and sends nothing.
+    let missing = Command::new(env!("CARGO_BIN_EXE_msn"))
+        .env_clear()
+        .env("HOME", &home.0)
+        .args([
+            "--url",
+            &server.url(),
+            "--tenant",
+            "team",
+            "--token",
+            "owner-secret",
+            "persona",
+            "webhook",
+            "set",
+            "work",
+            "reviewer",
+            "https://agent.example.com/wake",
+            "--bearer-env",
+            "NOPE",
+        ])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert_eq!(server.recorded().len(), 1);
 }

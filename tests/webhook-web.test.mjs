@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { failureText, webhookHost, webhookSummary } from "../public/webhook.js";
+import { authText, failureText, webhookHost, webhookSummary } from "../public/webhook.js";
 
 // Wake an agent with a webhook (ADR 0062): the web Agents panel's one-line webhook status.
 
@@ -39,4 +39,10 @@ test("unknown errors and hosts fall back to their raw text", () => {
     "it answered with a redirect, which is not followed",
   );
   assert.equal(webhookHost("not a url"), "not a url");
+});
+
+test("whether notices carry a bearer key reads as words", () => {
+  assert.equal(authText(null), "");
+  assert.equal(authText({ bearer: true }), "Sent with a bearer key.");
+  assert.match(authText({ bearer: false }), /^No bearer key: the receiver cannot tell/);
 });

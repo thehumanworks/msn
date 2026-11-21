@@ -12,7 +12,7 @@ import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from ".
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
-import { webhookSummary } from "./webhook.js";
+import { authText, webhookSummary } from "./webhook.js";
 
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "msn.session";
@@ -3599,24 +3599,26 @@ $("agents-dialog").addEventListener("close", () => {
 $("close-agents").addEventListener("click", () => $("agents-dialog").close());
 
 // Wake an agent with a webhook (ADR 0062): the owner sets, tests and removes a persona's webhook.
-// The signing secret is shown once, right after Save, and never stored by the page.
+// The bearer key goes to the server on Save and is never shown or kept by the page.
 let webhookTarget = null;
 function webhookPath() {
   return `/channels/${webhookTarget.channel}/personas/${encodeURIComponent(webhookTarget.persona.id)}/webhook`;
 }
 function showWebhook(hook) {
   webhookTarget.hook = hook;
-  $("webhook-state").textContent = hook ? webhookSummary(hook) : "No webhook yet.";
+  $("webhook-state").textContent = hook ? `${webhookSummary(hook)}. ${authText(hook)}` : "No webhook yet.";
+  // A save replaces the whole webhook, so a saved bearer key must be entered again to keep it.
+  $("webhook-bearer-note").textContent = hook?.bearer
+    ? "A bearer key is saved. Saving replaces it: paste the key again to keep it, or leave empty to remove it."
+    : "If the receiver wants an Authorization header, paste its key. It is never shown again.";
   $("webhook-test").hidden = !hook;
   $("webhook-remove").hidden = !hook;
-  $("webhook-save").textContent = hook ? "Save and make a new secret" : "Save";
 }
 function openWebhook(target, persona, hook) {
   webhookTarget = { channel: target, persona, hook, connection: session };
   $("webhook-title").textContent = `Wake ${persona.displayName} with a webhook`;
   $("webhook-url").value = hook?.url ?? "";
-  $("webhook-secret").textContent = "";
-  $("webhook-secret-row").hidden = true;
+  $("webhook-bearer").value = "";
   showWebhook(hook);
   $("webhook-dialog").showModal();
 }
@@ -3639,23 +3641,23 @@ $("webhook-form").addEventListener("submit", async (event) => {
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: $("webhook-url").value.trim() }),
+        body: JSON.stringify({
+          url: $("webhook-url").value.trim(),
+          ...($("webhook-bearer").value.trim() ? { bearer: $("webhook-bearer").value.trim() } : {}),
+        }),
       },
       target.connection,
     );
     if (webhookTarget !== target) return;
     showWebhook(made.webhook);
-    $("webhook-secret").textContent = made.secret;
-    $("webhook-secret-row").hidden = false;
-    $("webhook-state").textContent = "Saved. Copy the secret now: it is not shown again.";
+    // The key leaves the page once the server has it.
+    $("webhook-bearer").value = "";
+    $("webhook-state").textContent = `Saved. ${authText(made.webhook)}`;
     if ($("agents-dialog").open) showAgents();
   } catch (error) {
     if (webhookTarget === target) $("webhook-state").textContent = error.message;
   }
 });
-$("copy-webhook-secret").addEventListener("click", () =>
-  copy($("webhook-secret").textContent, "Signing secret copied."),
-);
 $("webhook-test").addEventListener("click", async () => {
   const target = webhookTarget;
   try {
@@ -3678,7 +3680,7 @@ $("webhook-remove").addEventListener("click", async () => {
     await api(webhookPath(), { method: "DELETE" }, target.connection);
     if (webhookTarget !== target) return;
     $("webhook-url").value = "";
-    $("webhook-secret-row").hidden = true;
+    $("webhook-bearer").value = "";
     showWebhook(null);
     $("webhook-state").textContent = "Webhook removed. Waiting notices were dropped.";
     if ($("agents-dialog").open) showAgents();
@@ -3688,9 +3690,8 @@ $("webhook-remove").addEventListener("click", async () => {
 });
 $("close-webhook").addEventListener("click", () => $("webhook-dialog").close());
 $("webhook-dialog").addEventListener("close", () => {
-  // The secret leaves the page with the dialog.
-  $("webhook-secret").textContent = "";
-  $("webhook-secret-row").hidden = true;
+  // A key typed but not saved leaves the page with the dialog.
+  $("webhook-bearer").value = "";
   webhookTarget = null;
 });
 

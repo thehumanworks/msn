@@ -357,13 +357,10 @@ describe("send a message later (ADR 0060)", () => {
     expect((await f.list()).map((s) => s.id)).toEqual([soon.id, next.id, far.id]);
     expect(await f.alarm()).toBe(Date.parse(soon.sendAt));
     await runInDurableObject(f.stub(), (_, state) => {
-      state.storage.sql.exec(
-        "UPDATE scheduled_messages SET dueMs = ? WHERE id IN (?, ?)",
-        Date.now() - 1,
-        soon.id,
-        next.id,
-      );
-      state.storage.sql.exec("UPDATE scheduled_messages SET dueMs = ? WHERE id = ?", Date.now() - 2, next.id);
+      // One clock reading, so "next" is always 1 ms earlier than "soon" (two readings could tie).
+      const now = Date.now();
+      state.storage.sql.exec("UPDATE scheduled_messages SET dueMs = ? WHERE id = ?", now - 1, soon.id);
+      state.storage.sql.exec("UPDATE scheduled_messages SET dueMs = ? WHERE id = ?", now - 2, next.id);
     });
     await runInDurableObject(f.stub(), (_, state) => state.storage.setAlarm(Date.now() + 3600_000));
     await runDurableObjectAlarm(f.stub());

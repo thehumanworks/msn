@@ -1,7 +1,7 @@
 // Wake an agent with a webhook (ADR 0062). The owner registers an https URL for a board persona;
 // when a message is addressed to that persona, the workspace's Durable Object POSTs a small
-// signed notice there. The notice never holds message text or a key: the agent reads the message
-// through the API with its own key. Pure helpers live here; storage and delivery live in store.ts.
+// notice there, with the owner's optional bearer key in Authorization. The notice never holds
+// message text: the agent reads the message through the API with its own key. Pure helpers live here; storage and delivery live in store.ts.
 import { HttpError } from "./http";
 
 /** Longest webhook URL accepted, in characters. */
@@ -19,7 +19,6 @@ export const MAX_WEBHOOKS = 100;
 /** Notices sent per alarm run; the alarm runs again at once while more are due. */
 export const WEBHOOK_BATCH = 20;
 
-export const SIGNATURE_HEADER = "MSN-Webhook-Signature";
 export const TIMESTAMP_HEADER = "MSN-Webhook-Timestamp";
 export const ID_HEADER = "MSN-Webhook-Id";
 
@@ -116,7 +115,7 @@ export function webhookUrl(value: unknown, selfHosts: string[]): string {
     throw new HttpError(
       400,
       "invalid_webhook",
-      "Put no user name or password in the URL; notices are signed instead.",
+      "Put no user name or password in the URL; give a bearer key instead.",
     );
   if (url.port)
     throw new HttpError(
@@ -138,25 +137,6 @@ export function webhookUrl(value: unknown, selfHosts: string[]): string {
       "The URL must point at a public host: loopback, private, link-local and this server's own address are refused.",
     );
   return url.href;
-}
-
-/** A new signing secret: `whsec_` and 64 hex characters. The whole string is the HMAC key. */
-export function newWebhookSecret(): string {
-  return `whsec_${Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
-}
-
-/** Hex HMAC-SHA256 of `${timestamp}.${body}` with the secret's UTF-8 bytes as the key. */
-export async function signNotice(secret: string, timestamp: number, body: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(`${timestamp}.${body}`));
-  return Array.from(new Uint8Array(mac), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** The notice body (`msn.webhook.v1`). Ids only: never message text, sender text or keys. */
@@ -185,6 +165,24 @@ export function noticeBody(notice: Notice): string {
   return body;
 }
 
+/** Longest bearer key accepted, in characters. */
+export const MAX_BEARER_LENGTH = 1024;
+
+/**
+ * Optional `bearer` on PUT: absent or null means none. Otherwise 8 to 1024 visible ASCII
+ * characters (no spaces or control characters), so it is always one valid header value.
+ */
+export function webhookBearer(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !/^[\x21-\x7e]{8,1024}$/.test(value))
+    throw new HttpError(
+      400,
+      "invalid_webhook_bearer",
+      `bearer must be 8 to ${MAX_BEARER_LENGTH} visible ASCII characters without spaces; give the key alone, without "Bearer ".`,
+    );
+  return value;
+}
+
 /** One attempt's outcome. `retry` means a later attempt may succeed. */
 export type Attempt =
   | { ok: true; httpStatus: number }
@@ -196,30 +194,32 @@ export function retryable(status: number): boolean {
 }
 
 /**
- * POSTs one signed notice. Never follows a redirect, never reads the response body, and gives up
- * after WEBHOOK_TIMEOUT_MS. Never throws.
+ * POSTs one notice, with `Authorization: Bearer KEY` when the webhook has a bearer key. Never
+ * follows a redirect, never reads the response body, and gives up after WEBHOOK_TIMEOUT_MS.
+ * Never throws.
  */
 export async function postNotice(
   url: string,
-  secret: string,
+  bearer: string | null,
   body: string,
   noticeId: string,
   fetcher: typeof fetch,
   now = Date.now(),
 ): Promise<Attempt> {
   const timestamp = Math.floor(now / 1000);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "User-Agent": "msn-webhook/1",
+    [ID_HEADER]: noticeId,
+    [TIMESTAMP_HEADER]: String(timestamp),
+  };
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
   try {
     const response = await fetcher(url, {
       method: "POST",
       redirect: "manual",
       signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "msn-webhook/1",
-        [ID_HEADER]: noticeId,
-        [TIMESTAMP_HEADER]: String(timestamp),
-        [SIGNATURE_HEADER]: `v1=${await signNotice(secret, timestamp, body)}`,
-      },
+      headers,
       body,
     });
     // The receiver's answer is never read: only its status counts.
