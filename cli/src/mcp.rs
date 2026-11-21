@@ -35,6 +35,7 @@ use crate::config::{
     require_idempotency_key, require_quote, require_tenant, require_text, require_token, slug,
 };
 use crate::error::CliError;
+use crate::gather;
 use crate::identity::{resolve_username, validate_username};
 use crate::labels::{self, Labels};
 use crate::links;
@@ -56,7 +57,7 @@ messages), process every message, then `commit` with that peek's nextCursor. `se
 message; reuse the same key and text if a send result was uncertain. `show_message` fetches exact \
 evidence, and `message_link` gives a link to one message to cite in a hand-off. Messages can carry key=value labels such as state=open: set them on `send` or later \
 with `label` (use `if` to claim safely), list matches with `find`, and block on one with \
-`wait_label`. `wait_all` waits on every board at once for a message addressed to you. `get_attachment` reads a file attached to a message, and `send` takes `attach` \
+`wait_label`. `wait_all` waits on every board at once for a message addressed to you. `gather` asks several agents one question and collects their replies. `get_attachment` reads a file attached to a message, and `send` takes `attach` \
 paths. `search` finds earlier messages by words, sender, kind or label, so you can look up a past \
 decision instead of re-reading the board. `receipts` lists which readers have explicitly committed \
 past a message (commits sent to the server, the default). `since` summarises what changed since \
@@ -243,6 +244,8 @@ impl Server {
                     "wait_answer" => self.wait_answer(args),
                     "wait_all" => self.wait_all(args),
                     "answer" => self.answer(args),
+                    "gather" => self.gather(args),
+                    "wait_gather" => self.wait_gather(args),
                     _ => unreachable!("every listed tool is dispatched"),
                 }
             };
@@ -986,6 +989,95 @@ impl Server {
         )
     }
 
+    /// Sends one question to several names and collects their replies (ADR 0071).
+    fn gather(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let text = match args.get("text") {
+            Some(Value::String(text)) if !text.trim().is_empty() => text.clone(),
+            _ => return Err(CliError::usage("text must be the non-blank question.").into()),
+        };
+        let names = address::from_argument(args.get("to"))?;
+        let names = gather::validate_names(&names, "to")?;
+        let reply_to = optional_int(args, "replyTo", MAX_SAFE_INTEGER)?;
+        if let Some(reply_to) = reply_to {
+            positive(reply_to, "replyTo")?;
+        }
+        let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(0);
+        let key = match optional_str(args, "key")? {
+            Some(key) => require_idempotency_key(key)?.to_owned(),
+            None => Uuid::new_v4().to_string(),
+        };
+        let posted = (|| {
+            let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+            gather::refuse_self(&names, &username, "to")?;
+            let response = MsnClient::new(&self.url)?.post_json(
+                &format!("/api/tenants/{tenant}/channels/{channel}/messages"),
+                &token,
+                &[("Idempotency-Key", key.as_str())],
+                &gather::question_body(&username, &text, &names, reply_to),
+            )?;
+            classify(response.status, &response.body)?;
+            serde_json::from_str::<Value>(&response.body)
+                .map_err(|_| CliError::generic("Response was not JSON."))
+        })()
+        .map_err(|error| ToolError {
+            error,
+            key: Some(key.clone()),
+            send_at: None,
+        })?;
+        // The question is posted: every later failure carries the key, so a retry replays it
+        // instead of asking twice.
+        let with_key = |error: CliError| ToolError {
+            error,
+            key: Some(key.clone()),
+            send_at: None,
+        };
+        let mut gathered = gather::Gather::new(&posted["message"]).map_err(with_key)?;
+        let mut result = self
+            .gather_into(&tenant, &token, &channel, &mut gathered, wait)
+            .map_err(with_key)?;
+        result["message"] = posted["message"].clone();
+        result["idempotencyKey"] = json!(key);
+        Ok(result)
+    }
+
+    /// Keeps gathering replies to question `id` for up to `wait` seconds (ADR 0071).
+    fn wait_gather(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let question = required_id(args)?;
+        let wait = optional_int(args, "wait", MAX_WAIT)?.unwrap_or(MAX_WAIT);
+        let client = MsnClient::new(&self.url)?;
+        let mut gathered = gather::start(
+            |path| agent::fetch_json(&client, path, &token),
+            &tenant,
+            &channel,
+            question,
+        )?;
+        Ok(self.gather_into(&tenant, &token, &channel, &mut gathered, wait)?)
+    }
+
+    /// Reads the question's thread for up to `wait` seconds and returns what was gathered.
+    fn gather_into(
+        &self,
+        tenant: &str,
+        token: &str,
+        channel: &str,
+        gathered: &mut gather::Gather,
+        wait: u64,
+    ) -> Result<Value, CliError> {
+        let client = MsnClient::new(&self.url)?;
+        gather::wait(
+            |path| agent::fetch_json(&client, path, token),
+            gathered,
+            tenant,
+            channel,
+            gather::deadline_in(wait),
+        )?;
+        Ok(gathered.result())
+    }
+
     /// Answers question `id` with one of its choices, as this session's name (ADR 0065).
     fn answer(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         let (tenant, token) = self.credentials()?;
@@ -1465,6 +1557,31 @@ pub fn tools() -> Vec<Value> {
             wait_all
         },
         tool(
+            "gather",
+            "Gather answers from several agents",
+            "Ask several agents one question and collect their replies. Sends text as a normal message addressed to every name in `to` (each is woken), then waits up to `wait` seconds (default 0). An agent's answer is its first reply anywhere in the question's thread, as it is now: edits show, and if it replaces that reply (replaces), the newest replacement counts. Your own replies never count, so do not name yourself. Returns {question, names, complete, answers: {NAME: {username, messageId, text, createdAt}}, pending: [NAME], message, idempotencyKey}. pending lists who has not replied yet: only replies actually posted count, never silence. When complete is false, call wait_gather with the question id to keep waiting. If you replace the question, gathering stops with replacedBy: gather the new one with wait_gather. Retry a failed gather with the same key.",
+            json!({
+                "text": {"type":"string","description":"The question."},
+                "to": {"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}],"description":"The names to gather answers from: 1 to 8."},
+                "replyTo": thread_schema("Optional same-channel message this question replies to."),
+                "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait for replies (default 0)."},
+                "key": {"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Idempotency key; generated when omitted."},
+            }),
+            &["text", "to"],
+            (false, false),
+        ),
+        tool(
+            "wait_gather",
+            "Keep gathering answers",
+            "Wait up to `wait` seconds for the remaining replies to a question sent with gather (or any message addressed to several names). Rereads the thread from the question, so it is safe to call any number of times; only replies posted before a replacement of the question count. Returns the same {question, names, complete, answers, pending} as gather, plus replacedBy when the question was replaced.",
+            json!({
+                "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"The question's message id."},
+                "wait": {"type":"integer","minimum":0,"maximum":25,"description":"Seconds to wait (default 25)."},
+            }),
+            &["id"],
+            (true, true),
+        ),
+        tool(
             "answer",
             "Answer a question",
             "Answer a question addressed to you (a message whose to is your name and that has choices) with one of its choices, exactly as listed. Only the first answer counts; a later one fails with already_answered.",
@@ -1618,6 +1735,8 @@ mod tests {
                 "ask",
                 "wait_answer",
                 "wait_all",
+                "gather",
+                "wait_gather",
                 "answer"
             ]
         );

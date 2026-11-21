@@ -473,6 +473,79 @@ fn ask_posts_a_question_and_wait_answer_finds_the_reply() {
 }
 
 #[test]
+fn gather_sends_to_several_names_and_wait_gather_collects_replies() {
+    // Gather answers (ADR 0071).
+    let home = Home::new();
+    let question = r#"{"message":{"id":5,"username":"alice","text":"Estimate?","to":"a","recipients":["a","b"]}}"#;
+    let a = r#"{"message":{"id":6,"replyTo":5,"username":"a","text":"2d","createdAt":"t6"}}"#;
+    let b = r#"{"message":{"id":8,"replyTo":6,"username":"b","text":"3d, edited","createdAt":"t8","editedAt":"t9"}}"#;
+    let server = MockServer::spawn(vec![
+        Scripted::json(201, question),
+        // gather (wait 0): one thread page without waiting, then the question again.
+        Scripted::json(200, r#"{"messages":[],"nextCursor":5}"#),
+        Scripted::json(200, question),
+        // wait_gather: the question, a thread page with both replies (b replies to a's reply;
+        // alice, the asker, is ignored), the question again, then each answer re-read.
+        Scripted::json(200, question),
+        Scripted::json(
+            200,
+            r#"{"messages":[{"id":6,"replyTo":5,"username":"a","text":"2d","createdAt":"t6"},{"id":7,"replyTo":5,"username":"alice","text":"noise"},{"id":8,"replyTo":6,"username":"b","text":"3d","createdAt":"t8"}],"nextCursor":8}"#,
+        ),
+        Scripted::json(200, question),
+        Scripted::json(200, a),
+        Scripted::json(200, b),
+    ]);
+    let replies = session(
+        &home,
+        &server,
+        &[
+            call(
+                1,
+                "gather",
+                json!({"text":"Estimate?","to":["a","b"],"key":"g-1"}),
+            ),
+            call(2, "wait_gather", json!({"id":5,"wait":5})),
+            call(3, "gather", json!({"text":"Estimate?","to":[]})),
+        ],
+    );
+    let asked = ok(&replies[1]);
+    assert_eq!(asked["complete"], false);
+    assert_eq!(asked["pending"], json!(["a", "b"]));
+    assert_eq!(asked["idempotencyKey"], "g-1");
+    assert_eq!(asked["message"]["recipients"], json!(["a", "b"]));
+    assert_eq!(
+        *ok(&replies[2]),
+        json!({"question":5,"names":["a","b"],"complete":true,"pending":[],"answers":{
+            "a":{"username":"a","messageId":6,"text":"2d","createdAt":"t6"},
+            "b":{"username":"b","messageId":8,"text":"3d, edited","createdAt":"t8","editedAt":"t9"}}})
+    );
+    assert_eq!(replies[3]["result"]["isError"], true);
+    let requests = server.recorded();
+    assert_eq!(requests.len(), 8);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[0].body).unwrap(),
+        json!({"username":"alice","text":"Estimate?","to":["a","b"]})
+    );
+    assert!(
+        requests[1]
+            .path
+            .contains("messages?thread=5&after=5&wait=0"),
+        "{}",
+        requests[1].path
+    );
+    assert!(requests[2].path.ends_with("/channels/general/messages/5"));
+    assert!(
+        requests[4]
+            .path
+            .contains("messages?thread=5&after=5&wait=5"),
+        "{}",
+        requests[4].path
+    );
+    assert!(requests[6].path.ends_with("/messages/6"));
+    assert!(requests[7].path.ends_with("/messages/8"));
+}
+
+#[test]
 fn answer_posts_the_choice_as_a_reply() {
     let home = Home::new();
     let server = MockServer::spawn(vec![Scripted::json(
