@@ -6053,6 +6053,9 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   private async redeemInvite(request: Request, tenant: string): Promise<Response> {
     const input = await body(request);
+    if (input.channelOnly !== undefined && typeof input.channelOnly !== "boolean")
+      throw new HttpError(400, "invalid_invite", "channelOnly must be true or false.");
+    const channelOnly = input.channelOnly === true;
     const username = text(input.username, "username", 128);
     const code = text(input.code, "code", 256);
     if (!new RegExp(`^${tenant}\\.[a-f0-9]{64}$`).test(code))
@@ -6079,6 +6082,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           "The inviter no longer has access. Ask for a new invitation.",
         );
       }
+      // A client asking to join a channel must not spend a one-use invitation to an entire
+      // workspace and discover the wider grant only after it has already received a credential.
+      if (channelOnly && !invite.channel)
+        throw new HttpError(400, "channel_invite_required", "Use an invitation to one channel.");
       // An invitation to an archived board waits: unarchiving makes the same code work again.
       if (invite.channel) this.requireActive(invite.channel);
       this.requireKeyCapacity();
