@@ -1281,7 +1281,9 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   /**
    * Exchanges an app sign-in code for an account key (ADR 0079). The code is spent on the first
-   * attempt, right or wrong, so a code seen by anyone else is useless without the verifier.
+   * attempt, right or wrong, so a code copied from the app's own sign-in is useless without its
+   * verifier. The verifier does not help when someone else started the sign-in with their own
+   * challenge; what stops that is the https callback only the associated app receives.
    */
   private async finishAppLogin(tenant: string, code: string, verifier: string) {
     const invalid = new HttpError(
@@ -1289,9 +1291,11 @@ export class MsnDurableObject extends DurableObject<Env> {
       "invalid_app_login",
       "This sign-in expired or was already used. Sign in again.",
     );
-    if (!/^[a-f0-9]{64}$/.test(code) || !/^[a-f0-9]{64}$/.test(verifier)) throw invalid;
+    // A malformed code matches no row. The verifier is checked only after the code is spent, so a
+    // wrong verifier of any shape uses it up.
+    if (!/^[a-f0-9]{64}$/.test(code)) throw invalid;
     const hash = await digest(code);
-    const challenge = await digest(verifier);
+    const challenge = /^[a-f0-9]{64}$/.test(verifier) ? await digest(verifier) : "";
     const row = this.ctx.storage.transactionSync(() => {
       const found = this.ctx.storage.sql
         .exec<{ challenge: string; username: string; expiresMs: number }>(
@@ -1306,7 +1310,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       );
       return found;
     });
-    if (!row || row.expiresMs <= Date.now() || !equalHash(row.challenge, challenge)) throw invalid;
+    if (!row || !challenge || row.expiresMs <= Date.now() || !equalHash(row.challenge, challenge))
+      throw invalid;
     return this.accountSession(tenant, row.username);
   }
 

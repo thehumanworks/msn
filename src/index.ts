@@ -7,10 +7,14 @@ import type { Refusal } from "./store";
 export { MsnDurableObject } from "./store";
 
 /**
- * Where a native app's sign-in sheet returns (ADR 0079). The code it carries is useless without
- * the verifier that only the app that started the sign-in holds.
+ * Where a native app's sign-in sheet returns (ADR 0079): an https path on this server, not a
+ * custom scheme. iOS hands it only to an app this server names in its apple-app-site-association
+ * file, so no other app can start a sign-in and collect the code.
  */
-const APP_LOGIN_CALLBACK = "msn://login";
+const APP_LOGIN_CALLBACK_PATH = "/app/signed-in";
+
+/** The page behind the callback path, for a browser that lands there outside the app's sheet. */
+const APP_SIGNED_IN_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MSN</title><p>Sign-in finished. If this page stays open, close it and sign in again from the MSN app.</p>`;
 
 /** Turns a refusal returned over Durable Object RPC back into the HTTP error it stands for. */
 function accepted<R extends object>(result: R): Exclude<R, { refused: unknown }> {
@@ -31,7 +35,20 @@ export default {
     let response: Response;
     try {
       const url = new URL(request.url);
-      if (url.pathname === "/api/account/config" && request.method === "GET") {
+      if (url.pathname === "/.well-known/apple-app-site-association" && request.method === "GET") {
+        // The apps allowed to receive the sign-in callback (ADR 0079), as TEAMID.bundle ids.
+        const apps = String(env.APPLE_APP_IDS ?? "")
+          .split(",")
+          .map((id) => id.trim())
+          .filter((id) => /^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$/.test(id));
+        if (!apps.length)
+          throw new HttpError(404, "route_not_found", "No apps are associated with this server.");
+        response = json({ webcredentials: { apps } });
+      } else if (url.pathname === APP_LOGIN_CALLBACK_PATH && request.method === "GET") {
+        response = new Response(APP_SIGNED_IN_PAGE, {
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+        });
+      } else if (url.pathname === "/api/account/config" && request.method === "GET") {
         const access = env as Env & AccessSettings;
         response = json({
           cloudflareAccess: Boolean(access.ACCESS_TEAM_DOMAIN && access.ACCESS_AUD),
@@ -51,15 +68,15 @@ export default {
           headers: { Location: target.href, "Cache-Control": "no-store" },
         });
       } else if (url.pathname === "/login" && request.method === "GET" && url.searchParams.has("app")) {
-        // Native app sign-in (ADR 0079): Access has verified the person; the app gets a one-time
-        // code on its own URL scheme and exchanges it, with its verifier, for a key.
+        // Native app sign-in (ADR 0079): Access has verified the person; the app's sign-in sheet
+        // catches the one-time code on the https callback and exchanges it, with its verifier, for a key.
         const challenge = appChallenge(url);
         if (!challenge)
           throw new HttpError(400, "invalid_app_login", "Use a SHA-256 hex challenge for app sign-in.");
         const account = await accessAccount(request, env as Env & AccessSettings);
         const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", account.tenant]));
         const { code } = accepted(await stub.startAppLogin(account.username, challenge));
-        const callback = new URL(APP_LOGIN_CALLBACK);
+        const callback = new URL(APP_LOGIN_CALLBACK_PATH, url.origin);
         callback.searchParams.set("account", account.tenant);
         callback.searchParams.set("code", code);
         response = new Response(null, {

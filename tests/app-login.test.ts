@@ -1,10 +1,36 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { digest } from "../src/http";
 
-// Native app sign-in (ADR 0079): Access verifies the person on /login?app=CHALLENGE, the app gets
-// a one-time code on msn://login, and exchanges it with its verifier for an account key.
+// Native app sign-in (ADR 0079): Access verifies the person on /login?app=CHALLENGE, the app's
+// sign-in sheet catches a one-time code on the https callback, and exchanges it with its verifier
+// for an account key.
+
+afterEach(() => vi.restoreAllMocks());
+
+/** Signs Access assertions with a key the Worker fetches as the team's certs. */
+async function accessIssuer() {
+  const key = await generateKeyPair("RS256");
+  const jwk = { ...(await exportJWK(key.publicKey)), kid: "app-login-test", alg: "RS256", use: "sig" };
+  const issuer = `https://${env.ACCESS_TEAM_DOMAIN}`;
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url === `${issuer}/cdn-cgi/access/certs`) return Response.json({ keys: [jwk] });
+    return realFetch(input, init);
+  });
+  return (subject: string, email: string) =>
+    new SignJWT({ email })
+      .setProtectedHeader({ alg: "RS256", kid: "app-login-test" })
+      .setSubject(subject)
+      .setIssuer(issuer)
+      .setAudience(env.ACCESS_AUD)
+      .setIssuedAt()
+      .setExpirationTime(Math.floor(Date.now() / 1000) + 60)
+      .sign(key.privateKey);
+}
 
 const tenant = `account-${"a".repeat(48)}`;
 const stub = () => env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
@@ -54,11 +80,75 @@ describe("app sign-in", () => {
     expect(await again.json()).toMatchObject({ error: { code: "invalid_app_login" } });
   });
 
-  it("a wrong verifier spends the code, so whoever sees a code cannot use it", async () => {
+  it("a wrong verifier of any shape spends the code, so whoever sees a code cannot use it", async () => {
+    for (const wrong of [hex(), "not-hex", ""]) {
+      const verifier = hex();
+      const code = await start(verifier);
+      expect((await exchange({ account: tenant, code, verifier: wrong })).status).toBe(401);
+      expect((await exchange({ account: tenant, code, verifier })).status).toBe(401);
+    }
+  });
+
+  it("two exchanges of one code at once yield exactly one key", async () => {
     const verifier = hex();
     const code = await start(verifier);
-    expect((await exchange({ account: tenant, code, verifier: hex() })).status).toBe(401);
-    expect((await exchange({ account: tenant, code, verifier })).status).toBe(401);
+    const answers = await Promise.all([
+      exchange({ account: tenant, code, verifier }),
+      exchange({ account: tenant, code, verifier }),
+      exchange({ account: tenant, code, verifier }),
+    ]);
+    expect(answers.map((r) => r.status).sort()).toEqual([200, 401, 401]);
+  });
+
+  it("a signed-in owner's /login?app= returns the code on the https callback, never a custom scheme", async () => {
+    const sign = await accessIssuer();
+    const verifier = hex();
+    const response = await exports.default.fetch(`${env.ACCESS_LOGIN_URL}?app=${await digest(verifier)}`, {
+      redirect: "manual",
+      headers: { "Cf-Access-Jwt-Assertion": await sign("app-login-subject", "owner@example.com") },
+    });
+    expect(response.status).toBe(303);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const location = new URL(response.headers.get("Location") ?? "");
+    expect(location.origin).toBe(new URL(env.ACCESS_LOGIN_URL).origin);
+    expect(location.pathname).toBe("/app/signed-in");
+    const account = location.searchParams.get("account") ?? "";
+    expect(account).toMatch(/^account-[a-f0-9]{48}$/);
+    const code = location.searchParams.get("code") ?? "";
+    const redeemed = await exports.default.fetch(
+      `${new URL(env.ACCESS_LOGIN_URL).origin}/api/account/app-login`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account, code, verifier }),
+      },
+    );
+    expect(redeemed.status).toBe(200);
+    expect(await redeemed.json()).toMatchObject({
+      tenant: account,
+      username: "owner@example.com",
+      owner: true,
+    });
+  });
+
+  it("names the associated app for https callbacks, outside Access, and the callback page echoes nothing", async () => {
+    const association = await exports.default.fetch(
+      "https://msn.test/.well-known/apple-app-site-association",
+      {
+        redirect: "manual",
+      },
+    );
+    expect(association.status).toBe(200);
+    expect(association.headers.get("Content-Type")).toContain("application/json");
+    expect(await association.json()).toEqual({ webcredentials: { apps: [env.APPLE_APP_IDS] } });
+    const code = hex();
+    const page = await exports.default.fetch(`https://msn.test/app/signed-in?account=${tenant}&code=${code}`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("Cache-Control")).toBe("no-store");
+    expect(page.headers.get("Referrer-Policy")).toBe("no-referrer");
+    const html = await page.text();
+    expect(html).not.toContain(code);
+    expect(html).not.toContain(tenant);
   });
 
   it("refuses malformed input, another account's code and cross-origin callers", async () => {

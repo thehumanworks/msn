@@ -12,6 +12,7 @@
     ],
     "ios": {
       "bundleIdentifier": "sh.thehuman.msn.next",
+      "appleTeamId": "54MXM5JG3R",
       "deploymentTarget": "26.0",
       "supportsTablet": false,
       "infoPlist": {
@@ -19,7 +20,10 @@
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
-      }
+      },
+      "associatedDomains": [
+        "webcredentials:msn.thehuman.sh"
+      ]
     },
     "plugins": [
       "expo-router",

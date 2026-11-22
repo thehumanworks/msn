@@ -45,7 +45,7 @@ export default function Welcome() {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Shown only when the server says it signs people in with Cloudflare Access (ADR 0079).
+  // Shown only for a server this app is associated with that signs people in with Cloudflare Access (ADR 0079).
   const [cloudflare, setCloudflare] = useState(false);
   const [cloudflareBusy, setCloudflareBusy] = useState(false);
 
@@ -121,7 +121,7 @@ export default function Welcome() {
       fetchImpl: transport,
       randomBytes: getRandomBytes,
       sha256Hex: (text) => digestStringAsync(CryptoDigestAlgorithm.SHA256, text),
-      openAuthSession: (url, callback) => WebBrowser.openAuthSessionAsync(url, callback),
+      openAuthSession: (url, callback, options) => WebBrowser.openAuthSessionAsync(url, callback, options),
     });
     let failure: string | null = null;
     if ("error" in result) failure = result.error;
