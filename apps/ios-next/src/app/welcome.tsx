@@ -1,8 +1,9 @@
 import * as Clipboard from "expo-clipboard";
-import { getRandomBytes } from "expo-crypto";
+import { CryptoDigestAlgorithm, digestStringAsync, getRandomBytes } from "expo-crypto";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
-import { useMemo, useRef, useState } from "react";
+import * as WebBrowser from "expo-web-browser";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionSheetIOS,
   Alert,
@@ -17,6 +18,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Backdrop } from "../components/Backdrop.tsx";
 import { Glass, GlassButton, Surface } from "../components/Glass.tsx";
+import { offersCloudflare, signInWithCloudflare } from "../lib/cloudflareLogin.ts";
 import { join } from "../lib/join.ts";
 import { describeJoin, joinServer, parseJoinLink } from "../lib/joinLink.ts";
 import { DEFAULT_ORIGIN, model, pending, transport } from "../lib/model.ts";
@@ -43,6 +45,23 @@ export default function Welcome() {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Shown only when the server says it signs people in with Cloudflare Access (ADR 0079).
+  const [cloudflare, setCloudflare] = useState(false);
+  const [cloudflareBusy, setCloudflareBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setCloudflare(false);
+    const timer = setTimeout(() => {
+      void offersCloudflare(server, transport).then((offered) => {
+        if (live) setCloudflare(offered);
+      });
+    }, 400);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [server]);
 
   const parsed = useMemo(() => (link.trim() ? parseJoinLink(link) : null), [link]);
   const needsName = parsed?.ok && parsed.link.kind !== "account";
@@ -89,6 +108,30 @@ export default function Welcome() {
       setError(failure);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } else {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+  }
+
+  async function cloudflareSignIn() {
+    if (submitting.current) return;
+    submitting.current = true;
+    setCloudflareBusy(true);
+    setError(null);
+    const result = await signInWithCloudflare(server, {
+      fetchImpl: transport,
+      randomBytes: getRandomBytes,
+      sha256Hex: (text) => digestStringAsync(CryptoDigestAlgorithm.SHA256, text),
+      openAuthSession: (url, callback) => WebBrowser.openAuthSessionAsync(url, callback),
+    });
+    let failure: string | null = null;
+    if ("error" in result) failure = result.error;
+    else if ("account" in result) failure = await model.signInWithKey({ ...result.account, remember: true });
+    submitting.current = false;
+    setCloudflareBusy(false);
+    if (failure) {
+      setError(failure);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } else if ("account" in result) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
   }
@@ -258,6 +301,14 @@ export default function Welcome() {
               busy={busy}
               tint={color.tint}
             />
+            {cloudflare && !keyMode ? (
+              <GlassButton
+                label="Sign in with Cloudflare"
+                onPress={cloudflareSignIn}
+                disabled={busy}
+                busy={cloudflareBusy}
+              />
+            ) : null}
           </View>
 
           <View style={styles.links}>

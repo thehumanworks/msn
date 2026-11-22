@@ -1,8 +1,30 @@
 import { type AccessSettings, accessAccount, accessLoginUrl } from "./account";
-import { admin, bearer, failure, HttpError, json, slug } from "./http";
+import { admin, bearer, body, failure, HttpError, json, slug } from "./http";
 import { quickstart } from "./quickstart";
 
+import type { Refusal } from "./store";
+
 export { MsnDurableObject } from "./store";
+
+/**
+ * Where a native app's sign-in sheet returns (ADR 0079). The code it carries is useless without
+ * the verifier that only the app that started the sign-in holds.
+ */
+const APP_LOGIN_CALLBACK = "msn://login";
+
+/** Turns a refusal returned over Durable Object RPC back into the HTTP error it stands for. */
+function accepted<R extends object>(result: R): Exclude<R, { refused: unknown }> {
+  if ("refused" in result) {
+    const { status, code, message } = (result as unknown as Refusal).refused;
+    throw new HttpError(status, code, message);
+  }
+  return result as Exclude<R, { refused: unknown }>;
+}
+
+function appChallenge(url: URL): string | null {
+  const challenge = url.searchParams.get("app");
+  return challenge && /^[a-f0-9]{64}$/.test(challenge) ? challenge : null;
+}
 
 export default {
   async fetch(request, env): Promise<Response> {
@@ -20,9 +42,48 @@ export default {
         request.method === "GET" &&
         new URL(accessLoginUrl(env as AccessSettings), url).origin !== url.origin
       ) {
+        // Only a well-formed app challenge survives the hop; other parameters are dropped.
+        const target = new URL(accessLoginUrl(env as AccessSettings), url);
+        const challenge = appChallenge(url);
+        if (challenge) target.searchParams.set("app", challenge);
         response = new Response(null, {
           status: 302,
-          headers: { Location: accessLoginUrl(env as AccessSettings), "Cache-Control": "no-store" },
+          headers: { Location: target.href, "Cache-Control": "no-store" },
+        });
+      } else if (url.pathname === "/login" && request.method === "GET" && url.searchParams.has("app")) {
+        // Native app sign-in (ADR 0079): Access has verified the person; the app gets a one-time
+        // code on its own URL scheme and exchanges it, with its verifier, for a key.
+        const challenge = appChallenge(url);
+        if (!challenge)
+          throw new HttpError(400, "invalid_app_login", "Use a SHA-256 hex challenge for app sign-in.");
+        const account = await accessAccount(request, env as Env & AccessSettings);
+        const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", account.tenant]));
+        const { code } = accepted(await stub.startAppLogin(account.username, challenge));
+        const callback = new URL(APP_LOGIN_CALLBACK);
+        callback.searchParams.set("account", account.tenant);
+        callback.searchParams.set("code", code);
+        response = new Response(null, {
+          status: 303,
+          headers: { Location: callback.href, "Cache-Control": "no-store" },
+        });
+      } else if (url.pathname === "/api/account/app-login" && request.method === "POST") {
+        const origin = request.headers.get("Origin");
+        if (origin && origin !== url.origin)
+          throw new HttpError(403, "origin_forbidden", "Use a same-origin login.");
+        const input = await body(request);
+        const tenant = typeof input.account === "string" ? input.account : "";
+        if (!/^account-[a-f0-9]{48}$/.test(tenant))
+          throw new HttpError(
+            401,
+            "invalid_app_login",
+            "This sign-in expired or was already used. Sign in again.",
+          );
+        const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));
+        response = json({
+          url: url.origin,
+          ...accepted(
+            await stub.redeemAppLogin(tenant, String(input.code ?? ""), String(input.verifier ?? "")),
+          ),
         });
       } else if (
         (url.pathname === "/api/account/login" && request.method === "POST") ||
