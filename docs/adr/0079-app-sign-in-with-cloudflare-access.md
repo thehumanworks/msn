@@ -25,5 +25,5 @@ Options considered:
 
 - If someone sends the owner a sign-in link with their own challenge, the code goes to the owner's phone, and the sender has no code to use. A code that leaks from the phone is useless without the verifier.
 - Each app sign-in creates an owner key, like each web or CLI sign-in. Signing out of the app does not revoke it.
-- The Access application needs no change: Access ignores query strings when matching application paths.
+- The Access application needs no change: Access ignores query strings when matching application paths, and its sign-in redirect keeps them (checked on msn.thehuman.sh: an unauthenticated `/login?app=…` goes to the team sign-in page with `redirect_url=/login?app=…`).
 - Tested with Worker tests (exchange, single use, wrong verifier, expiry, quota, malformed input, the redirect hop, and `/login?app=` without or with a forged assertion) and app tests against a fake server and sign-in sheet. A real Access sign-in can only be checked after deploying, on a device signed in to the team.
