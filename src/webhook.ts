@@ -139,16 +139,50 @@ export function webhookUrl(value: unknown, selfHosts: string[]): string {
   return url.href;
 }
 
+/**
+ * What a webhook subscribes to (ADR 0076). Each level includes the one before it:
+ * `addressed` (the default) is messages addressed to the persona; `board` adds every other
+ * message on the persona's board; `workspace` adds every message on every board.
+ */
+export const SUBSCRIPTIONS = ["addressed", "board", "workspace"] as const;
+export type Subscription = (typeof SUBSCRIPTIONS)[number];
+
+/** Optional `subscribe` on PUT: absent or null means `addressed`. */
+export function webhookSubscription(value: unknown): Subscription {
+  if (value === undefined || value === null) return "addressed";
+  if (typeof value !== "string" || !(SUBSCRIPTIONS as readonly string[]).includes(value))
+    throw new HttpError(
+      400,
+      "invalid_webhook_subscribe",
+      "subscribe must be addressed (the default), board or workspace.",
+    );
+  return value as Subscription;
+}
+
+/** A stored value read back; anything unknown is the narrowest level. */
+export function storedSubscription(value: unknown): Subscription {
+  return value === "board" || value === "workspace" ? value : "addressed";
+}
+
 /** The notice body (`msn.webhook.v1`). Ids only: never message text, sender text or keys. */
 export type Notice = {
   schema: "msn.webhook.v1";
-  type: "message.addressed" | "ping";
+  /**
+   * `message.addressed`: the message names the persona. `message.posted`: another message the
+   * webhook subscribes to (`board` or `workspace`). `ping`: a test.
+   */
+  type: "message.addressed" | "message.posted" | "ping";
   /** This notice's id; the same on every retry, so a receiver can drop repeats. */
   id: string;
   tenant: string;
+  /** The board the message is on (for a ping, the persona's board). */
   channel: string;
-  /** The persona id the message is addressed to. */
+  /** The persona id the webhook belongs to. */
   persona: string;
+  /** The board the persona is on; it differs from `channel` only for a `workspace` webhook. */
+  personaChannel: string;
+  /** What the webhook subscribes to. */
+  subscribe: Subscription;
   /** The addressed message, or null for a ping. */
   messageId: number | null;
   /** The board event (GET …/events) that recorded the message, or null for a ping. */

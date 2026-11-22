@@ -24,6 +24,7 @@ type Sent = { url: string; headers: Headers; body: string; redirect?: string; si
 type Hook = {
   persona: string;
   url: string;
+  subscribe?: string;
   pending: number;
   lastDelivery: {
     status: string;
@@ -593,5 +594,199 @@ describe("persona webhooks", () => {
         })
       ).status,
     ).toBe(403);
+  });
+
+  // ADR 0076: a webhook subscribes to addressed messages (the default), its board or the workspace.
+  describe("subscriptions", () => {
+    const board = async (f: { tenant: string; owner: string }, channel: string) => {
+      const key = (channel.charCodeAt(0) % 10).toString().repeat(64);
+      expect(
+        (
+          await call(f.tenant, `/channels/${channel}/board`, f.owner, "PUT", {
+            credential: key,
+            goal: "More",
+          })
+        ).status,
+      ).toBe(201);
+      // A shared board key posts under a registered persona's name only.
+      for (const name of ["lead", "someone", "reviewer"])
+        expect(
+          (await call(f.tenant, `/channels/${channel}/personas/${name}`, key, "PUT", { displayName: name }))
+            .status,
+        ).toBe(201);
+      return (text: string, extra: Record<string, unknown> = {}, username = "lead") =>
+        call(f.tenant, `/channels/${channel}/messages`, key, "POST", { username, text, ...extra });
+    };
+    const bodies = (f: { sent: Sent[] }) => f.sent.map((notice) => JSON.parse(notice.body));
+
+    it("defaults to addressed, reads the choice back and refuses unknown values", async () => {
+      const f = await fixture();
+      expect((await f.register()).webhook).toMatchObject({ subscribe: "addressed" });
+      expect((await f.register("rev", undefined, { subscribe: "board" })).webhook).toMatchObject({
+        subscribe: "board",
+      });
+      expect((await f.hook()).subscribe).toBe("board");
+      for (const subscribe of ["everything", "", 3, ["board"]]) {
+        const refused = await call(f.tenant, "/channels/work/personas/rev/webhook", f.owner, "PUT", {
+          url: "https://agent.example.com/wake",
+          subscribe,
+        });
+        expect(refused.status).toBe(400);
+        expect((await refused.json<{ error: { code: string } }>()).error.code).toBe(
+          "invalid_webhook_subscribe",
+        );
+      }
+      expect((await f.hook()).subscribe).toBe("board");
+      // A PUT replaces the whole webhook: without subscribe it is addressed again.
+      expect((await f.register()).webhook).toMatchObject({ subscribe: "addressed" });
+      const list = await (await call(f.tenant, "/channels/work/webhooks", f.owner)).json<{
+        webhooks: Hook[];
+      }>();
+      expect(list.webhooks.map((hook) => hook.subscribe)).toEqual(["addressed"]);
+    });
+
+    it("a board webhook hears every message on its board, but not its own or other boards'", async () => {
+      const f = await fixture();
+      const elsewhere = await board(f, "other");
+      await f.register("rev", undefined, { subscribe: "board" });
+      const posted = await (await say(f, "to nobody")).json<{ message: { id: number } }>();
+      await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      expect(bodies(f)[0]).toMatchObject({
+        schema: "msn.webhook.v1",
+        type: "message.posted",
+        channel: "work",
+        persona: "rev",
+        personaChannel: "work",
+        subscribe: "board",
+        messageId: posted.message.id,
+        messageUrl: `https://msn.test/api/tenants/${f.tenant}/channels/work/messages/${posted.message.id}`,
+      });
+      expect(f.sent[0].body).not.toContain("to nobody");
+      // A message that names the persona still says so.
+      expect((await say(f, "please look", { to: "reviewer" })).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      expect(bodies(f)[1]).toMatchObject({ type: "message.addressed", subscribe: "board" });
+      // Its own messages (by persona name) and another board's messages wake nothing.
+      expect((await say(f, "my answer", {}, "reviewer")).status).toBe(201);
+      expect((await elsewhere("not this board")).status).toBe(201);
+      expect((await elsewhere("nor by name", { to: "reviewer" })).status).toBe(201);
+      expect(await f.waiting()).toBe(0);
+      expect(await f.deliver()).toBe(0);
+      expect(f.sent).toHaveLength(2);
+    });
+
+    it("a workspace webhook hears every board; an addressed webhook beside it stays quiet", async () => {
+      const f = await fixture();
+      const elsewhere = await board(f, "other");
+      await f.register("rev", undefined, { subscribe: "workspace" });
+      await f.register("lead", "https://lead.example.com/wake");
+      const posted = await (await elsewhere("news from the other board", {}, "someone")).json<{
+        message: { id: number };
+      }>();
+      await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      expect(f.sent[0].url).toBe("https://agent.example.com/wake");
+      expect(bodies(f)[0]).toMatchObject({
+        type: "message.posted",
+        channel: "other",
+        persona: "rev",
+        personaChannel: "work",
+        subscribe: "workspace",
+        messageId: posted.message.id,
+        messageUrl: `https://msn.test/api/tenants/${f.tenant}/channels/other/messages/${posted.message.id}`,
+      });
+      // Named on the other board: addressed. Sent under its own name there: nothing.
+      expect((await elsewhere("over here", { to: "Reviewer" }, "someone")).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      expect(bodies(f)[1]).toMatchObject({ type: "message.addressed", channel: "other" });
+      expect((await elsewhere("my own words", {}, "reviewer")).status).toBe(201);
+      expect(await f.waiting()).toBe(0);
+      // Its own board too; the lead's addressed webhook only hears its name.
+      expect((await say(f, "on the home board")).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(3));
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      expect(f.sent.filter((notice) => notice.url.includes("lead.example.com"))).toHaveLength(0);
+    });
+
+    it("messages that arrive while a notice waits share it, one per board", async () => {
+      const f = await fixture();
+      const elsewhere = await board(f, "other");
+      await f.register("rev", undefined, { subscribe: "workspace" });
+      // The receiver is down: the first notice waits for its retry.
+      f.answerWith(() => new Response(null, { status: 503 }));
+      expect((await say(f, "one")).status).toBe(201);
+      await vi.waitFor(async () => expect((await f.hook()).lastDelivery?.status).toBe("retrying"));
+      expect(f.sent).toHaveLength(1);
+      for (const text of ["two", "three", "four"]) expect((await say(f, text)).status).toBe(201);
+      expect(await f.waiting()).toBe(1);
+      expect(f.sent).toHaveLength(1);
+      // Another board has its own notice, and an addressed message always has its own.
+      expect((await elsewhere("other one")).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+      expect((await elsewhere("other two")).status).toBe(201);
+      expect(await f.waiting()).toBe(2);
+      expect((await say(f, "for you", { to: "reviewer" })).status).toBe(201);
+      expect((await say(f, "for you again", { to: "reviewer" })).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(4));
+      expect(await f.waiting()).toBe(4);
+      // Once the waiting notice is delivered, the next message makes a new one.
+      f.answerWith(() => new Response("ok"));
+      await f.deliver();
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      const before = f.sent.length;
+      expect((await say(f, "five")).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(before + 1));
+      expect(bodies(f).at(-1)).toMatchObject({ type: "message.posted", channel: "work" });
+    });
+
+    it("a message that arrives while a notice is being posted gets a notice of its own", async () => {
+      const f = await fixture();
+      await f.register("rev", undefined, { subscribe: "board" });
+      // The receiver's handler is still running when the next message is stored.
+      const during: number[] = [];
+      await runInDurableObject(f.stub, (instance: MsnDurableObject) => {
+        const receive = instance.webhookFetch;
+        instance.webhookFetch = async (input, init) => {
+          if (!during.length) {
+            during.push(0);
+            const made = await instance.fetch(
+              new Request(`https://msn.test/api/tenants/${f.tenant}/channels/work/messages`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${f.agent}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ username: "lead", text: "two" }),
+              }),
+            );
+            during[0] = made.status;
+          }
+          return receive(input, init);
+        };
+      });
+      expect((await say(f, "one")).status).toBe(201);
+      // The receiver may already have read the board, so "two" must not be folded into "one".
+      await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+      await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
+      expect(during).toEqual([201]);
+      expect(new Set(f.sent.map((notice) => notice.headers.get("MSN-Webhook-Id"))).size).toBe(2);
+    });
+
+    it("narrowing a subscription drops the waiting notices it no longer covers", async () => {
+      const f = await fixture();
+      const elsewhere = await board(f, "other");
+      await f.register("rev", undefined, { subscribe: "workspace" });
+      f.answerWith(() => new Response(null, { status: 503 }));
+      expect((await say(f, "home")).status).toBe(201);
+      expect((await elsewhere("away")).status).toBe(201);
+      expect((await say(f, "for you", { to: "reviewer" })).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(3));
+      await vi.waitFor(async () => expect((await f.hook()).lastDelivery?.status).toBe("retrying"));
+      expect(await f.waiting()).toBe(3);
+      await f.register("rev", undefined, { subscribe: "board" });
+      expect(await f.waiting()).toBe(2);
+      await f.register();
+      expect(await f.waiting()).toBe(1);
+    });
   });
 });
