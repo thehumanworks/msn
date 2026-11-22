@@ -86,7 +86,7 @@ Settings come from `~/.pi/agent/pi-msn.json`, then `.pi/pi-msn.json` of a truste
 | `ownerProfile` | `PI_MSN_OWNER_PROFILE` | same as `profile` | Saved owner profile, used only to set and remove the webhook |
 | `board` | `PI_MSN_BOARD` | none | Default board |
 | `persona` | `PI_MSN_PERSONA` | none | Persona id the webhook is for |
-| `subscribe` | `PI_MSN_SUBSCRIBE` | `addressed` | `addressed`: messages to the persona. `board`: every message on its board. `workspace`: every board. The last two need an MSN server and CLI with webhook subscription scopes (ADR 0076) |
+| `subscribe` | `PI_MSN_SUBSCRIBE` | `addressed` | `addressed`: messages to the persona. `board`: every message on its board. `workspace`: every board. The last two need an MSN CLI with `--subscribe` ([ADR 0076](../../docs/adr/0076-webhook-subscriptions.md)) |
 | `tools` | `PI_MSN_TOOLS` | `direct` | `direct` declares the tools to the model; `deferred` and `codemode` are Pi's other MCP exposures; `off` registers none |
 | `deliverAs` | `PI_MSN_DELIVER_AS` | `steer` | `steer`, `followUp` or `nextTurn` |
 | `tunnel` | `PI_MSN_TUNNEL` | `cloudflared` | `cloudflared`, `command` or `none` |

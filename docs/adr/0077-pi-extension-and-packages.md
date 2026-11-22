@@ -23,7 +23,7 @@ Checked against the Pi 1.6.0 documentation and by running Pi itself:
 - **The webhook outlives a session change.** The receiver, tunnel and board setting are kept outside the extension instance. On `/new`, `/resume` or `/reload` only the delivery target changes, and messages that arrive in between wait (at most 50) for the next session. A quick tunnel's address would otherwise change on every `/new`.
 - **Who sets the webhook.** Only the owner account can (ADR 0062). `ownerProfile` names a saved owner profile used for that step alone. Without one, a user who supplies a key of their own (`PI_MSN_WEBHOOK_BEARER`) gets the receiver, the tunnel and the exact command for the owner to run; with a random key that path is refused, since nobody could learn the key.
 
-- **Wider subscriptions.** ADR 0076 (in review at the time of writing) lets a webhook subscribe to a whole board or workspace. The `subscribe` setting passes `--subscribe board|workspace` when it is not the default, so a CLI without the flag keeps working. A `message.posted` notice can stand for several messages, so the first is delivered with a line telling the agent to `peek` for the rest. This path is covered by a unit test only, since the server side is not merged.
+- **Wider subscriptions.** ADR 0076 lets a webhook subscribe to a whole board or workspace. The `subscribe` setting passes `--subscribe board|workspace` when it is not the default, so a CLI without the flag keeps working. A `message.posted` notice can stand for several messages, so the first is delivered with a line telling the agent to `peek` for the rest. This path is covered by a unit test, and the real CLI accepts the flag in this order; it has not been run against a live board.
 
 ## Security
 
