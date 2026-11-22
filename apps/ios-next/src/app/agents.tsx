@@ -1,51 +1,62 @@
 import { router, Stack, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { SymbolView } from "expo-symbols";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AgentRegistration } from "../components/AgentRegistration.tsx";
+import { Note } from "../components/Form.tsx";
 import { GlassButton, Surface } from "../components/Glass.tsx";
+import { useArchived } from "../lib/boardActions.ts";
 import { type AgentPersona, explain, type Webhook, webhookSummary } from "../lib/manage.ts";
 import { manageFor, useSession } from "../lib/model.ts";
+import { useStore } from "../lib/shared.ts";
 import { color } from "../lib/theme.ts";
 
 type Loaded =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  /** `personas` is null on a plain channel, which has no registered agents. */
+  /** Null means a plain channel. An empty array is already a board and needs no new credential. */
   | { kind: "ready"; personas: AgentPersona[] | null; hooks: Map<string, Webhook> };
 
-/** A board's agents and the webhook that wakes each one (ADR 0062). Owner only. */
 export default function Agents() {
   const { board } = useLocalSearchParams<{ board: string }>();
+  return <Roster key={board} board={board} />;
+}
+
+function Roster({ board }: { board: string }) {
   const session = useSession();
+  const ready = useStore(session.state).ready;
+  const owner = ready && session.owner;
+  const archived = useArchived(board);
+  const canWrite = ready && !session.watchOnly && !archived;
   const manage = useMemo(() => manageFor(session), [session]);
   const [state, setState] = useState<Loaded>({ kind: "loading" });
   const [refreshing, setRefreshing] = useState(false);
+  const view = useRef<AbortController | null>(null);
+  const read = useRef(0);
 
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
-      try {
-        const personas = await manage.personas(board, signal);
-        // A plain channel has no board, so there is nothing to list webhooks for.
-        const hooks = personas?.length ? await manage.webhooks(board, signal) : new Map<string, Webhook>();
-        if (!signal?.aborted) setState({ kind: "ready", personas, hooks });
-      } catch (caught) {
-        if (signal?.aborted) return;
-        const told = explain(caught, "show webhooks");
-        if (told.expired) session.reportAuthFailure();
-        setState({ kind: "error", message: told.message });
-      }
-    },
-    [manage, board, session],
-  );
+  const load = useCallback(async () => {
+    const signal = view.current?.signal;
+    if (!ready || !signal || signal.aborted) return;
+    const request = ++read.current;
+    try {
+      const personas = await manage.personas(board, signal);
+      // Members can read the roster, not the owner's webhook settings.
+      const hooks = owner && personas?.length ? await manage.webhooks(board, signal) : new Map<string, Webhook>();
+      if (!signal.aborted && request === read.current) setState({ kind: "ready", personas, hooks });
+    } catch (caught) {
+      if (signal.aborted || request !== read.current) return;
+      const told = explain(caught, "show agents");
+      if (told.expired) session.reportAuthFailure();
+      setState({ kind: "error", message: told.message });
+    }
+  }, [manage, board, owner, ready, session]);
 
-  // Reloads when the webhook sheet closes, so a saved or removed webhook shows at once.
-  useFocusEffect(
-    useCallback(() => {
-      const stop = new AbortController();
-      void load(stop.signal);
-      return () => stop.abort();
-    }, [load]),
-  );
+  useFocusEffect(useCallback(() => {
+    const stop = new AbortController();
+    view.current = stop;
+    void load();
+    return () => { stop.abort(); view.current = null; };
+  }, [load]));
 
   const refresh = () => {
     setRefreshing(true);
@@ -56,6 +67,8 @@ export default function Agents() {
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+      automaticallyAdjustKeyboardInsets
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
     >
       <Stack.Screen options={{ title: "Agents", headerLargeTitleEnabled: false }} />
@@ -69,75 +82,68 @@ export default function Agents() {
         </View>
       ) : null}
 
-      {state.kind === "ready" && state.personas?.length ? (
+      {state.kind === "ready" ? (
         <>
-          <Surface style={styles.intro}>
-            <Text style={styles.introText}>
-              A webhook wakes an agent that is not listening: the board sends a small notice to an address you choose,
-              and the agent then reads the board with its own key.
-            </Text>
-          </Surface>
-          {state.personas.map((persona) => {
-            const hook = state.hooks.get(persona.id) ?? null;
-            return (
-              <Pressable
-                key={persona.id}
-                onPress={() =>
-                  router.push({
-                    pathname: "/webhook",
-                    params: { board, persona: persona.id, name: persona.displayName },
-                  })
-                }
-                style={({ pressed }) => pressed && { opacity: 0.6 }}
-                accessibilityRole="button"
-                accessibilityLabel={`${persona.displayName}. ${webhookSummary(hook)}`}
-                accessibilityHint={hook ? "Opens its webhook" : "Adds a webhook"}
-              >
-                <Surface style={styles.row}>
-                  <View style={[styles.dot, { backgroundColor: persona.listening ? color.success : color.fill }]} />
-                  <View style={{ flex: 1, gap: 3 }}>
-                    <Text style={styles.name} numberOfLines={1}>
-                      {persona.displayName}
-                    </Text>
-                    <Text style={styles.summary}>{webhookSummary(hook)}</Text>
-                    {hook?.pending ? (
-                      <Text style={styles.summary}>
-                        {hook.pending} {hook.pending === 1 ? "notice" : "notices"} waiting
-                      </Text>
-                    ) : null}
-                  </View>
-                  <SymbolView name={hook ? "bolt.fill" : "plus.circle"} tintColor={color.tint} size={20} />
-                </Surface>
-              </Pressable>
-            );
-          })}
+          {canWrite && (state.personas !== null || owner) ? (
+            <AgentRegistration key={state.personas === null ? "setup" : "register"}
+              board={board} plain={state.personas === null} manage={manage} reload={load} />
+          ) : (
+            <Note>{archived ? "This board is archived and read-only." : session.watchOnly
+              ? "Your access is watch only." : "Only the workspace owner can enable agents on this channel."}</Note>
+          )}
+          {!state.personas?.length ? (
+            <View style={styles.empty}>
+              <SymbolView name="person.2" tintColor={color.tertiary} size={44} />
+              <Text style={styles.emptyTitle}>No agents registered yet</Text>
+            </View>
+          ) : (
+            <>
+              {owner && canWrite ? <Note>Select an agent to add, test or change its webhook.</Note> : null}
+              {state.personas.map((persona) => {
+                const hook = state.hooks.get(persona.id) ?? null;
+                const editable = owner && canWrite;
+                const summary = owner ? webhookSummary(hook) : persona.listening ? "Listening" : "Not listening";
+                return (
+                  <Pressable
+                    key={persona.id}
+                    disabled={!editable}
+                    onPress={() => router.push({
+                      pathname: "/webhook", params: { board, persona: persona.id, name: persona.displayName },
+                    })}
+                    style={({ pressed }) => pressed && { opacity: 0.6 }}
+                    accessibilityRole={editable ? "button" : "text"}
+                    accessibilityLabel={`${persona.displayName}. ${summary}`}
+                    accessibilityHint={editable ? (hook ? "Opens its webhook" : "Adds a webhook") : undefined}
+                  >
+                    <Surface style={styles.row}>
+                      <View style={[styles.dot, { backgroundColor: persona.listening ? color.success : color.fill }]} />
+                      <View style={{ flex: 1, gap: 3 }}>
+                        <Text style={styles.name}>{persona.displayName}</Text>
+                        <Text style={styles.summary}>{summary}</Text>
+                        {hook?.pending ? (
+                          <Text style={styles.summary}>{hook.pending} {hook.pending === 1 ? "notice" : "notices"} waiting</Text>
+                        ) : null}
+                      </View>
+                      {editable ? <SymbolView name={hook ? "bolt.fill" : "plus.circle"} tintColor={color.tint} size={20} /> : null}
+                    </Surface>
+                  </Pressable>
+                );
+              })}
+            </>
+          )}
         </>
-      ) : null}
-
-      {state.kind === "ready" && !state.personas?.length ? (
-        <View style={styles.empty}>
-          <SymbolView name="person.2.slash" tintColor={color.tertiary} size={44} />
-          <Text style={styles.emptyTitle}>No agents here yet</Text>
-          <Text style={styles.emptyText}>
-            {state.personas === null
-              ? `# ${board} was made as a plain channel, which has no registered agents. Agents register on a board made in the web app or with msn board create.`
-              : `An agent appears here once it joins # ${board} with the board's link. Then you can give it a webhook.`}
-          </Text>
-        </View>
       ) : null}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 60, gap: 10 },
-  intro: { borderRadius: 22, padding: 14 },
-  introText: { fontSize: 14, lineHeight: 19, color: color.label },
+  content: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 60, gap: 10 },
   row: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 22 },
   dot: { width: 10, height: 10, borderRadius: 5 },
   name: { fontSize: 17, fontWeight: "600", color: color.label },
   summary: { fontSize: 13, lineHeight: 17, color: color.secondary },
-  empty: { alignItems: "center", gap: 12, marginTop: 70, paddingHorizontal: 24 },
+  empty: { alignItems: "center", gap: 12, marginTop: 40, paddingHorizontal: 24 },
   emptyTitle: { fontSize: 20, fontWeight: "600", color: color.label, textAlign: "center" },
   emptyText: { fontSize: 15, lineHeight: 20, color: color.secondary, textAlign: "center" },
 });

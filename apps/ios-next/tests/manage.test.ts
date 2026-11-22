@@ -140,6 +140,66 @@ test("agents come with the ids a webhook is set on; a plain channel has none", a
   await assert.rejects(fake([json({})]).manage.personas("launch"), /invalid list of agents/);
 });
 
+test("enabling agents on a plain channel provisions a shared key only in the request body", async () => {
+  const { manage, calls } = fake([json({ board: { channel: "launch" }, sharedChannel: true }, 201)]);
+  await manage.enableAgents("launch", (n) => { assert.equal(n, 32); return new Uint8Array(n).fill(0x0a); });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, "https://msn.example/api/tenants/acme/channels/launch/board");
+  assert.equal(calls[0]?.init.method, "PUT");
+  assert.equal(calls[0]?.init.redirect, "manual");
+  assert.deepEqual(sent(calls[0]), { goal: "Collaborate in #launch.", credential: "0a".repeat(32) });
+});
+
+test("concurrent setup leaves the existing credential alone; other failures do not mean enabled", async () => {
+  const random = (n: number) => new Uint8Array(n);
+  const raced = fake([failure(409, "board_exists")]);
+  await raced.manage.enableAgents("launch", random);
+  assert.equal(raced.calls.length, 1);
+  for (const reply of [
+    failure(409, "board_archived"), failure(403, "owner_required"), failure(401, "unauthorized"),
+    json({ board: { channel: "wrong" }, sharedChannel: true }), json({ board: { channel: "launch" } }),
+  ]) {
+    const { manage, calls } = fake([reply]);
+    await assert.rejects(manage.enableAgents("launch", random));
+    assert.equal(calls.length, 1); // Never rotates or falls back to creating another channel.
+  }
+  const { manage, calls } = fake([]);
+  await assert.rejects(manage.enableAgents("launch", () => new Uint8Array(16)), /random bytes/);
+  assert.equal(calls.length, 0);
+});
+
+test("registering an agent and retrying the same PUT confirm the same board, id and trimmed display name", async () => {
+  const agent = { id: "persona-1", channel: "launch", displayName: "Planner" };
+  const { manage, calls } = fake([json(agent, 201), json(agent, 200)]);
+  for (let i = 0; i < 2; ++i) {
+    assert.deepEqual(await manage.registerAgent("launch", agent.id, "  Planner "), { id: agent.id, displayName: "Planner" });
+    assert.equal(calls[i]?.url, "https://msn.example/api/tenants/acme/channels/launch/personas/persona-1");
+    assert.equal(calls[i]?.init.method, "PUT");
+    assert.equal(calls[i]?.init.redirect, "manual");
+    assert.deepEqual(sent(calls[i]), { displayName: "Planner" });
+  }
+});
+
+test("invalid and reserved agent names do not write; registration never enables agents on its own", async () => {
+  const { manage, calls } = fake([]);
+  for (const name of [" ", "é".repeat(65), "github"])
+    await assert.rejects(manage.registerAgent("launch", "persona-1", name));
+  assert.equal(calls.length, 0);
+  for (const [status, code] of [[403, "watch_only"], [409, "board_archived"], [404, "board_not_found"], [409, "persona_name_conflict"]] as const) {
+    const denied = fake([failure(status, code)]);
+    await assert.rejects(denied.manage.registerAgent("launch", "persona-1", "Planner"),
+      (err: unknown) => err instanceof ApiError && err.code === code);
+    assert.equal(denied.calls.length, 1);
+  }
+});
+
+test("another agent, name or channel cannot confirm registration", async () => {
+  const agent = { id: "persona-1", channel: "launch", displayName: "Planner" };
+  for (const wrong of [{ ...agent, id: "other" }, { ...agent, channel: "elsewhere" }, { ...agent, displayName: "Other" }, {}]) {
+    await assert.rejects(fake([json(wrong)]).manage.registerAgent("launch", agent.id, agent.displayName), /did not confirm/);
+  }
+});
+
 const hook = (extra: Record<string, unknown> = {}) => ({
   channel: "launch",
   persona: "persona-1",

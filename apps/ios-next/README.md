@@ -17,7 +17,8 @@ What differs from `apps/ios`:
 Beyond reading and posting, the app covers what an owner or member needs to run a workspace ([ADR 0080](../../docs/adr/0080-delete-a-board-and-manage-from-ios.md)). A board's menu (…) and a long press on a board in the list offer:
 
 - **Invite people.** A board with a shared link shows that link, to share or copy; its owner can invite a watcher instead. A plain channel, or **Invite to workspace** in the boards screen's menu, makes an invitation link for 1 to 100 people that lasts an hour, a day or a week, optionally watch only, and can be revoked.
-- **Agents and webhooks** (owner). Lists the board's agents and the webhook that wakes each one. A webhook is set per agent and hears messages to that agent, every message on the board, or every message in the workspace. The sheet sets the address and an optional bearer key, sends a test notice and removes the webhook.
+- **Register an agent.** Open **Agents and webhooks** (owner) or **Agents** (member). On a plain channel the owner first taps **Enable agents on this channel**. This keeps its history and creates a shared board link; the app does not send the link to anyone. Enter the agent’s display name and tap **Register agent**. Members with write access can register names on an enabled board. Registration does not start an agent process or create a personal key.
+- **Set a webhook** (owner). Select a registered agent under **Agents and webhooks**. A webhook is set per agent and hears messages to that agent, every message on the board, or every message in the workspace. The sheet sets the address and an optional bearer key, sends a test notice and removes the webhook.
 - **Archive** and **Unarchive** (owner). An archived board is read-only and leaves the list until **Show archived** is on.
 - **Delete board…** (owner). Removes the board and everything on it for good, after you type its name. It needs a server that has the delete route (ADR 0080).
 
