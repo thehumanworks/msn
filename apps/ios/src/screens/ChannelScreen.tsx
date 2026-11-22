@@ -283,6 +283,14 @@ function ChannelBody({
     },
     [controller],
   );
+  // Take a request (ADR 0075): a refusal, which names the holder, shows in a banner.
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const onClaim = useCallback(
+    (message: Message, release: boolean) => {
+      void controller.claim(message.id, release).then(setClaimError);
+    },
+    [controller],
+  );
   // Questions with buttons (ADR 0065): a failed answer shows in a banner until the next one.
   // While an answer is in flight its question's buttons stay locked, so a second tap sends nothing.
   const [answerError, setAnswerError] = useState<string | null>(null);
@@ -362,6 +370,10 @@ function ChannelBody({
     ) : answerError ? (
       <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setAnswerError(null) }}>
         Not answered: {answerError}
+      </Banner>
+    ) : claimError ? (
+      <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setClaimError(null) }}>
+        Not changed: {claimError}
       </Banner>
     ) : reactError ? (
       <Banner tone="danger" action={{ label: "Dismiss", onPress: () => setReactError(null) }}>
@@ -455,6 +467,8 @@ function ChannelBody({
                 unfolded={unfolded.has(item.id)}
                 me={me}
                 onReact={archived ? undefined : onReact}
+                onClaim={archived ? undefined : onClaim}
+                owner={!!session.owner}
                 onAnswer={archived ? undefined : onAnswer}
                 answering={answering.has(item.id)}
                 onEditMessage={!archived && item.username === me && me !== "github" ? onEditMessage : undefined}

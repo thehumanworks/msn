@@ -677,6 +677,8 @@ function appendMessage(message, target = $("messages")) {
   if (Number.isSafeInteger(message.replaces))
     article.append(replaceLink("Replaces", message.replaces, elsewhereBoard));
   if (Number.isSafeInteger(message.replacedBy)) markReplaced(article, message.replacedBy, elsewhereBoard);
+  // Take a request (ADR 0075): who is handling this, and the button to take or release it.
+  fillClaim(article, message, target === $("messages"));
   // The quoted part of the replyTo message (ADR 0059). Plain text; pressing it shows the source.
   if (typeof message.quote === "string" && message.replyTo != null) {
     const block = document.createElement("blockquote");
@@ -1060,6 +1062,8 @@ function replaceLink(label, id, board = null) {
 function markReplaced(article, id, board = null) {
   article.classList.add("replaced");
   article.querySelector(":scope > .message-meta .message-replace")?.remove();
+  // A replaced message cannot be taken (ADR 0075); a claim made earlier stays shown.
+  article.querySelector(":scope > .message-meta .claim-button")?.remove();
   if (article.querySelector(":scope > .replaced-note")) return;
   const note = replaceLink("Replaced by", id, board);
   note.classList.add("replaced-note");
@@ -1387,10 +1391,18 @@ async function loadReactions(connection, name, state) {
   const before = Math.max(...ids) + 1;
   let after = Math.min(...ids) - 1;
   const found = new Map();
+  // Claims (ADR 0075) come on the same pages. A server without them sends no `claims` list.
+  const claims = new Map();
+  let claimsKnown = true;
+  // Ids at or below this were covered by the pages read; later ones keep what they show.
+  let covered = after;
   try {
     for (let page = 0; page < 5; page++) {
       const data = await api(`/channels/${name}/reactions?after=${after}&before=${before}`, {}, connection);
       for (const entry of data.reactions) found.set(entry.id, entry.reactions);
+      if (Array.isArray(data.claims)) for (const entry of data.claims) claims.set(entry.id, entry.claim);
+      else claimsKnown = false;
+      covered = data.hasMore ? data.nextAfter : before;
       if (!data.hasMore) break;
       after = data.nextAfter;
     }
@@ -1398,10 +1410,124 @@ async function loadReactions(connection, name, state) {
     return;
   }
   if (session !== connection || channel !== name) return;
-  for (const message of state.messages) {
+  for (const message of [...state.messages]) {
+    if (message.id > covered) continue;
     const next = found.get(message.id);
     if (JSON.stringify(next ?? null) !== JSON.stringify(message.reactions ?? null))
       showReactions(state, message.id, next);
+    const claim = claims.get(message.id);
+    if (claimsKnown && JSON.stringify(claim ?? null) !== JSON.stringify(message.claim ?? null))
+      showClaim(state, message.id, claim);
+  }
+}
+
+/*
+ * Take a request (ADR 0075). One name marks a message as being handled, so others skip it. It is
+ * a visible signal, not a lock. Only the holder or the owner releases it. Names are untrusted:
+ * textContent and attributes only. Other people's claims arrive with the reactions refresh.
+ */
+const claimOf = (message) =>
+  typeof message.claim?.username === "string" && message.claim.username ? message.claim : null;
+
+/** Draws the claim state of one row: a "Taking this" button in its header, or a "Taken by" note. */
+function fillClaim(article, message, interactive = true) {
+  const meta = article.querySelector(":scope > .message-meta");
+  meta?.querySelector(":scope > .claim-button")?.remove();
+  article.querySelector(":scope > .claim-note")?.remove();
+  article.classList.remove("claimed");
+  const live = interactive && Boolean(session) && !session.watchOnly && !archivedBoards.has(message.channel);
+  const claim = claimOf(message);
+  if (!claim) {
+    if (!live || !meta || message.replacedBy != null) return;
+    const take = document.createElement("button");
+    take.type = "button";
+    take.className = "quiet claim-button";
+    take.textContent = "Taking this";
+    take.title = `Tell everyone you are handling message #${message.id}, so others skip it`;
+    take.setAttribute("aria-label", `Take message #${message.id}: tell everyone you are handling it`);
+    take.addEventListener("click", () => setClaim(message, false, take));
+    meta.append(take);
+    return;
+  }
+  article.classList.add("claimed");
+  const mine = claim.username === session?.username;
+  const note = document.createElement("div");
+  note.className = "message-annotation claim-note";
+  const text = document.createElement("span");
+  text.className = "claim-holder";
+  text.textContent = `Taken by ${claim.username}${mine ? " (you)" : ""}`;
+  text.title = `${claim.username} is handling this since ${claim.claimedAt}. Others skip it.`;
+  note.append(text);
+  // The holder gives it back; the owner can release anyone's. The server checks both.
+  if (live && (mine || session.owner)) {
+    const release = document.createElement("button");
+    release.type = "button";
+    release.className = "quiet claim-release";
+    release.textContent = "Release";
+    release.title = mine
+      ? `Stop handling message #${message.id}, so someone else can take it`
+      : `Release message #${message.id} from ${claim.username}, so someone else can take it`;
+    release.setAttribute("aria-label", `Release message #${message.id}`);
+    release.addEventListener("click", () => setClaim(message, true, release));
+    note.append(release);
+  }
+  // Under the header and any "Replaced by" note.
+  (article.querySelector(":scope > .replaced-note") ?? meta)?.after(note);
+}
+
+/** Applies the current claim to the cached message and every row that shows it. */
+function showClaim(state, id, claim) {
+  const lists = [state.messages, state.pins ?? []];
+  let message = null;
+  for (const list of lists)
+    for (const item of list)
+      if (item.id === id) {
+        if (claim) item.claim = claim;
+        else delete item.claim;
+        message ??= item;
+      }
+  if (!message) return;
+  for (const article of document.querySelectorAll(`article[data-id="${id}"]`)) {
+    // Search results keep what the search returned; the log and the pins follow the board.
+    if (article.closest("#search-results")) continue;
+    fillClaim(article, message, Boolean(article.closest("#messages")));
+  }
+}
+
+async function setClaim(message, release, button) {
+  if (!session || !channel) return;
+  const connection = session;
+  const name = channel;
+  const path = `/channels/${name}/messages/${message.id}`;
+  const current = () => connection.channels.get(name);
+  const shown = () => session === connection && channel === name && current();
+  button.disabled = true;
+  try {
+    const data = await api(
+      `${path}/claim`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: connection.username, ...(release ? { release: true } : {}) }),
+      },
+      connection,
+    );
+    if (shown()) showClaim(current(), message.id, data.message?.claim);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    button.disabled = false;
+    status(error.message, true);
+    // Someone else got there first, or it changed: show what the board says now.
+    if (["already_claimed", "not_holder", "message_replaced"].includes(error.code)) {
+      try {
+        const data = await api(path, {}, connection);
+        if (shown()) {
+          showClaim(current(), message.id, data.message?.claim);
+          if (Number.isSafeInteger(data.message?.replacedBy))
+            showReplaced(current(), message.id, data.message.replacedBy);
+        }
+      } catch {}
+    }
   }
 }
 

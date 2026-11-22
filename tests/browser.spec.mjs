@@ -2357,6 +2357,15 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
     headers: t.headers,
     data: { username: "agent", text: "Ship it?", to: "Tomas", choices: ["yes", "no"] },
   });
+  // A message this person took (ADR 0075): its Release button, beside "Taking this" on the others.
+  expect(
+    (
+      await request.post(`${t.path}/channels/general/messages/1/claim`, {
+        headers: t.headers,
+        data: { username: "Tomas" },
+      })
+    ).status(),
+  ).toBe(200);
   // An agent status strip (ADR 0064) with its summary.
   expect(
     (
@@ -2392,6 +2401,8 @@ test("every control on a phone has a 44px touch target", async ({ page, request 
   await expect(page.locator(".label-chip")).toHaveCount(1);
   await expect(page.locator(".choice-button")).toHaveCount(2);
   await expect(page.locator("#statuses")).toBeVisible();
+  await expect(page.locator(".claim-release")).toHaveCount(1);
+  await expect(page.locator(".claim-button")).toHaveCount(3);
   expect(await small()).toEqual([]);
   // An open thread with a quoted reply, and a composer replying with a quote (ADR 0059).
   await page.locator(".thread-toggle").first().click();
@@ -3355,6 +3366,136 @@ test("people react to a message with a fixed set; reactions toggle and never add
   await expect(page.locator("#archived-note")).toBeVisible();
   await expect(row(ids[0]).getByRole("button", { name: /^Done, 3/ })).toBeVisible();
   for (const add of await page.locator("#messages .reaction-add").all()) await expect(add).toBeHidden();
+});
+
+test("one name takes a request: Taking this, taken by NAME, and Release for the holder or owner", async ({
+  page,
+  request,
+}, testInfo) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential, goal: "Ship" },
+      })
+    ).status(),
+  ).toBe(201);
+  await request.put(`${t.path}/channels/other`, { headers: t.headers });
+  const shared = { Authorization: `Bearer ${credential}` };
+  for (const name of ["lead", "dev <b>x</b>"])
+    await request.put(`${t.path}/channels/work/personas/${encodeURIComponent(name.split(" ")[0])}`, {
+      headers: shared,
+      data: { displayName: name },
+    });
+  const ids = [];
+  for (const text of ["Deploy the worker", "Review the PR", "Fix the flaky test", "Update the docs"]) {
+    const sent = await request.post(`${t.path}/channels/work/messages`, {
+      headers: shared,
+      data: {
+        username: "lead",
+        text,
+        ...(text.startsWith("Review") ? { to: ["dev <b>x</b>", "human"] } : {}),
+      },
+    });
+    ids.push((await sent.json()).message.id);
+  }
+  const claimAs = (id, username, release = false) =>
+    request.post(`${t.path}/channels/work/messages/${id}/claim`, {
+      headers: shared,
+      data: { username, ...(release ? { release } : {}) },
+    });
+  expect((await claimAs(ids[1], "dev <b>x</b>")).status()).toBe(200);
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  const article = (id) => page.locator(`#messages article[data-id="${id}"]`);
+  const note = (id) => article(id).locator(":scope > .claim-note");
+  const take = (id) =>
+    article(id).getByRole("button", { name: `Take message #${id}: tell everyone you are handling it` });
+  const releaseButton = (id) => article(id).getByRole("button", { name: `Release message #${id}` });
+
+  // A message another name took says so, as text only, and offers no "Taking this".
+  await expect(note(ids[1]).locator(".claim-holder")).toHaveText("Taken by dev <b>x</b>");
+  await expect(note(ids[1]).locator("b")).toHaveCount(0);
+  await expect(take(ids[1])).toHaveCount(0);
+  await expect(article(ids[1])).toHaveClass(/claimed/);
+  // Free messages offer the button and show no note.
+  await expect(note(ids[0])).toHaveCount(0);
+  await expect(take(ids[0])).toHaveText("Taking this");
+
+  await take(ids[0]).click();
+  await expect(note(ids[0]).locator(".claim-holder")).toHaveText("Taken by human (you)");
+  await expect(take(ids[0])).toHaveCount(0);
+  await expect(releaseButton(ids[0])).toBeVisible();
+  // Both themes (ADR 0049): the note and the buttons use theme tokens only.
+  for (const colorScheme of ["dark", "light"]) {
+    await page.emulateMedia({ colorScheme });
+    await expect(note(ids[0]).locator(".claim-holder")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`claim-${testInfo.project.name}-${colorScheme}.png`) });
+  }
+  await page.emulateMedia({ colorScheme: null });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Taking sends nothing: the log has the same four messages, and the server names the holder.
+  await expect(page.locator("#messages .message")).toHaveCount(4);
+  const history = await (
+    await request.get(`${t.path}/channels/work/messages`, { headers: t.headers })
+  ).json();
+  expect(history.messages.map((m) => m.id)).toEqual(ids);
+  expect(history.messages[0].claim.username).toBe("human");
+
+  // The holder releases; the button comes back.
+  await releaseButton(ids[0]).click();
+  await expect(note(ids[0])).toHaveCount(0);
+  await expect(take(ids[0])).toBeVisible();
+
+  // Someone else takes a message first: the press is refused, says who has it, and shows them.
+  expect((await claimAs(ids[2], "lead")).status()).toBe(200);
+  await take(ids[2]).click();
+  await expect(page.locator("#status")).toContainText('already taken by "lead"');
+  await expect(note(ids[2]).locator(".claim-holder")).toHaveText("Taken by lead");
+  await expect(take(ids[2])).toHaveCount(0);
+
+  // The owner releases someone else's claim.
+  await releaseButton(ids[2]).click();
+  await expect(note(ids[2])).toHaveCount(0);
+  expect(
+    (await (await request.get(`${t.path}/channels/work/messages/${ids[2]}`, { headers: t.headers })).json())
+      .message.claim,
+  ).toBeUndefined();
+
+  // Claims made and released elsewhere arrive with the refresh the page already makes.
+  expect((await claimAs(ids[3], "lead")).status()).toBe(200);
+  expect((await claimAs(ids[1], "dev <b>x</b>", true)).status()).toBe(200);
+  await openChannel(page, "other");
+  await openChannel(page, "work");
+  await expect(note(ids[3]).locator(".claim-holder")).toHaveText("Taken by lead");
+  await expect(note(ids[1])).toHaveCount(0);
+  await expect(take(ids[1])).toBeVisible();
+
+  // A replaced message cannot be taken: the button goes when the replacement arrives.
+  const mine = await (
+    await request.post(`${t.path}/channels/work/messages`, {
+      headers: t.headers,
+      data: { username: "human", text: "Plan A" },
+    })
+  ).json();
+  await expect(take(mine.message.id)).toBeVisible();
+  await request.post(`${t.path}/channels/work/messages`, {
+    headers: t.headers,
+    data: { username: "human", text: "Plan B", replaces: mine.message.id },
+  });
+  await expect(article(mine.message.id)).toHaveClass(/replaced/);
+  await expect(take(mine.message.id)).toHaveCount(0);
+
+  // An archived board shows who took what, with no way to change it.
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  await expect(page.locator("#archived-note")).toBeVisible();
+  await expect(note(ids[3]).locator(".claim-holder")).toHaveText("Taken by lead");
+  for (const button of await page.locator("#messages .claim-button, #messages .claim-release").all())
+    await expect(button).toBeHidden();
 });
 
 test("people edit their own messages in place; others see the edit and nothing moves", async ({

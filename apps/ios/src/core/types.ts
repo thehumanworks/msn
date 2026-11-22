@@ -46,7 +46,12 @@ export type Message = {
   replaces?: number;
   /** The newer message that replaced this one (ADR 0068); absent until replaced. */
   replacedBy?: number;
+  /** Who said they are handling this message (ADR 0075); absent while nobody has taken it. */
+  claim?: Claim;
 };
+
+/** The one name handling a message, and since when (ADR 0075). A signal, not a lock. */
+export type Claim = { username: string; claimedAt: string };
 
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
 export type Answered = { id: number; choice: string; username: string; answeredAt: string };

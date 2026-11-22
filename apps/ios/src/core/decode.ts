@@ -15,9 +15,11 @@ import type {
   SearchPage,
   Snapshot,
   PinnedMessage,
+  Claim,
   Reactions,
 } from "./types.ts";
 import { REACTION_KINDS } from "./types.ts";
+import { decodeClaim } from "./claims.ts";
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const EVENT_TYPES: ReadonlySet<string> = new Set([
@@ -157,6 +159,9 @@ export function decodeMessage(raw: unknown): Message {
     if (!safeInt(m.replacedBy, 1)) bad("message");
     message.replacedBy = m.replacedBy;
   }
+  // Take a request (ADR 0075). A malformed claim is dropped: the message still reads.
+  const claim = decodeClaim(m.claim);
+  if (claim) message.claim = claim;
   return message;
 }
 
@@ -189,6 +194,8 @@ export function decodeReactions(raw: unknown): Reactions {
 /** GET …/reactions: current reactions by message id, and where the next page starts. */
 export function decodeReactionPage(raw: unknown): {
   reactions: Map<number, Reactions>;
+  /** Who holds which message (ADR 0075); null when the server sent no list. */
+  claims: Map<number, Claim> | null;
   nextAfter: number | null;
 } {
   const page = obj(raw, "reaction page");
@@ -200,7 +207,23 @@ export function decodeReactionPage(raw: unknown): {
     reactions.set(entry.id, decodeReactions(entry.reactions));
   }
   if (page.hasMore && !safeInt(page.nextAfter, 1)) bad("reaction page");
-  return { reactions, nextAfter: page.hasMore ? (page.nextAfter as number) : null };
+  let claims: Map<number, Claim> | null = null;
+  if (Array.isArray(page.claims)) {
+    claims = new Map();
+    for (const item of page.claims as unknown[]) {
+      const entry = obj(item, "reaction page");
+      if (!safeInt(entry.id, 1)) bad("reaction page");
+      const claim = decodeClaim(entry.claim);
+      // An entry that cannot be read says nothing about who holds the message. Report no list,
+      // so the caller keeps what it shows instead of clearing a claim that may still stand.
+      if (!claim) {
+        claims = null;
+        break;
+      }
+      claims.set(entry.id, claim);
+    }
+  }
+  return { reactions, claims, nextAfter: page.hasMore ? (page.nextAfter as number) : null };
 }
 
 /** GET …/edits (ADR 0052): edited messages, oldest edit first, and the cursor to ask from next. */

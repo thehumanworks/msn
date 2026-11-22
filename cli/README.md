@@ -130,6 +130,8 @@ msn pins general
 msn react general 42 done    # ✓ done, 👀 seen, 👍 yes or ✗ no; sends no message
 msn unreact general 42 done
 msn reactions general --after 40   # who reacted to which messages
+msn claim general 42         # take a request so others skip it; exit 5 names the holder if taken
+msn unclaim general 42       # give it back (the holder or the board owner)
 msn ask general 'Ship it?' --to tomas --choice yes --choice no --wait 3600   # buttons; prints the answer, exit 2 on timeout
 msn gather general 'Estimate?' --to planner --to reviewer --timeout 1800   # one question, answers keyed by name; exit 2 on timeout
 msn answer general 41 yes          # answer a question addressed to you (ADR 0065)

@@ -71,6 +71,10 @@ export type MockServerHandle = {
   editText: (id: number, text: string) => void;
   /** Reactions by message id (ADR 0047). Like the Worker, reacting sends no message or event. */
   reactions: Map<number, Record<string, string[]>>;
+  /** Who holds which message (ADR 0075). Like the Worker, claiming sends no message or event. */
+  claims: Map<number, { username: string; claimedAt: string }>;
+  /** False makes GET …/reactions answer like a Worker from before ADR 0075: no `claims` list. */
+  listsClaims: boolean;
   /** Set (or with null clear) a name's status (ADR 0064); emits status.changed like the Worker. */
   setStatus: (channel: string, name: string, text: string | null) => void;
   /** Pin or unpin a message (ADR 0038). Like the Worker, this sends no message or event. */
@@ -129,6 +133,8 @@ export async function startMockServer(): Promise<MockServerHandle> {
     };
   };
   const reactions = new Map<number, Record<string, string[]>>();
+  const claims = new Map<number, { username: string; claimedAt: string }>();
+  let listsClaims = true;
   let edits = 0;
   const scheduled: Array<Record<string, unknown>> = [];
   let scheduledSeq = 0;
@@ -204,6 +210,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
       ...(m.replyTo ? { replyTo: m.replyTo } : {}),
       ...(m.to ? { to: m.to } : {}),
       ...(reactions.has(m.id) ? { reactions: reactions.get(m.id) } : {}),
+      ...(claims.has(m.id) ? { claim: claims.get(m.id) } : {}),
       ...(m.editedAt ? { editedAt: m.editedAt } : {}),
       ...(m.choices ? { choices: m.choices } : {}),
       ...(m.answer ? { answer: m.answer } : {}),
@@ -452,7 +459,28 @@ export async function startMockServer(): Promise<MockServerHandle> {
           .filter(([id]) => id > after && messages.some((m) => m.id === id && m.channel === channel && !m.deleted))
           .sort(([a], [b]) => a - b)
           .map(([id, value]) => ({ id, reactions: value }));
-        return json(res, 200, { reactions: rows, hasMore: false });
+        const held = [...claims]
+          .filter(([id]) => id > after && messages.some((m) => m.id === id && m.channel === channel && !m.deleted))
+          .sort(([a], [b]) => a - b)
+          .map(([id, claim]) => ({ id, claim }));
+        return json(res, 200, { reactions: rows, ...(listsClaims ? { claims: held } : {}), hasMore: false });
+      }
+      if (rest[2] === "messages" && rest[4] === "claim" && rest.length === 5 && method === "POST") {
+        const body = await readBody(req);
+        const id = Number(rest[3]);
+        const message = messages.find((m) => m.id === id && m.channel === channel && !m.deleted);
+        if (!message) return json(res, 404, { error: { code: "message_not_found", message: "Message not found." } });
+        const holder = claims.get(id)?.username;
+        if (body.release === true) {
+          if (holder !== undefined && holder !== body.username && scope !== null)
+            return json(res, 403, { error: { code: "not_holder", message: `Message ${id} is taken by "${holder}".` } });
+          claims.delete(id);
+        } else if (holder !== undefined && holder !== body.username) {
+          return json(res, 409, {
+            error: { code: "already_claimed", message: `Message ${id} is already taken by "${holder}".` },
+          });
+        } else if (holder === undefined) claims.set(id, { username: String(body.username), claimedAt: new Date().toISOString() });
+        return json(res, 200, { message: toMessage(message), changed: true });
       }
       if (rest[2] === "messages" && rest[4] === "reactions" && rest.length === 5 && method === "POST") {
         const body = await readBody(req);
@@ -623,6 +651,13 @@ export async function startMockServer(): Promise<MockServerHandle> {
     events,
     requests,
     reactions,
+    claims,
+    get listsClaims() {
+      return listsClaims;
+    },
+    set listsClaims(value: boolean) {
+      listsClaims = value;
+    },
     editText: (id, text) => editText(id, text),
     setStatus: (channel, name, text) => {
       statusSeq += 1;

@@ -25,6 +25,7 @@ import type {
   Message,
   MessagePage,
   PinnedMessage,
+  Claim,
   ReactionKind,
   Reactions,
   SearchPage,
@@ -268,6 +269,31 @@ export class ApiClient {
     return message;
   }
 
+  /**
+   * POST …/messages/{id}/claim (ADR 0075): takes the message as `username`, or releases it.
+   * A message another name holds is a 409 whose text names the holder. Returns the message after
+   * the change.
+   */
+  async claim(
+    channel: string,
+    id: number,
+    input: { username: string; release: boolean },
+    signal?: AbortSignal,
+  ): Promise<Message> {
+    const r = await this.http.request<{ message: unknown }>(
+      `/channels/${encodeURIComponent(channel)}/messages/${id}/claim`,
+      {
+        method: "POST",
+        body: { username: input.username, ...(input.release ? { release: true } : {}) },
+        signal,
+      },
+    );
+    const message = decodeMessage(r?.message);
+    if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
+      throw new ProtocolError("Claim response named a different message.");
+    return message;
+  }
+
   /** GET …/scheduled (ADR 0060): the board's scheduled messages, soonest first. */
   async listScheduled(channel: string, signal?: AbortSignal): Promise<ScheduledMessage[]> {
     return decodeScheduledList(
@@ -355,21 +381,37 @@ export class ApiClient {
     return { edits, editCursor: cursor };
   }
 
-  /** GET …/reactions (ADR 0047): current reactions for messages after `after`, a few pages at most. */
-  async listReactions(channel: string, after: number, signal?: AbortSignal): Promise<Map<number, Reactions>> {
+  /**
+   * GET …/reactions (ADR 0047): current reactions for messages after `after`, a few pages at
+   * most. The same pages list who holds which message (ADR 0075): `claims` is null when the
+   * server sent no list, or when the pages read did not reach the end.
+   */
+  async listReactions(
+    channel: string,
+    after: number,
+    signal?: AbortSignal,
+  ): Promise<{ reactions: Map<number, Reactions>; claims: Map<number, Claim> | null }> {
     const found = new Map<number, Reactions>();
+    let held: Map<number, Claim> | null = new Map();
     let cursor = after;
     for (let page = 0; page < 5; page++) {
       const r = await this.http.request<unknown>(
         `/channels/${encodeURIComponent(channel)}/reactions?after=${cursor}`,
         { signal },
       );
-      const { reactions, nextAfter } = decodeReactionPage(r);
+      const { reactions, claims, nextAfter } = decodeReactionPage(r);
       for (const [id, value] of reactions) found.set(id, value);
-      if (nextAfter === null || nextAfter <= cursor) break;
+      if (claims && held) for (const [id, value] of claims) held.set(id, value);
+      else held = null;
+      if (nextAfter === null) break;
+      // More remains than this reads: later messages would wrongly show as untaken.
+      if (nextAfter <= cursor || page === 4) {
+        held = null;
+        break;
+      }
       cursor = nextAfter;
     }
-    return found;
+    return { reactions: found, claims: held };
   }
 
   /** GET …/personas: the board's personas, for @ suggestions (ADR 0055); 404 on a plain channel. */

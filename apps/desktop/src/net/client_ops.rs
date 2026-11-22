@@ -576,6 +576,38 @@ pub fn react(
     Ok(message["reactions"].clone())
 }
 
+/// Takes message `id` as `username`, or releases it (ADR 0075). Returns the message's claim
+/// after the change: `{username, claimedAt}`, or `Null` when nobody holds it. A message another
+/// name holds is a conflict whose text names the holder.
+pub fn claim(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+    release: bool,
+) -> Result<Value, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let response = client.post_json(
+        &msn_cli::claim_path(tenant, channel, id),
+        token,
+        &[],
+        &msn_cli::claim_body(username, release),
+    )?;
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let message = &value["message"];
+    if message["id"].as_u64() != Some(id) || message["channel"].as_str() != Some(channel) {
+        return Err(CliError::generic(
+            "Claim response named a different message.",
+        ));
+    }
+    Ok(message["claim"].clone())
+}
+
 /// Replaces the text of a message `username` sent (ADR 0052). Returns the edited message.
 /// `base` is the `editedAt` the editor started from (None for a never-edited message); the server
 /// refuses the save with 409 edit_conflict when the message changed since.
@@ -790,10 +822,12 @@ pub fn fetch_reactions(
     token: &str,
     channel: &str,
     after: u64,
-) -> Result<ReactionRows, CliError> {
+) -> Result<(ReactionRows, Option<ClaimRows>), CliError> {
     slug(tenant)?;
     slug(channel)?;
     let mut found = Vec::new();
+    // Claims (ADR 0075) come on the same pages; a server without them sends no list at all.
+    let mut claims = Some(Vec::new());
     let mut after = after;
     for _ in 0..5 {
         let value = get_json(
@@ -803,12 +837,47 @@ pub fn fetch_reactions(
         )?;
         let (page, next) = parse_reactions(&value)?;
         found.extend(page);
+        match (claims.as_mut(), parse_claims(&value)?) {
+            (Some(all), Some(page)) => all.extend(page),
+            _ => claims = None,
+        }
         match next {
             Some(next) if next > after => after = next,
-            _ => break,
+            // Five full pages did not reach the end: later messages would wrongly read as
+            // untaken, so report no claims and keep what is shown.
+            Some(_) => {
+                claims = None;
+                break;
+            }
+            None => break,
         }
     }
-    Ok(found)
+    Ok((found, claims))
+}
+
+/// Claims by message id, as the server lists them with the reactions (ADR 0075).
+pub type ClaimRows = Vec<(u64, Value)>;
+
+/// The `claims` list of one reactions page: `None` when the server sent none (before ADR 0075).
+/// Each entry is a message id and `{username, claimedAt}`.
+pub fn parse_claims(value: &Value) -> Result<Option<ClaimRows>, CliError> {
+    let bad = || CliError::generic("Invalid reactions response.");
+    let Some(rows) = value.get("claims") else {
+        return Ok(None);
+    };
+    let rows = rows.as_array().ok_or_else(bad)?;
+    let mut page = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row["id"].as_u64().ok_or_else(bad)?;
+        // An entry that cannot be read says nothing about who holds the message: report no
+        // list, so the caller keeps what it shows instead of clearing a claim that may stand.
+        let name = row["claim"]["username"].as_str().unwrap_or_default();
+        if name.is_empty() || !row["claim"]["claimedAt"].is_string() {
+            return Ok(None);
+        }
+        page.push((id, row["claim"].clone()));
+    }
+    Ok(Some(page))
 }
 
 /// Reactions by message id, as the server lists them.
@@ -1583,6 +1652,37 @@ mod tests {
         );
         assert!(parse_edits(&json!({"edits": [], "hasMore": false}), "general").is_err());
         assert!(parse_edits(&json!({"edits": [{"id": 1, "channel": "general"}], "editCursor": 1, "hasMore": false}), "general").is_err());
+    }
+
+    #[test]
+    fn claim_lists_parse_and_a_page_without_one_says_unknown() {
+        // Take a request (ADR 0075): claims ride on the reactions page.
+        let page = parse_claims(&json!({
+            "reactions": [],
+            "claims": [{"id": 4, "claim": {"username": "dev", "claimedAt": "2026-11-21T18:00:00.000Z"}}],
+            "hasMore": false,
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            (page[0].0, page[0].1["username"].as_str()),
+            (4, Some("dev"))
+        );
+        assert_eq!(
+            parse_claims(&json!({"reactions": [], "claims": []})).unwrap(),
+            Some(vec![])
+        );
+        // A server from before ADR 0075 sends no list: unknown, not "nobody".
+        assert_eq!(parse_claims(&json!({"reactions": []})).unwrap(), None);
+        assert!(parse_claims(&json!({"claims": {}})).is_err());
+        // A malformed entry means "unknown", not "free": no list, so shown claims stay.
+        assert_eq!(parse_claims(&json!({"claims": [{"id": 4}]})).unwrap(), None);
+        assert_eq!(
+            parse_claims(&json!({"claims": [{"id": 4, "claim": {"username": "dev"}}]})).unwrap(),
+            None
+        );
+        assert!(parse_claims(&json!({"claims": [{"claim": {"username": "dev"}}]})).is_err());
     }
 
     #[test]

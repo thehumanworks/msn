@@ -157,6 +157,8 @@ describe("message reactions (ADR 0047)", () => {
         { id: ids[2], reactions: { done: ["dev"] } },
         { id: ids[3], reactions: { no: ["dev"] } },
       ],
+      // Claims travel with this refresh since ADR 0075; nobody took a message here.
+      claims: [],
       hasMore: false,
     });
     const range = (await (

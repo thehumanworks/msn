@@ -3,6 +3,7 @@ import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
 import { answeredBy } from "./questions.ts";
+import { withClaim } from "./claims.ts";
 import type { ScheduledMessage } from "./scheduled.ts";
 import { ApiError, isAbortError } from "./errors.ts";
 import type { SessionController } from "./sessionController.ts";
@@ -370,14 +371,21 @@ export class ChannelController {
     this.reactionsAt = Date.now();
     const after = Math.min(...this.byId.keys()) - 1;
     try {
-      const found = await this.ctl.api.listReactions(this.channel, after, this.ctl.signal);
+      const { reactions: found, claims } = await this.ctl.api.listReactions(this.channel, after, this.ctl.signal);
       if (this.disposed) return;
       let changed = false;
-      for (const [id, message] of this.byId) {
+      for (const [id, loaded] of this.byId) {
         if (id <= after) continue;
+        let message = loaded;
         const next = found.get(id);
-        if (JSON.stringify(next ?? null) === JSON.stringify(message.reactions ?? null)) continue;
-        this.byId.set(id, withReactions(message, next));
+        if (JSON.stringify(next ?? null) !== JSON.stringify(message.reactions ?? null))
+          message = withReactions(message, next);
+        // Claims (ADR 0075) ride on the same read; without a list, keep what is shown.
+        const claim = claims?.get(id);
+        if (claims && JSON.stringify(claim ?? null) !== JSON.stringify(message.claim ?? null))
+          message = withClaim(message, claim);
+        if (message === loaded) continue;
+        this.byId.set(id, message);
         changed = true;
       }
       if (changed) this.publishMessages();
@@ -507,6 +515,38 @@ export class ChannelController {
       if (isAbortError(error)) return null;
       if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
       return error instanceof Error ? error.message : "Could not edit the message.";
+    }
+  }
+
+  /**
+   * Takes a loaded message as you, or releases it (ADR 0075). Resolves to an error message, or
+   * null once the board shows the change. When someone else got there first, the server's text
+   * names the holder and the row shows them.
+   */
+  async claim(id: number, release: boolean): Promise<string | null> {
+    if (!this.byId.has(id)) return "That message is no longer loaded.";
+    const username = this.ctl.session.username;
+    const show = (updated: Message) => {
+      const current = this.byId.get(id);
+      if (this.disposed || !current) return;
+      this.byId.set(id, withClaim(current, updated.claim));
+      this.publishMessages();
+    };
+    try {
+      show(await this.ctl.api.claim(this.channel, id, { username, release }, this.ctl.signal));
+      return null;
+    } catch (error) {
+      if (isAbortError(error)) return null;
+      if (error instanceof ApiError && error.isAuthExpired) this.ctl.reportAuthFailure();
+      // 409: taken or replaced meanwhile. Read the message so the row says who has it.
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          show((await this.ctl.api.getMessage(this.channel, id, this.ctl.signal)).message);
+        } catch {
+          // The refusal below already says what happened.
+        }
+      }
+      return error instanceof Error ? error.message : "Could not change who is handling this.";
     }
   }
 
