@@ -1,6 +1,6 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { addressees, isAddressed, MAX_RECIPIENTS } from "../src/http";
 import { needsOwner } from "../src/push";
 import type { MsnDurableObject } from "../src/store";
@@ -171,13 +171,18 @@ describe("several names on one message (ADR 0067)", () => {
 
   it("wakes each addressed persona's webhook once, and never the sender's own", async () => {
     const f = await fixture();
-    // The notice alarm is due at once, so it may deliver (and delete) notices before the read
-    // below; count delivered and still-queued notices together. Delivery itself is covered by
-    // tests/webhooks.test.ts.
-    const delivered: string[] = [];
+    // The notice alarm is due at once, so each read below can see a notice before, during or
+    // after its delivery. A notice in delivery is both a row and a call until its row is deleted,
+    // so notices are told apart by id, never counted by persona. Retries and outcomes are covered
+    // by tests/webhooks.test.ts.
+    const calls: { id: string | null; persona: string }[] = [];
     await runInDurableObject(f.stub, (instance: MsnDurableObject) => {
-      instance.webhookFetch = async (input) => {
-        delivered.push(new URL(String(input instanceof Request ? input.url : input)).pathname.slice(1));
+      instance.webhookFetch = async (input, init) => {
+        const request = new Request(input, init);
+        calls.push({
+          id: request.headers.get("MSN-Webhook-Id"),
+          persona: new URL(request.url).pathname.slice(1),
+        });
         return new Response("ok");
       };
     });
@@ -191,13 +196,19 @@ describe("several names on one message (ADR 0067)", () => {
       ).toBe(201);
     // The sender "lead" names itself too; it is never woken by its own message.
     await f.sent({ to: ["reviewer", "worker", "lead"] });
-    const notices = await runInDurableObject(f.stub, (_: MsnDurableObject, state) =>
-      state.storage.sql
-        .exec<{ personaId: string }>("SELECT personaId FROM webhook_notices ORDER BY personaId")
-        .toArray()
-        .map((row) => row.personaId),
-    );
-    expect([...notices, ...delivered].sort()).toEqual(["rev", "work"]);
+    const queued = () =>
+      runInDurableObject(f.stub, (_: MsnDurableObject, state) =>
+        state.storage.sql
+          .exec<{ id: string; persona: string }>("SELECT id, personaId AS persona FROM webhook_notices")
+          .toArray(),
+      );
+    // One notice per addressed persona: queued, in delivery or delivered, each id counts once.
+    const notices = new Map([...(await queued()), ...calls].map((notice) => [notice.id, notice.persona]));
+    expect([...notices.values()].sort()).toEqual(["rev", "work"]);
+    // When the queue is empty every notice was posted exactly once: two calls, two ids.
+    await vi.waitFor(async () => expect(await queued()).toEqual([]), { timeout: 10_000 });
+    expect(calls.map((notice) => notice.persona).sort()).toEqual(["rev", "work"]);
+    expect(new Set(calls.map((notice) => notice.id)).size).toBe(2);
   });
 
   it("posts a scheduled message with all its names", async () => {

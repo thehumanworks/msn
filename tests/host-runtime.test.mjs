@@ -10,7 +10,9 @@ import { validateHostPage } from "../scripts/host/transport.mjs";
 import { hostFixture } from "./support/host-fixture.mjs";
 
 test("single-slot host coordinates two different harness executables without coordinator or polling", async (t) => {
-  const f = await hostFixture(t, { maxConcurrent: 1, pythonBob: true });
+  // A cold python3 start on a busy runner can pass the fixture's 1200 ms turn deadline; this
+  // test is about coordination, not deadlines, so its turns get a wide one.
+  const f = await hostFixture(t, { maxConcurrent: 1, pythonBob: true, timeoutMs: 10_000 });
   f.post({ to: "alice", text: "coordinate" });
   await f.message((m) => m.to === "human" && m.text === "completed");
   const records = await f.records();
