@@ -16,7 +16,7 @@ import {
   View,
   type ListViewToken,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Composer } from "../../components/Composer.tsx";
 import { ConnectionPill } from "../../components/ConnectionPill.tsx";
 import { Surface } from "../../components/Glass.tsx";
@@ -100,7 +100,6 @@ function Conversation({
   const session = useSession();
   const state = useStore(controller.state);
   const me = session.session.username;
-  const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const [text, setText] = useState("");
   // Read by the outbox's Edit action without making that callback change on every keystroke.
@@ -108,7 +107,6 @@ function Conversation({
   typed.current = text;
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [composerHeight, setComposerHeight] = useState(72);
   const [statusHeight, setStatusHeight] = useState(0);
   // The inverted list's bottom padding is its visual top, below the floating status chips.
   const topInset = state.statuses.length ? statusHeight : 0;
@@ -274,49 +272,45 @@ function Conversation({
   );
 
   return (
-    <View style={{ flex: 1 }}>
+    <SafeAreaView edges={["bottom"]} style={styles.fill}>
       <KeyboardAvoidingView
         behavior="padding"
         keyboardVerticalOffset={headerHeight}
-        style={{ flex: 1 }}
+        style={styles.fill}
       >
-        {state.phase === "loading" && !state.messages.length ? (
-          <ActivityIndicator style={{ flex: 1 }} />
-        ) : (
-          <FlatList
-            ref={list}
-            data={rows}
-            inverted
-            keyExtractor={(row) =>
-              row.kind === "message" ? `m${row.message.id}` : `o${row.item.id}`
-            }
-            renderItem={renderItem}
-            onViewableItemsChanged={onViewable}
-            viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-            contentInsetAdjustmentBehavior="never"
-            contentContainerStyle={[
-              styles.content,
-              { paddingTop: composerHeight + 12, paddingBottom: topInset },
-            ]}
-            ListFooterComponent={header}
-            ListEmptyComponent={
-              <Text style={[styles.older, { transform: [{ scaleY: -1 }] }]}>
-                {state.error ?? "No messages yet. Say hello."}
-              </Text>
-            }
-          />
-        )}
-        <View
-          style={[
-            styles.composer,
-            { paddingBottom: Math.max(insets.bottom, 10) },
-          ]}
-          onLayout={(event: LayoutChangeEvent) =>
-            setComposerHeight(event.nativeEvent.layout.height)
-          }
-        >
+        <View style={styles.fill}>
+          {state.phase === "loading" && !state.messages.length ? (
+            <ActivityIndicator style={{ flex: 1 }} />
+          ) : (
+            <FlatList
+              ref={list}
+              data={rows}
+              inverted
+              keyExtractor={(row) =>
+                row.kind === "message" ? `m${row.message.id}` : `o${row.item.id}`
+              }
+              renderItem={renderItem}
+              onViewableItemsChanged={onViewable}
+              viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+              contentInsetAdjustmentBehavior="never"
+              contentContainerStyle={[
+                styles.content,
+                { paddingBottom: topInset },
+              ]}
+              ListFooterComponent={header}
+              ListEmptyComponent={
+                <Text style={[styles.older, { transform: [{ scaleY: -1 }] }]}>
+                  {state.error ?? "No messages yet. Say hello."}
+                </Text>
+              }
+            />
+          )}
+          <ConnectionPill bottom={0} />
+        </View>
+        {/* Keep the composer in normal flow so it moves with the keyboard padding. */}
+        <View style={styles.composer}>
           <Composer
             ref={input}
             text={text}
@@ -364,21 +358,14 @@ function Conversation({
           </ScrollView>
         </View>
       ) : null}
-      <ConnectionPill bottom={composerHeight} />
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { paddingHorizontal: 12 },
-  composer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 12,
-    paddingTop: 8,
-  },
+  fill: { flex: 1 },
+  content: { paddingHorizontal: 12, paddingTop: 12 },
+  composer: { paddingHorizontal: 12, paddingVertical: 8 },
   older: {
     textAlign: "center",
     fontSize: 13,

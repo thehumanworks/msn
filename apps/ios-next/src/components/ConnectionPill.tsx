@@ -7,7 +7,7 @@ import { color } from "../lib/theme.ts";
 import { Surface } from "./Glass.tsx";
 
 /** A floating glass pill while the live connection is down; nothing while it is live. */
-export function ConnectionPill({ bottom = 0 }: { bottom?: number }) {
+export function ConnectionPill({ bottom }: { bottom?: number }) {
   const session = useSession();
   const state = useStore(session.state);
   const insets = useSafeAreaInsets();
@@ -15,7 +15,7 @@ export function ConnectionPill({ bottom = 0 }: { bottom?: number }) {
   const text =
     state.kind === "reconnecting" ? "Reconnecting…" : state.kind === "expired" ? "Signed out by the server" : "Offline";
   return (
-    <View pointerEvents="none" style={[styles.wrap, { bottom: insets.bottom + 12 + bottom }]}>
+    <View pointerEvents="none" style={[styles.wrap, { bottom: (bottom ?? insets.bottom) + 12 }]}>
       <Surface strength="chip" style={styles.pill}>
         <SymbolView name="antenna.radiowaves.left.and.right.slash" tintColor={color.warning} size={15} />
         <Text style={styles.text}>{text}</Text>
