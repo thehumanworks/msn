@@ -2465,6 +2465,112 @@ test("every control stays reachable on a landscape phone", async ({ page, reques
   expect(await onScreen("#entry-submit")).toBe(true);
 });
 
+// On a narrow screen the fields own the width: attach and send later end the To row, Send
+// alone sits beside the message, and a long message scrolls inside a field that stops growing.
+test("the phone composer gives the To and Message fields the width and bounds a long message", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "phone viewport only");
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await request.post(`${t.path}/channels/general/messages`, {
+    headers: t.headers,
+    data: { username: "agent", text: "ready when you are" },
+  });
+  await connect(page, t);
+  await openChannel(page, "general");
+  await expect(page.locator(".message")).toHaveCount(1);
+  const box = (selector) =>
+    page.evaluate((selector) => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width };
+    }, selector);
+  const layout = async () => {
+    const names = ["#send-form", "#recipient", "#message", "#attach", "#send-later", "#send"];
+    const [form, to, message, attach, later, send] = await Promise.all(names.map(box));
+    // Before this layout the two fields kept 52% and 57% of the composer.
+    expect(to.width / form.width).toBeGreaterThan(0.65);
+    expect(message.width / form.width).toBeGreaterThan(0.8);
+    // Attach and send later end the To row; Send ends the message row, level with its last line.
+    for (const button of [attach, later]) {
+      expect(button.left).toBeGreaterThanOrEqual(to.right);
+      expect(button.top).toBeGreaterThanOrEqual(to.top);
+      expect(button.bottom).toBeLessThanOrEqual(to.bottom);
+    }
+    expect(later.left).toBeGreaterThanOrEqual(attach.right);
+    expect(send.left).toBeGreaterThanOrEqual(message.right);
+    expect(send.top).toBeGreaterThanOrEqual(message.top);
+    expect(send.bottom).toBeLessThanOrEqual(message.bottom);
+    expect(message.top).toBeGreaterThanOrEqual(to.bottom);
+    // Nothing leaves the screen sideways.
+    for (const item of [to, message, attach, later, send]) {
+      expect(item.left).toBeGreaterThanOrEqual(form.left);
+      expect(item.right).toBeLessThanOrEqual(form.right);
+    }
+    return { form, message };
+  };
+  await layout();
+
+  // The keyboard takes the lower part of the screen, the way iOS pans the visible area.
+  const full = await page.evaluate(() => window.innerHeight);
+  const visible = Math.round(full * 0.45);
+  await page.locator("#message").focus();
+  const keyboard = (height, offsetTop) =>
+    page.evaluate(
+      ([height, offsetTop]) => {
+        const viewport = window.visualViewport;
+        Object.defineProperty(viewport, "height", { value: height, configurable: true });
+        Object.defineProperty(viewport, "offsetTop", { value: offsetTop, configurable: true });
+        viewport.dispatchEvent(new Event("resize"));
+        viewport.dispatchEvent(new Event("scroll"));
+      },
+      [height, offsetTop],
+    );
+  await keyboard(visible, full - visible);
+  await expect(page.locator("html")).toHaveClass(/keyboard-open/);
+  const oneLine = (await box("#message")).bottom - (await box("#message")).top;
+
+  // A long message grows the field to a few lines and no further; the rest scrolls inside it.
+  await page.locator("#message").fill("A long instruction that wraps. ".repeat(40));
+  const { form, message } = await layout();
+  const height = message.bottom - message.top;
+  expect(height).toBeGreaterThan(oneLine * 1.5);
+  expect(height).toBeLessThanOrEqual(visible * 0.25 + 1);
+  expect(
+    await page.locator("#message").evaluate((field) => field.scrollHeight > field.clientHeight + 20),
+  ).toBe(true);
+  expect(await page.locator("#message").evaluate((field) => getComputedStyle(field).overflowY)).toBe("auto");
+  // The composer stays inside the visible area and leaves the conversation more than half of it.
+  expect(form.top).toBeGreaterThanOrEqual(full - visible);
+  expect(form.bottom).toBeLessThanOrEqual(full + 1);
+  expect(form.bottom - form.top).toBeLessThan(visible * 0.5);
+  const log = await box("#messages");
+  expect(log.bottom - log.top).toBeGreaterThan(60);
+  await page.screenshot({ path: testInfo.outputPath("composer-long-message.png") });
+
+  // Reply, quote and attached files each take a full row above or below, and the rows hold.
+  await keyboard(full, 0);
+  await expect(page.locator("html")).not.toHaveClass(/keyboard-open/);
+  await page.locator("#message").fill("short");
+  await page.getByRole("button", { name: "Quote message #1 in a reply" }).click();
+  await expect(page.locator("#quote-note")).toBeVisible();
+  await page.locator("#attach-input").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("notes"),
+  });
+  await expect(page.locator("#attach-list")).toBeVisible();
+  const rows = await layout();
+  for (const selector of ["#reply-note", "#quote-note"]) {
+    const note = await box(selector);
+    expect(note.width / rows.form.width).toBeGreaterThan(0.9);
+    expect(note.bottom).toBeLessThanOrEqual((await box("#recipient")).top);
+  }
+  expect((await box("#attach-list")).top).toBeGreaterThanOrEqual(rows.message.bottom);
+  await page.screenshot({ path: testInfo.outputPath("composer-reply-quote-files.png") });
+});
+
 test("the Agents list shows which board personas are listening and when each last acted", async ({
   page,
   request,
