@@ -101,14 +101,17 @@ import {
 } from "./since";
 import { MAX_TEMPLATES, type TemplatePersona, templateFromBoard, templateName } from "./templates";
 import {
+  checkWakeTarget,
   MAX_PENDING_NOTICES,
   MAX_WEBHOOKS,
   type Notice,
   noticeBody,
   postNotice,
   storedSubscription,
+  type WakeFormat,
   WEBHOOK_BATCH,
   WEBHOOK_RETRY_DELAYS_MS,
+  wakeFormat,
   webhookBearer,
   webhookSubscription,
   webhookUrl,
@@ -902,6 +905,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Webhook bearer key (ADR 0062): sent as Authorization on each notice, NULL for none.
         // Additive, so no schema_version step.
         ["webhooks", "bearer", "TEXT"],
+        // Existing receivers keep the original notice. A model-running trigger is opt-in.
+        ["webhooks", "format", "TEXT NOT NULL DEFAULT 'notice'"],
         // What a webhook subscribes to (ADR 0076): addressed, board or workspace. Every webhook
         // made before this keeps waking on addressed messages only. `coalesce` is the board of a
         // `message.posted` notice, NULL on addressed notices and pings. Additive, no step.
@@ -2374,8 +2379,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       due.map(async (row) => {
         try {
           const hook = this.ctx.storage.sql
-            .exec<{ url: string; bearer: string | null }>(
-              "SELECT url, bearer FROM webhooks WHERE channel = ? AND personaId = ?",
+            .exec<{ url: string; bearer: string | null; format: WakeFormat }>(
+              "SELECT url, bearer, format FROM webhooks WHERE channel = ? AND personaId = ?",
               row.channel,
               row.personaId,
             )
@@ -2384,7 +2389,15 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.ctx.storage.sql.exec("DELETE FROM webhook_notices WHERE id = ?", row.id);
             return;
           }
-          const attempt = await postNotice(hook.url, hook.bearer, row.body, row.id, this.webhookFetch);
+          const attempt = await postNotice(
+            hook.url,
+            hook.bearer,
+            row.body,
+            row.id,
+            this.webhookFetch,
+            now,
+            hook.format,
+          );
           const at = new Date().toISOString();
           const attempts = row.attempts + 1;
           const retry = !attempt.ok && attempt.retry && attempts <= WEBHOOK_RETRY_DELAYS_MS.length;
@@ -2401,7 +2414,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.ctx.storage.sql.exec(
               `UPDATE webhooks SET lastStatus = ?, lastNoticeId = ?, lastAttemptAt = ?, lastHttpStatus = ?, lastError = ?,
                lastDeliveredAt = CASE WHEN ? THEN ? ELSE lastDeliveredAt END
-             WHERE channel = ? AND personaId = ? AND url = ?`,
+             WHERE channel = ? AND personaId = ? AND url = ? AND format = ?`,
               outcome,
               row.id,
               at,
@@ -2412,6 +2425,7 @@ export class MsnDurableObject extends DurableObject<Env> {
               row.channel,
               row.personaId,
               hook.url,
+              hook.format,
             );
           });
         } finally {
@@ -2428,6 +2442,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         personaId: string;
         url: string;
         subscribe: string;
+        format: WakeFormat;
         createdAt: string;
         createdBy: string | null;
         bearer: string | null;
@@ -2452,6 +2467,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       url: row.url,
       // addressed, board or workspace (ADR 0076).
       subscribe: storedSubscription(row.subscribe),
+      format: row.format,
       // Whether notices carry a bearer key; never the key itself.
       bearer: row.bearer !== null,
       createdAt: row.createdAt,
@@ -2511,15 +2527,17 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     if (rest.length === 0 && request.method === "PUT") {
       for (const field of Object.keys(input ?? {}))
-        if (!["url", "bearer", "subscribe"].includes(field))
+        if (!["url", "bearer", "subscribe", "format"].includes(field))
           throw new HttpError(
             400,
             "invalid_webhook",
-            `Unknown field ${field}; use url, bearer and subscribe.`,
+            `Unknown field ${field}; use url, bearer, subscribe and format.`,
           );
       const target = webhookUrl(input?.url, this.selfHosts(url));
       const bearer = webhookBearer(input?.bearer);
       const subscribe = webhookSubscription(input?.subscribe);
+      const format = wakeFormat(input?.format);
+      checkWakeTarget(format, target, bearer);
       // A workspace webhook hears every board, so a key held to one board cannot set one.
       if (subscribe === "workspace" && capability.channel_scope)
         throw new HttpError(
@@ -2529,8 +2547,12 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
       const replaced = this.ctx.storage.transactionSync(() => {
         const existing = this.ctx.storage.sql
-          .exec("SELECT 1 FROM webhooks WHERE channel = ? AND personaId = ?", channel, personaId)
-          .toArray().length;
+          .exec<{ format: string; url: string }>(
+            "SELECT format, url FROM webhooks WHERE channel = ? AND personaId = ?",
+            channel,
+            personaId,
+          )
+          .toArray()[0];
         if (!existing) {
           const count = this.ctx.storage.sql
             .exec<{ n: number }>("SELECT COUNT(*) AS n FROM webhooks")
@@ -2544,9 +2566,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         }
         // A new URL or key starts a fresh record; waiting notices go to the new URL.
         this.ctx.storage.sql.exec(
-          `INSERT INTO webhooks(channel, personaId, url, secret, bearer, subscribe, origin, createdAt, createdBy) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?)
+          `INSERT INTO webhooks(channel, personaId, url, secret, bearer, subscribe, format, origin, createdAt, createdBy) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?)
            ON CONFLICT(channel, personaId) DO UPDATE SET url = excluded.url, secret = '', bearer = excluded.bearer,
-             subscribe = excluded.subscribe, origin = excluded.origin,
+             subscribe = excluded.subscribe, format = excluded.format, origin = excluded.origin,
              createdAt = excluded.createdAt, createdBy = excluded.createdBy, lastStatus = NULL, lastNoticeId = NULL,
              lastAttemptAt = NULL, lastHttpStatus = NULL, lastError = NULL, lastDeliveredAt = NULL`,
           channel,
@@ -2554,18 +2576,29 @@ export class MsnDurableObject extends DurableObject<Env> {
           target,
           bearer,
           subscribe,
+          format,
           url.origin,
           new Date().toISOString(),
           capability.bound_username,
         );
+        // Do not turn a backlog of notices into paid runs by switching envelope or task.
+        if (
+          existing &&
+          (existing.format !== format || (format === "claude-routine" && existing.url !== target))
+        )
+          this.ctx.storage.sql.exec(
+            "DELETE FROM webhook_notices WHERE channel = ? AND personaId = ?",
+            channel,
+            personaId,
+          );
         // A narrower subscription drops the waiting notices it no longer covers.
-        if (subscribe !== "workspace")
+        else if (subscribe !== "workspace")
           this.ctx.storage.sql.exec(
             `DELETE FROM webhook_notices WHERE channel = ? AND personaId = ? AND coalesce IS NOT NULL${subscribe === "board" ? " AND coalesce <> channel" : ""}`,
             channel,
             personaId,
           );
-        return existing > 0;
+        return Boolean(existing);
       });
       // The bearer key was the owner's to begin with and is never echoed back.
       return json({ webhook: this.webhookView(channel, personaId) }, replaced ? 200 : 201);

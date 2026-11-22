@@ -2853,6 +2853,45 @@ test("each agent's status shows on the board and in Agents with its age, as plai
   await expect(strip).toBeHidden({ timeout: 30_000 });
 });
 
+test("an owner can save and reopen a task receiver format without starting a run", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request, { username: "human" });
+  const credential = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  await request.put(`${t.path}/channels/work/board`, {
+    headers: t.headers,
+    data: { credential, goal: "Private fixture" },
+  });
+  await request.put(`${t.path}/channels/work/personas/reviewer`, {
+    headers: { Authorization: `Bearer ${credential}` },
+    data: { displayName: "Reviewer" },
+  });
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  await page.locator("#agents").click();
+  const row = page.locator("#agents-list li").first();
+  await row.getByRole("button", { name: "Add webhook for Reviewer" }).click();
+  await expect(page.locator("#webhook-format")).toHaveValue("notice");
+  await page.locator("#webhook-format").selectOption("claude-routine");
+  await page
+    .locator("#webhook-url")
+    .fill("https://api.anthropic.com/v1/claude_code/routines/trig_not_a_real_task/fire");
+  await page.locator("#webhook-bearer").fill("not-a-real-trigger-key");
+  await page.locator("#webhook-save").click();
+  await expect(page.locator("#webhook-state")).toContainText("Saved.");
+  await page.locator("#close-webhook").click();
+  await row.getByRole("button", { name: "Webhook for Reviewer" }).click();
+  await expect(page.locator("#webhook-format")).toHaveValue("claude-routine");
+  await expect(page.locator("#webhook-bearer")).toHaveValue("");
+  await expect(page.locator("#webhook-test")).toHaveText("Start a test task run");
+  // Configuration alone must never wake a task. Do not press Test.
+  const cfg = await (
+    await request.get(`${t.path}/channels/work/personas/reviewer/webhook`, { headers: t.headers })
+  ).json();
+  expect(cfg.webhook).toMatchObject({ format: "claude-routine", pending: 0, lastDelivery: null });
+});
+
 test("the owner sets a persona's wake-up webhook in Agents; the bearer key never comes back (ADR 0062)", async ({
   page,
   request,

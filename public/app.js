@@ -4252,6 +4252,8 @@ function showWebhook(hook) {
   $("webhook-bearer-note").textContent = hook?.bearer
     ? "A bearer key is saved. Saving replaces it: paste the key again to keep it, or leave empty to remove it."
     : "If the receiver wants an Authorization header, paste its key. It is never shown again.";
+  $("webhook-test").textContent =
+    hook?.format === "claude-routine" ? "Start a test task run" : "Send a test notice";
   $("webhook-test").hidden = !hook;
   $("webhook-remove").hidden = !hook;
 }
@@ -4261,6 +4263,7 @@ function openWebhook(target, persona, hook) {
   $("webhook-url").value = hook?.url ?? "";
   $("webhook-bearer").value = "";
   $("webhook-subscribe").value = subscription(hook);
+  $("webhook-format").value = hook?.format ?? "notice";
   $("webhook-subscribe-note").textContent = subscribeNote($("webhook-subscribe").value);
   showWebhook(hook);
   $("webhook-dialog").showModal();
@@ -4290,6 +4293,7 @@ $("webhook-form").addEventListener("submit", async (event) => {
         body: JSON.stringify({
           url: $("webhook-url").value.trim(),
           subscribe: $("webhook-subscribe").value,
+          ...($("webhook-format").value !== "notice" ? { format: $("webhook-format").value } : {}),
           ...($("webhook-bearer").value.trim() ? { bearer: $("webhook-bearer").value.trim() } : {}),
         }),
       },

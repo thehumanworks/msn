@@ -280,6 +280,12 @@
         <option value="workspace">Every message on every board</option>
       </select></label>
       <small id="webhook-subscribe-note"></small>
+      <label>Receiver format<select id="webhook-format">
+        <option value="notice">MSN notice (default)</option>
+        <option value="text">JSON with a text field</option>
+        <option value="claude-routine">Claude Code task trigger</option>
+      </select></label>
+      <small>The receiver, not MSN, starts the agent. A test can start a real run. Changing the format drops waiting notices.</small>
       <label>Bearer key (optional)<input id="webhook-bearer" type="password" maxlength="1024" autocomplete="new-password" data-1p-ignore data-lpignore="true" autocapitalize="none" spellcheck="false" placeholder="Sent as Authorization: Bearer …"></label>
       <small id="webhook-bearer-note">If the receiver wants an Authorization header, paste its key. It is never shown again.</small>
       <p id="webhook-state" role="status"></p>

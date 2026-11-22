@@ -315,6 +315,76 @@ describe("persona webhooks", () => {
     expect(hook.lastDelivery?.deliveredAt).toBeTruthy();
   });
 
+  it("delivers generic text envelopes and direct task triggers only when the owner opts in", async () => {
+    const f = await fixture();
+    const trigger = "https://api.anthropic.com/v1/claude_code/routines/trig_fixture01/fire";
+    const bearer = "private-trigger-key";
+    // A URL alone (even a recognized one) never changes an existing receiver's protocol.
+    expect((await f.register("rev", trigger, { bearer })).status).toBe(201);
+    const ping = () => call(f.tenant, "/channels/work/personas/rev/webhook/test", f.owner, "POST");
+    expect((await ping()).status).toBe(202);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    expect(JSON.parse(f.sent[0].body)).toMatchObject({ type: "ping" });
+    expect(f.sent[0].headers.has("anthropic-beta")).toBe(false);
+
+    expect(
+      (await f.register("rev", "https://agent.example.com/start", { bearer, format: "text" })).status,
+    ).toBe(200);
+    expect((await say(f, "private chat content", { to: "reviewer" })).status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(2));
+    const generic = f.sent[1];
+    expect(generic.headers.has("anthropic-version")).toBe(false);
+    const payload = JSON.parse(generic.body);
+    expect(Object.keys(payload)).toEqual(["text"]);
+    expect(JSON.parse(payload.text)).toMatchObject({
+      type: "message.addressed",
+      id: generic.headers.get("MSN-Webhook-Id"),
+    });
+    expect(generic.body).not.toContain("private chat content");
+
+    for (const url of [
+      "https://agent.example.com/start",
+      `${trigger}?key=no`,
+      trigger.replace("/fire", "/other"),
+    ])
+      expect((await f.register("rev", url, { bearer, format: "claude-routine" })).status).toBe(400);
+    expect((await f.register("rev", trigger, { format: "claude-routine" })).status).toBe(400);
+    expect((await f.register("rev", trigger, { bearer, format: "unknown" })).status).toBe(400);
+    const saved = await f.register("rev", trigger, { bearer, format: "claude-routine" });
+    expect(saved.webhook).toMatchObject({ format: "claude-routine", bearer: true });
+    expect(JSON.stringify(saved)).not.toContain(bearer);
+    expect((await ping()).status).toBe(202);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(3));
+    const direct = f.sent[2];
+    expect(direct.url).toBe(trigger);
+    expect(direct.redirect).toBe("manual");
+    expect(direct.headers.get("Authorization")).toBe(`Bearer ${bearer}`);
+    expect(direct.headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(direct.headers.get("anthropic-beta")).toBe("experimental-cc-routine-2026-04-01");
+    expect(JSON.parse(JSON.parse(direct.body).text)).toMatchObject({
+      type: "ping",
+      id: direct.headers.get("MSN-Webhook-Id"),
+    });
+    expect(direct.body).not.toContain(bearer);
+    expect(direct.body).not.toContain(f.agent);
+  });
+
+  it("changing a format does not fire old waiting notices as new task runs", async () => {
+    const f = await fixture();
+    await f.register();
+    f.answerWith(() => new Response(null, { status: 503 }));
+    expect((await say(f, "first", { to: "reviewer" })).status).toBe(201);
+    await vi.waitFor(async () => expect((await f.hook()).lastDelivery?.status).toBe("retrying"));
+    expect(await f.waiting()).toBe(1);
+    await f.register("rev", "https://api.anthropic.com/v1/claude_code/routines/trig_fixture02/fire", {
+      bearer: "private-trigger-key",
+      format: "claude-routine",
+    });
+    expect(await f.waiting()).toBe(0);
+    expect(await f.deliver()).toBe(0);
+    expect(f.sent).toHaveLength(1);
+  });
+
   it("sends nothing for unaddressed messages, other personas or the persona's own messages", async () => {
     const f = await fixture();
     await f.register();
