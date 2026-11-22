@@ -231,6 +231,21 @@ const MAX_CONTENT_BYTES = 128 * 1024 * 1024;
 const MAX_CHANNELS = 1000;
 const MAX_WAITERS = 128;
 const MAX_KEYS = 1000;
+/** A native app's sign-in code lives this long before it must be exchanged (ADR 0079). */
+const APP_LOGIN_TTL_MS = 120_000;
+/** Unexchanged app sign-ins one account may hold at once (ADR 0079). */
+const MAX_APP_LOGINS = 20;
+/** An expected refusal returned over Durable Object RPC (see `startAppLogin`). */
+export type Refusal = { refused: { status: number; code: string; message: string } };
+async function refusing<T>(run: () => Promise<T>): Promise<T | Refusal> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof HttpError)
+      return { refused: { status: error.status, code: error.code, message: error.message } };
+    throw error;
+  }
+}
 const SCHEMA_VERSION = 20;
 /** After an alarm run in which a job threw, the next run waits at least this long. */
 export const ALARM_FAILURE_BACKOFF_MS = 30_000;
@@ -810,6 +825,13 @@ export class MsnDurableObject extends DurableObject<Env> {
           PRIMARY KEY(channel, reader)
         );
         CREATE INDEX IF NOT EXISTS brief_seen_age ON brief_seen(channel, seenAt);
+        -- App sign-in codes (ADR 0079): one row per Cloudflare sign-in a native app started and
+        -- has not exchanged yet. Rows live two minutes. A new table with no version step, so it is
+        -- safe in any merge order.
+        CREATE TABLE IF NOT EXISTS app_logins (
+          code_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, username TEXT NOT NULL,
+          expiresMs INTEGER NOT NULL
+        );
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -1222,6 +1244,87 @@ export class MsnDurableObject extends DurableObject<Env> {
       "DELETE FROM scheduled_messages WHERE failedAt IS NOT NULL AND failedAt < ?",
       new Date(now - FAILED_SCHEDULED_TTL_MS).toISOString(),
     );
+  }
+
+  /**
+   * Starts a native app sign-in after Cloudflare Access verified the account (ADR 0079). Stores
+   * a single-use code bound to the app's challenge and returns it; no key exists until the app
+   * proves it holds the challenge's verifier in `finishAppLogin`.
+   */
+  private async beginAppLogin(username: string, challenge: string): Promise<string> {
+    if (!/^[a-f0-9]{64}$/.test(challenge))
+      throw new HttpError(400, "invalid_app_login", "Use a SHA-256 hex challenge for app sign-in.");
+    const code = newToken();
+    const hash = await digest(code);
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM app_logins WHERE expiresMs <= ?", now);
+      if (
+        this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM app_logins").one()
+          .count >= MAX_APP_LOGINS
+      )
+        throw new HttpError(
+          429,
+          "app_login_quota",
+          "Too many app sign-ins in progress. Wait two minutes and retry.",
+        );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO app_logins(code_hash,challenge,username,expiresMs) VALUES(?,?,?,?)",
+        hash,
+        challenge,
+        username,
+        now + APP_LOGIN_TTL_MS,
+      );
+    });
+    return code;
+  }
+
+  /**
+   * Exchanges an app sign-in code for an account key (ADR 0079). The code is spent on the first
+   * attempt, right or wrong, so a code copied from the app's own sign-in is useless without its
+   * verifier. The verifier does not help when someone else started the sign-in with their own
+   * challenge; what stops that is the https callback only the associated app receives.
+   */
+  private async finishAppLogin(tenant: string, code: string, verifier: string) {
+    const invalid = new HttpError(
+      401,
+      "invalid_app_login",
+      "This sign-in expired or was already used. Sign in again.",
+    );
+    // A malformed code matches no row. The verifier is checked only after the code is spent, so a
+    // wrong verifier of any shape uses it up.
+    if (!/^[a-f0-9]{64}$/.test(code)) throw invalid;
+    const hash = await digest(code);
+    const challenge = /^[a-f0-9]{64}$/.test(verifier) ? await digest(verifier) : "";
+    const row = this.ctx.storage.transactionSync(() => {
+      const found = this.ctx.storage.sql
+        .exec<{ challenge: string; username: string; expiresMs: number }>(
+          "SELECT challenge, username, expiresMs FROM app_logins WHERE code_hash = ?",
+          hash,
+        )
+        .toArray()[0];
+      this.ctx.storage.sql.exec(
+        "DELETE FROM app_logins WHERE code_hash = ? OR expiresMs <= ?",
+        hash,
+        Date.now(),
+      );
+      return found;
+    });
+    if (!row || !challenge || row.expiresMs <= Date.now() || !equalHash(row.challenge, challenge))
+      throw invalid;
+    return this.accountSession(tenant, row.username);
+  }
+
+  /**
+   * RPC entry points for app sign-in. They return a refusal instead of throwing, because an error
+   * crossing Durable Object RPC loses its HttpError class and would answer 500.
+   */
+  async startAppLogin(username: string, challenge: string): Promise<{ code: string } | Refusal> {
+    return refusing(async () => ({ code: await this.beginAppLogin(username, challenge) }));
+  }
+
+  async redeemAppLogin(tenant: string, code: string, verifier: string) {
+    return refusing(() => this.finishAppLogin(tenant, code, verifier));
   }
 
   async accountSession(tenant: string, username: string) {

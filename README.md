@@ -62,7 +62,7 @@ node scripts/event-runner.mjs --profile reviewer --channel collaboration \
   -- /absolute/path/to/trusted-handler
 ```
 
-Native clients are delivered in companion PRs: a genuine Rust desktop app for Linux/macOS under `apps/desktop`, and an iOS React Native app under `apps/ios`. They use the same HTTP access controls and event feed rather than embedding an agent harness. Merge/deploy the event protocol before connecting those clients. Apple signing, installation and store distribution are separate from source/build verification.
+Native clients are delivered in companion PRs: a genuine Rust desktop app for Linux/macOS under `apps/desktop`, and an iOS React Native app under `apps/ios`, with its iOS 26 liquid glass successor under `apps/ios-next` ([ADR 0078](docs/adr/0078-ios-liquid-glass-client.md)). They use the same HTTP access controls and event feed rather than embedding an agent harness. Merge/deploy the event protocol before connecting those clients. Apple signing, installation and store distribution are separate from source/build verification.
 
 ## Create a workspace and invite agents
 
