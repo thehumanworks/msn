@@ -1,6 +1,6 @@
 import { useHeaderHeight } from "expo-router/react-navigation";
 import * as Clipboard from "expo-clipboard";
-import { router, Stack, useLocalSearchParams } from "expo-router";
+import { router, Stack, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActionSheetIOS,
@@ -17,6 +17,9 @@ import {
   type ListViewToken,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { addressees } from "../../../../ios/src/core/address.ts";
+import { ApiError } from "../../../../ios/src/core/errors.ts";
+import type { Persona } from "../../../../ios/src/core/mention.ts";
 import { Composer } from "../../components/Composer.tsx";
 import { ConnectionPill } from "../../components/ConnectionPill.tsx";
 import { Surface } from "../../components/Glass.tsx";
@@ -27,6 +30,7 @@ import {
   type Row,
 } from "../../components/MessageBubble.tsx";
 import { deleteBoard, openAgents, openInvite, setArchived, useArchived } from "../../lib/boardActions.ts";
+import { emptyDraft, type MentionDraft } from "../../lib/mentionDraft.ts";
 import { useSession } from "../../lib/model.ts";
 import {
   type ChannelController,
@@ -77,8 +81,8 @@ export default function Board() {
           </Stack.Toolbar.MenuAction>
         </Stack.Toolbar.Menu>
       </Stack.Toolbar>
-      {controller ? (
-        <Conversation controller={controller} archived={archived} owner={owner} />
+      {controller?.channel === name ? (
+        <Conversation key={name} controller={controller} archived={archived} owner={owner} />
       ) : (
         <ActivityIndicator
           style={{ flex: 1 }}
@@ -101,10 +105,29 @@ function Conversation({
   const state = useStore(controller.state);
   const me = session.session.username;
   const headerHeight = useHeaderHeight();
-  const [text, setText] = useState("");
-  // Read by the outbox's Edit action without making that callback change on every keystroke.
-  const typed = useRef(text);
-  typed.current = text;
+  const ready = useStore(session.state).ready;
+  const readOnly = archived
+    ? owner ? "This board is archived and read-only. Unarchive it from the menu above to post again."
+      : "This board is archived and read-only."
+    : !ready ? "Checking board access…" : session.watchOnly ? "Your access is watch only." : null;
+  const [draft, setDraft] = useState(emptyDraft);
+  // The outbox's Edit action checks the current text before replacing the draft.
+  const typed = useRef("");
+  const changeDraft = useCallback((next: MentionDraft) => { typed.current = next.text; setDraft(next); }, []);
+  const roster = useRef<Promise<Persona[]> | null>(null);
+  // A return from Agents may have new names. Do not query until the next @.
+  useFocusEffect(useCallback(() => () => { roster.current = null; }, []));
+  const loadPersonas = useCallback(() => {
+    if (roster.current) return roster.current;
+    const request: Promise<Persona[]> = session.api.listPersonas(controller.channel, session.signal).catch((error: unknown) => {
+      if (error instanceof ApiError && error.code === "board_not_found") return [];
+      if (roster.current === request) roster.current = null;
+      if (error instanceof ApiError && error.isAuthExpired) session.reportAuthFailure();
+      throw error;
+    });
+    roster.current = request;
+    return request;
+  }, [controller, session]);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusHeight, setStatusHeight] = useState(0);
@@ -141,7 +164,7 @@ function Conversation({
   }, [state.messages, state.outbox, me]);
 
   // Read marks (ADR 0045): what is on screen while the app is active counts as read.
-  const onViewable = useRef(
+  const onViewable = useCallback(
     ({ viewableItems }: { viewableItems: ListViewToken[] }) => {
       if (!session.marks || session.state.get().kind === "paused") return;
       const ids = viewableItems.flatMap((token) =>
@@ -152,11 +175,13 @@ function Conversation({
       const seen = seenMark(ids, []);
       if (seen !== null) session.marks.advance(controller.channel, seen);
     },
-  ).current;
+    [controller, session],
+  );
 
   const send = useCallback(() => {
+    if (readOnly) return;
     const result = controller.send({
-      text,
+      ...draft,
       ...(replyTo ? { replyTo: replyTo.id } : {}),
     });
     if (!result.ok) {
@@ -164,10 +189,10 @@ function Conversation({
       return;
     }
     setError(null);
-    setText("");
+    changeDraft(emptyDraft);
     setReplyTo(null);
     list.current?.scrollToOffset({ offset: 0, animated: true });
-  }, [controller, text, replyTo]);
+  }, [controller, draft, replyTo, readOnly, changeDraft]);
 
   const onLongPress = useCallback(
     (message: Message) => {
@@ -219,7 +244,10 @@ function Conversation({
           if (index === 0 && !retry) {
             const edit = () => {
               const draft = controller.takeRejected(item.id);
-              if (draft) setText(draft.text);
+              if (draft) {
+                changeDraft({ text: draft.text, recipients: addressees(draft) });
+                setReplyTo(state.messages.find((message) => message.id === draft.replyTo) ?? null);
+              }
             };
             // Never drop what is in the composer without asking.
             if (!typed.current.trim()) edit();
@@ -233,7 +261,7 @@ function Conversation({
         },
       );
     },
-    [controller],
+    [controller, changeDraft, state.messages],
   );
 
   const renderItem = useCallback(
@@ -313,18 +341,15 @@ function Conversation({
         <View style={styles.composer}>
           <Composer
             ref={input}
-            text={text}
-            onChangeText={setText}
+            draft={draft}
+            onDraftChange={changeDraft}
+            messages={state.messages}
+            me={me}
+            loadPersonas={loadPersonas}
             onSend={send}
             replyTo={replyTo}
             onCancelReply={() => setReplyTo(null)}
-            readOnly={
-              archived
-                ? owner
-                  ? "This board is archived and read-only. Unarchive it from the menu above to post again."
-                  : "This board is archived and read-only."
-                : null
-            }
+            readOnly={readOnly}
             error={
               error ??
               (state.error && state.messages.length ? state.error : null)

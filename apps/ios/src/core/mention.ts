@@ -82,17 +82,27 @@ export function insertMention(text: string, start: number, caret: number, name: 
   return { text: text.slice(0, start) + mention + after, caret: start + mention.length };
 }
 
-/** True when `text` still holds `@name` as a whole mention. */
-export function hasMention(text: string, name: string): boolean {
-  if (!name) return false;
-  const token = `@${name}`;
-  for (let at = text.indexOf(token); at >= 0; at = text.indexOf(token, at + 1)) {
-    const end = text[at + token.length];
-    const startOk = at === 0 || OPENS.test(text[at - 1] ?? "");
-    const endOk = end === undefined || !/[\p{L}\p{N}_-]/u.test(end);
-    if (startOk && endOk) return true;
+/** Keep only picked names that still have a whole mention. One @ cannot address both "Jo" and "Jo Lee". */
+export function keptMentions(text: string, picked: readonly string[]): string[] {
+  if (!picked.length) return [];
+  const longestFirst = picked.filter(Boolean).sort((a, b) => b.length - a.length);
+  const found = new Set<string>();
+  for (let at = text.indexOf("@"); at >= 0; at = text.indexOf("@", at + 1)) {
+    if (at > 0 && !OPENS.test(text[at - 1] ?? "")) continue;
+    for (const name of longestFirst) {
+      if (!text.startsWith(name, at + 1)) continue;
+      const next = text.codePointAt(at + 1 + name.length);
+      if (next !== undefined && /[\p{L}\p{N}_-]/u.test(String.fromCodePoint(next))) continue;
+      found.add(name);
+      at += name.length;
+      break;
+    }
   }
-  return false;
+  return picked.filter((name) => found.has(name));
+}
+
+export function hasMention(text: string, name: string): boolean {
+  return keptMentions(text, [name]).length > 0;
 }
 
 /**

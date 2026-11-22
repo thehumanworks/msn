@@ -33,6 +33,7 @@ type StoredMessage = {
   digest: string;
   deleted: boolean;
   to?: string;
+  recipients?: string[];
   replyTo?: number;
   /** Edits (ADR 0052): when, and the edit's place in the workspace's edit order. */
   editedAt?: string;
@@ -209,6 +210,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
       createdAt: m.createdAt,
       ...(m.replyTo ? { replyTo: m.replyTo } : {}),
       ...(m.to ? { to: m.to } : {}),
+      ...(m.recipients ? { recipients: m.recipients } : {}),
       ...(reactions.has(m.id) ? { reactions: reactions.get(m.id) } : {}),
       ...(claims.has(m.id) ? { claim: claims.get(m.id) } : {}),
       ...(m.editedAt ? { editedAt: m.editedAt } : {}),
@@ -220,7 +222,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
     };
   }
 
-  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; replyTo?: number; choices?: string[]; answer?: string; replaces?: number } = {}): StoredMessage {
+  function insert(channel: string, username: string, text: string, contentType: string, key: string | null, digest: string, extra: { to?: string; recipients?: string[]; replyTo?: number; choices?: string[]; answer?: string; replaces?: number } = {}): StoredMessage {
     ensureChannel(channel);
     messageId += 1;
     const stored: StoredMessage = {
@@ -389,7 +391,7 @@ export async function startMockServer(): Promise<MockServerHandle> {
               return json(res, 409, { error: { code: "already_answered", message: "This question was already answered." } });
           }
           const stored = insert(channel, String(body.username), String(body.text), String(body.contentType ?? "text/plain"), key, digest, {
-            ...(body.to ? { to: String(body.to) } : {}),
+            ...(Array.isArray(body.to) ? { to: String(body.to[0]), recipients: body.to.map(String) } : body.to ? { to: String(body.to) } : {}),
             ...(body.replyTo ? { replyTo: Number(body.replyTo) } : {}),
             ...(Array.isArray(body.choices) ? { choices: body.choices.map(String) } : {}),
             ...(body.answer !== undefined ? { answer: String(body.answer) } : {}),

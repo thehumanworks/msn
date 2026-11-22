@@ -42,7 +42,7 @@ export type SendMessageInput = {
   username: string;
   text: string;
   contentType?: ContentType;
-  to?: string;
+  to?: string | string[];
   replyTo?: number;
   correlationId?: string;
   /** The choice a reply picks from its replyTo question (ADR 0065). */

@@ -1,4 +1,5 @@
 import { BRIEF_CONFLICT, BRIEF_MAX_BYTES, type Brief, briefCount, briefNoticeVersion } from "./brief.ts";
+import { outgoingAddress } from "./address.ts";
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
@@ -24,7 +25,6 @@ const PAGE = 100;
 const JUMP_WINDOW = 2000;
 const MAX_PAGES = 40;
 const MAX_TEXT_BYTES = 16384;
-const MAX_TO_BYTES = 128;
 /** Pins send no message or event, so a sync re-reads them at most this often (ADR 0038). */
 export const PIN_REFRESH_MS = 30_000;
 
@@ -64,7 +64,7 @@ export type ChannelState = {
 };
 
 /** `replaces` is your earlier message this one replaces (ADR 0068). */
-export type Draft = { text: string; to?: string; replyTo?: number; replaces?: number };
+export type Draft = Pick<Message, "text" | "to" | "recipients" | "replyTo" | "replaces">;
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;
@@ -449,11 +449,12 @@ export class ChannelController {
     if (!draft.text.trim()) return "Write the message first, then choose when to send it.";
     if (draft.replaces !== undefined) return "A replacement cannot be scheduled. Send it now, or cancel the replace.";
     if (byteLength(draft.text) > MAX_TEXT_BYTES) return "Messages are limited to 16 KiB.";
-    const to = draft.to?.trim() || undefined;
+    const address = outgoingAddress(draft);
+    if ("error" in address) return address.error;
     const input = {
       username: this.ctl.session.username,
       text: draft.text,
-      ...(to ? { to } : {}),
+      ...address,
       ...(draft.replyTo ? { replyTo: draft.replyTo } : {}),
       sendAt,
     };
@@ -782,15 +783,15 @@ export class ChannelController {
   send(draft: Draft): { ok: true } | { ok: false; error: string } {
     if (!draft.text.trim()) return { ok: false, error: "Write a message first." };
     if (byteLength(draft.text) > MAX_TEXT_BYTES) return { ok: false, error: "Messages are limited to 16 KiB." };
-    const to = draft.to?.trim() || undefined;
-    if (to && byteLength(to) > MAX_TO_BYTES) return { ok: false, error: "The recipient name is too long." };
+    const address = outgoingAddress(draft);
+    if ("error" in address) return { ok: false, error: address.error };
     if (this.state.get().outbox.length >= MAX_OUTBOX) {
       return { ok: false, error: "Too many unsent messages. Retry or discard some first." };
     }
     const input: SendMessageInput = {
       username: this.ctl.session.username,
       text: draft.text,
-      ...(to ? { to } : {}),
+      ...address,
       ...(draft.replyTo ? { replyTo: draft.replyTo } : {}),
       ...(draft.replaces ? { replaces: draft.replaces } : {}),
     };
@@ -821,7 +822,8 @@ export class ChannelController {
     if (!item || item.status !== "rejected") return null;
     this.discardSend(id);
     const { text, to, replyTo, replaces } = item.input;
-    return { text, to, replyTo, ...(replaces !== undefined ? { replaces } : {}) };
+    const address = Array.isArray(to) ? { to: to[0], recipients: [...to] } : { to };
+    return { text, ...address, replyTo, ...(replaces !== undefined ? { replaces } : {}) };
   }
 
   private patchItem(id: number, patch: Partial<OutboxItem>): void {
