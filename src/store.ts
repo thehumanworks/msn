@@ -306,6 +306,34 @@ type InviteRow = {
   /** Redeeming issues a watch-only key (ADR 0039). */
   watch: number;
 };
+/**
+ * Every table whose rows belong to one board through a `channel` column. Deleting a board
+ * (ADR 0080) empties each of them for that board; tests/delete-board.test.ts reads the live
+ * schema and fails when a table with board data is missing here. `messages` goes last, after the
+ * rows that refer to it; the `channels` row itself is deleted after all of these.
+ */
+const CHANNEL_TABLES = [
+  "message_labels",
+  "message_attachments",
+  "attachments",
+  "pins",
+  "snapshots",
+  "channel_history",
+  "boards",
+  "board_briefs",
+  "brief_seen",
+  "channel_credentials",
+  "personas",
+  "persona_presence",
+  "agent_status",
+  "processing_cursors",
+  "push_mutes",
+  "github_links",
+  "scheduled_messages",
+  "webhooks",
+  "events",
+  "messages",
+] as const;
 const MAX_SNAPSHOTS = 1000;
 // Exact upper bound: every message can be created and later deleted, every channel and every
 // snapshot emits one event. Fail-closed capacity, never reached while other quotas hold.
@@ -3008,6 +3036,74 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     const archivedAt = this.archivedAt(channel);
     return json({ channel, archived: Boolean(archivedAt), ...(archivedAt ? { archivedAt } : {}) });
+  }
+
+  /**
+   * `DELETE …/channels/C?confirm=C` (ADR 0080): removes a board and everything on it, for good.
+   * Owner only. `confirm` must repeat the board's name, so a request that lost the end of its
+   * path (`…/channels/C/archive` unarchives) can never delete a board. Unlike archiving, this is
+   * not reversible: one transaction deletes every row that belongs to the board, and the keys and
+   * invitations held to it, so a board made later under the same name starts empty and nobody's
+   * old access returns with it.
+   */
+  private async deleteChannelRoute(url: URL, channel: string, capability: TenantRow): Promise<Response> {
+    this.requireOwner(capability);
+    this.requireChannel(channel);
+    if (url.searchParams.get("confirm") !== channel)
+      throw new HttpError(
+        400,
+        "confirm_required",
+        `Deleting board ${channel} cannot be undone. To confirm, repeat its name: DELETE …/channels/${channel}?confirm=${channel}. To keep its history, archive it instead.`,
+        { channel },
+      );
+    // Pending polls on this board answer now, while their keys still exist. Each one's cleanup
+    // may record its persona's presence; the transaction below removes that row with the rest.
+    for (const waiter of [...this.waiters]) if (waiter.channel === channel) waiter.end();
+    for (const waiter of [...this.eventWaiters]) if (waiter.channel === channel) waiter.end();
+    const sql = this.ctx.storage.sql;
+    this.ctx.storage.transactionSync(() => {
+      const sum = (query: string) => sql.exec<{ bytes: number }>(query, channel).one().bytes;
+      // What the board holds of the workspace's storage quota. A deleted message already counts 0.
+      const freed =
+        sum("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM messages WHERE channel = ?") +
+        sum("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM snapshots WHERE channel = ?") +
+        sum("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM attachments WHERE channel = ?") +
+        sum("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM board_briefs WHERE channel = ?");
+      const reactions = sql.exec("DELETE FROM reactions WHERE channel = ?", channel).rowsWritten;
+      // Deleted text must not stay findable (ADR 0037). Before the messages go: this needs their ids.
+      sql.exec(
+        "DELETE FROM message_search WHERE rowid IN (SELECT id FROM messages WHERE channel = ?)",
+        channel,
+      );
+      // Notices about this board's messages, whichever board their webhook is on (ADR 0076).
+      sql.exec(
+        "DELETE FROM webhook_notices WHERE channel = ? OR coalesce = ? OR json_extract(body, '$.channel') = ?",
+        channel,
+        channel,
+        channel,
+      );
+      // Keys that open only this board, and invitations to it: its shared key, invited members
+      // and watchers. Left behind, they would open a later board of the same name.
+      sql.exec("DELETE FROM access_keys WHERE channel_scope = ?", channel);
+      sql.exec("DELETE FROM invites WHERE channel = ?", channel);
+      for (const table of CHANNEL_TABLES) sql.exec(`DELETE FROM ${table} WHERE channel = ?`, channel);
+      sql.exec("DELETE FROM channels WHERE name = ?", channel);
+      // The lifetime counters (messages sent, edits, label and status changes) stay: they bound
+      // the event journal, whose sequence is never reused.
+      sql.exec(
+        "UPDATE usage SET bytes = MAX(0, bytes - ?), reactions = MAX(0, reactions - ?) WHERE singleton = 1",
+        freed,
+        reactions,
+      );
+    });
+    // Memory about the board's listeners and its push cooldowns goes with it.
+    for (const map of [this.listeners, this.presenceWritten, this.pushSentAt])
+      for (const key of [...map.keys()]) if ((JSON.parse(key) as unknown[])[0] === channel) map.delete(key);
+    // Polls held with a key that was just removed end now, as they do after a key is revoked.
+    this.wakeAllWaiters();
+    // The board's scheduled messages and waiting notices are gone; the alarm may have nothing left.
+    await this.armAlarm();
+    return json({ channel, deleted: true });
   }
 
   private tenantRow(): TenantRow | undefined {
@@ -6238,6 +6334,13 @@ export class MsnDurableObject extends DurableObject<Env> {
             const capability = this.authorize(hash);
             this.requireScope(capability, channel);
             return this.archiveRoute(request, channel, capability);
+          }
+          // Deleting a board (ADR 0080) works on an archived one too: archive first, then delete, is
+          // the careful order. It is routed here, before the archived gate, as archive itself is.
+          if (rest.length === 2 && request.method === "DELETE") {
+            const capability = this.authorize(hash);
+            this.requireScope(capability, channel);
+            return await this.deleteChannelRoute(url, channel, capability);
           }
           // Cancelling a scheduled message changes nothing on the board, so it works on an archived
           // board too (ADR 0060); otherwise a message that failed there could never be cleared.
