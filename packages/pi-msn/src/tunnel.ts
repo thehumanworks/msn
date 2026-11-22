@@ -105,7 +105,7 @@ function tail(output: string): string {
   return lines ? `\nLast output:\n${lines}` : "";
 }
 
-/** The process must not outlive Pi, whatever way Pi ends. */
+/** Ends the tunnel program when Pi exits without a stop. A Pi that is killed outright (SIGKILL) cannot do this. */
 function killOnExit(tunnel: Tunnel, kill: () => void): Tunnel {
   const onExit = () => kill();
   process.once("exit", onExit);

@@ -51,20 +51,6 @@ jobs:
         run: shellcheck -s sh public/install.sh scripts/homebrew-formula.sh scripts/linux-compat-smoke.sh
       - run: bun run test
 
-  # The Pi extension inside a real Pi (RPC mode) with a stand-in model, CLI and tunnel.
-  # Its unit tests run in the js job. Not a deploy gate.
-  pi-msn:
-    name: pi-msn in a real Pi
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run test:pi-msn:e2e
-
   # Builds all four Linux release binaries the way release.yml does and runs them in
   # older glibc and Alpine containers, so a broken release build shows up on the
   # pull request and not after merge. Not a deploy gate.

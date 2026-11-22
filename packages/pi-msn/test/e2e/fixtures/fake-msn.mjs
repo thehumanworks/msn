@@ -47,6 +47,11 @@ if (command[0] === "mcp") {
 }
 
 if (command[0] === "show") {
+  if (command[1] !== "--") {
+    console.error("fake msn: positionals must follow --");
+    process.exit(2);
+  }
+  command.splice(1, 1);
   const id = Number(command[2]);
   log({ call: "show", profile, board: command[1], id });
   if (id === 404) {
@@ -70,7 +75,16 @@ if (command[0] === "show") {
 }
 
 if (command[0] === "persona" && command[1] === "webhook") {
-  const [action, board, persona, url, flag, variable] = command.slice(2);
+  // Shape: persona webhook ACTION [--bearer-env VAR] -- BOARD PERSONA [URL]
+  const rest = command.slice(2);
+  const action = rest[0];
+  const dashes = rest.indexOf("--");
+  const [flag, variable] = rest.slice(1, dashes);
+  const [board, persona, url] = rest.slice(dashes + 1);
+  if (dashes < 0) {
+    console.error("fake msn: positionals must follow --");
+    process.exit(2);
+  }
   if (process.env.FAKE_MSN_NOT_OWNER) {
     log({ call: `webhook ${action}`, refused: true });
     console.error("Only the workspace owner can do this.");

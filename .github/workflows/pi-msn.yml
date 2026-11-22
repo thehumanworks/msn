@@ -1,0 +1,32 @@
+name: pi-msn
+
+# The Pi extension inside a real Pi (RPC mode) with a stand-in model, CLI and tunnel.
+# Runs only when the extension or the lockfile changes. Its unit tests run in ci.yml's js job.
+on:
+  pull_request:
+    paths:
+      - "packages/pi-msn/**"
+      - "bun.lock"
+      - ".github/workflows/pi-msn.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packages/pi-msn/**"
+      - "bun.lock"
+      - ".github/workflows/pi-msn.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: pi-msn in a real Pi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run test:pi-msn:e2e

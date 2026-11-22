@@ -23,6 +23,8 @@ export type Deliver = (delivery: Delivery) => void;
 
 /** Messages kept while no session is attached. MSN keeps at most 50 notices waiting per webhook. */
 export const MAX_QUEUED = 50;
+/** A board name as MSN writes it. Anything else in a notice is ignored. */
+const BOARD_NAME = /^[a-z0-9_][a-z0-9_-]{0,63}$/;
 
 export type Registration =
   | { state: "set" }
@@ -129,6 +131,10 @@ export class Webhook {
         throw new TunnelError(
           `The tunnel program stopped right after it gave the address ${this.tunnel.url}, so nothing can reach this computer through it.${this.tunnel.lastOutput()}`,
         );
+      if (!reachable)
+        throw new TunnelError(
+          `The public address ${this.tunnel.url} did not reach this computer within ${Math.round((this.deps.reachableTimeoutMs ?? 30_000) / 1000)} seconds, so the webhook was not set. Check the tunnel, then start again.${this.tunnel.lastOutput()}`,
+        );
       const registration = await this.register(config, theBoard, thePersona, publicUrl, bearer);
       this.active = {
         config,
@@ -180,22 +186,41 @@ export class Webhook {
   private async onNotice(notice: Notice): Promise<void> {
     const context = this.context;
     if (notice.type === "ping" || !context) return;
-    const board = notice.channel ?? context.board;
+    // The notice is outside text: only a well-formed board name and message id are used from it.
+    const board =
+      typeof notice.channel === "string" && BOARD_NAME.test(notice.channel) ? notice.channel : context.board;
+    const messageId =
+      Number.isSafeInteger(notice.messageId) && (notice.messageId as number) > 0
+        ? (notice.messageId as number)
+        : null;
+    const safe: Notice = {
+      schema: notice.schema,
+      type: notice.type,
+      id: notice.id,
+      channel: board,
+      messageId,
+    };
     let message: BoardMessage | null = null;
-    if (typeof notice.messageId === "number") {
+    if (messageId !== null) {
       try {
-        message = await showMessage(this.deps.run, context.config, board, notice.messageId);
+        message = await showMessage(this.deps.run, context.config, board, messageId);
       } catch {
         message = null;
       }
     }
-    this.send({ text: message ? formatMessage(message) : formatHint(notice), notice, message });
+    // Stopped while the message was being read: deliver nothing after a stop.
+    if (this.context !== context) return;
+    this.send({ text: message ? formatMessage(message) : formatHint(safe), notice: safe, message });
+  }
+
+  private enqueue(delivery: Delivery): void {
+    this.queue.push(delivery);
+    if (this.queue.length > MAX_QUEUED) this.queue.shift();
   }
 
   private send(delivery: Delivery): void {
     if (!this.deliver) {
-      this.queue.push(delivery);
-      if (this.queue.length > MAX_QUEUED) this.queue.shift();
+      this.enqueue(delivery);
       return;
     }
     try {
@@ -204,7 +229,7 @@ export class Webhook {
     } catch {
       // The session went away between the check and the call: keep the message for the next one.
       this.deliver = null;
-      this.queue.push(delivery);
+      this.enqueue(delivery);
     }
   }
 

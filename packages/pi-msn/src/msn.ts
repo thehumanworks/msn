@@ -1,5 +1,6 @@
 // Calls the MSN CLI. The CLI owns profiles and keys, so this extension never reads or stores an
 // MSN credential. The webhook's bearer key goes to the CLI through the environment, never argv.
+// Every positional comes after "--", so a value can never be read as an option.
 import { execFile } from "node:child_process";
 import type { Config } from "./config.ts";
 
@@ -66,21 +67,32 @@ export function setWebhook(
   bearer: string,
 ) {
   return run(
-    [...ownerArgs(config), "persona", "webhook", "set", board, persona, url, "--bearer-env", BEARER_VARIABLE],
+    [
+      ...ownerArgs(config),
+      "persona",
+      "webhook",
+      "set",
+      "--bearer-env",
+      BEARER_VARIABLE,
+      "--",
+      board,
+      persona,
+      url,
+    ],
     { [BEARER_VARIABLE]: bearer },
   );
 }
 
 export function removeWebhook(run: RunCli, config: Config, board: string, persona: string) {
-  return run([...ownerArgs(config), "persona", "webhook", "remove", board, persona]);
+  return run([...ownerArgs(config), "persona", "webhook", "remove", "--", board, persona]);
 }
 
 export function testWebhook(run: RunCli, config: Config, board: string, persona: string) {
-  return run([...ownerArgs(config), "persona", "webhook", "test", board, persona]);
+  return run([...ownerArgs(config), "persona", "webhook", "test", "--", board, persona]);
 }
 
 export function showWebhook(run: RunCli, config: Config, board: string, persona: string) {
-  return run([...ownerArgs(config), "persona", "webhook", "show", board, persona]);
+  return run([...ownerArgs(config), "persona", "webhook", "show", "--", board, persona]);
 }
 
 export type BoardMessage = {
@@ -104,7 +116,7 @@ export async function showMessage(
   board: string,
   id: number,
 ): Promise<BoardMessage | null> {
-  const result = await run([...profileArgs(config.profile), "show", board, String(id)]);
+  const result = await run([...profileArgs(config.profile), "show", "--", board, String(id)]);
   if (result.code !== 0) return null;
   try {
     const message = (JSON.parse(result.stdout) as { message?: BoardMessage }).message;

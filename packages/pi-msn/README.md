@@ -38,7 +38,7 @@ Save that as `~/.pi/agent/pi-msn.json` (all your projects) or `.pi/pi-msn.json` 
 `work` is the board and `reviewer` is the persona id (`msn persona list work`). The command:
 
 1. Opens a receiver on `127.0.0.1`, on a free port.
-2. Starts the tunnel and waits until the public address reaches the receiver.
+2. Starts the tunnel and waits until the public address reaches the receiver. If it does not within 30 seconds, the command stops and sets nothing.
 3. Sets the address as the persona's webhook on the board, with a new random bearer key, and asks the board for a test ping.
 
 From then on, each message whose `to` is that persona is read with your own profile and delivered into the session. `/msn-webhook-status` shows the public URL, the tunnel, what arrived and the board's record of its last delivery. `/msn-webhook-stop` removes the webhook from the board and closes the tunnel and the receiver. Quitting Pi does the same. `/new`, `/resume` and `/reload` keep the webhook and its address.
@@ -70,7 +70,7 @@ MSN posts notices to a public `https` address on port 443. Pick one way with `tu
 | `tunnel` | What it does | You need |
 |---|---|---|
 | `cloudflared` (default) | A Cloudflare quick tunnel with a random `trycloudflare.com` address, new on each start | The `cloudflared` program. No account. |
-| `command` | Runs your program and takes the first `https://` URL it prints | `tunnelCommand`, such as `["ngrok", "http", "{port}"]` or `["tailscale", "funnel", "{port}"]`. `{port}` and `{url}` are replaced by the local port and URL. `tunnelUrlPattern` (a regular expression) picks the URL when the program prints several. |
+| `command` | Runs your program and takes the first `https://` URL it prints | `tunnelCommand`, such as `["ngrok", "http", "{port}", "--log", "stdout"]` or `["tailscale", "funnel", "{port}"]`. `{port}` and `{url}` are replaced by the local port and URL. `tunnelUrlPattern` (a regular expression) picks the URL when the program prints several. |
 | `none` | Starts no program | `publicUrl` (your own address that already forwards here) and a fixed `port` |
 
 With a stable address (`none`, or a named tunnel) the owner can set the webhook once by hand: set `"register": false` and a fixed key in `PI_MSN_WEBHOOK_BEARER`.
@@ -103,11 +103,11 @@ Settings come from `~/.pi/agent/pi-msn.json`, then `.pi/pi-msn.json` of a truste
 
 - The receiver listens on loopback only. It refuses every request without the bearer key (compared in constant time), bodies over 8 KiB and anything that is not an `msn.webhook.v1` notice.
 - The bearer key goes to the MSN CLI through an environment variable, never as an argument, and is never printed or written to a file. A fixed key is read from the environment only, never from a settings file.
-- A notice holds ids only. The message is read with your own MSN profile, so a forged notice cannot inject text; with the key it could at most make the agent read a real message again.
+- A notice holds ids only. The message is read with your own MSN profile, so a forged notice cannot inject text. From a notice only a well-formed board name and a message id are used; with the key a forger could at most make the agent read a real message again.
 - Repeats are dropped by `MSN-Webhook-Id`, because MSN delivers at least once.
 - Board messages are other people's words. They steer the agent, which is the purpose, so give the webhook to a persona only on boards whose senders you trust to direct this agent.
 - A project's `.pi/pi-msn.json` can name programs to run (`msnBin`, `tunnelCommand`). It is read only for a project you trusted in Pi.
-- If Pi is killed, the tunnel program is killed with it, but the webhook stays set on the board until the next start replaces it or the owner removes it. MSN retries a dead address for about 73 minutes, then records the failure.
+- When Pi quits in order (including on SIGTERM or SIGHUP), the webhook is removed and the tunnel program ends. If Pi is killed outright or crashes, the tunnel program can keep running until you end it, and the webhook stays set on the board until the next start replaces it or the owner removes it. MSN retries a dead address for about 73 minutes, then records the failure.
 
 ## Limits
 
