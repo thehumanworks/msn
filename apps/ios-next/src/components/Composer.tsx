@@ -4,7 +4,7 @@ import { SymbolView } from "expo-symbols";
 import { forwardRef } from "react";
 import { Pressable, StyleSheet, Text, TextInput, type TextInputInstance, View } from "react-native";
 import type { Message } from "../lib/shared.ts";
-import { color } from "../lib/theme.ts";
+import { color, glassTint } from "../lib/theme.ts";
 import { Glass } from "./Glass.tsx";
 
 /**
@@ -26,7 +26,7 @@ export const Composer = forwardRef<
   const canSend = text.trim().length > 0;
   if (readOnly) {
     return (
-      <Glass style={styles.readOnly}>
+      <Glass tintColor={glassTint.chip} style={styles.readOnly}>
         <Text style={styles.readOnlyText}>{readOnly}</Text>
       </Glass>
     );
@@ -34,7 +34,7 @@ export const Composer = forwardRef<
   return (
     <View style={{ gap: 8 }}>
       {replyTo ? (
-        <Glass style={styles.chip}>
+        <Glass tintColor={glassTint.chip} style={styles.chip}>
           <SymbolView name="arrowshape.turn.up.left.fill" tintColor={color.tint} size={14} />
           <Text style={styles.chipText} numberOfLines={1}>
             Replying to <Text style={{ fontWeight: "700" }}>{replyTo.username}</Text>
@@ -46,7 +46,7 @@ export const Composer = forwardRef<
       ) : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <GlassContainer spacing={10} style={styles.row}>
-        <Glass style={styles.field}>
+        <Glass tintColor={glassTint.chip} style={styles.field}>
           <TextInput
             ref={ref}
             value={text}
@@ -68,7 +68,7 @@ export const Composer = forwardRef<
           accessibilityRole="button"
           accessibilityLabel="Send"
         >
-          <Glass isInteractive tintColor={canSend ? color.tint : undefined} style={styles.send}>
+          <Glass isInteractive tintColor={canSend ? color.tint : glassTint.chip} style={styles.send}>
             <SymbolView name="arrow.up" tintColor={canSend ? "#fff" : color.tertiary} size={20} weight="bold" />
           </Glass>
         </Pressable>

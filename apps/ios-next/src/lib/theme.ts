@@ -1,4 +1,4 @@
-import { PlatformColor } from "react-native";
+import { DynamicColorIOS, PlatformColor } from "react-native";
 
 // System colors follow light and dark mode and the user's contrast settings on their own.
 export const color = {
@@ -16,6 +16,17 @@ export const color = {
   success: PlatformColor("systemGreen"),
   mine: PlatformColor("systemBlue"),
   onTint: "#ffffff",
+};
+
+/**
+ * Glass tints strong enough that text on glass stays legible over any backdrop: a milky white
+ * in light mode and a deep navy in dark mode. Paired with a blur under the glass (`Surface`).
+ */
+export const glassTint = {
+  /** Cards and sheets that carry text. */
+  surface: DynamicColorIOS({ light: "rgba(255,255,255,0.62)", dark: "rgba(12,18,42,0.62)" }),
+  /** Small chips and pills floating over content. */
+  chip: DynamicColorIOS({ light: "rgba(255,255,255,0.72)", dark: "rgba(12,18,42,0.72)" }),
 };
 
 /** A stable hue for a sender's name, so the same agent reads the same color everywhere. */

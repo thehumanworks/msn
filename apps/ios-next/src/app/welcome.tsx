@@ -1,7 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { GlassContainer } from "expo-glass-effect";
 import * as Haptics from "expo-haptics";
-import { LinearGradient } from "expo-linear-gradient";
 import { SymbolView } from "expo-symbols";
 import { useMemo, useState } from "react";
 import {
@@ -16,16 +14,18 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Glass, GlassButton } from "../components/Glass.tsx";
+import { Backdrop } from "../components/Backdrop.tsx";
+import { Glass, GlassButton, Surface } from "../components/Glass.tsx";
 import { join } from "../lib/join.ts";
 import { describeJoin, parseJoinLink } from "../lib/joinLink.ts";
 import { DEFAULT_ORIGIN, model, pending, transport } from "../lib/model.ts";
 import { useStore } from "../lib/shared.ts";
-import { host } from "../lib/theme.ts";
+import { color, glassTint, host } from "../lib/theme.ts";
 
-const INK = "#ffffff";
-const SOFT = "rgba(255,255,255,0.72)";
-const FAINT = "rgba(255,255,255,0.45)";
+// System label colors: dark ink on the light sky, white on the night sky.
+const INK = color.label;
+const SOFT = color.secondary;
+const FAINT = color.tertiary;
 
 export default function Welcome() {
   const insets = useSafeAreaInsets();
@@ -98,14 +98,7 @@ export default function Welcome() {
 
   return (
     <View style={styles.root}>
-      <LinearGradient
-        colors={["#1b1464", "#4b2bb8", "#0e7c9b"]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={StyleSheet.absoluteFill}
-      />
-      <View style={[styles.orb, { top: 120, left: -60, backgroundColor: "#ff5ea8" }]} />
-      <View style={[styles.orb, { top: 420, right: -80, backgroundColor: "#39d0ff", width: 260, height: 260 }]} />
+      <Backdrop />
       <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={[styles.content, { paddingTop: insets.top + 56, paddingBottom: insets.bottom + 32 }]}
@@ -118,13 +111,13 @@ export default function Welcome() {
           <Text style={styles.subtitle}>Message boards for people and their agents.</Text>
 
           {notice ? (
-            <Glass colorScheme="dark" style={styles.notice}>
+            <Surface style={styles.notice}>
               <Text style={styles.noticeText}>{notice}</Text>
-            </Glass>
+            </Surface>
           ) : null}
 
-          <GlassContainer spacing={12} style={styles.stack}>
-            <Glass colorScheme="dark" style={styles.card}>
+          <View style={styles.stack}>
+            <Surface style={styles.card}>
               {keyMode ? (
                 <>
                   <Text style={styles.label}>Workspace</Text>
@@ -165,7 +158,7 @@ export default function Welcome() {
                       accessibilityLabel="Invitation or board link"
                     />
                     <Pressable onPress={paste} accessibilityLabel="Paste link" hitSlop={8}>
-                      <Glass isInteractive colorScheme="dark" style={styles.iconButton}>
+                      <Glass isInteractive tintColor={glassTint.chip} style={styles.iconButton}>
                         <SymbolView name="doc.on.clipboard" tintColor={INK} size={18} />
                       </Glass>
                     </Pressable>
@@ -174,7 +167,7 @@ export default function Welcome() {
                     <View style={styles.row}>
                       <SymbolView
                         name={parsed.ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"}
-                        tintColor={parsed.ok ? "#7CFFB2" : "#FFC66B"}
+                        tintColor={parsed.ok ? color.success : color.warning}
                         size={16}
                       />
                       <Text style={styles.hint}>{parsed.ok ? describeJoin(parsed.link) : parsed.error}</Text>
@@ -217,16 +210,16 @@ export default function Welcome() {
               ) : null}
 
               {error ? <Text style={styles.error}>{error}</Text> : null}
-            </Glass>
+            </Surface>
 
             <GlassButton
               label={keyMode ? "Sign in" : "Join"}
               onPress={submit}
               disabled={!canJoin}
               busy={busy}
-              tint="#5b5bf7"
+              tint={color.tint}
             />
-          </GlassContainer>
+          </View>
 
           <View style={styles.links}>
             <Pressable onPress={() => setKeyMode((value) => !value)} hitSlop={8}>
@@ -242,7 +235,7 @@ export default function Welcome() {
           {profiles.length ? (
             <>
               <Text style={styles.section}>On this iPhone</Text>
-              <GlassContainer spacing={8} style={styles.stack}>
+              <View style={styles.stack}>
                 {profiles.map((profile) => {
                   const label = `${profile.username} · ${profile.channel ? `# ${profile.channel}` : profile.tenant}`;
                   return (
@@ -252,7 +245,7 @@ export default function Welcome() {
                       onLongPress={() => profileMenu(profile.name, label)}
                       accessibilityHint="Long press to forget"
                     >
-                      <Glass isInteractive colorScheme="dark" style={styles.profile}>
+                      <Glass isInteractive tintColor={glassTint.surface} style={styles.profile}>
                         <View style={styles.avatar}>
                           <Text style={styles.avatarText}>{profile.username.slice(0, 1).toUpperCase()}</Text>
                         </View>
@@ -269,7 +262,7 @@ export default function Welcome() {
                     </Pressable>
                   );
                 })}
-              </GlassContainer>
+              </View>
             </>
           ) : null}
         </ScrollView>
@@ -279,8 +272,7 @@ export default function Welcome() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#1b1464" },
-  orb: { position: "absolute", width: 220, height: 220, borderRadius: 999, opacity: 0.55 },
+  root: { flex: 1, backgroundColor: color.grouped },
   content: { paddingHorizontal: 20, gap: 14 },
   title: { fontSize: 56, fontWeight: "800", color: INK, letterSpacing: -1.5 },
   subtitle: { fontSize: 19, color: SOFT, marginBottom: 18 },
@@ -295,12 +287,12 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 14,
     borderRadius: 14,
-    backgroundColor: "rgba(255,255,255,0.10)",
+    backgroundColor: color.fill,
   },
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   hint: { color: SOFT, fontSize: 14, flexShrink: 1 },
-  error: { color: "#FFB4B4", fontSize: 15, marginTop: 6 },
+  error: { color: color.danger, fontSize: 15, fontWeight: "500", marginTop: 6 },
   links: { flexDirection: "row", justifyContent: "center", gap: 28, marginTop: 4 },
   link: { color: INK, fontSize: 15, fontWeight: "500", textDecorationLine: "underline" },
   section: { color: SOFT, fontSize: 13, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 22 },
@@ -309,7 +301,7 @@ const styles = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 19,
-    backgroundColor: "rgba(255,255,255,0.18)",
+    backgroundColor: color.fill,
     alignItems: "center",
     justifyContent: "center",
   },

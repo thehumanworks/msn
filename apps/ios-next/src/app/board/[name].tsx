@@ -19,7 +19,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Composer } from "../../components/Composer.tsx";
 import { ConnectionPill } from "../../components/ConnectionPill.tsx";
-import { Glass } from "../../components/Glass.tsx";
+import { Surface } from "../../components/Glass.tsx";
 import { Markdown } from "../../components/Markdown.tsx";
 import {
   MessageBubble,
@@ -52,7 +52,7 @@ export default function Board() {
         <Conversation controller={controller} />
       ) : (
         <ActivityIndicator
-          style={{ flex: 1, backgroundColor: color.background }}
+          style={{ flex: 1 }}
         />
       )}
     </>
@@ -212,20 +212,20 @@ function Conversation({ controller }: { controller: ChannelController }) {
         </Text>
       ) : null}
       {state.brief ? (
-        <Glass style={styles.brief}>
+        <Surface style={styles.brief}>
           <Text style={styles.briefTitle}>Brief</Text>
           <Markdown
             text={state.brief.text}
             color={color.label}
             tint={color.tint}
           />
-        </Glass>
+        </Surface>
       ) : null}
     </View>
   );
 
   return (
-    <View style={{ flex: 1, backgroundColor: color.background }}>
+    <View style={{ flex: 1 }}>
       <KeyboardAvoidingView
         behavior="padding"
         keyboardVerticalOffset={headerHeight}
@@ -297,13 +297,13 @@ function Conversation({ controller }: { controller: ChannelController }) {
             contentContainerStyle={styles.statuses}
           >
             {state.statuses.map((status) => (
-              <Glass key={status.name} style={styles.status}>
+              <Surface key={status.name} strength="chip" style={styles.status}>
                 <View style={styles.dot} />
                 <Text style={styles.statusText} numberOfLines={1}>
                   <Text style={{ fontWeight: "700" }}>{status.name}</Text>{" "}
                   {status.text}
                 </Text>
-              </Glass>
+              </Surface>
             ))}
           </ScrollView>
         </View>
