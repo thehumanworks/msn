@@ -39,7 +39,7 @@ Checked on the day:
 ## Verification
 
 - `bun run typecheck` covers the app and the shared files it imports.
-- 23 Node tests (`bun run test`) for join link parsing and host spoofing, join routing, persona registration through the shared HTTP client (redirects, foreign responses, size and timeout limits) and board notices. The join card names the server and warns for any host but msn.thehuman.sh.
+- 24 Node tests (`bun run test`) for join link parsing and host spoofing, join routing, persona registration through the shared HTTP client (redirects, foreign responses, size and timeout limits) and board notices. The join card names the server and warns for any host but msn.thehuman.sh.
 - `expo export --platform ios` produces the bundle, so Metro resolves the shared core.
 - Run in the iOS 27 simulator (Xcode 27 beta) against a local Worker (`wrangler dev`, scratch persistence): joining with a board link and a new persona, the session surviving a relaunch, the boards list, reading and sending Markdown messages, replies (the server recorded `replyTo`), answering a question with choices, the brief card and brief notice, status chips, and the unread badge (a mention posted while the list was open showed `@1`; it cleared once the board was opened, and a mention that arrived while the board was open showed none; read marks are kept on the device, ADR 0045).
 - Not yet run on a device, in dark mode, or with Reduce Transparency on.

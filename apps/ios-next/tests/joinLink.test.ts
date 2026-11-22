@@ -118,3 +118,13 @@ test("a bare invitation code goes to the server the person typed", () => {
   assert.equal(joinServer(parsed.link, "not a server"), null);
   assert.equal(joinServer(parsed.link, "https://msn.thehuman.sh@evil.example"), null);
 });
+
+test("plain http is refused except for a server on this machine", () => {
+  const insecure = parseJoinLink(`http://msn.thehuman.sh/#board=acme/launch&key=${KEY}`);
+  assert.equal(insecure.ok, false);
+  if (!insecure.ok) assert.match(insecure.error, /https/);
+  assert.equal(parseJoinLink(`http://127.0.0.1:8787/#board=acme/launch&key=${KEY}`).ok, true);
+  const bare = parseJoinLink(CODE);
+  assert.ok(bare.ok);
+  assert.equal(joinServer(bare.link, "http://msn.thehuman.sh"), null);
+});

@@ -33,7 +33,9 @@ const USERINFO = "That link puts a name before its server, which can disguise wh
 function originOf(value: string): string | null {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    // http only for a server on this machine, as the shared client allows (validateOrigin).
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return null;
     // `https://msn.thehuman.sh@evil.example/` goes to evil.example: never accept userinfo.
     if (url.username || url.password) return null;
     return url.origin;
@@ -135,7 +137,7 @@ export function joinServer(link: JoinLink, server: string): { host: string; offi
   const origin = link.origin ?? server.trim();
   try {
     const url = new URL(origin);
-    if (url.username || url.password) return null;
+    if (url.username || url.password || originOf(url.origin) === null) return null;
     return { host: url.host, official: url.origin === DEFAULT_ORIGIN };
   } catch {
     return null;
