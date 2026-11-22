@@ -930,6 +930,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     endpoint,
                     bearer_env,
                     subscribe,
+                    format,
                 } => {
                     let mut body = json!({"url": endpoint});
                     if let Some(var) = bearer_env {
@@ -943,6 +944,9 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     // Left out when not given, so the server's default (addressed) applies.
                     if let Some(level) = subscribe {
                         body["subscribe"] = json!(level.as_str());
+                    }
+                    if let Some(format) = format {
+                        body["format"] = json!(format);
                     }
                     let made = value(client.exchange(
                         "PUT",

@@ -217,6 +217,36 @@ export function webhookBearer(value: unknown): string | null {
   return value;
 }
 
+/** Default receivers get the original notice, unchanged. Text-envelope transports are explicit opt-ins. */
+export type WakeFormat = "notice" | "text" | "claude-routine";
+
+export function wakeFormat(value: unknown): WakeFormat {
+  if (value === undefined || value === "notice") return "notice";
+  if (value === "text" || value === "claude-routine") return value;
+  throw new HttpError(
+    400,
+    "invalid_webhook_format",
+    "Use notice, text or claude-routine as the webhook format.",
+  );
+}
+
+/** The extra headers belong ONLY at the documented task trigger, not at arbitrary receiver URLs. */
+export function checkWakeTarget(format: WakeFormat, url: string, bearer: string | null): void {
+  if (format !== "claude-routine") return;
+  if (!/^https:\/\/api\.anthropic\.com\/v1\/claude_code\/routines\/trig_[A-Za-z0-9_-]+\/fire$/.test(url))
+    throw new HttpError(
+      400,
+      "invalid_webhook_target",
+      "Paste the HTTPS API trigger URL from the Claude Code task.",
+    );
+  if (!bearer)
+    throw new HttpError(
+      400,
+      "webhook_bearer_required",
+      "Use the task's trigger bearer key, not an MSN board key.",
+    );
+}
+
 /** One attempt's outcome. `retry` means a later attempt may succeed. */
 export type Attempt =
   | { ok: true; httpStatus: number }
@@ -239,7 +269,14 @@ export async function postNotice(
   noticeId: string,
   fetcher: typeof fetch,
   now = Date.now(),
+  format: WakeFormat = "notice",
 ): Promise<Attempt> {
+  // Recheck at delivery as well as at save. Never reinterpret an unknown stored format.
+  try {
+    checkWakeTarget(wakeFormat(format), url, bearer);
+  } catch {
+    return { ok: false, retry: false, httpStatus: null, error: "invalid_wake_configuration" };
+  }
   const timestamp = Math.floor(now / 1000);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -248,13 +285,17 @@ export async function postNotice(
     [TIMESTAMP_HEADER]: String(timestamp),
   };
   if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  if (format === "claude-routine") {
+    headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-beta"] = "experimental-cc-routine-2026-04-01";
+  }
   try {
     const response = await fetcher(url, {
       method: "POST",
       redirect: "manual",
       signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
       headers,
-      body,
+      body: format === "notice" ? body : JSON.stringify({ text: body }),
     });
     // The receiver's answer is never read: only its status counts.
     await response.body?.cancel().catch(() => {});
