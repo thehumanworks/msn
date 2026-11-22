@@ -1,6 +1,6 @@
 [tools]
-1password = "latest"
 bun = "latest"
+doppler = "latest"
 fnox = "latest"
 rust = "1.98.1"
 wrangler = { version = "latest", allow_builds = ["esbuild", "sharp", "workerd"] }

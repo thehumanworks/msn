@@ -1,12 +1,14 @@
-default_provider = "op"
+default_provider = "doppler"
 
-[providers.op]
-type = "1password"
+[providers.doppler]
+type = "doppler"
+project = "vault"
+config = "prd"
 
 [secrets]
-CLOUDFLARE_API_TOKEN= { provider = "op", value = "op://vault/cloudflare/token" }
-CLOUDFLARE_ACCOUNT_ID= { provider = "op", value = "op://vault/cloudflare/account_id" }
-CLOUDFLARE_API_EMAIL= { provider = "op", value = "op://vault/cloudflare/username" }
-MSN_WORKSPACE_TOKEN= { provider = "op", value = "op://vault/msn/workspace/token" }
-MSN_WORKSPACE_TENANT= { provider = "op", value = "op://vault/msn/workspace/tenant" }
-MSN_ADMIN_TOKEN= { provider = "op", value = "op://vault/msn/admin/token" }
+CLOUDFLARE_API_TOKEN= { provider = "op", value = "CLOUDFLARE_API_TOKEN", sync = { provider = "age", value = "fnox-age-batch-v1:YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHBpdi1wMjU2IEYyandKUSBBNk1renZ2MnZoVEtRbDl6a2hMZWg4RVc4bDMxSWlOWWtkRmF6RGtOQTFWKwpSaVVCTG9EeEFBendkR2dvTW9vejM0c202WFh1UWhBdHVpWWRvNlZoWU5jCi0+IHEpNDB0X08tZ3JlYXNlIGJze1QgcE1zOl8KSERaQXljU0IrMWtUeDI0dkNtZjdtWmFFN2NEa3lCMmhyQndhOFNsaTlPcmxNOXBXRlpKdWtHdmNnVkhNOFZibApLUEh2Tll5UkJrbDVvbE42VWFnMHFtaFhDc3BZWE5ZRwotLS0gTUlLV29ueWl1YWRrdHgxbjlBNERuRUE4Y1dQYTVwR2VGQ0tFMkhPVzdYVQrNk6JCGDaRqLM25mZ31NnLidRTsawk8pfEQNuMfMO196edPc/Lj30lLQxlbbpk2Ne7x1ZOKGYHeWNoMjRMXpLlOonNkktF1A0M915G:ltFV7RKBgaptLpIaOgc3xoOg0pTQ8dVQgqRNqBYbLb9Slgcbv5wHpSF2U2aV8Hj3LcXWodL4BYT7UISqrzoEnJwVjYpG11/LfKJ+nHsY3Gbh" } }
+CLOUDFLARE_ACCOUNT_ID= { provider = "op", value = "CLOUDFLARE_ACCOUNT_ID", sync = { provider = "age", value = "fnox-age-batch-v1:YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHBpdi1wMjU2IEYyandKUSBBNk1renZ2MnZoVEtRbDl6a2hMZWg4RVc4bDMxSWlOWWtkRmF6RGtOQTFWKwpSaVVCTG9EeEFBendkR2dvTW9vejM0c202WFh1UWhBdHVpWWRvNlZoWU5jCi0+IHEpNDB0X08tZ3JlYXNlIGJze1QgcE1zOl8KSERaQXljU0IrMWtUeDI0dkNtZjdtWmFFN2NEa3lCMmhyQndhOFNsaTlPcmxNOXBXRlpKdWtHdmNnVkhNOFZibApLUEh2Tll5UkJrbDVvbE42VWFnMHFtaFhDc3BZWE5ZRwotLS0gTUlLV29ueWl1YWRrdHgxbjlBNERuRUE4Y1dQYTVwR2VGQ0tFMkhPVzdYVQrNk6JCGDaRqLM25mZ31NnLidRTsawk8pfEQNuMfMO196edPc/Lj30lLQxlbbpk2Ne7x1ZOKGYHeWNoMjRMXpLlOonNkktF1A0M915G:oBab2InSjBH9aUO/DDsFHTHiNFm6PPXBN0bsZVBp4BfRWU/17AIqdrh243aaR8VeY+UoVE4SYad/Pwsz" } }
+CLOUDFLARE_API_EMAIL= { provider = "doppler", value = "CLOUDFLARE_API_EMAIL" }
+MSN_WORKSPACE_TOKEN= { provider = "doppler", value = "MSN_WORKSPACE_TOKEN" }
+MSN_WORKSPACE_TENANT= { provider = "doppler", value = "MSN_WORKSPACE_TENANT" }
+MSN_ADMIN_TOKEN= { provider = "doppler", value = "MSN_ADMIN_TOKEN" }
