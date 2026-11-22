@@ -2491,3 +2491,65 @@ nav button.has-unread .channel-name {
     min-height: 44px;
   }
 }
+/* The composer on a phone. Side by side with three 44px buttons, the To and Message fields kept
+   little more than half of a narrow screen. Here the fields take the width instead: attach and
+   send later sit at the end of the To row, and only Send stays beside the message. The buttons
+   look smaller and keep a 44px hit area. The fields join the composer's own grid, so `order`
+   can seat the buttons, which follow the fields in the document, in the rows they belong to. */
+@media (max-width: 759px) {
+  .compose {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 6px;
+  }
+  .compose-fields {
+    display: contents;
+  }
+  .compose :is(.reply-note, .quote-note, .attach-list) {
+    grid-column: 1 / -1;
+  }
+  .compose .to-field {
+    order: 1;
+  }
+  .compose #attach {
+    order: 2;
+  }
+  .compose #send-later {
+    order: 3;
+  }
+  .compose .message-field {
+    order: 4;
+    grid-column: 1 / 3;
+  }
+  .compose #send {
+    order: 5;
+    align-self: end;
+    /* Centred on a one-line message field, which is 46px tall. */
+    margin-bottom: 5px;
+  }
+  .compose .attach-list {
+    order: 6;
+    margin-top: 0;
+  }
+  .compose .icon {
+    position: relative;
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+  .compose .icon::after {
+    content: "";
+    position: absolute;
+    inset: -4px -3px;
+  }
+  /* A long placeholder ends in an ellipsis rather than a cut letter. */
+  .compose #recipient {
+    text-overflow: ellipsis;
+  }
+  /* A long message scrolls inside its field. With the keyboard up it stops at about three
+     lines, so the conversation keeps most of the little room that is left. */
+  .keyboard-open .compose textarea {
+    max-height: min(160px, calc(var(--app-height) * 0.25));
+  }
+}
