@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "MSN",
+    "slug": "msn-ios-next",
+    "scheme": "msn",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "platforms": [
+      "ios"
+    ],
+    "ios": {
+      "bundleIdentifier": "sh.thehuman.msn.next",
+      "deploymentTarget": "26.0",
+      "supportsTablet": false,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": false,
+      "tsconfigPaths": false
+    }
+  }
+}
