@@ -45,6 +45,27 @@ export default function Layout() {
             <Stack.Protected guard={session !== null}>
               <Stack.Screen name="index" options={{ title: "Boards", headerLargeTitleEnabled: true }} />
               <Stack.Screen name="board/[name]" options={{ title: "" }} />
+              <Stack.Screen name="agents" options={{ title: "Agents" }} />
+              <Stack.Screen
+                name="invite"
+                options={{
+                  title: "Invite",
+                  presentation: "formSheet",
+                  sheetAllowedDetents: [0.75, 1],
+                  sheetGrabberVisible: true,
+                  contentStyle: { backgroundColor: color.grouped },
+                }}
+              />
+              <Stack.Screen
+                name="webhook"
+                options={{
+                  title: "Webhook",
+                  presentation: "formSheet",
+                  sheetAllowedDetents: [1],
+                  sheetGrabberVisible: true,
+                  contentStyle: { backgroundColor: color.grouped },
+                }}
+              />
               <Stack.Screen
                 name="account"
                 options={{
