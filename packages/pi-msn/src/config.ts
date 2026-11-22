@@ -7,6 +7,7 @@ export const CONFIG_FILE = "pi-msn.json";
 
 export type ToolExposure = "direct" | "deferred" | "codemode" | "off";
 export type DeliverAs = "steer" | "followUp" | "nextTurn";
+export type Subscribe = "addressed" | "board" | "workspace";
 export type TunnelProvider = "cloudflared" | "command" | "none";
 
 export type Config = {
@@ -20,6 +21,8 @@ export type Config = {
   board?: string;
   /** Persona id whose addressed messages wake this agent. */
   persona?: string;
+  /** What the webhook is told about: messages addressed to the persona, every message on its board, or on every board. */
+  subscribe: Subscribe;
   /** How the MSN tools reach the model; "off" registers none. */
   tools: ToolExposure;
   /** How a board message enters the session. */
@@ -48,6 +51,7 @@ export type Config = {
 
 export const DEFAULTS: Config = {
   msnBin: "msn",
+  subscribe: "addressed",
   tools: "direct",
   deliverAs: "steer",
   tunnel: "cloudflared",
@@ -59,6 +63,7 @@ export const DEFAULTS: Config = {
 };
 
 const TOOLS: ToolExposure[] = ["direct", "deferred", "codemode", "off"];
+const SUBSCRIBE: Subscribe[] = ["addressed", "board", "workspace"];
 const DELIVER: DeliverAs[] = ["steer", "followUp", "nextTurn"];
 const TUNNELS: TunnelProvider[] = ["cloudflared", "command", "none"];
 
@@ -117,6 +122,7 @@ function fromObject(raw: Record<string, unknown>, where: string): Partial<Config
     ownerProfile: text(raw.ownerProfile, name("ownerProfile")),
     board: text(raw.board, name("board")),
     persona: text(raw.persona, name("persona")),
+    subscribe: oneOf(raw.subscribe, SUBSCRIBE, name("subscribe")),
     tools: oneOf(raw.tools, TOOLS, name("tools")),
     deliverAs: oneOf(raw.deliverAs, DELIVER, name("deliverAs")),
     tunnel: oneOf(raw.tunnel, TUNNELS, name("tunnel")),
@@ -138,6 +144,7 @@ function fromEnv(env: Record<string, string | undefined>): Partial<Config> {
     ownerProfile: text(env.PI_MSN_OWNER_PROFILE, "PI_MSN_OWNER_PROFILE"),
     board: text(env.PI_MSN_BOARD, "PI_MSN_BOARD"),
     persona: text(env.PI_MSN_PERSONA, "PI_MSN_PERSONA"),
+    subscribe: oneOf(env.PI_MSN_SUBSCRIBE, SUBSCRIBE, "PI_MSN_SUBSCRIBE"),
     tools: oneOf(env.PI_MSN_TOOLS, TOOLS, "PI_MSN_TOOLS"),
     deliverAs: oneOf(env.PI_MSN_DELIVER_AS, DELIVER, "PI_MSN_DELIVER_AS"),
     tunnel: oneOf(env.PI_MSN_TUNNEL, TUNNELS, "PI_MSN_TUNNEL"),

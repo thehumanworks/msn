@@ -23,6 +23,8 @@ Checked against the Pi 1.6.0 documentation and by running Pi itself:
 - **The webhook outlives a session change.** The receiver, tunnel and board setting are kept outside the extension instance. On `/new`, `/resume` or `/reload` only the delivery target changes, and messages that arrive in between wait (at most 50) for the next session. A quick tunnel's address would otherwise change on every `/new`.
 - **Who sets the webhook.** Only the owner account can (ADR 0062). `ownerProfile` names a saved owner profile used for that step alone. Without one, a user who supplies a key of their own (`PI_MSN_WEBHOOK_BEARER`) gets the receiver, the tunnel and the exact command for the owner to run; with a random key that path is refused, since nobody could learn the key.
 
+- **Wider subscriptions.** ADR 0076 (in review at the time of writing) lets a webhook subscribe to a whole board or workspace. The `subscribe` setting passes `--subscribe board|workspace` when it is not the default, so a CLI without the flag keeps working. A `message.posted` notice can stand for several messages, so the first is delivered with a line telling the agent to `peek` for the rest. This path is covered by a unit test only, since the server side is not merged.
+
 ## Security
 
 - The receiver binds `127.0.0.1` only; the tunnel is the one way in. Requests without the key get `401`, bodies over 8 KiB `413`, non-notices `400`.
@@ -34,7 +36,7 @@ Checked against the Pi 1.6.0 documentation and by running Pi itself:
 
 ## Verification
 
-- 32 unit tests (`bun run test:pi-msn`) for settings, the receiver, the three tunnel providers and the webhook's life, run by the `js` job.
+- 33 unit tests (`bun run test:pi-msn`) for settings, the receiver, the three tunnel providers and the webhook's life, run by the `js` job.
 - One end-to-end test (`bun run test:pi-msn:e2e`) starts a real Pi 1.6.0 in RPC mode with the extension, and stand-ins for the model (an OpenAI-compatible server), the MSN CLI and the tunnel program (a real https hop). It shows that a notice wakes an idle session; that a notice sent while a tool runs is in the very next model call, after the tool result (with `followUp` the same test fails); that a repeat is dropped; that the tools are declared; that the webhook survives `new_session`; and that stop and quit remove it.
 - By hand: the real CLI's 26 tools are declared to the model in a real Pi. The real `cloudflared` 2026.11.1 output was used for the URL pattern. A full quick tunnel could not be run in the build container, which cannot reach Cloudflare's tunnel network, so a notice travelling from the production Worker through a real quick tunnel is not yet verified.
 

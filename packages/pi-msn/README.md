@@ -86,6 +86,7 @@ Settings come from `~/.pi/agent/pi-msn.json`, then `.pi/pi-msn.json` of a truste
 | `ownerProfile` | `PI_MSN_OWNER_PROFILE` | same as `profile` | Saved owner profile, used only to set and remove the webhook |
 | `board` | `PI_MSN_BOARD` | none | Default board |
 | `persona` | `PI_MSN_PERSONA` | none | Persona id the webhook is for |
+| `subscribe` | `PI_MSN_SUBSCRIBE` | `addressed` | `addressed`: messages to the persona. `board`: every message on its board. `workspace`: every board. The last two need an MSN server and CLI with webhook subscription scopes (ADR 0076) |
 | `tools` | `PI_MSN_TOOLS` | `direct` | `direct` declares the tools to the model; `deferred` and `codemode` are Pi's other MCP exposures; `off` registers none |
 | `deliverAs` | `PI_MSN_DELIVER_AS` | `steer` | `steer`, `followUp` or `nextTurn` |
 | `tunnel` | `PI_MSN_TUNNEL` | `cloudflared` | `cloudflared`, `command` or `none` |
@@ -111,7 +112,7 @@ Settings come from `~/.pi/agent/pi-msn.json`, then `.pi/pi-msn.json` of a truste
 
 ## Limits
 
-- One webhook per Pi process, for one persona on one board, which is what MSN offers today. A notice that names another board is read from that board, so wider subscriptions will be delivered once MSN has them.
+- One webhook per Pi process, for one persona. With `subscribe` set to `board` or `workspace`, one notice can stand for several messages: the first is delivered and the agent is told to `peek` for the rest. For `workspace`, your profile must be able to read every board; a board's shared key reads its own board only.
 - A quick tunnel's address changes on every start, so the webhook is set again on every start.
 
 ## Develop

@@ -162,7 +162,8 @@ export class Webhook {
     publicUrl: string,
     bearer: string,
   ): Promise<Registration> {
-    const command = `msn persona webhook set ${board} ${persona} ${publicUrl} --bearer-env VAR`;
+    const scope = config.subscribe === "addressed" ? "" : ` --subscribe ${config.subscribe}`;
+    const command = `msn persona webhook set --bearer-env VAR${scope} -- ${board} ${persona} ${publicUrl}`;
     if (!config.register)
       return { state: "manual", reason: "register is off, so the owner sets the webhook by hand.", command };
     const result = await setWebhook(this.deps.run, config, board, persona, publicUrl, bearer);
@@ -210,7 +211,11 @@ export class Webhook {
     }
     // Stopped while the message was being read: deliver nothing after a stop.
     if (this.context !== context) return;
-    this.send({ text: message ? formatMessage(message) : formatHint(safe), notice: safe, message });
+    this.send({
+      text: message ? formatMessage(message, notice.type === "message.posted") : formatHint(safe),
+      notice: safe,
+      message,
+    });
   }
 
   private enqueue(delivery: Delivery): void {

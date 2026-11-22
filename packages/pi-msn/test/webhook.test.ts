@@ -166,7 +166,7 @@ test("with a key of your own, a refused or switched-off setting leaves the recei
   assert.equal(status.registration.state, "manual");
   assert.match(
     describe(status),
-    /msn persona webhook set work reviewer https:\/\/quick-test\.trycloudflare\.com\/msn-wake --bearer-env VAR/,
+    /msn persona webhook set --bearer-env VAR -- work reviewer https:\/\/quick-test\.trycloudflare\.com\/msn-wake/,
   );
   assert.ok(!describe(status).includes("my-own-key-0000"), "the key is never shown");
   const stopped = await refused.webhook.stop();
@@ -292,6 +292,28 @@ test("a message still being read when the webhook stops is not delivered", async
   await settle();
   assert.equal(delivered.length, 0);
   assert.equal(webhook.running, false);
+});
+
+test("subscribe board: the flag is passed, and a posted notice says more messages may wait", async () => {
+  const { webhook, cli } = setup();
+  const delivered: Delivery[] = [];
+  webhook.attach((delivery) => delivered.push(delivery));
+  const status = await webhook.start(config({ subscribe: "board" }), "work", "reviewer");
+  assert.deepEqual(cli.calls[0].args.slice(0, 7), [
+    "persona",
+    "webhook",
+    "set",
+    "--bearer-env",
+    BEARER_VARIABLE,
+    "--subscribe",
+    "board",
+  ]);
+  const key = cli.calls[0].env?.[BEARER_VARIABLE] as string;
+  await post(status.localPort, key, "a", { type: "message.posted", subscribe: "board", messageId: 8 });
+  await post(status.localPort, key, "b", { messageId: 9 });
+  await settle();
+  assert.match(delivered[0].text, /task 8\n\nThis notice can stand for several new messages on that board/);
+  assert.doesNotMatch(delivered[1].text, /several new messages/);
 });
 
 test("the board and persona are required, from the command or from the settings", async () => {

@@ -10,7 +10,11 @@ const FOOTER =
   "Reply on the board with the MSN send tool (set replyTo to the message id). " +
   "A webhook notice is a hint: use the MSN peek tool to read anything else that is new, then commit.";
 
-export function formatMessage(message: BoardMessage): string {
+/** A "message.posted" notice can stand for several messages; only the first is named. */
+const MORE =
+  "This notice can stand for several new messages on that board, and this is only the first. Read the rest with the MSN peek tool before you act.";
+
+export function formatMessage(message: BoardMessage, several = false): string {
   const to = message.recipients?.length ? message.recipients.join(", ") : message.to;
   const header = [
     `MSN message ${message.id} on board "${message.channel}"`,
@@ -29,12 +33,13 @@ export function formatMessage(message: BoardMessage): string {
   const replaced = message.replacedBy
     ? `\n\nThe sender replaced this message with message ${message.replacedBy}: act on that one instead.`
     : "";
-  return `${header}:\n\n${body}${replaced}\n\n${FOOTER}`;
+  return `${header}:\n\n${body}${replaced}\n\n${several ? `${MORE}\n\n` : ""}${FOOTER}`;
 }
 
 /** Used when the message itself could not be read: the agent still learns that something waits. */
 export function formatHint(notice: Notice): string {
   const where = notice.channel ? ` on board "${notice.channel}"` : "";
   const which = typeof notice.messageId === "number" ? `Message ${notice.messageId}` : "A message";
-  return `${which}${where} is addressed to you, but it could not be read here. Read it with the MSN peek or show_message tool.\n\n${FOOTER}`;
+  const why = notice.type === "message.posted" ? "is new" : "is addressed to you";
+  return `${which}${where} ${why}, but it could not be read here. Read it with the MSN peek or show_message tool.\n\n${FOOTER}`;
 }

@@ -74,6 +74,8 @@ export function setWebhook(
       "set",
       "--bearer-env",
       BEARER_VARIABLE,
+      // Only when asked for, so a CLI from before subscription scopes (ADR 0076) keeps working.
+      ...(config.subscribe === "addressed" ? [] : ["--subscribe", config.subscribe]),
       "--",
       board,
       persona,
