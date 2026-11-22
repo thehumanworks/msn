@@ -88,9 +88,11 @@ export function parseCallback(raw: string, origin: string): { account: string; c
   } catch {
     return null;
   }
-  if (url.origin !== origin || url.pathname !== CALLBACK_PATH) return null;
-  const account = url.searchParams.get("account") ?? "";
-  const code = url.searchParams.get("code") ?? "";
+  if (url.origin !== origin || url.pathname !== CALLBACK_PATH || url.search) return null;
+  // The server puts the answer in the fragment, so the code never reaches a request log.
+  const answer = new URLSearchParams(url.hash.slice(1));
+  const account = answer.get("account") ?? "";
+  const code = answer.get("code") ?? "";
   return ACCOUNT.test(account) && HEX64.test(code) ? { account, code } : null;
 }
 

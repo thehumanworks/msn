@@ -43,7 +43,7 @@ function sheet(reply: (url: string) => { type: string; url?: string }) {
   };
 }
 
-const answered = () => ({ type: "success", url: `${callbackUrl}?account=${account}&code=${code}` });
+const answered = () => ({ type: "success", url: `${callbackUrl}#account=${account}&code=${code}` });
 
 test("signs in: opens /login with a challenge, then trades the code and verifier for a key", async () => {
   const { calls, fetchImpl } = fake([json({ url: origin, tenant: account, username: "tomas@example.com", token })]);
@@ -96,10 +96,11 @@ test("a callback that is not the server's answer is refused before any request",
   for (const url of [
     `${origin}/#account=${account}`,
     `msn://login?account=${account}&code=${code}`,
-    `https://evil.example${CALLBACK_PATH}?account=${account}&code=${code}`,
-    `${origin}/app/other?account=${account}&code=${code}`,
-    `${callbackUrl}?account=workspace&code=${code}`,
-    `${callbackUrl}?account=${account}&code=short`,
+    `https://evil.example${CALLBACK_PATH}#account=${account}&code=${code}`,
+    `${origin}/app/other#account=${account}&code=${code}`,
+    `${callbackUrl}#account=workspace&code=${code}`,
+    `${callbackUrl}#account=${account}&code=short`,
+    `${callbackUrl}?account=${account}&code=${code}`,
   ]) {
     const { calls, fetchImpl } = fake([]);
     const result = await signInWithCloudflare(origin, {
@@ -158,7 +159,7 @@ test("the button shows only for an associated server whose Access sign-in is on 
 });
 
 test("parseCallback reads the account and code from the server's own callback path", () => {
-  assert.deepEqual(parseCallback(`${callbackUrl}?account=${account}&code=${code}`, origin), { account, code });
+  assert.deepEqual(parseCallback(`${callbackUrl}#account=${account}&code=${code}`, origin), { account, code });
   assert.equal(parseCallback(callbackUrl, origin), null);
-  assert.equal(parseCallback(`${callbackUrl}?account=${account}&code=${code}`, "https://msn.example"), null);
+  assert.equal(parseCallback(`${callbackUrl}#account=${account}&code=${code}`, "https://msn.example"), null);
 });

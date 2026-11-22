@@ -76,9 +76,9 @@ export default {
         const account = await accessAccount(request, env as Env & AccessSettings);
         const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", account.tenant]));
         const { code } = accepted(await stub.startAppLogin(account.username, challenge));
+        // The code rides in the fragment, which browsers never send, so it stays out of request logs.
         const callback = new URL(APP_LOGIN_CALLBACK_PATH, url.origin);
-        callback.searchParams.set("account", account.tenant);
-        callback.searchParams.set("code", code);
+        callback.hash = new URLSearchParams({ account: account.tenant, code }).toString();
         response = new Response(null, {
           status: 303,
           headers: { Location: callback.href, "Cache-Control": "no-store" },

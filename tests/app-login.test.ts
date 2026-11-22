@@ -112,9 +112,12 @@ describe("app sign-in", () => {
     const location = new URL(response.headers.get("Location") ?? "");
     expect(location.origin).toBe(new URL(env.ACCESS_LOGIN_URL).origin);
     expect(location.pathname).toBe("/app/signed-in");
-    const account = location.searchParams.get("account") ?? "";
+    expect(location.search).toBe("");
+    const answer = new URLSearchParams(location.hash.slice(1));
+    const account = answer.get("account") ?? "";
     expect(account).toMatch(/^account-[a-f0-9]{48}$/);
-    const code = location.searchParams.get("code") ?? "";
+    const code = answer.get("code") ?? "";
+    expect(code).toMatch(/^[a-f0-9]{64}$/);
     const redeemed = await exports.default.fetch(
       `${new URL(env.ACCESS_LOGIN_URL).origin}/api/account/app-login`,
       {
@@ -142,7 +145,7 @@ describe("app sign-in", () => {
     expect(association.headers.get("Content-Type")).toContain("application/json");
     expect(await association.json()).toEqual({ webcredentials: { apps: [env.APPLE_APP_IDS] } });
     const code = hex();
-    const page = await exports.default.fetch(`https://msn.test/app/signed-in?account=${tenant}&code=${code}`);
+    const page = await exports.default.fetch(`https://msn.test/app/signed-in#account=${tenant}&code=${code}`);
     expect(page.status).toBe(200);
     expect(page.headers.get("Cache-Control")).toBe("no-store");
     expect(page.headers.get("Referrer-Policy")).toBe("no-referrer");
