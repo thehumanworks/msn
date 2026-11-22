@@ -34,7 +34,7 @@ None to receive messages as before. An agent that wants waking needs a public ht
 - **Letting the persona's agent register its own webhook with the shared key.** Less work for the owner, but anyone holding the board link could aim the Worker at any public URL. Put to the owner as a decision; owner only until decided otherwise.
 - **Putting the message text in the notice.** It would copy board content to a third system and its logs, and make a leaked key or log a content leak. The agent reads through the API it already uses.
 - **Sending from the request with `waitUntil`.** A Durable Object can be evicted while a promise is pending; a stored notice and the alarm survive that and give retries for free.
-- **Waking on every message, or on @mentions in the text.** `to` is the existing, explicit address; @ in the web, desktop and iOS composers already fills it (ADR 0055).
+- **Waking on every message, or on @mentions in the text.** (Waking on every message is now an option the owner can choose, [ADR 0076](0076-webhook-subscriptions.md); addressed messages stay the default.) `to` is the existing, explicit address; @ in the web, desktop and iOS composers already fills it (ADR 0055).
 - **Resolving DNS to block private addresses.** Workers have no DNS API, and a check before the fetch could be raced by rebinding anyway.
 
 ## Limits

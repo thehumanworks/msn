@@ -25,7 +25,7 @@ import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
-import { authText, webhookSummary } from "./webhook.js";
+import { authText, subscribeNote, subscription, webhookSummary } from "./webhook.js";
 
 const $ = (id) => document.getElementById(id);
 const SESSION_KEY = "msn.session";
@@ -4260,9 +4260,14 @@ function openWebhook(target, persona, hook) {
   $("webhook-title").textContent = `Wake ${persona.displayName} with a webhook`;
   $("webhook-url").value = hook?.url ?? "";
   $("webhook-bearer").value = "";
+  $("webhook-subscribe").value = subscription(hook);
+  $("webhook-subscribe-note").textContent = subscribeNote($("webhook-subscribe").value);
   showWebhook(hook);
   $("webhook-dialog").showModal();
 }
+$("webhook-subscribe").addEventListener("change", () => {
+  $("webhook-subscribe-note").textContent = subscribeNote($("webhook-subscribe").value);
+});
 async function refreshWebhook() {
   const target = webhookTarget;
   try {
@@ -4284,6 +4289,7 @@ $("webhook-form").addEventListener("submit", async (event) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: $("webhook-url").value.trim(),
+          subscribe: $("webhook-subscribe").value,
           ...($("webhook-bearer").value.trim() ? { bearer: $("webhook-bearer").value.trim() } : {}),
         }),
       },

@@ -863,11 +863,33 @@ pub enum PersonaCommand {
         channel: String,
     },
     /// Wake a persona's agent: POST a notice to an https URL when a message is addressed to
-    /// it (owner account only; ADR 0062). The notice holds ids, never message text or keys.
+    /// it, or for every message on its board or workspace with --subscribe (owner account only;
+    /// ADR 0062, 0076). The notice holds ids, never message text or keys.
     Webhook {
         #[command(subcommand)]
         command: WebhookCommand,
     },
+}
+
+/// What a persona webhook sends notices for (ADR 0076). Each level includes the one before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum WebhookSubscribe {
+    /// Messages addressed to the persona
+    Addressed,
+    /// Every message on the persona's board
+    Board,
+    /// Every message on every board in the workspace
+    Workspace,
+}
+
+impl WebhookSubscribe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Addressed => "addressed",
+            Self::Board => "board",
+            Self::Workspace => "workspace",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -886,6 +908,12 @@ pub enum WebhookCommand {
         /// a file or secret store rather than typing the key, which would put it in shell history.
         #[arg(long, value_name = "VAR")]
         bearer_env: Option<String>,
+        /// What to send notices for: addressed (the default) is messages addressed to PERSONA;
+        /// board adds every other message on this board; workspace adds every message on every
+        /// board. Messages that arrive while a notice waits share that notice, so read everything
+        /// new on the notice's board, not only its messageId.
+        #[arg(long, value_enum, value_name = "LEVEL")]
+        subscribe: Option<WebhookSubscribe>,
     },
     /// Show PERSONA's webhook and its last delivery (never the bearer key)
     Show { channel: String, persona: String },

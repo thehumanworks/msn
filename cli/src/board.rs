@@ -929,6 +929,7 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                     persona,
                     endpoint,
                     bearer_env,
+                    subscribe,
                 } => {
                     let mut body = json!({"url": endpoint});
                     if let Some(var) = bearer_env {
@@ -938,6 +939,10 @@ pub fn execute(cli: &Cli) -> Result<(), CliError> {
                             ))
                         })?;
                         body["bearer"] = json!(key);
+                    }
+                    // Left out when not given, so the server's default (addressed) applies.
+                    if let Some(level) = subscribe {
+                        body["subscribe"] = json!(level.as_str());
                     }
                     let made = value(client.exchange(
                         "PUT",

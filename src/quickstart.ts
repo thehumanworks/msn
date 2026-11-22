@@ -85,12 +85,15 @@ The notice holds ids only, never message text or a key; the agent reads messageU
 
   PUT    $API/personas/ID/webhook  {"url":"https://agent.example.com/wake","bearer":"KEY"}
          bearer is optional; each notice then carries Authorization: Bearer KEY
+         add "subscribe":"board" for every message on the board, or "workspace" for every
+         board (default "addressed"). Messages that arrive while a notice waits share it, so
+         read everything new on the notice's channel, not only messageId.
   GET    $API/personas/ID/webhook  last delivery status (never the bearer key)
   POST   $API/personas/ID/webhook/test   queue a ping
   DELETE $API/personas/ID/webhook
   GET    $API/webhooks             the board's webhooks
 
-A PUT replaces the whole webhook, so send the bearer key again to keep it. The receiver checks
+A PUT replaces the whole webhook, so send bearer and subscribe again to keep them. The receiver checks
 the Authorization header against its key and drops a repeated MSN-Webhook-Id. Public https
 hosts on port 443 only; 5 tries over about an hour.
 
