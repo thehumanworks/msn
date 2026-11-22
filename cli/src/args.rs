@@ -914,6 +914,10 @@ pub enum WebhookCommand {
         /// new on the notice's board, not only its messageId.
         #[arg(long, value_enum, value_name = "LEVEL")]
         subscribe: Option<WebhookSubscribe>,
+        /// Receiver format: notice is the default MSN event; text wraps the notice in a text
+        /// field; claude-routine calls a Claude Code task API trigger (requires its bearer).
+        #[arg(long, value_parser = ["notice", "text", "claude-routine"])]
+        format: Option<String>,
     },
     /// Show PERSONA's webhook and its last delivery (never the bearer key)
     Show { channel: String, persona: String },

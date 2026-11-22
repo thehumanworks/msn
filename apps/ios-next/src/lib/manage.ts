@@ -44,6 +44,11 @@ export type AgentPersona = { id: string; displayName: string; listening: boolean
 
 export const SUBSCRIPTIONS = ["addressed", "board", "workspace"] as const;
 export type Subscription = (typeof SUBSCRIPTIONS)[number];
+export const WAKE_FORMATS = ["notice", "text", "claude-routine"] as const;
+export type WakeFormat = (typeof WAKE_FORMATS)[number];
+export const WAKE_LABEL: Record<WakeFormat, string> = {
+  notice: "MSN notice (default)", text: "JSON with a text field", "claude-routine": "Claude Code task trigger",
+};
 
 export type Delivery = {
   status: string;
@@ -56,13 +61,14 @@ export type Webhook = {
   persona: string;
   url: string;
   subscribe: Subscription;
+  format?: WakeFormat;
   /** Whether notices carry a bearer key. The key itself is never returned. */
   bearer: boolean;
   pending: number;
   lastDelivery: Delivery | null;
 };
 
-export type WebhookInput = { url: string; bearer?: string; subscribe: Subscription };
+export type WebhookInput = { url: string; bearer?: string; subscribe: Subscription; format?: WakeFormat };
 
 const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
@@ -72,10 +78,14 @@ function decodeWebhook(value: unknown, persona?: string): Webhook {
   const id = text(hook?.persona);
   if (!hook || !url || !id || (persona !== undefined && id !== persona))
     throw new ProtocolError("The server sent an invalid webhook.");
+  const format = hook.format;
+  if (format !== undefined && format !== "notice" && format !== "text" && format !== "claude-routine")
+    throw new ProtocolError("This app does not support the saved webhook format.");
   const last = hook.lastDelivery as Record<string, unknown> | null | undefined;
   return {
     persona: id,
     url,
+    ...(format ? { format } : {}),
     // Anything unknown reads as the default, as the web app does (public/webhook.js).
     subscribe: hook.subscribe === "board" || hook.subscribe === "workspace" ? hook.subscribe : "addressed",
     bearer: hook.bearer === true,
@@ -265,11 +275,15 @@ export class Manage {
   async setWebhook(board: string, persona: string, input: WebhookInput, signal?: AbortSignal): Promise<Webhook> {
     const made = await this.http.request<{ webhook?: unknown }>(this.hookPath(board, persona), {
       method: "PUT",
-      body: { url: input.url, subscribe: input.subscribe, ...(input.bearer ? { bearer: input.bearer } : {}) },
+      body: { url: input.url, subscribe: input.subscribe,
+        ...(input.format && input.format !== "notice" ? { format: input.format } : {}),
+        ...(input.bearer ? { bearer: input.bearer } : {}) },
       signal,
       ...LIMITS,
     });
-    return decodeWebhook(made?.webhook, persona);
+    const saved = decodeWebhook(made?.webhook, persona);
+    if ((saved.format ?? "notice") !== (input.format ?? "notice")) throw new ProtocolError("The server did not confirm the webhook format.");
+    return saved;
   }
 
   async removeWebhook(board: string, persona: string, signal?: AbortSignal): Promise<void> {

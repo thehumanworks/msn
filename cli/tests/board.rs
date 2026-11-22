@@ -290,13 +290,13 @@ fn persona_webhook_commands_use_the_owner_key_and_webhook_routes() {
 }
 
 #[test]
-fn persona_webhook_set_sends_the_subscription_only_when_given() {
+fn persona_webhook_set_validates_subscription_and_format() {
     let home = Home::new();
     let server = MockServer::spawn(vec![Scripted::json(
         201,
         r#"{"webhook":{"persona":"reviewer","subscribe":"workspace"}}"#,
     )]);
-    let set = |level: &str| {
+    let set = |level: &str, format: &str| {
         Command::new(env!("CARGO_BIN_EXE_msn"))
             .env_clear()
             .env("HOME", &home.0)
@@ -317,11 +317,13 @@ fn persona_webhook_set_sends_the_subscription_only_when_given() {
                 "https://agent.example.com/wake",
                 "--subscribe",
                 level,
+                "--format",
+                format,
             ])
             .output()
             .unwrap()
     };
-    let out = set("workspace");
+    let out = set("workspace", "text");
     assert!(
         out.status.success(),
         "{}",
@@ -332,12 +334,13 @@ fn persona_webhook_set_sends_the_subscription_only_when_given() {
     let body: Value = serde_json::from_slice(&server.recorded()[0].body).unwrap();
     assert_eq!(
         body,
-        json!({"url": "https://agent.example.com/wake", "subscribe": "workspace"})
+        json!({"url": "https://agent.example.com/wake", "subscribe": "workspace", "format": "text"})
     );
     // An unknown level is refused by the CLI and sends nothing.
-    let refused = set("everything");
+    let refused = set("everything", "text");
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("addressed"));
+    assert!(!set("workspace", "arbitrary").status.success());
     assert_eq!(server.recorded().len(), 1);
 }
 

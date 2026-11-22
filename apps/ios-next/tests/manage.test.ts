@@ -249,6 +249,16 @@ test("setting a webhook sends the address, the level and the key only when one i
   assert.deepEqual(sent(calls[1]), { url: "https://agent.example/wake", subscribe: "board" });
 });
 
+test("an explicitly selected trigger format must be confirmed by the server", async () => {
+  const input = { url: "https://agent.example/wake", subscribe: "addressed" as const, format: "text" as const };
+  const { calls, manage } = fake([json({ webhook: hook({ format: "text" }) }), json({ webhook: hook() }),
+    json({ webhook: hook({ format: "future" }) })]);
+  assert.equal((await manage.setWebhook("launch", "persona-1", input)).format, "text");
+  assert.equal(sent(calls[0]).format, "text");
+  await assert.rejects(manage.setWebhook("launch", "persona-1", input), /did not confirm the webhook format/);
+  await assert.rejects(manage.webhook("launch", "persona-1"), /not support the saved webhook format/);
+});
+
 test("a webhook answer for another persona is refused", async () => {
   const { manage } = fake([json({ webhook: hook({ persona: "persona-9" }) })]);
   await assert.rejects(

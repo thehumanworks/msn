@@ -12,6 +12,9 @@ import {
   type Subscription,
   SUBSCRIPTIONS,
   subscribeNote,
+  WAKE_FORMATS,
+  WAKE_LABEL,
+  type WakeFormat,
   type Webhook,
   webhookSummary,
 } from "../lib/manage.ts";
@@ -30,6 +33,7 @@ export default function WebhookSheet() {
   const [loading, setLoading] = useState(true);
   const [url, setUrl] = useState("");
   const [bearer, setBearer] = useState("");
+  const [format, setFormat] = useState<WakeFormat>("notice");
   const [subscribe, setSubscribe] = useState<Subscription>("addressed");
   const [busy, setBusy] = useState<"save" | "test" | "remove" | null>(null);
   const [status, setStatus] = useState<{ text: string; failed?: boolean } | null>(null);
@@ -57,6 +61,7 @@ export default function WebhookSheet() {
         if (found) {
           setUrl(found.url);
           setSubscribe(found.subscribe);
+          setFormat(found.format ?? "notice");
         }
       })
       .catch((caught) => current && fail(caught))
@@ -73,7 +78,7 @@ export default function WebhookSheet() {
       const key = bearer.trim();
       const made = await manage.setWebhook(board, persona, {
         url: url.trim(),
-        subscribe,
+        subscribe, format,
         ...(key ? { bearer: key } : {}),
       });
       if (!open.current) return;
@@ -92,6 +97,8 @@ export default function WebhookSheet() {
   function submit() {
     const problem = checkWebhookUrl(url) ?? checkBearer(bearer);
     if (problem) return setStatus({ text: problem, failed: true });
+    if (format === "claude-routine" && !bearer.trim())
+      return setStatus({ text: "Enter the Claude task’s trigger bearer key, not an MSN key.", failed: true });
     // A save replaces the whole webhook (ADR 0062), so an empty key field removes a saved key.
     if (hook?.bearer && !bearer.trim())
       return Alert.alert(
@@ -196,6 +203,14 @@ export default function WebhookSheet() {
               : "The notice holds ids only, never message text. A bearer key lets the receiver tell real notices from forged ones."}
           </Note>
 
+          <Heading>Receiver format</Heading>
+          <Card>
+            {WAKE_FORMATS.map((value, i) => (
+              <Choice key={value} label={WAKE_LABEL[value]} selected={format === value} onPress={() => setFormat(value)} last={i === WAKE_FORMATS.length - 1} />
+            ))}
+          </Card>
+          <Note>{format === "claude-routine" ? "Use the API trigger URL and bearer from the saved Claude Code task. A test starts a real run." : "Choose the body your receiver accepts. Both formats carry only the notice, never message text or an MSN key."} Changing format drops waiting notices.</Note>
+
           <Heading>Send a notice for</Heading>
           <Card>
             {levels.map((level, index) => (
@@ -225,7 +240,7 @@ export default function WebhookSheet() {
           {hook ? (
             <Card>
               <Action
-                label="Send a test notice"
+                label={hook.format === "claude-routine" ? "Start a test task run" : "Send a test notice"}
                 busy={busy === "test"}
                 disabled={busy !== null}
                 onPress={() => void test()}
