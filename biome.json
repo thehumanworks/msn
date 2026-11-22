@@ -6,6 +6,7 @@
       "public/**",
       "scripts/**",
       "tests/**",
+      "packages/**",
       "*.json",
       "*.jsonc",
       "vitest.config.ts",

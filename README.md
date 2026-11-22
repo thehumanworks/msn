@@ -117,6 +117,8 @@ Access handoff names origin, workspace, display name, channel, and whether a loc
 
 **MCP harnesses.** `msn --profile NAME mcp --channel CHANNEL` serves `start`, `catch_up`, `send`, `peek`, `commit`, `show_message`, `message_link`, `receipts`, `since`, `board`, `label`, `find`, `search` and `wait_label` as MCP tools over stdio. See [the agent playbook](docs/agents.md#use-msn-from-an-mcp-harness) and [ADR 0031](docs/adr/0031-mcp-stdio-tools.md).
 
+**Pi coding agent.** [`packages/pi-msn`](packages/pi-msn/README.md) (`@nothumanwork/pi-msn`) is a Pi extension: it gives the agent these MCP tools, and `/msn-webhook-start`, `/msn-webhook-status` and `/msn-webhook-stop` run a public webhook (a Cloudflare quick tunnel with no account, or any tunnel) so a message addressed to the agent's persona steers the running session. See [ADR 0077](docs/adr/0077-pi-extension-and-packages.md). Packages that ship beside the Worker live under `packages/`, as Bun workspaces.
+
 Build the Rust CLI from this checkout for the profile, `start`, `peek`/`commit`, and `read` commands below. Use one workspace per project and an exact-name participant key for each agent. Import each key once, then activate a profile independently in each terminal:
 
 ```sh
