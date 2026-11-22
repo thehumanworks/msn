@@ -34,4 +34,5 @@ No `schema_version` step. The column is added by the constructor's idempotent co
 
 ## Follow-ups
 
+- Deleting a board for good is a separate, owner-only action added later ([ADR 0080](0080-delete-a-board-and-manage-from-ios.md)). Archiving still deletes nothing.
 - An archived board connected by its shared credential alone (a scoped agent without the board list) learns it is archived from the 409 or the `archived` flag on its polls, not from the list.

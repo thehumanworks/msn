@@ -1,10 +1,21 @@
 import { router, Stack } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import {
+  ActionSheetIOS,
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { ConnectionPill } from "../components/ConnectionPill.tsx";
 import { Glass, GlassButton, Surface } from "../components/Glass.tsx";
-import { model, pending, useSession } from "../lib/model.ts";
+import { deleteBoard, openAgents, openInvite, setArchived } from "../lib/boardActions.ts";
+import { boardList, model, pending, useSession } from "../lib/model.ts";
 import { type ChannelSummary, currentUnread, unreadBadge, useChannelList, useStore } from "../lib/shared.ts";
 import { color, shortTime } from "../lib/theme.ts";
 
@@ -65,7 +76,17 @@ function BoardList() {
   const state = useStore(list?.state ?? emptyStore(empty));
   const marks = useStore(list?.marks ?? emptyStore([] as const));
   const [query, setQuery] = useState("");
+  // Archived boards (ADR 0046) stay out of the list unless the person asks to see them.
+  const [showArchived, setShowArchived] = useState(false);
   const scoped = session.session.channel;
+
+  // A board's own screen reads and changes the same list (archive, delete).
+  useEffect(() => {
+    boardList.set(list);
+    return () => {
+      if (boardList.get() === list) boardList.set(null);
+    };
+  }, [list]);
 
   // A board link names its board: open it once the session can read.
   useEffect(() => {
@@ -79,10 +100,46 @@ function BoardList() {
   const boards = useMemo(() => {
     const words = query.trim().toLowerCase();
     return state.channels
-      .filter((board) => !board.archivedAt)
+      .filter((board) => showArchived || !board.archivedAt)
       .filter((board) => !words || board.name.includes(words))
-      .sort((a, b) => (b.lastActivityAt ?? b.createdAt).localeCompare(a.lastActivityAt ?? a.createdAt));
-  }, [state.channels, query]);
+      .sort(
+        (a, b) =>
+          // Archived boards sit below the active ones.
+          Number(Boolean(a.archivedAt)) - Number(Boolean(b.archivedAt)) ||
+          (b.lastActivityAt ?? b.createdAt).localeCompare(a.lastActivityAt ?? a.createdAt),
+      );
+  }, [state.channels, query, showArchived]);
+  const archivedCount = useMemo(() => state.channels.filter((board) => board.archivedAt).length, [state.channels]);
+  // With the last archived board gone the toggle is hidden, so it must not stay on: the next board
+  // to be archived has to leave the list.
+  if (showArchived && !archivedCount) setShowArchived(false);
+
+  /** A long press on a board: what this person may do with it. */
+  function boardMenu(board: ChannelSummary) {
+    const archived = Boolean(board.archivedAt);
+    const actions: { label: string; run: () => void; destructive?: boolean }[] = [];
+    // Nobody can join an archived board, so there is nothing to invite to.
+    if (!archived) actions.push({ label: "Invite people", run: () => openInvite(board.name) });
+    if (session.owner) {
+      if (!archived) actions.push({ label: "Agents and webhooks", run: () => openAgents(board.name) });
+      actions.push({
+        label: archived ? "Unarchive" : "Archive",
+        run: () => setArchived(session, board.name, !archived),
+      });
+      actions.push({ label: "Delete board…", destructive: true, run: () => deleteBoard(session, board.name) });
+    }
+    if (!actions.length) return;
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: `# ${board.name}${archived ? " · archived" : ""}`,
+        options: [...actions.map((action) => action.label), "Cancel"],
+        // The owner's list ends with Delete; everyone else has no destructive action.
+        ...(actions.at(-1)?.destructive ? { destructiveButtonIndex: actions.length - 1 } : {}),
+        cancelButtonIndex: actions.length,
+      },
+      (index) => actions[index]?.run(),
+    );
+  }
 
   function newBoard() {
     Alert.prompt("New board", "Lowercase letters, digits, - and _.", async (name) => {
@@ -111,6 +168,19 @@ function BoardList() {
       />
       <Stack.Toolbar placement="right">
         {!scoped ? <Stack.Toolbar.Button icon="plus" accessibilityLabel="New board" onPress={newBoard} /> : null}
+        <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel="More" hidden={Boolean(scoped) && !archivedCount}>
+          <Stack.Toolbar.MenuAction icon="person.badge.plus" hidden={Boolean(scoped)} onPress={() => openInvite(null)}>
+            Invite to workspace
+          </Stack.Toolbar.MenuAction>
+          <Stack.Toolbar.MenuAction
+            icon="archivebox"
+            hidden={!archivedCount}
+            isOn={showArchived}
+            onPress={() => setShowArchived((shown) => !shown)}
+          >
+            {`Show archived (${archivedCount})`}
+          </Stack.Toolbar.MenuAction>
+        </Stack.Toolbar.Menu>
         <Stack.Toolbar.Button
           icon="person.crop.circle"
           accessibilityLabel="Account"
@@ -124,7 +194,11 @@ function BoardList() {
         contentContainerStyle={styles.list}
         refreshControl={<RefreshControl refreshing={false} onRefresh={() => void list?.load()} />}
         renderItem={({ item }) => (
-          <BoardRow board={item} badge={unreadBadge(currentUnread(state.unread, marks, item.name))} />
+          <BoardRow
+            board={item}
+            badge={unreadBadge(currentUnread(state.unread, marks, item.name))}
+            onLongPress={boardMenu}
+          />
         )}
         ListEmptyComponent={
           state.phase === "loading" ? (
@@ -145,17 +219,27 @@ function BoardList() {
   );
 }
 
-function BoardRow({ board, badge }: { board: ChannelSummary; badge: ReturnType<typeof unreadBadge> }) {
+function BoardRow({
+  board,
+  badge,
+  onLongPress,
+}: {
+  board: ChannelSummary;
+  badge: ReturnType<typeof unreadBadge>;
+  onLongPress: (board: ChannelSummary) => void;
+}) {
   return (
     <Pressable
       onPress={() => router.push({ pathname: "/board/[name]", params: { name: board.name } })}
+      onLongPress={() => onLongPress(board)}
       style={({ pressed }) => pressed && { opacity: 0.6 }}
       accessibilityRole="button"
-      accessibilityLabel={`${board.name}${badge ? `, ${badge.label}` : ""}`}
+      accessibilityLabel={`${board.name}${board.archivedAt ? ", archived" : ""}${badge ? `, ${badge.label}` : ""}`}
+      accessibilityHint="Long press for more"
     >
       <Surface style={styles.row}>
         <View style={styles.hash}>
-          <Text style={styles.hashText}>#</Text>
+          <Text style={[styles.hashText, board.archivedAt && { color: color.secondary }]}>#</Text>
         </View>
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={[styles.name, badge && { fontWeight: "700" }]} numberOfLines={1}>
@@ -164,6 +248,7 @@ function BoardRow({ board, badge }: { board: ChannelSummary; badge: ReturnType<t
           <Text style={styles.meta} numberOfLines={1}>
             {board.messageCount} {board.messageCount === 1 ? "message" : "messages"} · {board.participantCount}{" "}
             {board.participantCount === 1 ? "member" : "members"}
+            {board.archivedAt ? " · archived" : ""}
           </Text>
         </View>
         <View style={{ alignItems: "flex-end", gap: 4 }}>

@@ -1,6 +1,6 @@
 import { useHeaderHeight } from "expo-router/react-navigation";
 import * as Clipboard from "expo-clipboard";
-import { Stack, useLocalSearchParams } from "expo-router";
+import { router, Stack, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActionSheetIOS,
@@ -26,6 +26,7 @@ import {
   OutboxBubble,
   type Row,
 } from "../../components/MessageBubble.tsx";
+import { deleteBoard, openAgents, openInvite, setArchived, useArchived } from "../../lib/boardActions.ts";
 import { useSession } from "../../lib/model.ts";
 import {
   type ChannelController,
@@ -44,12 +45,40 @@ export default function Board() {
   const { name } = useLocalSearchParams<{ name: string }>();
   const session = useSession();
   const controller = useChannel(session, name);
+  const archived = useArchived(name);
+  const owner = session.owner;
   return (
     <>
       {/* An opaque bar: iOS 26's scroll edge effect under a transparent bar blurs all of an inverted list. */}
       <Stack.Screen options={{ title: `# ${name}`, headerTransparent: false }} />
+      {/* Nobody can join an archived board, and a member who is not the owner has nothing else here. */}
+      <Stack.Toolbar placement="right">
+        <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel="Board actions" hidden={archived && !owner}>
+          <Stack.Toolbar.MenuAction icon="person.badge.plus" hidden={archived} onPress={() => openInvite(name)}>
+            Invite people
+          </Stack.Toolbar.MenuAction>
+          <Stack.Toolbar.MenuAction icon="bolt" hidden={!owner || archived} onPress={() => openAgents(name)}>
+            Agents and webhooks
+          </Stack.Toolbar.MenuAction>
+          <Stack.Toolbar.MenuAction
+            icon={archived ? "tray.and.arrow.up" : "archivebox"}
+            hidden={!owner}
+            onPress={() => setArchived(session, name, !archived)}
+          >
+            {archived ? "Unarchive" : "Archive"}
+          </Stack.Toolbar.MenuAction>
+          <Stack.Toolbar.MenuAction
+            icon="trash"
+            destructive
+            hidden={!owner}
+            onPress={() => deleteBoard(session, name, () => router.back())}
+          >
+            Delete board…
+          </Stack.Toolbar.MenuAction>
+        </Stack.Toolbar.Menu>
+      </Stack.Toolbar>
       {controller ? (
-        <Conversation controller={controller} />
+        <Conversation controller={controller} archived={archived} owner={owner} />
       ) : (
         <ActivityIndicator
           style={{ flex: 1 }}
@@ -59,7 +88,15 @@ export default function Board() {
   );
 }
 
-function Conversation({ controller }: { controller: ChannelController }) {
+function Conversation({
+  controller,
+  archived,
+  owner,
+}: {
+  controller: ChannelController;
+  archived: boolean;
+  owner: boolean;
+}) {
   const session = useSession();
   const state = useStore(controller.state);
   const me = session.session.username;
@@ -287,6 +324,13 @@ function Conversation({ controller }: { controller: ChannelController }) {
             onSend={send}
             replyTo={replyTo}
             onCancelReply={() => setReplyTo(null)}
+            readOnly={
+              archived
+                ? owner
+                  ? "This board is archived and read-only. Unarchive it from the menu above to post again."
+                  : "This board is archived and read-only."
+                : null
+            }
             error={
               error ??
               (state.error && state.messages.length ? state.error : null)

@@ -1,6 +1,6 @@
 # ADR 0076: choose what a webhook subscribes to
 
-Date: 2026-11-22. Status: implemented (Worker, CLI, curl quickstart, web). Two additive columns (`webhooks.subscribe`, `webhook_notices.coalesce`), no schema version bump, so the merge order with other changes does not matter. Desktop and iOS show no webhook settings (as before, ADR 0062).
+Date: 2026-11-22. Status: implemented (Worker, CLI, curl quickstart, web). Two additive columns (`webhooks.subscribe`, `webhook_notices.coalesce`), no schema version bump, so the merge order with other changes does not matter. Desktop and `apps/ios` show no webhook settings (as before, ADR 0062); `apps/ios-next` gained them in [ADR 0080](0080-delete-a-board-and-manage-from-ios.md).
 
 ## Context
 

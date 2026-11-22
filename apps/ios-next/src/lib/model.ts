@@ -1,7 +1,8 @@
 import { fetch as expoFetch } from "expo/fetch";
 import * as SecureStore from "expo-secure-store";
 import { createContext, useContext } from "react";
-import { AppModel, type SecretStore, type SessionController } from "./shared.ts";
+import { Manage } from "./manage.ts";
+import { AppModel, type ChannelListController, type SecretStore, type SessionController, Store } from "./shared.ts";
 
 // Keys live only in the iOS keychain, readable while the device is unlocked, never migrated to
 // another device or included in backups (the same policy as apps/ios, ADR 0021).
@@ -33,3 +34,15 @@ export function useSession(): SessionController {
 
 /** A board to open as soon as a just-joined session is ready (a board link names one). */
 export const pending: { board: string | null } = { board: null };
+
+/**
+ * The boards screen's list controller, shared so a board's own screen can read whether it is
+ * archived and change that without loading the list a second time. The boards screen stays
+ * mounted under every board, so this is set whenever a board is open.
+ */
+export const boardList = new Store<ChannelListController | null>(null);
+
+/** Invitations, webhooks and board deletion for this session, over the same guarded transport. */
+export function manageFor(session: SessionController): Manage {
+  return new Manage(session.session, transport);
+}

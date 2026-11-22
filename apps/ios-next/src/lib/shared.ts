@@ -11,6 +11,7 @@ export type { ChannelSummary, Message } from "../../../ios/src/core/types.ts";
 export { currentUnread, seenMark, unreadBadge } from "../../../ios/src/core/readMarks.ts";
 export { parse as parseMarkdown, safeHref, type Block, type Inline } from "../../../ios/src/core/markdown.ts";
 export { messageLink } from "../../../ios/src/core/links.ts";
+export { Store } from "../../../ios/src/core/store.ts";
 export { useStore } from "../../../ios/src/hooks/useStore.ts";
 export { useOwned } from "../../../ios/src/hooks/useOwned.ts";
 export { useChannel, useChannelList } from "../../../ios/src/hooks/useChannelController.ts";
