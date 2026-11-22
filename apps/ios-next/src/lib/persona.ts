@@ -9,7 +9,7 @@
  */
 // Imported from the shared core directly, not through shared.ts, whose hooks need React Native
 // and would keep this module out of the Node tests.
-import { ApiError } from "../../../ios/src/core/errors.ts";
+import { ApiError, ProtocolError } from "../../../ios/src/core/errors.ts";
 import { HttpClient, type FetchLike } from "../../../ios/src/core/httpClient.ts";
 
 export type Fetch = FetchLike;
@@ -30,9 +30,33 @@ export function validName(name: string): string | null {
 /** Random bytes from the platform: expo-crypto in the app (React Native has no `crypto` global). */
 export type RandomBytes = (count: number) => Uint8Array;
 
-function newId(randomBytes: RandomBytes): string {
-  const bytes = randomBytes(16);
-  return `persona-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+export function randomHex(count: number, randomBytes: RandomBytes): string {
+  const bytes = randomBytes(count);
+  if (bytes.length !== count) throw new Error("Could not generate random bytes.");
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export function newPersonaId(randomBytes: RandomBytes): string {
+  return `persona-${randomHex(16, randomBytes)}`;
+}
+
+/** Join and explicit registration use the same PUT. Repeating the same ID and name is safe. */
+export async function putPersona(
+  http: HttpClient, board: string, id: string, name: string, signal?: AbortSignal,
+): Promise<Persona> {
+  const displayName = name.trim();
+  const problem = validName(displayName);
+  if (problem) throw new Error(problem);
+  if (displayName === "github") throw new Error("The name github is reserved for GitHub messages.");
+  const slug = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  if (!slug.test(board) || !slug.test(id)) throw new Error("Invalid board or agent ID.");
+  const result = await http.request<Persona & { channel: string }>(
+    `/channels/${board}/personas/${id}`,
+    { method: "PUT", body: { displayName }, signal, ...LIMITS },
+  );
+  if (result?.channel !== board || result.id !== id || result.displayName !== displayName)
+    throw new ProtocolError("The server did not confirm this agent on this board.");
+  return { id, displayName };
 }
 
 function explain(error: unknown): never {
@@ -54,9 +78,5 @@ export async function ensurePersona(
   const personas = Array.isArray(roster?.personas) ? (roster.personas as Persona[]) : [];
   const existing = personas.find((p) => p && typeof p.id === "string" && p.displayName === name);
   if (existing) return { id: existing.id, displayName: existing.displayName };
-  const created = await http
-    .request<Persona>(`${path}/${newId(randomBytes)}`, { method: "PUT", body: { displayName: name }, ...LIMITS })
-    .catch(explain);
-  if (!created || typeof created.id !== "string") throw new Error("The server did not register the name.");
-  return created;
+  return putPersona(http, input.board, newPersonaId(randomBytes), name).catch(explain);
 }

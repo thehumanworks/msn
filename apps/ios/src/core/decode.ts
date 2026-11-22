@@ -427,6 +427,8 @@ export function decodeIdentity(raw: unknown, expectedTenant: string): Identity {
     identity.initialChannel = i.initialChannel;
   }
   if (i.owner === true) identity.owner = true;
+  if (i.watchOnly !== undefined && typeof i.watchOnly !== "boolean") bad("identity");
+  if (i.watchOnly === true) identity.watchOnly = true;
   return identity;
 }
 

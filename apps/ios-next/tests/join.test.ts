@@ -64,7 +64,10 @@ test("an invitation is redeemed on its own server, or on the typed one for a bar
 });
 
 test("a board link registers the name on the board, then signs in and opens that board", async () => {
-  const { calls, urls, d } = deps([json({ personas: [] }), json({ id: "persona-new", displayName: "Dana" }, 201)]);
+  const { calls, urls, d } = deps([
+    json({ personas: [] }), json({ id: `persona-${"01".repeat(16)}`, displayName: "Dana", channel: "launch" }, 201),
+  ]);
+  d.randomBytes = (n) => new Uint8Array(n).fill(1);
   const link: JoinLink = { kind: "board", origin: "https://msn.example", tenant: "acme", board: "launch", token: KEY };
   assert.deepEqual(await join(link, "Dana", "https://ignored.example", d), { board: "launch" });
   assert.ok(urls.every((url) => url.startsWith("https://msn.example/api/tenants/acme/channels/launch/personas")));

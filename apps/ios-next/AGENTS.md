@@ -31,7 +31,9 @@ Run lint and typecheck before declaring any task done.
 
 ## Building, signing and distribution
 
-Build and test locally only: `bun expo run:ios` for a simulator development build, with a local Worker (see the repository's iOS testing notes). Never sign, archive, upload, submit or publish the app, and never run `eas build`, `eas submit` or `eas update`, without the repository owner's explicit approval for that specific step. Signing identities, App Store Connect and over-the-air updates reach real users, so the owner decides them.
+Use a local Worker for development tests (`bun expo run:ios` for a simulator build). For the [default delivery workflow](../../AGENTS.md#delivering-changes), the owner has given standing approval to development-sign a local Release build and install it on their paired physical iPhone Air. Update the existing app in place. Use `xcrun devicectl` to verify that `sh.thehuman.msn.next` is installed; verify launch when the phone is unlocked.
+
+This approval is for that phone only. Signing for distribution, archiving, uploading, TestFlight, App Store submission and over-the-air updates still need the owner's explicit approval for that step. Do not run `eas build`, `eas submit` or `eas update` as part of a routine device install.
 
 ## Rules
 

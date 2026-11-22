@@ -1,6 +1,6 @@
 import { test } from "./support/bounded.ts";
 import assert from "node:assert/strict";
-import { decodeChannelList, decodeEventPage, decodeMessagePage } from "../src/core/decode.ts";
+import { decodeChannelList, decodeEventPage, decodeIdentity, decodeMessagePage } from "../src/core/decode.ts";
 import { ProtocolError } from "../src/core/errors.ts";
 
 const base = { tenant: "acme", channel: "general", type: "message.created", resourceId: 5, historyRevision: 0, createdAt: "2026-09-20T00:00:00.000Z" };
@@ -9,6 +9,13 @@ const expected = { tenant: "acme", after: 10, limit: 100 };
 function page(events: unknown[], nextCursor: number, hasMore = false) {
   return { events, nextCursor, hasMore };
 }
+
+test("watch-only access comes from the verified identity, not a saved profile", () => {
+  const member = { tenant: "acme", username: "reader" };
+  assert.equal(decodeIdentity({ ...member, watchOnly: true }, "acme").watchOnly, true);
+  assert.equal(decodeIdentity(member, "acme").watchOnly, undefined);
+  assert.throws(() => decodeIdentity({ ...member, watchOnly: "yes" }, "acme"), ProtocolError);
+});
 
 test("a valid event page decodes", () => {
   const decoded = decodeEventPage(page([{ ...base, id: 11 }, { ...base, id: 12, type: "channel.created", resourceId: null }], 12), expected);

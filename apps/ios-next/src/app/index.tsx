@@ -119,9 +119,11 @@ function BoardList() {
     const archived = Boolean(board.archivedAt);
     const actions: { label: string; run: () => void; destructive?: boolean }[] = [];
     // Nobody can join an archived board, so there is nothing to invite to.
-    if (!archived) actions.push({ label: "Invite people", run: () => openInvite(board.name) });
+    if (!archived) actions.push(
+      { label: "Invite people", run: () => openInvite(board.name) },
+      { label: session.owner ? "Agents and webhooks" : "Agents", run: () => openAgents(board.name) },
+    );
     if (session.owner) {
-      if (!archived) actions.push({ label: "Agents and webhooks", run: () => openAgents(board.name) });
       actions.push({
         label: archived ? "Unarchive" : "Archive",
         run: () => setArchived(session, board.name, !archived),

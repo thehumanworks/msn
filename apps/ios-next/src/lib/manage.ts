@@ -11,6 +11,7 @@
 // and would keep this module out of the Node tests.
 import { ApiError, isAbortError, ProtocolError } from "../../../ios/src/core/errors.ts";
 import { HttpClient, type FetchLike } from "../../../ios/src/core/httpClient.ts";
+import { putPersona, randomHex, type RandomBytes } from "./persona.ts";
 
 export type Connection = { origin: string; tenant: string; token: string };
 
@@ -200,6 +201,33 @@ export class Manage {
     return out;
   }
 
+  /**
+   * Enable shared board access in place, only on the owner's explicit request. A second device
+   * may have done this first. Its credential wins: never replace it or call the rotation route.
+   * The caller reloads the roster after either outcome.
+   */
+  async enableAgents(board: string, secureBytes: RandomBytes, signal?: AbortSignal): Promise<void> {
+    if (!SLUG.test(board)) throw new Error("Invalid board name.");
+    try {
+      const made = await this.http.request<{ board?: { channel?: string }; sharedChannel?: boolean }>(
+        `/channels/${board}/board`,
+        {
+          method: "PUT",
+          body: { goal: `Collaborate in #${board}.`, credential: randomHex(32, secureBytes) },
+          signal, ...LIMITS,
+        },
+      );
+      if (made?.sharedChannel !== true || made.board?.channel !== board)
+        throw new ProtocolError("The server did not confirm shared access for this board.");
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 409 && error.code === "board_exists")) throw error;
+    }
+  }
+
+  registerAgent(board: string, id: string, name: string, signal?: AbortSignal) {
+    return putPersona(this.http, board, id, name, signal);
+  }
+
   /** GET …/webhooks: the board's webhooks by persona id. Owner only. */
   async webhooks(board: string, signal?: AbortSignal): Promise<Map<string, Webhook>> {
     const listed = await this.http.request<{ webhooks?: unknown }>(`/channels/${encodeURIComponent(board)}/webhooks`, {
@@ -290,6 +318,8 @@ export function explain(error: unknown, doing: string): { message: string; expir
         return say("Your access is watch only, so you cannot change anything.");
       case "channel_forbidden":
         return say("Your access covers one board only.");
+      case "persona_name_conflict":
+        return say("An agent with that name is already registered on this board.");
       case "shared_channel_invitation":
         return say("This board is shared with one link. Send that link instead of an invitation.");
       case "board_archived":

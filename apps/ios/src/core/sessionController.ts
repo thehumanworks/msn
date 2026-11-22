@@ -48,6 +48,8 @@ export class SessionController {
   readonly marks: ReadMarks | null;
   /** Set once the key is verified: the workspace owner's key may mute boards (ADR 0044). */
   owner = false;
+  /** Fail closed until the server has verified this connection. */
+  watchOnly = true;
   readonly state = new Store<ConnectionState>({
     kind: "connecting",
     ready: false,
@@ -125,6 +127,7 @@ export class SessionController {
           throw new ProtocolError("This key's channel access changed. Reconnect to continue.");
         }
         this.owner = identity.owner === true;
+        this.watchOnly = identity.watchOnly === true;
         const cursor = await bootstrapEventCursor(
           (after, limit, wait, channel, s) => this.api.getEvents({ after, limit, wait, channel }, s),
           { signal },

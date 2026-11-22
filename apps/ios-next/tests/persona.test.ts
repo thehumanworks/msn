@@ -32,8 +32,8 @@ test("a name already on the board is reused, without registering again", async (
 });
 
 test("a new name is registered under a fresh persona id", async () => {
-  const { calls, fetchImpl } = fake([json({ personas: [] }), json({ id: "persona-new", displayName: "Dana" }, 201)]);
-  const persona = await ensurePersona(input, fetchImpl, random);
+  const { calls, fetchImpl } = fake([json({ personas: [] }), json({ id: `persona-${"01".repeat(16)}`, displayName: "Dana", channel: "launch" }, 201)]);
+  const persona = await ensurePersona(input, fetchImpl, (n) => new Uint8Array(n).fill(1));
   assert.equal(persona.displayName, "Dana");
   assert.equal(calls[1]?.init.method, "PUT");
   assert.match(calls[1]?.url ?? "", /\/personas\/persona-[0-9a-f]{32}$/);

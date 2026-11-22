@@ -70,7 +70,7 @@ Checked before building:
 - The deleted board's messages still count toward the workspace's lifetime message limit.
 - Message and event numbers are never reused (`AUTOINCREMENT`). When the deleted board held the newest events, `GET …/events/head` falls back to the newest event left; a client that had read further still receives every later event. A client that kept a message cursor for the deleted name gets `400 invalid_cursor` on a board re-created under that name until it starts again from the beginning.
 - Other clients show the deleted board until they reload their list; opening it then says the channel was not found.
-- A board made in the iOS app with **+** is a plain channel with no personas, so it has no agents to give webhooks to. Boards with agents are made on the web or with `msn board create`.
+- **Updated:** iOS **+** still makes a plain channel. Under **Agents and webhooks** the owner can now explicitly enable its shared board link in place. Owners and writable members can then register a persona on iOS; only the owner can configure its webhook. This uses the existing board and persona routes (ADR 0026).
 - An app that talks to a server from before this change is told "This server cannot delete boards yet."
 
 ## Verification

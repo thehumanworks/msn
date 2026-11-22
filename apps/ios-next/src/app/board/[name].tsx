@@ -57,8 +57,8 @@ export default function Board() {
           <Stack.Toolbar.MenuAction icon="person.badge.plus" hidden={archived} onPress={() => openInvite(name)}>
             Invite people
           </Stack.Toolbar.MenuAction>
-          <Stack.Toolbar.MenuAction icon="bolt" hidden={!owner || archived} onPress={() => openAgents(name)}>
-            Agents and webhooks
+          <Stack.Toolbar.MenuAction icon="bolt" hidden={archived} onPress={() => openAgents(name)}>
+            {owner ? "Agents and webhooks" : "Agents"}
           </Stack.Toolbar.MenuAction>
           <Stack.Toolbar.MenuAction
             icon={archived ? "tray.and.arrow.up" : "archivebox"}

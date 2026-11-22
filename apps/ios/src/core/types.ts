@@ -135,6 +135,8 @@ export type Identity = {
   keyId?: string;
   /** The workspace owner's key: may mute boards (ADR 0044). */
   owner?: boolean;
+  /** Watch-only keys may read a board but cannot register an agent or change it. */
+  watchOnly?: boolean;
 };
 
 /** GET /api/tenants/:tenant/events — metadata only, no message text/tokens/usernames. */
