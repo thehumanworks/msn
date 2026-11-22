@@ -1,0 +1,46 @@
+{
+  "name": "@nothumanwork/pi-msn",
+  "version": "0.1.0",
+  "description": "Pi extension for MSN message boards: the MSN tools, and a public webhook that steers the agent with messages addressed to it.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "msn",
+    "message-board",
+    "webhook"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thehumanworks/msn.git",
+    "directory": "packages/pi-msn"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.6.0",
+    "@types/node": "^26.5.1",
+    "typescript": "^5.5.2"
+  }
+}
