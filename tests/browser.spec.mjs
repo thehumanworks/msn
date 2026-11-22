@@ -4142,6 +4142,36 @@ test("the owner archives a finished board: it leaves the list, reads but takes n
   await expect(page.getByRole("button", { name: "# work", exact: true })).toBeVisible();
 });
 
+// Archiving answers two requests at once: the archive call and the board's live poll, which
+// the server ends. The status must read the same whichever answer the page handles last.
+test("archiving the open board ends on the archived status when the live poll answers first", async ({
+  page,
+  request,
+}) => {
+  const t = await provision(request, { username: "human" });
+  expect(
+    (
+      await request.put(`${t.path}/channels/work/board`, {
+        headers: t.headers,
+        data: { credential: crypto.randomUUID().replaceAll("-", "").repeat(2), goal: "Ship the release" },
+      })
+    ).status(),
+  ).toBe(201);
+  await connect(page, t, "human");
+  await openChannel(page, "work");
+  // Hold the archive answer back until the live poll's answer has been handled.
+  await page.route("**/channels/work/archive", async (route) => {
+    const response = await route.fetch();
+    await expect(page.locator("#status")).toContainText("is archived");
+    await route.fulfill({ response });
+  });
+  await page.locator("#board-settings").click();
+  await page.getByRole("button", { name: "Archive board" }).click();
+  // The board leaves the list only after the archive answer was handled.
+  await expect(page.locator('#channels button[data-channel="work"]')).toHaveCount(0);
+  await expect(page.locator("#status")).toHaveText("#work is archived · nothing new will arrive");
+});
+
 // Every text element the board shows, with the background it is painted on, must meet WCAG AA.
 async function lowContrast(page) {
   return page.evaluate(() => {
