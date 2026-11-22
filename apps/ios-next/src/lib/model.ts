@@ -12,16 +12,16 @@ const keychain: SecretStore = {
   remove: (key) => SecureStore.deleteItemAsync(key, options),
 };
 
-// expo/fetch refuses redirects natively (redirect: "manual"), so the bearer key never follows a
-// redirect off the configured origin. It is passed in explicitly rather than looked up lazily.
+// The shared client sends every request with redirect: "manual" and refuses any 3xx or a
+// response from another origin, so the bearer key never follows a redirect off the configured
+// origin. expo/fetch supports manual redirects; it is passed in explicitly, not looked up lazily.
 export const transport = ((input: string, init?: RequestInit) =>
   expoFetch(input, init as Parameters<typeof expoFetch>[1]) as unknown as Promise<Response>);
 
 /** The one model: it owns every session controller and so the single event subscription. */
 export const model = new AppModel(keychain, { fetchImpl: transport });
 
-/** The production server. Invitation codes and access keys that carry no origin use it. */
-export const DEFAULT_ORIGIN = "https://msn.thehuman.sh";
+export { DEFAULT_ORIGIN } from "./joinLink.ts";
 
 export const SessionContext = createContext<SessionController | null>(null);
 

@@ -1,5 +1,5 @@
 import { Fragment, memo, useMemo } from "react";
-import { Linking, type ColorValue, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, type ColorValue, ScrollView, StyleSheet, Text, View } from "react-native";
 import { type Block, type Inline, parseMarkdown, safeHref } from "../lib/shared.ts";
 
 const MONO = "Menlo";
@@ -40,7 +40,9 @@ function inlines(nodes: Inline[], tint: ColorValue, key = ""): React.ReactNode[]
           <Text
             key={k}
             style={{ color: tint, textDecorationLine: "underline" }}
-            onPress={href ? () => void Linking.openURL(href) : undefined}
+            onPress={
+              href ? () => void Linking.openURL(href).catch(() => Alert.alert("Can't open link", href)) : undefined
+            }
             accessibilityRole="link"
           >
             {inlines(node.children, tint, `${k}.`)}
@@ -63,7 +65,10 @@ function blocks(list: Block[], textColor: ColorValue, tint: ColorValue, key = ""
         );
       case "heading":
         return (
-          <Text key={k} style={[styles.text, styles.heading, { color: textColor, fontSize: block.level <= 2 ? 19 : 17 }]}>
+          <Text
+            key={k}
+            style={[styles.text, styles.heading, { color: textColor, fontSize: block.level <= 2 ? 19 : 17 }]}
+          >
             {inlines(block.children, tint)}
           </Text>
         );

@@ -1,7 +1,8 @@
 import * as Clipboard from "expo-clipboard";
+import { getRandomBytes } from "expo-crypto";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   ActionSheetIOS,
   Alert,
@@ -17,7 +18,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Backdrop } from "../components/Backdrop.tsx";
 import { Glass, GlassButton, Surface } from "../components/Glass.tsx";
 import { join } from "../lib/join.ts";
-import { describeJoin, parseJoinLink } from "../lib/joinLink.ts";
+import { describeJoin, joinServer, parseJoinLink } from "../lib/joinLink.ts";
 import { DEFAULT_ORIGIN, model, pending, transport } from "../lib/model.ts";
 import { useStore } from "../lib/shared.ts";
 import { color, glassTint, host } from "../lib/theme.ts";
@@ -46,9 +47,12 @@ export default function Welcome() {
   const parsed = useMemo(() => (link.trim() ? parseJoinLink(link) : null), [link]);
   const needsName = parsed?.ok && parsed.link.kind !== "account";
   const needsServer = parsed?.ok && parsed.link.kind === "invite" && parsed.link.origin === null;
+  const submitting = useRef(false);
+  // Where the key goes: always on the card, with a warning for any server but the production one.
+  const target = parsed?.ok ? joinServer(parsed.link, server) : null;
   const canJoin = keyMode
     ? Boolean(tenant.trim() && token.trim() && name.trim())
-    : Boolean(parsed?.ok && (!needsName || name.trim()));
+    : Boolean(parsed?.ok && target && (!needsName || name.trim()));
 
   async function paste() {
     const text = await Clipboard.getStringAsync();
@@ -56,17 +60,30 @@ export default function Welcome() {
   }
 
   async function submit() {
-    if (!canJoin || busy) return;
+    // A ref, not `busy`: two taps in one frame both see the old state.
+    if (!canJoin || submitting.current) return;
+    submitting.current = true;
     setBusy(true);
     setError(null);
     let failure: string | null = null;
     if (keyMode) {
-      failure = await model.signInWithKey({ origin: server.trim(), tenant, username: name.trim(), token, remember: true });
+      failure = await model.signInWithKey({
+        origin: server.trim(),
+        tenant,
+        username: name.trim(),
+        token,
+        remember: true,
+      });
     } else if (parsed?.ok) {
-      const result = await join(parsed.link, name, server.trim(), transport);
+      const result = await join(parsed.link, name, server.trim(), {
+        model,
+        fetchImpl: transport,
+        randomBytes: getRandomBytes,
+      });
       if ("error" in result) failure = result.error;
       else pending.board = result.board;
     }
+    submitting.current = false;
     setBusy(false);
     if (failure) {
       setError(failure);
@@ -78,7 +95,12 @@ export default function Welcome() {
 
   function profileMenu(profileName: string, label: string) {
     ActionSheetIOS.showActionSheetWithOptions(
-      { title: label, options: ["Open", "Forget on this device", "Cancel"], destructiveButtonIndex: 1, cancelButtonIndex: 2 },
+      {
+        title: label,
+        options: ["Open", "Forget on this device", "Cancel"],
+        destructiveButtonIndex: 1,
+        cancelButtonIndex: 2,
+      },
       (index) => {
         if (index === 0) void open(profileName);
         if (index === 1)
@@ -163,17 +185,34 @@ export default function Welcome() {
                       </Glass>
                     </Pressable>
                   </View>
-                  {parsed ? (
+                  {parsed?.ok ? (
                     <View style={styles.row}>
                       <SymbolView
-                        name={parsed.ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"}
-                        tintColor={parsed.ok ? color.success : color.warning}
+                        name={target?.official ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"}
+                        tintColor={target?.official ? color.success : color.warning}
                         size={16}
                       />
-                      <Text style={styles.hint}>{parsed.ok ? describeJoin(parsed.link) : parsed.error}</Text>
+                      <View style={styles.hintStack}>
+                        <Text style={styles.hint}>{describeJoin(parsed.link)}</Text>
+                        <Text style={styles.server} accessibilityLabel={`Server ${target?.host ?? "not valid"}`}>
+                          {target ? `on ${target.host}` : "The server is not a valid address."}
+                        </Text>
+                        {target && !target.official ? (
+                          <Text style={styles.warning}>
+                            This is not msn.thehuman.sh. Join only if you trust {target.host}: it receives your key.
+                          </Text>
+                        ) : null}
+                      </View>
+                    </View>
+                  ) : parsed ? (
+                    <View style={styles.row}>
+                      <SymbolView name="exclamationmark.triangle.fill" tintColor={color.warning} size={16} />
+                      <Text style={styles.hint}>{parsed.error}</Text>
                     </View>
                   ) : (
-                    <Text style={styles.hint}>Ask a board's owner for its Invite link, or paste an account connection.</Text>
+                    <Text style={styles.hint}>
+                      Ask a board's owner for its Invite link, or paste an account connection.
+                    </Text>
                   )}
                 </>
               )}
@@ -292,11 +331,28 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 10 },
   iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   hint: { color: SOFT, fontSize: 14, flexShrink: 1 },
+  hintStack: { flexShrink: 1, gap: 2 },
+  server: { color: INK, fontSize: 14, fontWeight: "600" },
+  warning: { color: color.warning, fontSize: 13 },
   error: { color: color.danger, fontSize: 15, fontWeight: "500", marginTop: 6 },
   links: { flexDirection: "row", justifyContent: "center", gap: 28, marginTop: 4 },
   link: { color: INK, fontSize: 15, fontWeight: "500", textDecorationLine: "underline" },
-  section: { color: SOFT, fontSize: 13, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.6, marginTop: 22 },
-  profile: { borderRadius: 22, paddingVertical: 12, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", gap: 12 },
+  section: {
+    color: SOFT,
+    fontSize: 13,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginTop: 22,
+  },
+  profile: {
+    borderRadius: 22,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
   avatar: {
     width: 38,
     height: 38,

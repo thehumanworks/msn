@@ -23,12 +23,19 @@ const INVITE = /^([a-z0-9][a-z0-9_-]{0,63})\.([a-f0-9]{64})$/;
 const KEY = /^[A-Za-z0-9_-]{32,256}$/;
 const MAX_INPUT = 65536;
 
+/** The production server. Invitation codes and access keys that carry no origin use it. */
+export const DEFAULT_ORIGIN = "https://msn.thehuman.sh";
+
 const fail = (error: string): JoinParse => ({ ok: false, error });
+
+const USERINFO = "That link puts a name before its server, which can disguise where it goes. Ask for a new link.";
 
 function originOf(value: string): string | null {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    // `https://msn.thehuman.sh@evil.example/` goes to evil.example: never accept userinfo.
+    if (url.username || url.password) return null;
     return url.origin;
   } catch {
     return null;
@@ -67,6 +74,7 @@ export function parseJoinLink(input: string): JoinParse {
   } catch {
     return fail("Paste a complete invitation or board link.");
   }
+  if (url.username || url.password) return fail(USERINFO);
   const origin = originOf(text);
   if (!origin) return fail("MSN links start with https://.");
   if (url.search || (url.pathname !== "/" && url.pathname !== "")) return fail("That is not an MSN join link.");
@@ -114,5 +122,22 @@ export function describeJoin(link: JoinLink): string {
       return `Board # ${link.board} in ${link.tenant}`;
     case "account":
       return `${link.username} in ${link.tenant}`;
+  }
+}
+
+/**
+ * The server a join sends the key to, as the join card shows it. `host` is the URL parser's
+ * (punycode for international names, with any port), so look-alikes such as
+ * `msn.thehuman.sh.evil.example` read as what they are. `official` is false for any server
+ * other than the production one, and the card then warns before Join.
+ */
+export function joinServer(link: JoinLink, server: string): { host: string; official: boolean } | null {
+  const origin = link.origin ?? server.trim();
+  try {
+    const url = new URL(origin);
+    if (url.username || url.password) return null;
+    return { host: url.host, official: url.origin === DEFAULT_ORIGIN };
+  } catch {
+    return null;
   }
 }

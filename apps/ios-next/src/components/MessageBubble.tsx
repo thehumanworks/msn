@@ -2,6 +2,7 @@ import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { boardNotice } from "../lib/notice.ts";
 import type { Message, OutboxItem } from "../lib/shared.ts";
+import { addressedTo, mayAnswer } from "../lib/shared.ts";
 import { clockTime, color, nameColor } from "../lib/theme.ts";
 import { Glass } from "./Glass.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -38,9 +39,10 @@ export const MessageBubble = memo(function MessageBubble({
     );
   }
   const recipients = message.recipients ?? (message.to ? [message.to] : []);
-  const toMe = recipients.includes(me);
+  // The same case-insensitive name match the shared engine uses for questions and mentions.
+  const toMe = recipients.some((name) => addressedTo(me, name));
   const json = message.contentType === "application/json";
-  const canAnswer = Boolean(message.choices?.length) && !message.answered && (message.answerer ?? message.to) === me;
+  const canAnswer = Boolean(message.choices?.length) && !message.answered && mayAnswer(message, me);
   const textColor = mine ? MINE_TEXT : color.label;
 
   return (
@@ -61,7 +63,10 @@ export const MessageBubble = memo(function MessageBubble({
       >
         {replied ? (
           <View style={[styles.reply, mine && { borderLeftColor: "rgba(255,255,255,0.7)" }]}>
-            <Text style={[styles.replyName, { color: mine ? MINE_TEXT : nameColor(replied.username) }]} numberOfLines={1}>
+            <Text
+              style={[styles.replyName, { color: mine ? MINE_TEXT : nameColor(replied.username) }]}
+              numberOfLines={1}
+            >
               {replied.username}
             </Text>
             <Text style={[styles.replyText, mine && { color: "rgba(255,255,255,0.85)" }]} numberOfLines={2}>

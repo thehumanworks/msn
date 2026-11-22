@@ -18,9 +18,20 @@ function useReduceTransparency(): boolean {
   return reduce;
 }
 
+/** The milky glass tints are see-through; without glass they become the opaque cell color. */
+const translucent = new Set<unknown>(Object.values(glassTint));
+
+/**
+ * Without glass (no API, or Reduce Transparency on) a solid tint such as the accent of a button,
+ * badge or send button stays as the background, so its white label keeps its contrast.
+ */
 export function Glass({ style, fallback, ...props }: GlassViewProps & { fallback?: StyleProp<ViewStyle> }) {
   const reduce = useReduceTransparency();
-  if (!available || reduce) return <View {...props} style={[{ backgroundColor: color.cell }, style, fallback]} />;
+  if (!available || reduce) {
+    const tint = props.tintColor;
+    const backgroundColor = tint && !translucent.has(tint) ? tint : color.cell;
+    return <View {...props} style={[{ backgroundColor }, style, fallback]} />;
+  }
   return <GlassView {...props} style={style} />;
 }
 
@@ -36,7 +47,12 @@ export function Surface({
   ...props
 }: GlassViewProps & { strength?: keyof typeof glassTint }) {
   const reduce = useReduceTransparency();
-  if (!available || reduce) return <View {...props} style={[{ backgroundColor: color.cell }, style]}>{children}</View>;
+  if (!available || reduce)
+    return (
+      <View {...props} style={[{ backgroundColor: color.cell }, style]}>
+        {children}
+      </View>
+    );
   const radius = StyleSheet.flatten(style)?.borderRadius;
   return (
     <View style={[style, styles.surface]}>
@@ -45,7 +61,11 @@ export function Surface({
         tint="systemMaterial"
         style={[StyleSheet.absoluteFill, { borderRadius: radius, overflow: "hidden" }]}
       />
-      <GlassView {...props} tintColor={glassTint[strength]} style={[StyleSheet.absoluteFill, { borderRadius: radius }]} />
+      <GlassView
+        {...props}
+        tintColor={glassTint[strength]}
+        style={[StyleSheet.absoluteFill, { borderRadius: radius }]}
+      />
       {children}
     </View>
   );
@@ -71,7 +91,12 @@ export function GlassButton({
   // A disabled or untinted button sits on the milky surface tint, so its label takes the system label color.
   const solid = tint && !disabled;
   return (
-    <Pressable onPress={onPress} disabled={disabled || busy} accessibilityRole="button" accessibilityState={{ disabled, busy }}>
+    <Pressable
+      onPress={onPress}
+      disabled={disabled || busy}
+      accessibilityRole="button"
+      accessibilityState={{ disabled, busy }}
+    >
       <Glass isInteractive tintColor={solid ? tint : glassTint.surface} style={[styles.button, style]}>
         <Text
           style={[

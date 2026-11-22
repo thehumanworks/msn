@@ -41,7 +41,10 @@ test("a new name is registered under a fresh persona id", async () => {
 });
 
 test("a revoked key and a redirect stop the join before anything is sent", async () => {
-  await assert.rejects(ensurePersona(input, fake([json({ error: { message: "no" } }, 401)]).fetchImpl, random), /no longer works/);
+  await assert.rejects(
+    ensurePersona(input, fake([json({ error: { message: "no" } }, 401)]).fetchImpl, random),
+    /no longer works/,
+  );
   const redirect = new Response(null, { status: 302, headers: { location: "https://evil.example" } });
   const { calls, fetchImpl } = fake([redirect]);
   await assert.rejects(ensurePersona(input, fetchImpl, random), /redirect/);
@@ -53,4 +56,25 @@ test("display names must be present and at most 128 bytes", () => {
   assert.ok(validName("   "));
   assert.ok(validName("é".repeat(65)));
   assert.equal(validName("é".repeat(64)), null);
+});
+
+test("a response from another origin, or one too large, is refused", async () => {
+  const foreign = json({ personas: [] });
+  Object.defineProperty(foreign, "url", { value: "https://evil.example/api" });
+  await assert.rejects(ensurePersona(input, fake([foreign]).fetchImpl, random), /foreign/);
+  const huge = new Response("x".repeat(600 * 1024), { status: 200 });
+  await assert.rejects(ensurePersona(input, fake([huge]).fetchImpl, random), /size budget/);
+});
+
+test("a server that never answers times out instead of leaving Join stuck", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const hang = (_url: string, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+      );
+    });
+  const pending = ensurePersona(input, hang, random);
+  t.mock.timers.tick(15_000);
+  await assert.rejects(pending, /timed out/);
 });

@@ -66,6 +66,9 @@ function Conversation({ controller }: { controller: ChannelController }) {
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();
   const [text, setText] = useState("");
+  // Read by the outbox's Edit action without making that callback change on every keystroke.
+  const typed = useRef(text);
+  typed.current = text;
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(72);
@@ -179,8 +182,17 @@ function Conversation({ controller }: { controller: ChannelController }) {
         (index) => {
           if (index === 0 && retry) controller.retrySend(item.id);
           if (index === 0 && !retry) {
-            const draft = controller.takeRejected(item.id);
-            if (draft) setText(draft.text);
+            const edit = () => {
+              const draft = controller.takeRejected(item.id);
+              if (draft) setText(draft.text);
+            };
+            // Never drop what is in the composer without asking.
+            if (!typed.current.trim()) edit();
+            else
+              Alert.alert("Replace your draft?", "Editing the failed message replaces what you have typed.", [
+                { text: "Cancel", style: "cancel" },
+                { text: "Replace", style: "destructive", onPress: edit },
+              ]);
           }
           if (index === 1) controller.discardSend(item.id);
         },

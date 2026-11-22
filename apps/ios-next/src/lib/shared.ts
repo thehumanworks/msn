@@ -15,3 +15,4 @@ export { useStore } from "../../../ios/src/hooks/useStore.ts";
 export { useOwned } from "../../../ios/src/hooks/useOwned.ts";
 export { useChannel, useChannelList } from "../../../ios/src/hooks/useChannelController.ts";
 export { validateOrigin } from "../../../ios/src/core/httpClient.ts";
+export { addressedTo, mayAnswer } from "../../../ios/src/core/questions.ts";
