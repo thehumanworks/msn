@@ -1,6 +1,6 @@
 import { test } from "./support/bounded.ts";
 import assert from "node:assert/strict";
-import { addressees, namesLine } from "../src/core/address.ts";
+import { addressees, namesLine, outgoingAddress } from "../src/core/address.ts";
 import { decodeMessage } from "../src/core/decode.ts";
 
 // Several names on one message (ADR 0067).
@@ -10,6 +10,16 @@ test("a message lists every name it is addressed to, in order", () => {
   assert.deepEqual(addressees({}), []);
   assert.equal(namesLine({ to: "rev", recipients: ["rev", "ops"] }), "rev, ops");
   assert.equal(namesLine({}), "");
+});
+
+test("outgoing names keep the wire format and enforce the server's limits", () => {
+  assert.deepEqual(outgoingAddress({}), {});
+  assert.deepEqual(outgoingAddress({ to: "  " }), {});
+  assert.deepEqual(outgoingAddress({ recipients: [" Rae "] }), { to: "Rae" });
+  assert.deepEqual(outgoingAddress({ to: "Rae", recipients: [] }), { to: "Rae" });
+  assert.deepEqual(outgoingAddress({ to: "Rae", recipients: ["Rae", "Dev, Ops"] }), { to: ["Rae", "Dev, Ops"] });
+  for (const names of [["A", " a "], ["A", ""], ["✨".repeat(43)], Array.from({ length: 9 }, (_, i) => String(i))])
+    assert.ok("error" in outgoingAddress({ recipients: names }));
 });
 
 test("the decoder keeps a list of names and drops a malformed one", () => {

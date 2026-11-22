@@ -224,6 +224,32 @@ test("an uncertain send keeps its key and body; retry is idempotent (one stored 
   }
 });
 
+test("multiple picked recipients survive a lost response and a rejected draft is editable with every name", async () => {
+  const server = await startMockServer();
+  try {
+    const { ctl, channelCtl } = await open(server, "general", lossyOnce());
+    const recipients = ["Rae", "Dev, Ops"];
+    channelCtl.send({ text: "@Rae @Dev, Ops hi", recipients });
+    recipients.pop(); // Later edits must not change the queued body or its idempotency digest.
+    await waitFor(() => channelCtl.state.get().outbox[0]?.status === "uncertain", "uncertain");
+    channelCtl.retrySend(channelCtl.state.get().outbox[0].id);
+    await waitFor(() => !channelCtl.state.get().outbox.length, "delivered");
+    assert.equal(server.messages.length, 1);
+    assert.equal(server.messages[0].to, "Rae");
+    assert.deepEqual(channelCtl.state.get().messages[0].recipients, ["Rae", "Dev, Ops"]);
+
+    server.fail((p, m) => m === "POST" && p.endsWith("/messages"), 1, 403);
+    channelCtl.send({ text: "reply", recipients: ["Rae", "Dev, Ops"], replyTo: 1 });
+    await waitFor(() => channelCtl.state.get().outbox[0]?.status === "rejected", "rejected");
+    assert.deepEqual(channelCtl.takeRejected(channelCtl.state.get().outbox[0].id),
+      { text: "reply", to: "Rae", recipients: ["Rae", "Dev, Ops"], replyTo: 1 });
+    ctl.dispose();
+    channelCtl.dispose();
+  } finally {
+    await server.close();
+  }
+});
+
 test("a new draft while one is uncertain gets its own key and waits its turn", async () => {
   const server = await startMockServer();
   try {

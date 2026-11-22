@@ -165,6 +165,8 @@ export default function WebhookSheet() {
               : "No webhook yet. Add one to wake this agent when a message arrives while it is not listening."}
           </Note>
 
+          <Note>A webhook wakes a task. It does not give the task access to MSN. For a fresh session on every run, save a separate, name-bound channel key in the task’s secret store once. Never put an MSN key in the webhook or its notice.</Note>
+
           <Heading>Send notices to</Heading>
           <Card>
             <Field
