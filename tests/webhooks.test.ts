@@ -723,6 +723,14 @@ describe("persona webhooks", () => {
       for (const text of ["two", "three", "four"]) expect((await say(f, text)).status).toBe(201);
       expect(await f.waiting()).toBe(1);
       expect(f.sent).toHaveLength(1);
+      // The notice was already tried, and a receiver drops an id it has handled (its answer may
+      // have been lost). So the retry that now also stands for "two" to "four" has a new id.
+      const firstId = f.sent[0].headers.get("MSN-Webhook-Id");
+      const waitingId = await runInDurableObject(f.stub, (_: MsnDurableObject, state) =>
+        state.storage.sql.exec<{ id: string; body: string }>("SELECT id, body FROM webhook_notices").one(),
+      );
+      expect(waitingId.id).not.toBe(firstId);
+      expect(JSON.parse(waitingId.body).id).toBe(waitingId.id);
       // Another board has its own notice, and an addressed message always has its own.
       expect((await elsewhere("other one")).status).toBe(201);
       await vi.waitFor(() => expect(f.sent).toHaveLength(2));
@@ -770,6 +778,20 @@ describe("persona webhooks", () => {
       await vi.waitFor(async () => expect(await f.waiting()).toBe(0));
       expect(during).toEqual([201]);
       expect(new Set(f.sent.map((notice) => notice.headers.get("MSN-Webhook-Id"))).size).toBe(2);
+    });
+
+    it("a workspace webhook on an archived board hears nothing until the board is unarchived", async () => {
+      const f = await fixture();
+      const elsewhere = await board(f, "other");
+      await f.register("rev", undefined, { subscribe: "workspace" });
+      expect((await call(f.tenant, "/channels/work/archive", f.owner, "PUT")).status).toBe(200);
+      expect((await elsewhere("while archived")).status).toBe(201);
+      expect((await elsewhere("by name", { to: "reviewer" })).status).toBe(201);
+      expect(await f.waiting()).toBe(0);
+      expect(f.sent).toHaveLength(0);
+      expect((await call(f.tenant, "/channels/work/archive", f.owner, "DELETE")).status).toBe(200);
+      expect((await elsewhere("after unarchive")).status).toBe(201);
+      await vi.waitFor(() => expect(f.sent).toHaveLength(1));
     });
 
     it("narrowing a subscription drops the waiting notices it no longer covers", async () => {

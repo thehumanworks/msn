@@ -2080,11 +2080,13 @@ export class MsnDurableObject extends DurableObject<Env> {
     // ("@Reviewer" wakes "reviewer"). Names are unique only by exact case, so the exact match
     // decides between "Reviewer" and "reviewer", and the folded fallback takes the oldest persona.
     const fold = (name: string) => name.trim().toLowerCase();
-    // At most MAX_WEBHOOKS rows in the whole workspace, so this read is bounded.
+    // At most MAX_WEBHOOKS rows in the whole workspace, so this read is bounded. A webhook whose
+    // own board is archived hears nothing: its settings cannot be changed there (ADR 0046).
     const hooks = this.ctx.storage.sql
       .exec<{ channel: string; personaId: string; origin: string; subscribe: string; displayName: string }>(
         `SELECT w.channel, w.personaId, w.origin, w.subscribe, p.displayName FROM webhooks w JOIN personas p ON p.channel = w.channel AND p.id = w.personaId
-         WHERE w.channel = ? OR w.subscribe = 'workspace' ORDER BY p.createdAt, p.id`,
+           LEFT JOIN channels c ON c.name = w.channel
+         WHERE (w.channel = ? OR w.subscribe = 'workspace') AND c.archivedAt IS NULL ORDER BY p.createdAt, p.id`,
         message.channel,
       )
       .toArray();
@@ -2156,19 +2158,33 @@ export class MsnDurableObject extends DurableObject<Env> {
     notice: Notice,
     coalesce: string | null = null,
   ): boolean {
-    if (
-      coalesce !== null &&
-      this.ctx.storage.sql
-        .exec<{ id: string }>(
-          "SELECT id FROM webhook_notices WHERE channel = ? AND personaId = ? AND coalesce = ?",
+    if (coalesce !== null) {
+      const waiting = this.ctx.storage.sql
+        .exec<{ id: string; attempts: number; body: string }>(
+          "SELECT id, attempts, body FROM webhook_notices WHERE channel = ? AND personaId = ? AND coalesce = ? ORDER BY attempts",
           channel,
           personaId,
           coalesce,
         )
         .toArray()
-        .some((row) => !this.noticesInFlight.has(row.id))
-    )
-      return false;
+        .filter((row) => !this.noticesInFlight.has(row.id));
+      if (waiting.length) {
+        // A notice that was already tried may have reached a receiver whose answer was lost, and
+        // receivers drop an id they have handled. So when a message joins such a notice it takes a
+        // new id: the retry then announces this message too. Its retry schedule is kept.
+        const [row] = waiting;
+        if (row.attempts > 0) {
+          const id = crypto.randomUUID();
+          this.ctx.storage.sql.exec(
+            "UPDATE webhook_notices SET id = ?, body = ? WHERE id = ?",
+            id,
+            noticeBody({ ...(JSON.parse(row.body) as Notice), id }),
+            row.id,
+          );
+        }
+        return false;
+      }
+    }
     const waiting = this.ctx.storage.sql
       .exec<{ n: number }>(
         "SELECT COUNT(*) AS n FROM webhook_notices WHERE channel = ? AND personaId = ?",
