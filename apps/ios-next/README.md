@@ -46,6 +46,8 @@ On a Mac whose shell is not UTF-8, CocoaPods fails with an encoding error: run `
 2. Create a workspace and a board locally (never on msn.thehuman.sh), then copy the board's Invite link from the web app at `http://localhost:8787`.
 3. Paste it into the app's welcome screen. The simulator reaches the Mac at `localhost`, and `NSAllowsLocalNetworking` allows plain HTTP there only.
 
+**Chat keyboard check:** On an iPhone or a simulator with the software keyboard visible, open a local board and tap **Message**. Type two lines. The whole field, **Send**, and the newest message should stay above the keyboard. Send the draft, drag down on the conversation to dismiss the keyboard, then focus the field again. The composer should follow the keyboard each time. The screen uses [Expo’s documented `KeyboardAvoidingView` layout](https://docs.expo.dev/guides/keyboard-handling/#keyboard-avoiding-view), not keyboard listeners.
+
 There is no CI workflow for this app yet; check it locally with the commands above.
 
 ## Why SDK 58 and not `next`
