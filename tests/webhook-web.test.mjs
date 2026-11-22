@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { authText, failureText, webhookHost, webhookSummary } from "../public/webhook.js";
+import {
+  authText,
+  failureText,
+  subscribeNote,
+  subscription,
+  webhookHost,
+  webhookSummary,
+} from "../public/webhook.js";
 
 // Wake an agent with a webhook (ADR 0062): the web Agents panel's one-line webhook status.
 
@@ -45,4 +52,29 @@ test("whether notices carry a bearer key reads as words", () => {
   assert.equal(authText(null), "");
   assert.equal(authText({ bearer: true }), "Sent with a bearer key.");
   assert.match(authText({ bearer: false }), /^No bearer key: the receiver cannot tell/);
+});
+
+test("a wider subscription is named in the summary; the default adds nothing (ADR 0076)", () => {
+  assert.equal(subscription(null), "addressed");
+  assert.equal(subscription({ subscribe: "nonsense" }), "addressed");
+  assert.equal(
+    webhookSummary({ ...hook(null), subscribe: "addressed" }, now),
+    "Wakes agent.example.com · nothing sent yet",
+  );
+  assert.equal(
+    webhookSummary({ ...hook(null), subscribe: "board" }, now),
+    "Wakes agent.example.com for every message on this board · nothing sent yet",
+  );
+  assert.equal(
+    webhookSummary(
+      {
+        ...hook({ status: "delivered", at: "2026-11-21T11:57:00Z", error: null }),
+        subscribe: "workspace",
+      },
+      now,
+    ),
+    "Wakes agent.example.com for every message on every board · delivered 3 min ago",
+  );
+  assert.match(subscribeNote("addressed"), /names this persona/);
+  assert.match(subscribeNote("workspace"), /share that notice/);
 });

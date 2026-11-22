@@ -38,13 +38,31 @@ export function failureText(delivery) {
   return status ? `it answered HTTP ${status}` : delivery.error;
 }
 
+/** What a webhook subscribes to (ADR 0076); anything unknown reads as the default. */
+export function subscription(hook) {
+  return hook?.subscribe === "board" || hook?.subscribe === "workspace" ? hook.subscribe : "addressed";
+}
+
+const HEARS = {
+  addressed: "",
+  board: " for every message on this board",
+  workspace: " for every message on every board",
+};
+
+/** What the chosen level means for the receiver, under the choice in the dialog. */
+export function subscribeNote(level) {
+  if (level === "board" || level === "workspace")
+    return "Messages that arrive while a notice waits share that notice, so the agent should read everything new on the notice's board. The persona's own messages never wake it.";
+  return "The default: one notice for each message that names this persona.";
+}
+
 /**
  * One line for a persona row: where it wakes and how the last notice went, or null when the
  * persona has no webhook.
  */
 export function webhookSummary(hook, now = Date.now()) {
   if (!hook) return null;
-  const host = webhookHost(hook.url);
+  const host = `${webhookHost(hook.url)}${HEARS[subscription(hook)]}`;
   const last = hook.lastDelivery;
   if (!last) return `Wakes ${host} · nothing sent yet`;
   const when = last.at ? since(last.at, now) : "";

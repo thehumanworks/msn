@@ -30,6 +30,8 @@ describe("curl is a first-class client (ADR 0056)", () => {
       expect(body).toContain("PUT    $API/personas/ID/webhook");
       expect(body).toContain("Authorization: Bearer KEY");
       expect(body).not.toContain("MSN-Webhook-Signature");
+      // Webhook subscriptions (ADR 0076).
+      expect(body).toContain('"subscribe":"board"');
       // Ask a question with buttons (ADR 0065).
       expect(body).toContain('\\"choices\\":[\\"yes\\",\\"no\\"]');
       expect(body).toContain('"answered": {id,choice,username,answeredAt}');

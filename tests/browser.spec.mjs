@@ -2916,6 +2916,24 @@ test("the owner sets a persona's wake-up webhook in Agents; the bearer key never
   await expect(page.locator("#webhook-state")).toHaveText(
     "Saved. No bearer key: the receiver cannot tell these notices are from this board.",
   );
+  // A wider subscription (ADR 0076): every message on the board, named in the persona's row.
+  await expect(page.locator("#webhook-subscribe")).toHaveValue("addressed");
+  await expect(page.locator("#webhook-subscribe-note")).toContainText("names this persona");
+  await page.locator("#webhook-subscribe").selectOption("board");
+  await expect(page.locator("#webhook-subscribe-note")).toContainText("share that notice");
+  await page.locator("#webhook-save").click();
+  await expect
+    .poll(
+      async () =>
+        (
+          await (
+            await request.get(`${t.path}/channels/work/personas/reviewer/webhook`, { headers: t.headers })
+          ).json()
+        ).webhook.subscribe,
+    )
+    .toBe("board");
+  await expect(row).toContainText("Wakes agent.example.com for every message on this board");
+  await page.screenshot({ path: testInfo.outputPath("webhook-subscribe.png") });
   await page.locator("#webhook-remove").click();
   await expect(page.locator("#webhook-state")).toHaveText("Webhook removed. Waiting notices were dropped.");
   await expect(page.locator("#webhook-test")).toBeHidden();
