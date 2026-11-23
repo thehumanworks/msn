@@ -10,6 +10,7 @@ import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
 import { ownBubble, tickLabel, tickLayout } from "../core/ticks.ts";
+import { Attachments } from "./Attachments.tsx";
 import { DeliveryTicks } from "./DeliveryTicks.tsx";
 import { formatTime } from "./format.ts";
 import { MarkdownText, openMessageLink } from "./MarkdownText.tsx";
@@ -60,6 +61,8 @@ type Props = {
   owner?: boolean;
   /** Answers a question (ADR 0065); absent where nothing can be posted (archived boards, search). */
   onAnswer?: (message: Message, choice: string) => void;
+  /** Server origin, so attachment previews and downloads can open. */
+  origin?: string;
   /** An answer to this question is in flight: its buttons stay locked until it settles. */
   answering?: boolean;
 };
@@ -122,6 +125,7 @@ function MessageRowImpl({
   owner = false,
   onAnswer,
   answering = false,
+  origin = "",
 }: Props) {
   const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
   const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
@@ -334,6 +338,7 @@ function MessageRowImpl({
           )}
         </View>
       </View>
+      <Attachments files={message.attachments} origin={origin} />
       {fold.long && onToggleFold ? (
         <Pressable
           accessibilityRole="button"

@@ -472,7 +472,13 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 .map(require_correlation_id)
                 .transpose()?;
             let to = address::validate_names(&to, "--to")?;
+            // Read every file before any network call: a bad path fails without side effects.
+            let files = attachments::read_files(&attach)?;
             let payload = match (text, json) {
+                (Some(text), None) if text.trim().is_empty() && !files.is_empty() => Payload {
+                    text: String::new(),
+                    content_type: None,
+                },
                 (Some(text), None) => Payload {
                     text: read_text(&text)?,
                     content_type: None,
@@ -484,8 +490,6 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
                 // clap enforces exactly one of --text / --json.
                 _ => return Err(CliError::usage("Pass either --text or --json, not both.")),
             };
-            // Read every file before any network call: a bad path fails without side effects.
-            let files = attachments::read_files(&attach)?;
             let username =
                 identity::resolve_username(&url, &tenant, &token, cli.username.as_deref())?;
             send(

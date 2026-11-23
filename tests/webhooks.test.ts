@@ -315,6 +315,43 @@ describe("persona webhooks", () => {
     expect(hook.lastDelivery?.deliveredAt).toBeTruthy();
   });
 
+  it("includes attachment names in the notice and leaves the bytes out", async () => {
+    const f = await fixture();
+    await f.register("rev", "https://agent.example.com/wake");
+    const raw = await exports.default.fetch(
+      `https://msn.test/api/tenants/${f.tenant}/channels/work/attachments`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${f.agent}`, "Content-Type": "application/octet-stream" },
+        body: "build failed\n",
+      },
+    );
+    expect(raw.status).toBe(201);
+    const { attachment } = await raw.json<{ attachment: { id: string } }>();
+    expect(
+      (
+        await say(f, "please review", {
+          to: "reviewer",
+          attachments: [{ id: attachment.id, name: "build.log" }],
+        })
+      ).status,
+    ).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    const body = JSON.parse(f.sent[0].body);
+    expect(body.attachments).toEqual([
+      expect.objectContaining({
+        index: 0,
+        id: attachment.id,
+        name: "build.log",
+        mime: "text/plain",
+        size: 13,
+      }),
+    ]);
+    expect(body.attachments[0].url).toContain("/attachments/0");
+    expect(JSON.stringify(body.attachments)).not.toContain("sig=");
+    expect(f.sent[0].body).not.toContain("build failed");
+  });
+
   it("delivers generic text envelopes and direct task triggers only when the owner opts in", async () => {
     const f = await fixture();
     const trigger = "https://api.anthropic.com/v1/claude_code/routines/trig_fixture01/fire";

@@ -154,7 +154,13 @@ export default {
         if (match[1]) await admin(request, env);
         else if (
           !(request.method === "PUT" && !match[3]) &&
-          !(request.method === "POST" && match[3] === "/invites/redeem")
+          !(request.method === "POST" && match[3] === "/invites/redeem") &&
+          // A signed file link is the credential (ADR 0086). The object checks the signature.
+          !(
+            request.method === "GET" &&
+            /\/messages\/[1-9]\d*\/attachments\/\d+$/.test(match[3] ?? "") &&
+            url.searchParams.has("sig")
+          )
         )
           bearer(request);
         const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));

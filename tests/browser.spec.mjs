@@ -3480,7 +3480,13 @@ test("files attached to messages show as chips and previews, and a person can at
     await request.get(`${t.path}/channels/general/messages`, { headers: t.headers })
   ).json();
   expect(history.messages.at(-1).attachments).toEqual([
-    expect.objectContaining({ index: 0, name: "fix.patch", mediaType: "text/x-diff", bytes: 12 }),
+    expect.objectContaining({
+      index: 0,
+      name: "fix.patch",
+      mediaType: "text/plain",
+      mime: "text/plain",
+      bytes: 12,
+    }),
   ]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("attachments.png") });

@@ -475,9 +475,9 @@ export function labelFilters(params: URLSearchParams): LabelFilter[] {
   });
 }
 
-/** Attachments (ADR 0035): small files stored in the workspace's own SQLite, never a new binding. */
-export const MAX_ATTACHMENT_BYTES = 1024 * 1024;
-export const MAX_ATTACHMENTS_PER_MESSAGE = 4;
+/** Attachments (ADR 0086): 25 MB in R2. The SQLite row limit is 8 MB, so the bytes are not a row. */
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
 /** An uploaded file that no message references after this long is deleted on a later upload. */
 export const ATTACHMENT_ORPHAN_MS = 24 * 60 * 60 * 1000;
 /** Images a browser may render inline; every other type is served as a download. */
@@ -525,12 +525,8 @@ export async function sha256(bytes: Uint8Array): Promise<string> {
 }
 
 export function attachmentId(value: unknown): string {
-  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value))
-    throw new HttpError(
-      400,
-      "invalid_attachment",
-      "Attachment id must be the 64-hex SHA-256 the upload returned.",
-    );
+  if (typeof value !== "string" || !ATTACHMENT_ID.test(value))
+    throw new HttpError(400, "invalid_attachment", "Attachment id must be the id the upload returned.");
   return value;
 }
 
@@ -593,14 +589,22 @@ export function mediaType(value: unknown, name: string): string {
   return value;
 }
 
-/** Optional `attachments` send field: absent/null means none; otherwise 1–4 distinct references. */
+const ATTACHMENT_ID = /^(?:[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/** Optional `attachments` send field: absent/null means none; otherwise 1–10 distinct references. */
 export function attachmentRefs(value: unknown): AttachmentRef[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || !value.length || value.length > MAX_ATTACHMENTS_PER_MESSAGE)
+  if (!Array.isArray(value) || !value.length)
     throw new HttpError(
       400,
       "invalid_attachment",
       `attachments must be a list of 1 to ${MAX_ATTACHMENTS_PER_MESSAGE} uploaded files.`,
+    );
+  if (value.length > MAX_ATTACHMENTS_PER_MESSAGE)
+    throw new HttpError(
+      413,
+      "too_many_attachments",
+      `A message can carry at most ${MAX_ATTACHMENTS_PER_MESSAGE} files.`,
     );
   const refs = value.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item))

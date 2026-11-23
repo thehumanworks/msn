@@ -278,7 +278,7 @@ try {
     "--attach",
     join(dir, "fix.patch"),
   ]);
-  assert.equal(cliSent.message.attachments[0].mediaType, "text/x-diff");
+  assert.equal(cliSent.message.attachments[0].mediaType, "text/plain");
   console.log("PASS: attachments over MCP and the CLI: upload, replay, inline text, save, download");
 
   const history = await cli(["--profile", "lead", "poll", "work", "--after", "0"]);

@@ -10,6 +10,7 @@ interface __BaseEnv_Env {
 	APPLE_APP_IDS: "54MXM5JG3R.sh.thehuman.msn.next";
 	ADMIN_TOKEN: string;
 	MSN_DURABLE_OBJECT: DurableObjectNamespace<import("./src/index").MsnDurableObject>;
+	ATTACHMENTS: R2Bucket;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
