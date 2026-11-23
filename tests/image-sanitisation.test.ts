@@ -85,7 +85,6 @@ describe("image sanitisation", () => {
         );
         const at = result.bytes.findIndex((_, i) => tag.every((v, j) => result.bytes[i + j] === v));
         expect(at !== -1).toBe(orientation !== 1);
-
       }
     }
   });
