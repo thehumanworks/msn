@@ -436,9 +436,9 @@ describe("message attachments (ADR 0035)", () => {
     await runInDurableObject(t.stub, (_instance, state) => {
       state.storage.sql.exec("UPDATE attachments SET width = 0, height = 1 WHERE id = ?", attachment.id);
     });
-    const again = await (
-      await call(`${t.path}/channels/general/messages/${sent.message.id}`, t.token)
-    ).json<{ message: Message }>();
+    const again = await (await call(`${t.path}/channels/general/messages/${sent.message.id}`, t.token)).json<{
+      message: Message;
+    }>();
     expect(again.message.attachments?.[0].width).toBeUndefined();
     expect(again.message.attachments?.[0].height).toBeUndefined();
   });
