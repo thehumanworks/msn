@@ -16,7 +16,15 @@ import { boardCurl, inviteCurl } from "./curl.js";
 import { draftsFor, parseDrafts, putDraft, restoreDraft, unchangedRetryFiles } from "./drafts.js";
 import { SHORTCUTS, shortcut, step } from "./keys.js";
 import { renderMarkdown } from "./markdown.js";
-import { addressAfterEdit, addressAfterPick, insertMention, mentionAt, people, suggest } from "./mention.js";
+import {
+  addressAfterEdit,
+  addressAfterPick,
+  insertMention,
+  mentionAt,
+  paintChannelMentions,
+  people,
+  suggest,
+} from "./mention.js";
 import { disablePush, enablePush, needsHomeScreen, pushEnabled, pushSupported } from "./notify.js";
 import { quoteOf, quotePreview } from "./quote.js";
 import {
@@ -1131,7 +1139,7 @@ function boardNotice(message) {
 
 /** Plain text renders as safe Markdown built from DOM nodes, never innerHTML (ADR 0043). */
 function messageContent(message, boardUpdate, structured) {
-  if (!boardUpdate && !structured) return addCodeCopy(renderMarkdown(message.text));
+  if (!boardUpdate && !structured) return paintChannelMentions(addCodeCopy(renderMarkdown(message.text)));
   const content = document.createElement(structured ? "pre" : "p");
   content.textContent = boardUpdate ?? pretty(message.text);
   return content;
@@ -4962,9 +4970,9 @@ function showMentions() {
       const name = document.createElement("span");
       name.textContent = `@${person.name}`;
       item.append(name);
-      if (person.listening) {
+      if (person.everyone || person.listening) {
         const note = document.createElement("small");
-        note.textContent = "listening";
+        note.textContent = person.everyone ? "everyone" : "listening";
         item.append(note);
       }
       return item;
@@ -4999,9 +5007,11 @@ function pickMention(index) {
   closeMentions();
   autosize();
   status(
-    address.to === address.mentionTo
-      ? `Mentioned ${person.name} · the message goes to ${address.to}`
-      : `Mentioned ${person.name} · the message still goes to ${address.to}`,
+    person.everyone
+      ? "Mentioned @channel · everyone on this board is notified, except you"
+      : address.to === address.mentionTo
+        ? `Mentioned ${person.name} · the message goes to ${address.to}`
+        : `Mentioned ${person.name} · the message still goes to ${address.to}`,
   );
 }
 

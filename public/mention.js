@@ -5,8 +5,17 @@
 
 import { addressees, namesText, parseNames, sameName, withName } from "./address.js";
 
-/** How many suggestions the list shows at most. */
+/** How many suggestions the list shows at most. `@channel` uses one of them (ADR 0086). */
 export const MAX_SUGGESTIONS = 6;
+
+const CHANNEL = "channel";
+const OPENS = /[\s([{"'“‘]/;
+const WORD = /[\p{L}\p{N}_-]/u;
+
+/** The reserved @channel token, in any case. Not a person. */
+export function isChannelMention(name) {
+  return typeof name === "string" && name.trim().toLowerCase() === CHANNEL;
+}
 /** Picks add names to To up to the server's limit (ADR 0067). */
 const MAX_PICKED = 8;
 
@@ -37,7 +46,8 @@ export function people({ personas = [], messages = [], me = "" } = {}) {
   const seen = new Set();
   const out = [];
   const add = (name, listening = false) => {
-    if (typeof name !== "string" || !name.trim() || name === me || seen.has(name)) return;
+    if (typeof name !== "string" || !name.trim() || name === me || seen.has(name) || isChannelMention(name))
+      return;
     seen.add(name);
     out.push({ name, listening });
   };
@@ -47,7 +57,8 @@ export function people({ personas = [], messages = [], me = "" } = {}) {
     for (const name of addressees(messages[i])) add(name);
   }
   for (const persona of personas) add(persona?.displayName, Boolean(persona?.listening));
-  return out;
+  // First, so a bare @ offers the whole board before any person (ADR 0086).
+  return [{ name: CHANNEL, listening: false, everyone: true }, ...out];
 }
 
 /**
@@ -100,6 +111,8 @@ export function hasMention(text, name) {
  * Returns `{ to, mentionTo }`: `mentionTo` is the To text picks made (or the old one).
  */
 export function addressAfterPick(to, mentionTo, name) {
+  // @channel is expanded by the server. It must not land in To, which rejects that name.
+  if (isChannelMention(name)) return { to, mentionTo };
   if (!to.trim()) return { to: name, mentionTo: name };
   if (!mentionTo || to !== mentionTo) return { to, mentionTo };
   const names = parseNames(to);
@@ -117,4 +130,58 @@ export function addressAfterEdit(to, mentionTo, text) {
   const kept = parseNames(to).filter((name) => hasMention(text, name));
   const next = namesText(kept);
   return { to: next, mentionTo: next || null };
+}
+
+/**
+ * Splits `text` into runs, marking each whole @channel (any case). Code is not split here:
+ * callers skip code nodes. The original spelling of the token is kept.
+ */
+export function splitChannelMentions(text) {
+  const parts = [];
+  if (typeof text !== "string" || !text) return [{ text: text ?? "", channel: false }];
+  const lower = text.toLowerCase();
+  let from = 0;
+  let last = 0;
+  for (;;) {
+    const at = lower.indexOf("@channel", from);
+    if (at < 0) break;
+    const end = text[at + CHANNEL.length + 1];
+    const startOk = at === 0 || OPENS.test(text[at - 1]);
+    const endOk = end === undefined || !WORD.test(end);
+    if (startOk && endOk) {
+      if (at > last) parts.push({ text: text.slice(last, at), channel: false });
+      parts.push({ text: text.slice(at, at + CHANNEL.length + 1), channel: true });
+      last = at + CHANNEL.length + 1;
+    }
+    from = at + 1;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), channel: false });
+  return parts.length ? parts : [{ text, channel: false }];
+}
+
+/** Wraps @channel in the rendered message. Skips code. No-op without a DOM. */
+export function paintChannelMentions(root) {
+  const doc = root?.ownerDocument;
+  if (!doc?.createTreeWalker) return root;
+  const showText = typeof NodeFilter === "undefined" ? 4 : NodeFilter.SHOW_TEXT;
+  const walker = doc.createTreeWalker(root, showText);
+  const nodes = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.closest("code, pre, .md-code, .md-codeblock")) continue;
+    if (splitChannelMentions(node.nodeValue ?? "").some((part) => part.channel)) nodes.push(node);
+  }
+  for (const node of nodes) {
+    const frag = doc.createDocumentFragment();
+    for (const part of splitChannelMentions(node.nodeValue ?? "")) {
+      if (!part.channel) frag.append(doc.createTextNode(part.text));
+      else {
+        const span = doc.createElement("span");
+        span.className = "at-channel";
+        span.textContent = part.text;
+        frag.append(span);
+      }
+    }
+    node.parentNode.replaceChild(frag, node);
+  }
+  return root;
 }

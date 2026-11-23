@@ -2296,6 +2296,11 @@ nav button.has-unread .channel-name {
   position: relative;
   display: grid;
 }
+/* @channel in a message (ADR 0086). Accent, so it reads as a mention in both themes. */
+.at-channel {
+  color: var(--accent);
+  font-weight: 600;
+}
 .mention-list {
   position: absolute;
   left: 0;

@@ -6,6 +6,7 @@
 import { Fragment, memo, type ReactNode } from "react";
 import { Linking, ScrollView, StyleSheet, type StyleProp, type TextStyle, View } from "react-native";
 import { type Block, type Inline, safeHref } from "../core/markdown.ts";
+import { splitChannelMentions } from "../core/mention.ts";
 import { colors, mono, radius, spacing } from "./theme.ts";
 import { Text } from "./ui.tsx";
 
@@ -15,12 +16,26 @@ export function openMessageLink(href: string): void {
   if (safe) Linking.openURL(safe).catch(() => {});
 }
 
+function channelRuns(text: string, key: string): ReactNode {
+  const parts = splitChannelMentions(text);
+  if (!parts.some((part) => part.channel)) return text;
+  return parts.map((part, index) =>
+    part.channel ? (
+      <Text key={`${key}.${index}`} style={styles.mention}>
+        {part.text}
+      </Text>
+    ) : (
+      <Text key={`${key}.${index}`}>{part.text}</Text>
+    ),
+  );
+}
+
 function inline(nodes: Inline[], key = "i"): ReactNode[] {
   return nodes.map((node, index) => {
     const k = `${key}.${index}`;
     switch (node.type) {
       case "text":
-        return <Fragment key={k}>{node.text}</Fragment>;
+        return <Fragment key={k}>{channelRuns(node.text, k)}</Fragment>;
       case "code":
         return (
           <Text key={k} style={styles.code}>
@@ -158,6 +173,7 @@ const styles = StyleSheet.create({
   em: { fontStyle: "italic" },
   del: { textDecorationLine: "line-through" },
   link: { color: colors.accent, textDecorationLine: "underline" },
+  mention: { color: colors.accent, fontWeight: "700" },
   code: { fontFamily: mono, fontSize: 14, backgroundColor: colors.surfaceRaised },
   heading: { fontWeight: "700" },
   h1: { fontSize: 20 },

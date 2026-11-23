@@ -1350,7 +1350,9 @@ impl MsnDesktopApp {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(ui.available_width().min(360.0));
                     for (index, person) in list.options.iter().enumerate().rev() {
-                        let note = if person.listening {
+                        let note = if person.everyone {
+                            "  · everyone"
+                        } else if person.listening {
                             "  · listening"
                         } else {
                             ""
@@ -2039,7 +2041,9 @@ impl MsnDesktopApp {
             self.composer.mention_to.take(),
             &person.name,
         );
-        self.state.status = Some(if to == person.name {
+        self.state.status = Some(if person.everyone {
+            "Mentioned @channel · everyone on this board is notified, except you".into()
+        } else if to == person.name {
             format!(
                 "Mentioned {} · the message goes to {}",
                 person.name, person.name
@@ -4914,10 +4918,16 @@ mod layout_tests {
 
         // A bare @ lists listening personas, recent senders, then the rest; never me (Alex).
         press(&ctx, &mut app, text("Please @"));
-        assert_eq!(names(&app), ["lead", "Jamie", "reviewer"]);
+        assert_eq!(names(&app), ["channel", "lead", "Jamie", "reviewer"]);
         // Typing narrows; arrows move; Enter picks instead of sending.
         press(&ctx, &mut app, text("e"));
-        assert_eq!(names(&app), ["lead", "Jamie", "reviewer"], "contains e");
+        // "channel" contains e, so it stays first. Two steps down lands on Jamie.
+        assert_eq!(
+            names(&app),
+            ["channel", "lead", "Jamie", "reviewer"],
+            "contains e"
+        );
+        press(&ctx, &mut app, key(egui::Key::ArrowDown));
         press(&ctx, &mut app, key(egui::Key::ArrowDown));
         press(&ctx, &mut app, key(egui::Key::Enter));
         press(&ctx, &mut app, vec![]);

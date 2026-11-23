@@ -11,6 +11,12 @@ pub const MAX_SUGGESTIONS: usize = 6;
 pub struct Person {
     pub name: String,
     pub listening: bool,
+    /// `@channel`: everyone on the board except the sender. Not a person (ADR 0086).
+    pub everyone: bool,
+}
+
+fn channel_token(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("channel")
 }
 
 fn opens(c: char) -> bool {
@@ -44,14 +50,23 @@ pub fn people<'a>(
     messages: impl DoubleEndedIterator<Item = &'a Value>,
     me: &str,
 ) -> Vec<Person> {
-    let mut out: Vec<Person> = Vec::new();
+    let mut out = vec![Person {
+        name: "channel".to_owned(),
+        listening: false,
+        everyone: true,
+    }];
     let mut add = |name: &str, listening: bool| {
-        if name.trim().is_empty() || name == me || out.iter().any(|p| p.name == name) {
+        if name.trim().is_empty()
+            || name == me
+            || channel_token(name)
+            || out.iter().any(|p| p.name == name)
+        {
             return;
         }
         out.push(Person {
             name: name.to_owned(),
             listening,
+            everyone: false,
         });
     };
     for (name, listening) in personas {
@@ -126,6 +141,10 @@ pub fn address_after_pick(
     mention_to: Option<String>,
     name: &str,
 ) -> (String, Option<String>) {
+    // The server expands @channel. To rejects the name, so a pick must not write it.
+    if channel_token(name) {
+        return (to.to_owned(), mention_to);
+    }
     if to.trim().is_empty() {
         (name.to_owned(), Some(name.to_owned()))
     } else {
@@ -185,7 +204,12 @@ mod tests {
             .into_iter()
             .map(|p| p.name)
             .collect();
-        assert_eq!(names, ["lead", "builder", "tester", "reviewer", "idle-bot"]);
+        assert_eq!(
+            names,
+            [
+                "channel", "lead", "builder", "tester", "reviewer", "idle-bot"
+            ]
+        );
     }
 
     #[test]
@@ -195,6 +219,7 @@ mod tests {
             .map(|name| Person {
                 name: name.into(),
                 listening: false,
+                everyone: false,
             })
             .collect();
         let names: Vec<String> = suggest(&everyone, "LEA", MAX_SUGGESTIONS)
@@ -230,6 +255,12 @@ mod tests {
 
     #[test]
     fn the_first_pick_addresses_and_deleting_it_clears_to() {
+        let (to, by) = address_after_pick("", None, "channel");
+        assert_eq!(
+            (to.as_str(), by.as_deref()),
+            ("", None),
+            "@channel does not fill To"
+        );
         let (to, by) = address_after_pick("", None, "lead");
         assert_eq!((to.as_str(), by.as_deref()), ("lead", Some("lead")));
         let (to, by) = address_after_pick(&to, by, "builder");

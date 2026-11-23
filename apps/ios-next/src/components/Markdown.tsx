@@ -1,15 +1,30 @@
 import { Fragment, memo, useMemo } from "react";
 import { Alert, Linking, type ColorValue, ScrollView, StyleSheet, Text, View } from "react-native";
+import { splitChannelMentions } from "../../../ios/src/core/mention.ts";
 import { type Block, type Inline, parseMarkdown, safeHref } from "../lib/shared.ts";
 
 const MONO = "Menlo";
+
+function channelRuns(text: string, tint: ColorValue, key: string): React.ReactNode {
+  const parts = splitChannelMentions(text);
+  if (!parts.some((part) => part.channel)) return text;
+  return parts.map((part, index) =>
+    part.channel ? (
+      <Text key={`${key}.${index}`} style={[styles.mention, { color: tint }]}>
+        {part.text}
+      </Text>
+    ) : (
+      <Text key={`${key}.${index}`}>{part.text}</Text>
+    ),
+  );
+}
 
 function inlines(nodes: Inline[], tint: ColorValue, key = ""): React.ReactNode[] {
   return nodes.map((node, index) => {
     const k = `${key}${index}`;
     switch (node.type) {
       case "text":
-        return <Fragment key={k}>{node.text}</Fragment>;
+        return <Fragment key={k}>{channelRuns(node.text, tint, k)}</Fragment>;
       case "code":
         return (
           <Text key={k} style={styles.code}>
@@ -135,6 +150,7 @@ export const Markdown = memo(function Markdown({
 
 const styles = StyleSheet.create({
   text: { fontSize: 16, lineHeight: 22 },
+  mention: { fontWeight: "700" },
   heading: { fontWeight: "700" },
   code: { fontFamily: MONO, fontSize: 14 },
   pre: { backgroundColor: "rgba(127,127,127,0.16)", borderRadius: 10 },

@@ -26,6 +26,14 @@ test("multiple tags, repeats and deletion keep exactly the intended recipients",
   assert.deepEqual(edit(draft, "@Joanna or someone@Jo").recipients, []);
 });
 
+test("@channel is inserted and does not take a recipient slot, even when eight names are already picked", () => {
+  const recipients = Array.from({ length: 8 }, (_, i) => "Member" + i);
+  const draft = { text: recipients.map((name) => "@" + name).join(" ") + " @", recipients };
+  const picked = pick(draft, draft.text.length, "channel");
+  assert.equal(picked?.draft.text.endsWith("@channel "), true);
+  assert.deepEqual(picked?.draft.recipients, recipients);
+});
+
 test("eight distinct recipients can be picked; the ninth does not silently insert an unaddressed tag", () => {
   const recipients = Array.from({ length: 8 }, (_, i) => "Member" + i);
   const draft = { text: recipients.map((n) => "@" + n).join(" ") + " @", recipients };

@@ -7,7 +7,14 @@ import type { Message } from "./types.ts";
 /** How many suggestions the list shows at most. */
 export const MAX_SUGGESTIONS = 6;
 
-export type Person = { name: string; listening: boolean };
+export type Person = { name: string; listening: boolean; everyone?: boolean };
+
+const CHANNEL = "channel";
+
+/** The reserved @channel token, in any case. Not a person (ADR 0086). */
+export function isChannelMention(name: string): boolean {
+  return name.trim().toLowerCase() === CHANNEL;
+}
 export type Persona = { displayName: string; listening: boolean };
 
 const OPENS = /[\s([{"'“‘]/;
@@ -48,7 +55,7 @@ export function people(personas: Persona[], messages: readonly Message[], me: st
   const seen = new Set<string>();
   const out: Person[] = [];
   const add = (name: string | undefined, listening = false) => {
-    if (!name?.trim() || name === me || seen.has(name)) return;
+    if (!name?.trim() || name === me || seen.has(name) || isChannelMention(name)) return;
     seen.add(name);
     out.push({ name, listening });
   };
@@ -59,7 +66,33 @@ export function people(personas: Persona[], messages: readonly Message[], me: st
     if (message) for (const name of addressees(message)) add(name);
   }
   for (const persona of personas) add(persona.displayName, persona.listening);
-  return out;
+  return [{ name: CHANNEL, listening: false, everyone: true }, ...out];
+}
+
+const WORD = /[\p{L}\p{N}_-]/u;
+
+/** Splits `text` into runs, marking each whole @channel (any case). Code is split out by Markdown. */
+export function splitChannelMentions(text: string): { text: string; channel: boolean }[] {
+  const parts: { text: string; channel: boolean }[] = [];
+  if (!text) return [{ text, channel: false }];
+  const lower = text.toLowerCase();
+  let from = 0;
+  let last = 0;
+  for (;;) {
+    const at = lower.indexOf("@channel", from);
+    if (at < 0) break;
+    const end = text[at + CHANNEL.length + 1];
+    const startOk = at === 0 || OPENS.test(text[at - 1] ?? "");
+    const endOk = end === undefined || !WORD.test(end);
+    if (startOk && endOk) {
+      if (at > last) parts.push({ text: text.slice(last, at), channel: false });
+      parts.push({ text: text.slice(at, at + CHANNEL.length + 1), channel: true });
+      last = at + CHANNEL.length + 1;
+    }
+    from = at + 1;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), channel: false });
+  return parts.length ? parts : [{ text, channel: false }];
 }
 
 /** Names that start with `query` first, then names that contain it, ignoring case. */
@@ -117,6 +150,7 @@ export type Address = { to: string; mentionTo: string | null };
 
 /** To after a pick: the picked name when To is empty; otherwise To stays. */
 export function addressAfterPick(to: string, mentionTo: string | null, name: string): Address {
+  if (isChannelMention(name)) return { to, mentionTo };
   return to.trim() ? { to, mentionTo } : { to: name, mentionTo: name };
 }
 

@@ -114,7 +114,7 @@ export function Composer({
     const address = addressAfterPick(to, mentionTo, name);
     setTo(address.to);
     setMentionTo(address.mentionTo);
-    setShowTo(true);
+    setShowTo(Boolean(address.to));
   }
 
   useEffect(() => {
@@ -256,14 +256,20 @@ export function Composer({
             <Pressable
               key={person.name}
               accessibilityRole="button"
-              accessibilityLabel={`Mention ${person.name}${person.listening ? ", listening" : ""}`}
+              accessibilityLabel={
+                person.everyone
+                  ? "Mention everyone in this channel"
+                  : `Mention ${person.name}${person.listening ? ", listening" : ""}`
+              }
               onPress={() => pick(person.name)}
               style={({ pressed }) => [styles.mention, pressed ? styles.mentionPressed : null]}
             >
               <Text style={{ color: colors.text, flex: 1 }} numberOfLines={1}>
                 @{person.name}
               </Text>
-              {person.listening ? <Text style={{ color: colors.muted, fontSize: 12 }}>listening</Text> : null}
+              {person.everyone || person.listening ? (
+                <Text style={{ color: colors.muted, fontSize: 12 }}>{person.everyone ? "everyone" : "listening"}</Text>
+              ) : null}
             </Pressable>
           ))}
           <Button label="Close" variant="ghost" onPress={() => at && setDismissed(at.start)} />

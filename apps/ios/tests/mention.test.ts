@@ -7,8 +7,10 @@ import {
   decodePersonas,
   hasMention,
   insertMention,
+  isChannelMention,
   MAX_SUGGESTIONS,
   mentionAt,
+  splitChannelMentions,
   nextDismissed,
   people,
   suggest,
@@ -44,7 +46,14 @@ test("people: listening personas, recent names newest first, then other personas
     [message("reviewer", "lead"), message("human"), message("builder", "tester")],
     "human",
   ).map((p) => p.name);
-  assert.deepEqual(names, ["lead", "builder", "tester", "reviewer", "idle-bot"]);
+  assert.deepEqual(names, ["channel", "lead", "builder", "tester", "reviewer", "idle-bot"]);
+  assert.equal(isChannelMention("CHANNEL"), true);
+  assert.deepEqual(splitChannelMentions("ping @channel now"), [
+    { text: "ping ", channel: false },
+    { text: "@channel", channel: true },
+    { text: " now", channel: false },
+  ]);
+  assert.deepEqual(addressAfterPick("", null, "channel"), { to: "", mentionTo: null });
 });
 
 test("suggest ranks prefix matches first and caps the list", () => {
