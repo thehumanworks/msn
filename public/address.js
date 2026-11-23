@@ -22,12 +22,23 @@ export function sameName(a, b) {
 }
 
 /**
- * The viewer sent this message: their bound name, or that name with a `/worker` suffix
- * (ADR 0084). A longer name that merely starts the same is someone else.
+ * The sender, exactly. The server allows `/` in a username (`text()` only bounds the length),
+ * so `me/worker` is a different person, not this viewer's worker (ADR 0085). A bound key
+ * sends as its bound name, which is this same comparison.
  */
-export function sentBy(username, me) {
-  if (typeof username !== "string" || typeof me !== "string" || me === "") return false;
-  return username === me || username.startsWith(`${me}/`);
+export function exactSender(username, me) {
+  return typeof username === "string" && typeof me === "string" && me !== "" && username === me;
+}
+
+/** Ticks only. Not the check for edit, replace, claim, delete, or ack. */
+export function sentByViewer(username, me) {
+  return exactSender(username, me);
+}
+
+/** Controls that belong to the exact sender. Claim, delete, and ack are not among them. */
+export function senderActions(username, me) {
+  const exact = exactSender(username, me);
+  return { edit: exact, replace: exact };
 }
 
 /** Whether `me` is one of the message's addressees, exactly or trimmed and ignoring case. */

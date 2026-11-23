@@ -615,7 +615,7 @@ nav .empty {
   align-items: center;
   gap: var(--tick-gap);
   margin-left: 0;
-  font-family: inherit;
+  font-family: var(--mono);
 }
 .ticks {
   --tick-box: calc((var(--tick-mark) + var(--tick-stem)) * 0.7071);
@@ -632,9 +632,11 @@ nav .empty {
 .message-meta .ticks {
   margin-left: 0;
 }
+.ticks:has(.tick-mark + .tick-mark) {
+  width: calc(var(--tick-box) + var(--tick-offset));
+}
 .ticks.read {
   color: var(--tick-read);
-  width: calc(var(--tick-box) + var(--tick-offset));
 }
 .message-meta .ticks .tick-mark {
   position: absolute;

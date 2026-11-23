@@ -24,12 +24,6 @@ export function tickOf(rows: DeliveryRow[] | null | undefined): Tick {
   return "pending";
 }
 
-export function tickGlyph(tick: Tick): string {
-  if (tick === "read") return "✓✓";
-  if (tick === "delivered" || tick === "partial") return "✓";
-  return "";
-}
-
 /**
  * How far the second check sits to the right of the first, in px.
  * A few pixels: the strokes overlap instead of sitting side by side (ADR 0083).

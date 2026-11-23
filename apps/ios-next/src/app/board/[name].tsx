@@ -17,7 +17,7 @@ import {
   type ListViewToken,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { addressees, sentBy } from "../../../../ios/src/core/address.ts";
+import { addressees } from "../../../../ios/src/core/address.ts";
 import { ApiError } from "../../../../ios/src/core/errors.ts";
 import type { Persona } from "../../../../ios/src/core/mention.ts";
 import { Composer } from "../../components/Composer.tsx";
@@ -157,7 +157,7 @@ function Conversation({
       out.push({
         kind: "message",
         message,
-        mine: sentBy(message.username, me),
+        mine: message.username === me,
         showName: !grouped,
         replied: message.replyTo ? (byId.get(message.replyTo) ?? null) : null,
         me,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { FlatList, StyleSheet, TextInput, View } from "react-native";
-import { sentBy } from "../core/address.ts";
+import { exactSender } from "../core/address.ts";
 import type { ApiClient } from "../core/apiClient.ts";
 import { ChannelSearch, searchSummary } from "../core/search.ts";
 import type { Message } from "../core/types.ts";
@@ -70,7 +70,7 @@ export function SearchView({
             ) : null
           }
           renderItem={({ item }) => (
-            <MessageRow message={item} own={sentBy(item.username, me)} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} />
+            <MessageRow message={item} own={exactSender(item.username, me)} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} />
           )}
         />
       )}

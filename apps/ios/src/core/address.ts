@@ -5,9 +5,20 @@ export function sameName(a: string, b: string): boolean {
   return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
-/** The viewer sent this message: their name, or that name with a `/worker` suffix (ADR 0084). */
-export function sentBy(username: string, me: string): boolean {
-  return me !== "" && (username === me || username.startsWith(`${me}/`));
+/** The sender, exactly. `/` is not reserved in a username, so `me/worker` is someone else (ADR 0085). */
+export function exactSender(username: string, me: string): boolean {
+  return me !== "" && username === me;
+}
+
+/** Ticks only. Not the check for edit, replace, claim, delete, or ack. */
+export function sentByViewer(username: string, me: string): boolean {
+  return exactSender(username, me);
+}
+
+/** Controls that belong to the exact sender. Claim, delete, and ack are not among them. */
+export function senderActions(username: string, me: string): { edit: boolean; replace: boolean } {
+  const exact = exactSender(username, me);
+  return { edit: exact, replace: exact };
 }
 
 /** Whether `me` is one of the message's addressees. */

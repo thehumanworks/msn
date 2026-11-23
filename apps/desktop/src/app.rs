@@ -3545,11 +3545,14 @@ fn render_message(
     let agent = message["agentUserId"]
         .as_str()
         .is_some_and(|id| !id.is_empty());
-    let own = !agent && sent_by(username, me);
-    // Only the exact sender edits (ADR 0052). A `/worker` suffix is still this viewer's bubble,
-    // but the server rejects an edit unless the name matches. GitHub notices never. Search hits
-    // (no fold) show no editor, so they offer no Edit.
-    let editable = username == me && can_post && fold.is_some() && username != "github";
+    // Bubble side and controls use the exact sender. Ticks use the same names through
+    // `sent_by_viewer`, which stays a separate call so a tick rule cannot grant those controls.
+    let exact = username == me;
+    let own = exact && !agent;
+    let show_ticks = !agent && msn_cli::ticks::sent_by_viewer(username, me);
+    // Only the exact sender edits (ADR 0052). GitHub notices never. Search hits (no fold) show
+    // no editor, so they offer no Edit. An agent message is not editable even under this name.
+    let editable = exact && !agent && can_post && fold.is_some() && username != "github";
     let text = message["text"].as_str().unwrap_or("");
     let body = if message["contentType"].as_str() == Some("application/json") {
         Body::Rich(
@@ -3570,7 +3573,7 @@ fn render_message(
             ),
         }
     };
-    let header = message_header(ui, message, username, own);
+    let header = message_header(ui, message, username, own, show_ticks);
     // The quoted part of the replyTo message (ADR 0059); pressing it shows the source.
     let source = message["replyTo"].as_u64();
     let quote = message["quote"].as_str().filter(|_| source.is_some());
@@ -3874,15 +3877,6 @@ fn render_parent(
     });
 }
 
-/// The viewer sent this message: their name, or that name with a `/worker` suffix (ADR 0084).
-fn sent_by(username: &str, me: &str) -> bool {
-    !me.is_empty()
-        && (username == me
-            || username
-                .strip_prefix(me)
-                .is_some_and(|rest| rest.starts_with('/')))
-}
-
 /// Width of one ✓ in the header font, from a galley, so the overlap is not a guessed advance.
 fn check_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
     ui.ctx().fonts_mut(|fonts| {
@@ -3929,6 +3923,7 @@ fn message_header(
     message: &Value,
     username: &str,
     own: bool,
+    show_ticks: bool,
 ) -> egui::text::LayoutJob {
     let small = egui::TextStyle::Small.resolve(ui.style());
     let format = |color| egui::TextFormat {
@@ -3952,7 +3947,7 @@ fn message_header(
     if let Some(time) = time {
         job.append(time, 10.0, format(theme::muted()));
     }
-    let tick = msn_cli::ticks::bubble_tick(own, msn_cli::ticks::delivery_rows(message));
+    let tick = msn_cli::ticks::bubble_tick(show_ticks, msn_cli::ticks::delivery_rows(message));
     let drew_ticks = append_delivery_ticks(
         ui,
         &mut job,
@@ -5397,9 +5392,9 @@ mod draft_tests {
         let ctx = egui::Context::default();
         let mut text = String::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            text = message_header(ui, &taken, "lead", false).text;
+            text = message_header(ui, &taken, "lead", false, false).text;
             text.push('|');
-            text.push_str(&message_header(ui, &free, "lead", false).text);
+            text.push_str(&message_header(ui, &free, "lead", false, false).text);
         });
         output.textures_delta.clear();
         // The name is plain text, never markup.
@@ -5496,10 +5491,10 @@ mod draft_tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let message = json!({"id": 3, "username": "Alex", "replacedBy": 5,
                 "createdAt": "2026-09-20T14:00:00Z"});
-            text = message_header(ui, &message, "Alex", true).text;
+            text = message_header(ui, &message, "Alex", true, true).text;
             let message = json!({"id": 5, "username": "Alex", "replaces": 3});
             text.push('|');
-            text.push_str(&message_header(ui, &message, "Alex", true).text);
+            text.push_str(&message_header(ui, &message, "Alex", true, true).text);
         });
         output.textures_delta.clear();
         assert!(text.contains("#3 · replaced by #5"), "{text}");
@@ -5523,37 +5518,49 @@ mod draft_tests {
             "createdAt": "2026-11-23T14:03:00.000Z",
             "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": null }]
         });
-        let worker = json!({
+        let bare = json!({
             "id": 9,
+            "username": "Alex",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
+        });
+        let worker = json!({
+            "id": 10,
             "username": "Alex/worker",
             "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
         });
-        assert!(super::sent_by("Alex", "Alex"));
-        assert!(super::sent_by("Alex/worker", "Alex"));
-        assert!(super::sent_by("Alex/worker", "Alex/worker"));
-        assert!(!super::sent_by("Alex", "Alex/worker"));
-        assert!(!super::sent_by("Bob", "Alex"));
-        assert!(!super::sent_by("Alexworker", "Alex"));
-        assert!(!super::sent_by("Alex", ""));
+        assert!(msn_cli::ticks::sent_by_viewer("Alex", "Alex"));
+        assert!(!msn_cli::ticks::sent_by_viewer("Alex/worker", "Alex"));
+        assert!(msn_cli::ticks::sent_by_viewer("Alex/worker", "Alex/worker"));
+        assert!(!msn_cli::ticks::sent_by_viewer("Alex", ""));
         let ctx = egui::Context::default();
         let mut read_job = None;
         let mut delivered_job = None;
+        let mut bare_job = None;
         let mut worker_job = None;
         let mut other = String::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            read_job = Some(message_header(ui, &read, "Alex", true));
-            other = message_header(ui, &read, "dev", false).text;
-            delivered_job = Some(message_header(ui, &delivered, "Alex", true));
+            read_job = Some(message_header(ui, &read, "Alex", true, true));
+            other = message_header(ui, &read, "dev", false, false).text;
+            delivered_job = Some(message_header(ui, &delivered, "Alex", true, true));
+            bare_job = Some(message_header(
+                ui,
+                &bare,
+                "Alex",
+                true,
+                msn_cli::ticks::sent_by_viewer("Alex", "Alex"),
+            ));
             worker_job = Some(message_header(
                 ui,
                 &worker,
                 "Alex/worker",
-                super::sent_by("Alex/worker", "Alex"),
+                false,
+                msn_cli::ticks::sent_by_viewer("Alex/worker", "Alex"),
             ));
         });
         output.textures_delta.clear();
         let read_job = read_job.unwrap();
         let delivered_job = delivered_job.unwrap();
+        let bare_job = bare_job.unwrap();
         let worker_job = worker_job.unwrap();
         assert!(read_job.text.contains("14:02"), "{read_job:?}");
         assert_eq!(read_job.text.matches('✓').count(), 2, "{}", read_job.text);
@@ -5566,10 +5573,9 @@ mod draft_tests {
             read_job.text
         );
         assert!(!other.contains('✓'), "{other}");
-        assert_eq!(
-            worker_job.text.matches('✓').count(),
-            2,
-            "{}",
+        assert!(
+            !worker_job.text.contains('✓'),
+            "a username that only starts with the viewer is not theirs: {}",
             worker_job.text
         );
         let checks: Vec<_> = read_job
@@ -5639,14 +5645,15 @@ mod draft_tests {
         assert_eq!(meta.leading_space, 0.0);
         assert_eq!(meta.format.extra_letter_spacing, 0.0);
         // No time: the checks take the one 10px gap, and the id does not take another.
-        let id = worker_job
+        let id = bare_job
             .sections
             .iter()
             .find(|section| {
-                worker_job.text[section.byte_range.start.0..section.byte_range.end.0].contains("#9")
+                bare_job.text[section.byte_range.start.0..section.byte_range.end.0].contains("#9")
             })
             .unwrap();
         assert_eq!(id.leading_space, 0.0);
+        assert_eq!(bare_job.text.matches('✓').count(), 2, "{}", bare_job.text);
         assert_eq!(
             delivered_job.text.matches('✓').count(),
             1,

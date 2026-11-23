@@ -1,5 +1,6 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { sentByViewer } from "../../../ios/src/core/address.ts";
 import { DeliveryTicks } from "../../../ios/src/components/DeliveryTicks.tsx";
 import { boardNotice } from "../lib/notice.ts";
 import {
@@ -52,7 +53,7 @@ export const MessageBubble = memo(function MessageBubble({
   const json = message.contentType === "application/json";
   const canAnswer = Boolean(message.choices?.length) && !message.answered && mayAnswer(message, me);
   const textColor = mine ? MINE_TEXT : color.label;
-  const ticks = tickLayout(mine, message.delivery);
+  const ticks = tickLayout(sentByViewer(message.username, me), message.delivery);
 
   return (
     <View style={[styles.wrap, mine ? styles.right : styles.left, showName && { marginTop: 10 }]}>

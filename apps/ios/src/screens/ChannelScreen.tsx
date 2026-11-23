@@ -20,7 +20,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
-import { sentBy } from "../core/address.ts";
+import { exactSender } from "../core/address.ts";
 import { baseAfterSave } from "../core/brief.ts";
 import { toggled } from "../core/fold.ts";
 import { messageLink } from "../core/links.ts";
@@ -445,7 +445,7 @@ function ChannelBody({
             return (
               <MessageRow
                 message={item}
-                own={sentBy(item.username, me)}
+                own={exactSender(item.username, me)}
                 quoted={
                   item.replyTo === undefined
                     ? undefined
@@ -473,8 +473,8 @@ function ChannelBody({
                 owner={!!session.owner}
                 onAnswer={archived ? undefined : onAnswer}
                 answering={answering.has(item.id)}
-                onEditMessage={!archived && item.username === me && me !== "github" ? onEditMessage : undefined}
-                onReplaceMessage={!archived && item.username === me && me !== "github" ? onReplaceMessage : undefined}
+                onEditMessage={!archived && exactSender(item.username, me) && me !== "github" ? onEditMessage : undefined}
+                onReplaceMessage={!archived && exactSender(item.username, me) && me !== "github" ? onReplaceMessage : undefined}
               />
             );
           }}

@@ -608,6 +608,27 @@ mod palette_tests {
     }
 
     #[test]
+    fn read_ticks_clear_3_to_1_on_the_outgoing_bubble() {
+        // A check is a non-text mark: 3:1 on the composited outgoing bubble, light and dark.
+        let samples = [
+            (&DARK, [[0.0; 3], [40.0; 3]]),
+            (&LIGHT, [[0.0; 3], [255.0; 3]]),
+        ];
+        for (palette, desktops) in samples {
+            let [r, g, b, _] = palette.accent.to_array();
+            for desktop in desktops {
+                let glass = over(palette.glass, over(palette.backdrop, desktop));
+                let bubble = over(palette.bubble_own, glass);
+                let ratio = contrast([r as f32, g as f32, b as f32], bubble);
+                assert!(
+                    ratio >= 3.0,
+                    "read tick on own bubble over {desktop:?}: {ratio:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn accent_is_blue_so_read_ticks_use_it() {
         let blue = |color: Color32| (170.0..=230.0).contains(&hue(color));
         assert!(blue(DARK.accent), "dark accent hue {:.1}", hue(DARK.accent));

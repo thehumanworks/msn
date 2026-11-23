@@ -1,15 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import {
-  ownBubble,
-  TICK_OFFSET_PX,
-  tickAttrs,
-  tickGlyph,
-  tickLabel,
-  tickLayout,
-  tickOf,
-} from "../public/ticks.js";
+import { ownBubble, TICK_OFFSET_PX, tickAttrs, tickLabel, tickLayout, tickOf } from "../public/ticks.js";
 
 // Delivery ticks on the bubble (ADR 0083).
 // I1 another participant's message, even fully read, draws no ticks.
@@ -24,7 +16,6 @@ test("given the shared delivery rows, when folded, then the mark matches", () =>
   for (const item of cases) {
     const tick = tickOf(item.rows);
     assert.equal(tick, item.tick);
-    assert.equal(tickGlyph(tick), item.glyph);
     assert.equal(tickLabel(item.rows), item.label);
   }
 });
@@ -68,15 +59,15 @@ test("given the sender's pending or unaddressed message, when the bubble is mark
   assert.equal(tickLayout(true, []).marks, 0);
 });
 
-test("given a bound name or a worker suffix, when the bubble is the viewer's, then read ticks are an image", () => {
+test("given a bound name, when the bubble is the viewer's, then read ticks are an image and a slash name is not", () => {
   const message = { username: "Ada", delivery: read };
   assert.equal(ownBubble(message, "Ada"), true);
-  assert.equal(ownBubble({ username: "Ada/worker", delivery: read }, "Ada"), true);
+  assert.equal(ownBubble({ username: "Ada/worker", delivery: read }, "Ada"), false);
   assert.equal(ownBubble({ username: "Ada/worker", delivery: read }, "Ada/worker"), true);
   assert.equal(ownBubble({ ...message, agentUserId: "agent-1" }, "Ada"), false);
   assert.equal(ownBubble({ username: "Bob", delivery: read }, "Ada"), false);
-  assert.equal(ownBubble({ username: "Adaworker", delivery: read }, "Ada"), false);
-  const shown = tickAttrs({ username: "Ada/worker", delivery: read }, "Ada");
+  assert.equal(tickAttrs({ username: "Ada/worker", delivery: read }, "Ada"), null);
+  const shown = tickAttrs(message, "Ada");
   assert.equal(shown.role, "img");
   assert.equal(shown.className, "ticks read");
   assert.deepEqual(shown.offsets, [0, TICK_OFFSET_PX]);
@@ -98,7 +89,28 @@ test("the web painter names the ticks as an image and sets the shared offset", (
   assert.match(fn, /tickAttrs\(/);
   assert.match(fn, /setProperty\("--tick-offset"/);
   assert.doesNotMatch(fn, /tickGlyph/);
+  const canEdit = app.slice(
+    app.indexOf("function canEdit"),
+    app.indexOf("\nfunction ", app.indexOf("function canEdit") + 1),
+  );
+  assert.match(canEdit, /exactSender\(/);
+  assert.doesNotMatch(canEdit, /sentByViewer|ownBubble/);
+  const mine = app.slice(
+    app.indexOf("function myMessage"),
+    app.indexOf("\nfunction ", app.indexOf("function myMessage") + 1),
+  );
+  assert.match(mine, /exactSender\(/);
+  assert.doesNotMatch(mine, /sentByViewer|ownBubble/);
+  const edit = app.slice(
+    app.indexOf("function showEdit"),
+    app.indexOf("\nfunction ", app.indexOf("function showEdit") + 1),
+  );
+  assert.ok(edit.includes(":scope > .message-stamp"));
+  assert.doesNotMatch(app, /\.message-meta > time/);
   const css = readFileSync(new URL("../public/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.ticks:has\(\.tick-mark \+ \.tick-mark\)/);
+  assert.doesNotMatch(css, /\.ticks\.read\s*\{[^}]*width/);
+  assert.doesNotMatch(css, /\.message-meta > time/);
   assert.match(css, new RegExp(`--tick-offset:\\s*${TICK_OFFSET_PX}px`));
   assert.match(css, /var\(--tick-offset\)/);
   assert.match(css, /gap:\s*var\(--tick-gap\)/);

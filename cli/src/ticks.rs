@@ -52,6 +52,16 @@ pub fn tick_glyph(tick: Tick) -> &'static str {
 /// A few pixels: the strokes overlap instead of sitting side by side (ADR 0083).
 pub const TICK_OFFSET_PX: i32 = 4;
 
+/// Whether this viewer sent the message, for ticks only.
+///
+/// A username may contain `/`: the server's `text()` check only requires non-blank text within
+/// the byte limit. `name/worker` is therefore a different sender, not proof of this viewer's
+/// worker. A bound key sends as its exact bound name, which this comparison already accepts.
+/// Edit, replace, claim, delete, and ack do not use this function.
+pub fn sent_by_viewer(username: &str, me: &str) -> bool {
+    !me.is_empty() && username == me
+}
+
 /// Ticks belong on the sender's bubble. Another participant's message stays unmarked.
 pub fn bubble_tick(own: bool, rows: Option<&Vec<Value>>) -> Tick {
     if !own {
@@ -157,6 +167,14 @@ mod tests {
         assert_eq!(tick_marks(Tick::Partial), 1);
         assert!(!tick_tone_read(Tick::Partial));
 
+        assert!(!sent_by_viewer("Alex/worker", "Alex"));
+        assert!(sent_by_viewer("Alex", "Alex"));
+        assert!(sent_by_viewer("Alex/worker", "Alex/worker"));
+        assert!(!sent_by_viewer("Alex", ""));
+        assert_eq!(
+            bubble_tick(sent_by_viewer("Alex/worker", "Alex"), rows),
+            Tick::None
+        );
         assert_eq!(bubble_tick(true, None), Tick::None);
         assert_eq!(tick_marks(Tick::Pending), 0);
         assert_eq!(tick_marks(Tick::None), 0);

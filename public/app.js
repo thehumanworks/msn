@@ -1,6 +1,7 @@
 import { acquire, invitation, savePassword } from "./access.js";
 import {
   addressees,
+  exactSender,
   isAddressedTo,
   namesProblem,
   namesText,
@@ -31,7 +32,7 @@ import {
 } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
-import { ownBubble, tickAttrs } from "./ticks.js";
+import { tickAttrs } from "./ticks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -613,7 +614,7 @@ function showFiles(state) {
 
 // The browser uses a human/legacy connection, never an authenticated MCP installation.
 function myMessage(message) {
-  return ownBubble(message, session?.username);
+  return Boolean(message) && !message.agentUserId && exactSender(message.username, session?.username);
 }
 function appendMessage(message, target = $("messages")) {
   const article = document.createElement("article");
@@ -658,7 +659,7 @@ function appendMessage(message, target = $("messages")) {
     mark.title = `MSN agent user ${message.agentUserId}`;
     meta.append(mark);
   }
-  const stamp = document.createElement("span");
+  const stamp = document.createElement("div");
   stamp.className = "message-stamp";
   stamp.append(time);
   meta.append(stamp);
@@ -1147,7 +1148,7 @@ function canEdit(message) {
     Boolean(session) &&
     !session.watchOnly &&
     !message.agentUserId &&
-    message.username === session.username &&
+    exactSender(message.username, session.username) &&
     message.username !== "github" &&
     !archivedBoards.has(message.channel)
   );
@@ -1310,7 +1311,10 @@ function showEdit(state, edited) {
     const meta = article.querySelector(":scope > .message-meta");
     const mark = meta?.querySelector(".message-edited");
     if (mark) mark.title = `Edited ${message.editedAt}`;
-    else meta?.querySelector("time")?.after(editedMark(message));
+    else {
+      const stamp = meta?.querySelector(":scope > .message-stamp");
+      (stamp ?? meta?.querySelector(":scope > time"))?.after(editedMark(message));
+    }
   }
 }
 
@@ -5064,7 +5068,7 @@ function showScheduled(state) {
 }
 
 function ownScheduled(item) {
-  return item.username === session?.username;
+  return exactSender(item.username, session?.username);
 }
 
 function renderScheduledList(list) {

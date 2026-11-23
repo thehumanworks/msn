@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   addressees,
+  exactSender,
   isAddressedTo,
   MAX_RECIPIENTS,
   MAX_TO_TEXT_BYTES,
   namesProblem,
   namesText,
   parseNames,
-  sentBy,
+  senderActions,
+  sentByViewer,
   toField,
   withName,
 } from "../public/address.js";
@@ -85,13 +87,15 @@ test("since you left shows a message to you when you are any of its names", () =
   );
 });
 
-test("given a bound name or a name/worker suffix, when asking who sent it, then it is the viewer's", () => {
-  assert.equal(sentBy("Ada", "Ada"), true);
-  assert.equal(sentBy("Ada/worker", "Ada"), true);
-  assert.equal(sentBy("Ada/worker", "Ada/worker"), true);
-  assert.equal(sentBy("Ada", "Ada/worker"), false);
-  assert.equal(sentBy("Bob", "Ada"), false);
-  assert.equal(sentBy("Adaworker", "Ada"), false);
-  assert.equal(sentBy("Ada", ""), false);
-  assert.equal(sentBy(undefined, "Ada"), false);
+test("given a slash in a username, when asking who sent it, then it is a different person for ticks and for controls", () => {
+  assert.equal(exactSender("Ada", "Ada"), true);
+  assert.equal(sentByViewer("Ada", "Ada"), true);
+  assert.deepEqual(senderActions("Ada", "Ada"), { edit: true, replace: true });
+  assert.equal(sentByViewer("Ada/worker", "Ada"), false);
+  assert.equal(exactSender("Ada/worker", "Ada"), false);
+  assert.deepEqual(senderActions("Ada/worker", "Ada"), { edit: false, replace: false });
+  assert.equal(sentByViewer("Ada/worker", "Ada/worker"), true);
+  assert.equal(senderActions("Ada/worker", "Ada/worker").edit, true);
+  assert.equal(sentByViewer("Ada", ""), false);
+  assert.equal(sentByViewer(undefined, "Ada"), false);
 });

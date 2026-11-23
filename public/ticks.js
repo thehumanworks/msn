@@ -1,4 +1,4 @@
-import { sentBy } from "./address.js";
+import { sentByViewer } from "./address.js";
 
 /**
  * One mark for an addressed message's per-recipient delivery (ADR 0082).
@@ -23,13 +23,6 @@ export function tickOf(rows) {
   if (delivered === rows.length) return "delivered";
   if (delivered > 0) return "partial";
   return "pending";
-}
-
-/** @param {ReturnType<typeof tickOf>} tick */
-export function tickGlyph(tick) {
-  if (tick === "read") return "✓✓";
-  if (tick === "delivered" || tick === "partial") return "✓";
-  return "";
 }
 
 /**
@@ -57,11 +50,10 @@ export function tickTone(tick) {
 }
 
 /**
- * This viewer sent the bubble: their bound name or a `/worker` suffix of it, and not an agent
- * posting under that name (ADR 0084).
+ * Ticks only: the exact sender, and not an agent posting under that name (ADR 0085).
  */
 export function ownBubble(message, me) {
-  return Boolean(message) && !message.agentUserId && sentBy(message.username, me);
+  return Boolean(message) && !message.agentUserId && sentByViewer(message.username, me);
 }
 
 /**
