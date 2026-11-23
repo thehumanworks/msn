@@ -65,7 +65,6 @@ test("given a bound name, when the bubble is the viewer's, then read ticks are a
   assert.equal(ownBubble({ username: "Ada/worker", delivery: read }, "Ada"), false);
   assert.equal(ownBubble({ username: "Ada/worker", delivery: read }, "Ada/worker"), true);
   assert.equal(ownBubble({ username: "Ada", agentUserId: "a" }, "Ada"), false);
-  assert.equal(ownBubble({ ...message, agentUserId: "agent-1" }, "Ada"), false);
   assert.equal(tickAttrs({ username: "Ada", agentUserId: "a", delivery: read }, "Ada"), null);
   assert.equal(ownBubble({ username: "Bob", delivery: read }, "Ada"), false);
   assert.equal(tickAttrs({ username: "Ada/worker", delivery: read }, "Ada"), null);

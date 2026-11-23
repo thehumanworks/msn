@@ -16,15 +16,13 @@ Ticks use an exact username match (`sentByViewer` on the web and iOS, and the sa
 
 Edit and replace use `exactSender` or `username == me`, and they do not call `ownBubble`. The outgoing side uses `ownBubble`: that exact match, and not an agent. Claim, delete, and ack stay on their existing holder and owner checks.
 
-Phone read ticks are `#E8F7FF` (about 3.67:1 on `#007AFF`). Delivered and partial stay one muted check: `#E4EAF1` on the phone, the muted token on the web. Read is a different colour from that check. The older iOS app keeps its blue accent. Web read ticks use `--tick-read`: `#53bdeb` in the dark theme, `#0757a8` in both light paths. Desktop read ticks keep the accent while it clears 3:1 on the own bubble.
+Phone read ticks are `#E8F7FF` (about 3.67:1 on `#007AFF`). Delivered and partial stay one muted check: `#E4EAF1` on the phone, the muted token on the web. The older iOS app keeps its blue accent. Web read ticks use `--tick-read`: `#53bdeb` when dark, `#0757a8` on both light paths. Desktop read ticks keep the accent while it clears 3:1 on the own bubble.
 
 ## Consequences
 
 - A username that only starts with the viewer draws no ticks and no sender controls. That message is shown as another sender's bubble, on the incoming side.
-- An agent posting under the viewer's name is not their bubble either. The web, desktop, and both iOS apps exclude `agentUserId` from ticks and from the outgoing side. Edit and replace stay on the exact name and still exclude the agent.
-- Phone read ticks are `#E8F7FF`. Delivered and partial stay the one grey check, `#E4EAF1` on the phone.
-- Light web read ticks are `#0757a8` because `#53bdeb` on white is about 2.13:1. `#0757a8` on white is 7.15:1.
-- Widening the tick rule later cannot grant edit or replace, because those call sites do not use it.
+- An agent posting under the viewer's name is not their bubble either. The web, desktop, and both iOS apps exclude `agentUserId` from ticks and from the outgoing side.
+- Widening `ownBubble` later cannot grant edit or replace, because those call sites do not use it.
 
 ## Rejected
 
