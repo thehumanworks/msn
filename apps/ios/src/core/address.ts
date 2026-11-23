@@ -15,12 +15,6 @@ export function sentByViewer(username: string, me: string): boolean {
   return exactSender(username, me);
 }
 
-/** Controls that belong to the exact sender. Claim, delete, and ack are not among them. */
-export function senderActions(username: string, me: string): { edit: boolean; replace: boolean } {
-  const exact = exactSender(username, me);
-  return { edit: exact, replace: exact };
-}
-
 /** Whether `me` is one of the message's addressees. */
 export function isAddressed(me: string, message: Pick<Message, "to" | "recipients">): boolean {
   return addressees(message).some((name) => sameName(me, name));

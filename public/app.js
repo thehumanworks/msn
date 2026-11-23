@@ -32,7 +32,7 @@ import {
 } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
-import { tickAttrs } from "./ticks.js";
+import { ownBubble, tickAttrs } from "./ticks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -180,7 +180,7 @@ function paintTicks(article, message) {
   ticks.className = shown.className;
   ticks.replaceChildren();
   ticks.title = shown.label;
-  ticks.setAttribute("role", "img");
+  ticks.setAttribute("role", shown.role);
   ticks.setAttribute("aria-label", shown.label);
   ticks.style.setProperty("--tick-offset", `${shown.offset}px`);
   for (let index = 0; index < shown.offsets.length; index += 1) {
@@ -614,7 +614,7 @@ function showFiles(state) {
 
 // The browser uses a human/legacy connection, never an authenticated MCP installation.
 function myMessage(message) {
-  return Boolean(message) && !message.agentUserId && exactSender(message.username, session?.username);
+  return ownBubble(message, session?.username);
 }
 function appendMessage(message, target = $("messages")) {
   const article = document.createElement("article");

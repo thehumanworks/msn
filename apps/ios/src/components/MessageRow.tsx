@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
-import { namesLine, sentByViewer } from "../core/address.ts";
+import { namesLine } from "../core/address.ts";
 import { claimControl, claimNote } from "../core/claims.ts";
 import { foldState } from "../core/fold.ts";
 import { linksOf, parse, plainText } from "../core/markdown.ts";
@@ -9,7 +9,7 @@ import { choiceMode, choiceNote } from "../core/questions.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
-import { tickLabel, tickLayout } from "../core/ticks.ts";
+import { ownBubble, tickLabel, tickLayout } from "../core/ticks.ts";
 import { DeliveryTicks } from "./DeliveryTicks.tsx";
 import { formatTime } from "./format.ts";
 import { MarkdownText, openMessageLink } from "./MarkdownText.tsx";
@@ -136,7 +136,7 @@ function MessageRowImpl({
   const spoken = tree ? plainText(tree) : message.text;
   const links = tree ? linksOf(tree).slice(0, 5) : [];
   const who = own ? "You" : message.username;
-  const ticks = tickLayout(me !== undefined && sentByViewer(message.username, me), message.delivery);
+  const ticks = tickLayout(ownBubble(message, me), message.delivery);
   // A question's buttons (ADR 0065): open only for the addressed name, locked once answered.
   const choices = message.choices && message.choices.length >= 2 ? message.choices : null;
   const mode = choices ? choiceMode(message, me, onAnswer !== undefined) : null;

@@ -20,7 +20,8 @@ Phone read ticks are `#E8F7FF`. That clears 3:1 on both system blues and stays l
 
 ## Consequences
 
-- A username that only starts with the viewer draws no ticks and no sender controls.
+- A username that only starts with the viewer draws no ticks and no sender controls. That message is shown as another sender's bubble, on the incoming side.
+- An agent posting under the viewer's name is not their bubble either. The web, desktop, and both iOS apps exclude `agentUserId` from ticks and from the outgoing side. Edit and replace stay on the exact name and still exclude the agent.
 - Phone read ticks are a light cyan, distinct from the grey delivered check.
 - Widening the tick rule later cannot grant edit or replace, because those call sites do not use it.
 

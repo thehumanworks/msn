@@ -70,7 +70,7 @@ export function SearchView({
             ) : null
           }
           renderItem={({ item }) => (
-            <MessageRow message={item} own={exactSender(item.username, me)} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} />
+            <MessageRow message={item} own={!item.agentUserId && exactSender(item.username, me)} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} />
           )}
         />
       )}

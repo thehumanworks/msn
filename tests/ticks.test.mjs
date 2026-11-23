@@ -85,7 +85,7 @@ test("the web painter names the ticks as an image and sets the shared offset", (
   assert.ok(start >= 0);
   assert.ok(end > start);
   const fn = app.slice(start, end);
-  assert.match(fn, /setAttribute\("role", "img"\)/);
+  assert.match(fn, /setAttribute\("role", shown\.role\)/);
   assert.match(fn, /tickAttrs\(/);
   assert.match(fn, /setProperty\("--tick-offset"/);
   assert.doesNotMatch(fn, /tickGlyph/);
@@ -99,8 +99,8 @@ test("the web painter names the ticks as an image and sets the shared offset", (
     app.indexOf("function myMessage"),
     app.indexOf("\nfunction ", app.indexOf("function myMessage") + 1),
   );
-  assert.match(mine, /exactSender\(/);
-  assert.doesNotMatch(mine, /sentByViewer|ownBubble/);
+  assert.match(mine, /return ownBubble\(/);
+  assert.doesNotMatch(mine, /exactSender|sentByViewer/);
   const edit = app.slice(
     app.indexOf("function showEdit"),
     app.indexOf("\nfunction ", app.indexOf("function showEdit") + 1),
@@ -111,6 +111,9 @@ test("the web painter names the ticks as an image and sets the shared offset", (
   assert.match(css, /\.ticks:has\(\.tick-mark \+ \.tick-mark\)/);
   assert.doesNotMatch(css, /\.ticks\.read\s*\{[^}]*width/);
   assert.doesNotMatch(css, /\.message-meta > time/);
+  assert.match(css, /\.message-meta \.message-stamp \{[^}]*font-family:\s*inherit/);
+  const transcript = readFileSync(new URL("../public/transcript.js", import.meta.url), "utf8");
+  assert.doesNotMatch(transcript, /message-stamp/);
   assert.match(css, new RegExp(`--tick-offset:\\s*${TICK_OFFSET_PX}px`));
   assert.match(css, /var\(--tick-offset\)/);
   assert.match(css, /gap:\s*var\(--tick-gap\)/);

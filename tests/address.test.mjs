@@ -9,7 +9,6 @@ import {
   namesProblem,
   namesText,
   parseNames,
-  senderActions,
   sentByViewer,
   toField,
   withName,
@@ -90,12 +89,10 @@ test("since you left shows a message to you when you are any of its names", () =
 test("given a slash in a username, when asking who sent it, then it is a different person for ticks and for controls", () => {
   assert.equal(exactSender("Ada", "Ada"), true);
   assert.equal(sentByViewer("Ada", "Ada"), true);
-  assert.deepEqual(senderActions("Ada", "Ada"), { edit: true, replace: true });
   assert.equal(sentByViewer("Ada/worker", "Ada"), false);
   assert.equal(exactSender("Ada/worker", "Ada"), false);
-  assert.deepEqual(senderActions("Ada/worker", "Ada"), { edit: false, replace: false });
   assert.equal(sentByViewer("Ada/worker", "Ada/worker"), true);
-  assert.equal(senderActions("Ada/worker", "Ada/worker").edit, true);
+  assert.equal(exactSender("Ada/worker", "Ada/worker"), true);
   assert.equal(sentByViewer("Ada", ""), false);
   assert.equal(sentByViewer(undefined, "Ada"), false);
 });

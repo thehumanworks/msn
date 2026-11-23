@@ -38,12 +38,12 @@ test("given the message bubble, when it paints ticks, then the tick predicate is
   const start = source.indexOf("export const MessageBubble");
   assert.ok(start >= 0);
   const fn = source.slice(start);
-  assert.match(fn, /tickLayout\(sentByViewer\(message\.username, me\)/);
+  assert.match(fn, /tickLayout\(ownBubble\(message, me\)/);
   assert.doesNotMatch(fn, /tickLayout\(mine/);
   assert.match(fn, /tickColor\(ticks\.tone\)/);
   assert.doesNotMatch(fn, /tickGlyph/);
   assert.doesNotMatch(source, /#A5EBFF/);
   const board = readFileSync(new URL("../src/app/board/[name].tsx", import.meta.url), "utf8");
-  assert.match(board, /mine: message\.username === me/);
-  assert.doesNotMatch(board, /sentByViewer/);
+  assert.match(board, /mine: message\.username === me && !message\.agentUserId/);
+  assert.doesNotMatch(board, /sentByViewer|ownBubble/);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { TICK_OFFSET_PX, tickFrame, tickLabel, tickLayout, tickOf } from "../src/core/ticks.ts";
+import { ownBubble, TICK_OFFSET_PX, tickFrame, tickLabel, tickLayout, tickOf } from "../src/core/ticks.ts";
 
 // Delivery ticks on the bubble (ADR 0083).
 // I1 another participant's message, even fully read, draws no ticks -> only the sender
@@ -75,11 +75,15 @@ test("given two checks, when the frame is sized, then the rotated second check s
 
 test("the message row asks the tick predicate, and the accent clears 3:1 on the outgoing bubble", () => {
   const source = readFileSync(new URL("../src/components/MessageRow.tsx", import.meta.url), "utf8");
-  assert.match(source, /tickLayout\(me !== undefined && sentByViewer/);
+  assert.match(source, /tickLayout\(ownBubble\(message, me\)/);
   assert.doesNotMatch(source, /tickGlyph/);
+  assert.equal(ownBubble({ username: "Ada" }, "Ada"), true);
+  assert.equal(ownBubble({ username: "Ada", agentUserId: "agent-1" }, "Ada"), false);
+  assert.equal(ownBubble({ username: "Ada/worker" }, "Ada"), false);
   const channel = readFileSync(new URL("../src/screens/ChannelScreen.tsx", import.meta.url), "utf8");
-  assert.match(channel, /onEditMessage=\{!archived && exactSender\(item\.username, me\)/);
-  assert.doesNotMatch(channel, /sentByViewer/);
+  assert.match(channel, /onEditMessage=\{!archived && !item\.agentUserId && exactSender\(item\.username, me\)/);
+  assert.match(channel, /own=\{!item\.agentUserId && exactSender\(item\.username, me\)\}/);
+  assert.doesNotMatch(channel, /sentByViewer|ownBubble/);
   const theme = readFileSync(new URL("../src/components/theme.ts", import.meta.url), "utf8");
   const accent = /accent: "(#[0-9a-f]{6})"/i.exec(theme)?.[1];
   const own = /own: "(#[0-9a-f]{6})"/i.exec(theme)?.[1];

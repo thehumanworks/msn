@@ -445,7 +445,7 @@ function ChannelBody({
             return (
               <MessageRow
                 message={item}
-                own={exactSender(item.username, me)}
+                own={!item.agentUserId && exactSender(item.username, me)}
                 quoted={
                   item.replyTo === undefined
                     ? undefined
@@ -473,8 +473,8 @@ function ChannelBody({
                 owner={!!session.owner}
                 onAnswer={archived ? undefined : onAnswer}
                 answering={answering.has(item.id)}
-                onEditMessage={!archived && exactSender(item.username, me) && me !== "github" ? onEditMessage : undefined}
-                onReplaceMessage={!archived && exactSender(item.username, me) && me !== "github" ? onReplaceMessage : undefined}
+                onEditMessage={!archived && !item.agentUserId && exactSender(item.username, me) && me !== "github" ? onEditMessage : undefined}
+                onReplaceMessage={!archived && !item.agentUserId && exactSender(item.username, me) && me !== "github" ? onReplaceMessage : undefined}
               />
             );
           }}

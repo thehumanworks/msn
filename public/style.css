@@ -615,7 +615,7 @@ nav .empty {
   align-items: center;
   gap: var(--tick-gap);
   margin-left: 0;
-  font-family: var(--mono);
+  font-family: inherit;
 }
 .ticks {
   --tick-box: calc((var(--tick-mark) + var(--tick-stem)) * 0.7071);

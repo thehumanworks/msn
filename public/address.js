@@ -35,12 +35,6 @@ export function sentByViewer(username, me) {
   return exactSender(username, me);
 }
 
-/** Controls that belong to the exact sender. Claim, delete, and ack are not among them. */
-export function senderActions(username, me) {
-  const exact = exactSender(username, me);
-  return { edit: exact, replace: exact };
-}
-
 /** Whether `me` is one of the message's addressees, exactly or trimmed and ignoring case. */
 export function isAddressedTo(me, message) {
   return addressees(message).some((name) => sameName(me, name));

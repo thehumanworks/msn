@@ -157,7 +157,7 @@ function Conversation({
       out.push({
         kind: "message",
         message,
-        mine: message.username === me,
+        mine: message.username === me && !message.agentUserId,
         showName: !grouped,
         replied: message.replyTo ? (byId.get(message.replyTo) ?? null) : null,
         me,

@@ -3549,7 +3549,7 @@ fn render_message(
     // `sent_by_viewer`, which stays a separate call so a tick rule cannot grant those controls.
     let exact = username == me;
     let own = exact && !agent;
-    let show_ticks = !agent && msn_cli::ticks::sent_by_viewer(username, me);
+    let show_ticks = !agent && sent_by_viewer(username, me);
     // Only the exact sender edits (ADR 0052). GitHub notices never. Search hits (no fold) show
     // no editor, so they offer no Edit. An agent message is not editable even under this name.
     let editable = exact && !agent && can_post && fold.is_some() && username != "github";
@@ -3875,6 +3875,11 @@ fn render_parent(
             }
         }
     });
+}
+
+/// Ticks only. `/` is allowed in a username, so this is exact equality (ADR 0085).
+fn sent_by_viewer(username: &str, me: &str) -> bool {
+    !me.is_empty() && username == me
 }
 
 /// Width of one ✓ in the header font, from a galley, so the overlap is not a guessed advance.
@@ -5528,10 +5533,10 @@ mod draft_tests {
             "username": "Alex/worker",
             "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
         });
-        assert!(msn_cli::ticks::sent_by_viewer("Alex", "Alex"));
-        assert!(!msn_cli::ticks::sent_by_viewer("Alex/worker", "Alex"));
-        assert!(msn_cli::ticks::sent_by_viewer("Alex/worker", "Alex/worker"));
-        assert!(!msn_cli::ticks::sent_by_viewer("Alex", ""));
+        assert!(super::sent_by_viewer("Alex", "Alex"));
+        assert!(!super::sent_by_viewer("Alex/worker", "Alex"));
+        assert!(super::sent_by_viewer("Alex/worker", "Alex/worker"));
+        assert!(!super::sent_by_viewer("Alex", ""));
         let ctx = egui::Context::default();
         let mut read_job = None;
         let mut delivered_job = None;
@@ -5547,14 +5552,14 @@ mod draft_tests {
                 &bare,
                 "Alex",
                 true,
-                msn_cli::ticks::sent_by_viewer("Alex", "Alex"),
+                super::sent_by_viewer("Alex", "Alex"),
             ));
             worker_job = Some(message_header(
                 ui,
                 &worker,
                 "Alex/worker",
                 false,
-                msn_cli::ticks::sent_by_viewer("Alex/worker", "Alex"),
+                super::sent_by_viewer("Alex/worker", "Alex"),
             ));
         });
         output.textures_delta.clear();

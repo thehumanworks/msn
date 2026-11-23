@@ -1,4 +1,5 @@
 /** One mark for an addressed message's delivery rows (ADR 0082). */
+import { sentByViewer } from "./address.ts";
 
 export type DeliveryRow = {
   name: string;
@@ -29,6 +30,15 @@ export function tickOf(rows: DeliveryRow[] | null | undefined): Tick {
  * A few pixels: the strokes overlap instead of sitting side by side (ADR 0083).
  */
 export const TICK_OFFSET_PX = 4;
+
+/** Ticks only: the exact sender, and not an agent posting under that name (ADR 0085). */
+export function ownBubble(
+  message: { username: string; agentUserId?: string } | null | undefined,
+  me: string | undefined,
+): boolean {
+  if (!message || message.agentUserId || typeof me !== "string") return false;
+  return sentByViewer(message.username, me);
+}
 
 /** Ticks belong on the sender's bubble. Another participant's message stays unmarked. */
 export function bubbleTick(own: boolean, rows: DeliveryRow[] | null | undefined): Tick {
