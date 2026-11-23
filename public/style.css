@@ -602,12 +602,12 @@ nav .empty {
   margin-top: 4px;
 }
 .ticks {
-  color: var(--muted, #6b7280);
+  color: var(--muted);
   letter-spacing: -0.12em;
   font-size: 0.85em;
 }
 .ticks.read {
-  color: var(--accent, #2563eb);
+  color: var(--accent);
 }
 .ticks:empty {
   display: none;
