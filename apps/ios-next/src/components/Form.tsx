@@ -86,6 +86,7 @@ export function Field({ last, style, ...props }: TextInputProps & { last?: boole
 /** A full-width text button inside a card: the system style for an action in a grouped form. */
 export function Action({
   label,
+  detail,
   onPress,
   tone,
   disabled,
@@ -93,6 +94,7 @@ export function Action({
   last,
 }: {
   label: string;
+  detail?: string;
   onPress: () => void;
   tone?: "danger";
   disabled?: boolean;
@@ -108,9 +110,12 @@ export function Action({
       accessibilityState={{ disabled: off, busy }}
       style={({ pressed }) => [styles.cell, !last && styles.divider, pressed && { opacity: 0.6 }]}
     >
-      <Text style={[styles.action, tone === "danger" && { color: color.danger }, off && { color: color.tertiary }]}>
-        {busy ? "Working…" : label}
-      </Text>
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={[styles.action, tone === "danger" && { color: color.danger }, off && { color: color.tertiary }]}>
+          {busy ? "Working…" : label}
+        </Text>
+        {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+      </View>
     </Pressable>
   );
 }

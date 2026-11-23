@@ -19,6 +19,10 @@ export function openInvite(board: string | null) {
   router.push({ pathname: "/invite", params: board ? { board } : {} });
 }
 
+export function openAgentConnectors(board: string) {
+  router.push({ pathname: "/agent-connectors", params: { board } });
+}
+
 export function openAgents(board: string) {
   router.push({ pathname: "/agents", params: { board } });
 }

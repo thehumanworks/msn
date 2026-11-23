@@ -14,7 +14,7 @@ import {
 } from "react-native";
 import { ConnectionPill } from "../components/ConnectionPill.tsx";
 import { Glass, GlassButton, Surface } from "../components/Glass.tsx";
-import { deleteBoard, openAgents, openInvite, setArchived } from "../lib/boardActions.ts";
+import { deleteBoard, openAgentConnectors, openAgents, openInvite, setArchived } from "../lib/boardActions.ts";
 import { boardList, model, pending, useSession } from "../lib/model.ts";
 import { type ChannelSummary, currentUnread, unreadBadge, useChannelList, useStore } from "../lib/shared.ts";
 import { color, shortTime } from "../lib/theme.ts";
@@ -124,6 +124,7 @@ function BoardList() {
       { label: session.owner ? "Agents and webhooks" : "Agents", run: () => openAgents(board.name) },
     );
     if (session.owner) {
+      if (!session.watchOnly && !scoped) actions.push({ label: "Agent connectors", run: () => openAgentConnectors(board.name) });
       actions.push({
         label: archived ? "Unarchive" : "Archive",
         run: () => setArchived(session, board.name, !archived),
