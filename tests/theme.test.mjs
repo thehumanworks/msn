@@ -90,6 +90,19 @@ test("no rule outside the token blocks hard-codes a colour", () => {
   assert.equal(found, "", `use a var(--token) instead of: ${found}`);
 });
 
+test("light --tick-read overrides the dark token and clears 3:1 on white", () => {
+  const lightMedia = tokens(lightSystem.body);
+  assert.equal(light.get("--tick-read"), "#0757a8");
+  assert.equal(lightMedia.get("--tick-read"), "#0757a8");
+  assert.equal(darkTokens.get("--tick-read"), "#53bdeb");
+  const onWhite = contrast(rgba("#0757a8"), rgba("#ffffff"));
+  const onBg = contrast(rgba(light.get("--tick-read")), rgba(light.get("--bg")));
+  assert.ok(onWhite >= 3, `light read on white is ${onWhite.toFixed(2)}`);
+  assert.ok(onBg >= 3, `light read on bg is ${onBg.toFixed(2)}`);
+  const darkOnWhite = contrast(rgba("#53bdeb"), rgba("#ffffff"));
+  assert.ok(darkOnWhite < 3, `dark token on white is ${darkOnWhite.toFixed(2)}`);
+});
+
 test("the raw-colour check catches hex, colour functions and named colours", () => {
   const sample =
     "a { color: red; background: oklch(0.7 0.1 200); border: 1px solid gray; fill: #fff; outline: 2px solid var(--accent); }";
@@ -131,7 +144,7 @@ for (const [name, theme] of [
       "accent-soft on surface": over(c("--accent-soft"), c("--surface")),
     };
     const failures = [];
-    for (const fg of ["--text", "--muted", "--accent", "--error"])
+    for (const fg of ["--text", "--muted", "--accent", "--error", "--tick-read"])
       for (const [where, under] of Object.entries(surfaces)) {
         const ratio = contrast(c(fg), under);
         if (ratio < 4.5) failures.push(`${fg} on ${where}: ${ratio.toFixed(2)}`);

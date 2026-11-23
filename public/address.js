@@ -21,6 +21,20 @@ export function sameName(a, b) {
   return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+/**
+ * The sender, exactly. The server allows `/` in a username (`text()` only bounds the length),
+ * so `me/worker` is a different person, not this viewer's worker (ADR 0085). A bound key
+ * sends as its bound name, which is this same comparison.
+ */
+export function exactSender(username, me) {
+  return typeof username === "string" && typeof me === "string" && me !== "" && username === me;
+}
+
+/** Ticks only. Not the check for edit, replace, claim, delete, or ack. */
+export function sentByViewer(username, me) {
+  return exactSender(username, me);
+}
+
 /** Whether `me` is one of the message's addressees, exactly or trimmed and ignoring case. */
 export function isAddressedTo(me, message) {
   return addressees(message).some((name) => sameName(me, name));

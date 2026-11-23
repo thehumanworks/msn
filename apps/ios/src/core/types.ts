@@ -22,6 +22,8 @@ export type Message = {
   tenant: string;
   channel: string;
   username: string;
+  /** Set when an authenticated agent posted this message, even under a person's name. */
+  agentUserId?: string;
   text: string;
   contentType: ContentType;
   createdAt: string;

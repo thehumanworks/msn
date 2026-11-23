@@ -18,6 +18,12 @@
   --on-accent: #1a0316;
   --error: #ff7a7a;
   --presence: #3ddc84;
+  --tick-read: #53bdeb;
+  /* Layout of the checks, shared with TICK_OFFSET_PX. Not colours, so the light blocks do not repeat them. */
+  --tick-offset: 4px;
+  --tick-mark: 4px;
+  --tick-stem: 7px;
+  --tick-gap: 3px;
   --backdrop: #000a;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -48,6 +54,7 @@
     --on-accent: #ffffff;
     --error: #c01a33;
     --presence: #13893f;
+    --tick-read: #0757a8;
     --backdrop: #17171c66;
   }
 }
@@ -65,6 +72,7 @@
   --on-accent: #ffffff;
   --error: #c01a33;
   --presence: #13893f;
+  --tick-read: #0757a8;
   --backdrop: #17171c66;
 }
 * {
@@ -601,16 +609,51 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
+/* One thin check, or two overlapping by --tick-offset, beside the time (ADR 0083).
+   The stamp is a div so `.message-meta span` does not push it or set mono.
+   inline-flex still lays the time and the checks on one line. */
+.message-meta .message-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tick-gap);
+  margin-left: 0;
+  font-family: inherit;
+}
 .ticks {
+  --tick-box: calc((var(--tick-mark) + var(--tick-stem)) * 0.7071);
+  --tick-overhang: calc((var(--tick-box) - var(--tick-mark)) / 2);
+  position: relative;
+  display: inline-block;
+  width: var(--tick-box);
+  height: 12px;
+  flex: none;
+  align-self: center;
   color: var(--muted);
-  letter-spacing: -0.12em;
-  font-size: 0.85em;
+  vertical-align: -1px;
+}
+.message-meta .ticks {
+  margin-left: 0;
+}
+.ticks:has(.tick-mark + .tick-mark) {
+  width: calc(var(--tick-box) + var(--tick-offset));
 }
 .ticks.read {
-  color: var(--accent);
+  color: var(--tick-read);
 }
-.ticks:empty {
-  display: none;
+.message-meta .ticks .tick-mark {
+  position: absolute;
+  left: var(--tick-overhang);
+  bottom: 1px;
+  width: var(--tick-mark);
+  height: var(--tick-stem);
+  margin-left: 0;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transform-origin: center;
+}
+.message-meta .ticks .tick-mark + .tick-mark {
+  left: calc(var(--tick-overhang) + var(--tick-offset));
 }
 
 .message-receipts {

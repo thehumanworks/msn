@@ -139,6 +139,24 @@ test("messages keep known reactions and drop unknown kinds; bad reactions are pr
   assert.throws(() => decodeReactionPage({ reactions: [{ id: 0, reactions: {} }], hasMore: false }), ProtocolError);
 });
 
+test("an agent id is kept, and a non-string id is rejected", async () => {
+  const { decodeMessage } = await import("../src/core/decode.ts");
+  const raw = {
+    id: 3,
+    tenant: "acme",
+    channel: "general",
+    username: "asha",
+    text: "hi",
+    contentType: "text/plain",
+    createdAt: "2026-11-20T00:00:00.000Z",
+  };
+  assert.equal(decodeMessage(raw).agentUserId, undefined);
+  assert.equal(decodeMessage({ ...raw, agentUserId: null }).agentUserId, undefined);
+  assert.equal(decodeMessage({ ...raw, agentUserId: "agent-1" }).agentUserId, "agent-1");
+  assert.equal(decodeMessage({ ...raw, agentUserId: "" }).agentUserId, undefined);
+  assert.throws(() => decodeMessage({ ...raw, agentUserId: 5 }), ProtocolError);
+});
+
 test("messages keep editedAt; edit pages carry the cursor (ADR 0052)", async () => {
   const { decodeMessage, decodeEditPage } = await import("../src/core/decode.ts");
   const raw = {

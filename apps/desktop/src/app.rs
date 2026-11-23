@@ -3542,10 +3542,17 @@ fn render_message(
     let claim = claim_control(message, viewer, fold.is_some());
     let id = message["id"].as_u64().unwrap_or(0);
     let username = message["username"].as_str().unwrap_or("?");
-    let own = username == me;
-    // Only the sender edits (ADR 0052); GitHub notices never; the server checks it too.
-    // Search hits (no fold) show no editor, so they offer no Edit.
-    let editable = own && can_post && fold.is_some() && username != "github";
+    let agent = message["agentUserId"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty());
+    // Bubble side and controls use the exact sender. Ticks use the same names through
+    // `sent_by_viewer`, which stays a separate call so a tick rule cannot grant those controls.
+    let exact = username == me;
+    let own = exact && !agent;
+    let show_ticks = !agent && sent_by_viewer(username, me);
+    // Only the exact sender edits (ADR 0052). GitHub notices never. Search hits (no fold) show
+    // no editor, so they offer no Edit. An agent message is not editable even under this name.
+    let editable = exact && !agent && can_post && fold.is_some() && username != "github";
     let text = message["text"].as_str().unwrap_or("");
     let body = if message["contentType"].as_str() == Some("application/json") {
         Body::Rich(
@@ -3566,7 +3573,7 @@ fn render_message(
             ),
         }
     };
-    let header = message_header(ui, message, username, own);
+    let header = message_header(ui, message, username, own, show_ticks);
     // The quoted part of the replyTo message (ADR 0059); pressing it shows the source.
     let source = message["replyTo"].as_u64();
     let quote = message["quote"].as_str().filter(|_| source.is_some());
@@ -3870,12 +3877,58 @@ fn render_parent(
     });
 }
 
+/// Ticks only. `/` is allowed in a username, so this is exact equality (ADR 0085).
+fn sent_by_viewer(username: &str, me: &str) -> bool {
+    !me.is_empty() && username == me
+}
+
+/// Width of one ✓ in the header font, from a galley, so the overlap is not a guessed advance.
+fn check_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
+    ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap("✓".to_owned(), font_id.clone(), egui::Color32::PLACEHOLDER)
+            .rect
+            .width()
+    })
+}
+
+/// One or two checks just after the time, only when `tick` is not empty (ADR 0083).
+/// Returns whether any check was appended. Two checks are separate sections: the second's
+/// leading is `offset - measured width`, so it overlaps the first and the following text
+/// starts after the second check. Read uses the accent, which is blue in both themes.
+fn append_delivery_ticks(
+    ui: &egui::Ui,
+    job: &mut egui::text::LayoutJob,
+    tick: msn_cli::ticks::Tick,
+    leading: f32,
+    format: &impl Fn(egui::Color32) -> egui::TextFormat,
+) -> bool {
+    let marks = msn_cli::ticks::tick_marks(tick);
+    if marks == 0 {
+        return false;
+    }
+    let color = if tick == msn_cli::ticks::Tick::Read {
+        theme::accent()
+    } else {
+        theme::muted()
+    };
+    let text = format(color);
+    job.append("✓", leading, text.clone());
+    if marks == 2 {
+        let advance = check_width(ui, &text.font_id);
+        let overlap = msn_cli::ticks::TICK_OFFSET_PX as f32 - advance;
+        job.append("✓", overlap, text);
+    }
+    true
+}
+
 /// "name says" in the Messenger tradition, then the quieter metadata: time, id, reply target.
 fn message_header(
     ui: &egui::Ui,
     message: &Value,
     username: &str,
     own: bool,
+    show_ticks: bool,
 ) -> egui::text::LayoutJob {
     let small = egui::TextStyle::Small.resolve(ui.style());
     let format = |color| egui::TextFormat {
@@ -3895,29 +3948,47 @@ fn message_header(
         None => " says".to_string(),
     };
     job.append(&says, 0.0, format(theme::muted()));
-    let mut meta = String::new();
-    if let Some(time) = message["createdAt"].as_str().and_then(|c| c.get(11..16)) {
-        meta.push_str(&format!("{time} · "));
+    let time = message["createdAt"].as_str().and_then(|c| c.get(11..16));
+    if let Some(time) = time {
+        job.append(time, 10.0, format(theme::muted()));
     }
-    meta.push_str(&format!("#{}", message["id"].as_u64().unwrap_or(0)));
+    let tick = msn_cli::ticks::bubble_tick(show_ticks, msn_cli::ticks::delivery_rows(message));
+    let drew_ticks = append_delivery_ticks(
+        ui,
+        &mut job,
+        tick,
+        if time.is_some() { 3.0 } else { 10.0 },
+        &format,
+    );
+    let mut meta = format!("#{}", message["id"].as_u64().unwrap_or(0));
     if let Some(reply_to) = message["replyTo"].as_u64() {
         meta.push_str(&format!(" · re #{reply_to}"));
     }
     if message["editedAt"].is_string() {
         meta.push_str(" · edited");
     }
-    let tick = msn_cli::ticks::tick_of(msn_cli::ticks::delivery_rows(message));
-    let glyph = msn_cli::ticks::tick_glyph(tick);
-    if !glyph.is_empty() {
-        meta.push(' ');
-        meta.push_str(glyph);
-    }
     // Replace an instruction (ADR 0068): each end names the other.
     if let Some(old) = message["replaces"].as_u64() {
         meta.push_str(&format!(" · replaces #{old}"));
     }
+    // One gap only. The time, or the ticks when there is no time, already carries the 10px
+    // leading; a second 10px here used to sit between the checks and the id.
+    let prefix = if time.is_some() || drew_ticks {
+        " · "
+    } else {
+        ""
+    };
+    let meta_leading = if time.is_some() || drew_ticks {
+        0.0
+    } else {
+        10.0
+    };
     // Full muted, not dimmed: the time and id must meet AA in both themes (ADR 0049).
-    job.append(&meta, 10.0, format(theme::muted()));
+    job.append(
+        &format!("{prefix}{meta}"),
+        meta_leading,
+        format(theme::muted()),
+    );
     if let Some(new) = message["replacedBy"].as_u64() {
         job.append(
             &format!(" · replaced by #{new}"),
@@ -5326,9 +5397,9 @@ mod draft_tests {
         let ctx = egui::Context::default();
         let mut text = String::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            text = message_header(ui, &taken, "lead", false).text;
+            text = message_header(ui, &taken, "lead", false, false).text;
             text.push('|');
-            text.push_str(&message_header(ui, &free, "lead", false).text);
+            text.push_str(&message_header(ui, &free, "lead", false, false).text);
         });
         output.textures_delta.clear();
         // The name is plain text, never markup.
@@ -5425,14 +5496,185 @@ mod draft_tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let message = json!({"id": 3, "username": "Alex", "replacedBy": 5,
                 "createdAt": "2026-09-20T14:00:00Z"});
-            text = message_header(ui, &message, "Alex", true).text;
+            text = message_header(ui, &message, "Alex", true, true).text;
             let message = json!({"id": 5, "username": "Alex", "replaces": 3});
             text.push('|');
-            text.push_str(&message_header(ui, &message, "Alex", true).text);
+            text.push_str(&message_header(ui, &message, "Alex", true, true).text);
         });
         output.textures_delta.clear();
         assert!(text.contains("#3 · replaced by #5"), "{text}");
         assert!(text.contains("#5 · replaces #3"), "{text}");
+    }
+
+    /// Delivery ticks (ADR 0083, ADR 0084): only the sender's bubble, including a `/worker`
+    /// suffix. Read uses the accent, which is blue. The second check's leading comes from the
+    /// measured glyph width, and the id is not pulled into that check or given a second gap.
+    #[test]
+    fn ticks_show_only_on_the_senders_bubble() {
+        let read = json!({
+            "id": 1,
+            "username": "Alex",
+            "createdAt": "2026-11-23T14:02:00.000Z",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
+        });
+        let delivered = json!({
+            "id": 2,
+            "username": "Alex",
+            "createdAt": "2026-11-23T14:03:00.000Z",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": null }]
+        });
+        let bare = json!({
+            "id": 9,
+            "username": "Alex",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
+        });
+        let worker = json!({
+            "id": 10,
+            "username": "Alex/worker",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
+        });
+        assert!(super::sent_by_viewer("Alex", "Alex"));
+        assert!(!super::sent_by_viewer("Alex/worker", "Alex"));
+        assert!(super::sent_by_viewer("Alex/worker", "Alex/worker"));
+        assert!(!super::sent_by_viewer("Alex", ""));
+        let ctx = egui::Context::default();
+        let mut read_job = None;
+        let mut delivered_job = None;
+        let mut bare_job = None;
+        let mut worker_job = None;
+        let mut other = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            read_job = Some(message_header(ui, &read, "Alex", true, true));
+            other = message_header(ui, &read, "dev", false, false).text;
+            delivered_job = Some(message_header(ui, &delivered, "Alex", true, true));
+            bare_job = Some(message_header(
+                ui,
+                &bare,
+                "Alex",
+                true,
+                super::sent_by_viewer("Alex", "Alex"),
+            ));
+            worker_job = Some(message_header(
+                ui,
+                &worker,
+                "Alex/worker",
+                false,
+                super::sent_by_viewer("Alex/worker", "Alex"),
+            ));
+        });
+        output.textures_delta.clear();
+        let read_job = read_job.unwrap();
+        let delivered_job = delivered_job.unwrap();
+        let bare_job = bare_job.unwrap();
+        let worker_job = worker_job.unwrap();
+        assert!(read_job.text.contains("14:02"), "{read_job:?}");
+        assert_eq!(read_job.text.matches('✓').count(), 2, "{}", read_job.text);
+        assert!(
+            read_job
+                .text
+                .find('✓')
+                .is_some_and(|at| read_job.text[..at].contains("14:02")),
+            "{}",
+            read_job.text
+        );
+        assert!(!other.contains('✓'), "{other}");
+        assert!(
+            !worker_job.text.contains('✓'),
+            "a username that only starts with the viewer is not theirs: {}",
+            worker_job.text
+        );
+        let checks: Vec<_> = read_job
+            .sections
+            .iter()
+            .filter(|section| {
+                &read_job.text[section.byte_range.start.0..section.byte_range.end.0] == "✓"
+            })
+            .collect();
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].format.extra_letter_spacing, 0.0);
+        assert_eq!(checks[1].format.extra_letter_spacing, 0.0);
+        assert_eq!(checks[0].format.color, crate::theme::accent());
+        assert_eq!(checks[1].format.color, crate::theme::accent());
+        let advance = ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    "✓".to_owned(),
+                    checks[0].format.font_id.clone(),
+                    egui::Color32::PLACEHOLDER,
+                )
+                .rect
+                .width()
+        });
+        assert!(
+            advance > msn_cli::ticks::TICK_OFFSET_PX as f32,
+            "glyph advance {advance}"
+        );
+        let expected = msn_cli::ticks::TICK_OFFSET_PX as f32 - advance;
+        assert!(
+            (checks[1].leading_space - expected).abs() < 0.01,
+            "leading {} expected {expected}",
+            checks[1].leading_space
+        );
+        let galley = ctx.fonts_mut(|fonts| fonts.layout_job(read_job.clone()));
+        let glyphs: Vec<_> = galley
+            .rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter())
+            .filter(|glyph| glyph.chr == '✓')
+            .collect();
+        assert_eq!(glyphs.len(), 2);
+        let offset = glyphs[1].pos.x - glyphs[0].pos.x;
+        assert!(
+            (offset - msn_cli::ticks::TICK_OFFSET_PX as f32).abs() < 0.51,
+            "measured offset {offset}"
+        );
+        let second_end = glyphs[1].pos.x + glyphs[1].advance_width;
+        let after = galley
+            .rows
+            .iter()
+            .flat_map(|row| row.glyphs.iter())
+            .find(|glyph| glyph.pos.x > glyphs[1].pos.x && glyph.chr != '✓')
+            .expect("text after the checks");
+        assert!(
+            after.pos.x + 0.51 >= second_end,
+            "following glyph at {} overlaps the check ending at {second_end}",
+            after.pos.x
+        );
+        let meta = read_job
+            .sections
+            .iter()
+            .find(|section| {
+                read_job.text[section.byte_range.start.0..section.byte_range.end.0].contains("#1")
+            })
+            .unwrap();
+        assert_eq!(meta.leading_space, 0.0);
+        assert_eq!(meta.format.extra_letter_spacing, 0.0);
+        // No time: the checks take the one 10px gap, and the id does not take another.
+        let id = bare_job
+            .sections
+            .iter()
+            .find(|section| {
+                bare_job.text[section.byte_range.start.0..section.byte_range.end.0].contains("#9")
+            })
+            .unwrap();
+        assert_eq!(id.leading_space, 0.0);
+        assert_eq!(bare_job.text.matches('✓').count(), 2, "{}", bare_job.text);
+        assert_eq!(
+            delivered_job.text.matches('✓').count(),
+            1,
+            "{}",
+            delivered_job.text
+        );
+        let single = delivered_job
+            .sections
+            .iter()
+            .find(|section| {
+                delivered_job.text[section.byte_range.start.0..section.byte_range.end.0]
+                    .contains('✓')
+            })
+            .unwrap();
+        assert_eq!(single.format.color, crate::theme::muted());
+        assert_eq!(single.format.extra_letter_spacing, 0.0);
     }
 
     /// Drafts (ADR 0057): each board keeps its own composer, sending clears only that board's,

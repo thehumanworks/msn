@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   addressees,
+  exactSender,
   isAddressedTo,
   MAX_RECIPIENTS,
   MAX_TO_TEXT_BYTES,
   namesProblem,
   namesText,
   parseNames,
+  sentByViewer,
   toField,
   withName,
 } from "../public/address.js";
@@ -82,4 +84,15 @@ test("since you left shows a message to you when you are any of its names", () =
     summary.items.map((item) => item.text),
     ["lead to you: “Which region?”"],
   );
+});
+
+test("given a slash in a username, when asking who sent it, then it is a different person for ticks and for controls", () => {
+  assert.equal(exactSender("Ada", "Ada"), true);
+  assert.equal(sentByViewer("Ada", "Ada"), true);
+  assert.equal(sentByViewer("Ada/worker", "Ada"), false);
+  assert.equal(exactSender("Ada/worker", "Ada"), false);
+  assert.equal(sentByViewer("Ada/worker", "Ada/worker"), true);
+  assert.equal(exactSender("Ada/worker", "Ada/worker"), true);
+  assert.equal(sentByViewer("Ada", ""), false);
+  assert.equal(sentByViewer(undefined, "Ada"), false);
 });

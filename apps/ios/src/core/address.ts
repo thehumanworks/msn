@@ -5,6 +5,16 @@ export function sameName(a: string, b: string): boolean {
   return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+/** The sender, exactly. `/` is not reserved in a username, so `me/worker` is someone else (ADR 0085). */
+export function exactSender(username: string, me: string): boolean {
+  return me !== "" && username === me;
+}
+
+/** Ticks only. Not the check for edit, replace, claim, delete, or ack. */
+export function sentByViewer(username: string, me: string): boolean {
+  return exactSender(username, me);
+}
+
 /** Whether `me` is one of the message's addressees. */
 export function isAddressed(me: string, message: Pick<Message, "to" | "recipients">): boolean {
   return addressees(message).some((name) => sameName(me, name));

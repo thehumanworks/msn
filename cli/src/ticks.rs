@@ -48,6 +48,35 @@ pub fn tick_glyph(tick: Tick) -> &'static str {
     }
 }
 
+/// How far the second check sits to the right of the first, in px.
+/// A few pixels: the strokes overlap instead of sitting side by side (ADR 0083).
+pub const TICK_OFFSET_PX: i32 = 4;
+
+/// Ticks belong on the sender's bubble. Another participant's message stays unmarked.
+///
+/// The CLI prints message JSON and does not draw ticks. Each client that paints them decides
+/// the sender itself (ADR 0085): exact username, and not an agent posting under that name.
+pub fn bubble_tick(own: bool, rows: Option<&Vec<Value>>) -> Tick {
+    if !own {
+        return Tick::None;
+    }
+    tick_of(rows)
+}
+
+/// How many thin checks to draw. Pending and none draw nothing.
+pub fn tick_marks(tick: Tick) -> u8 {
+    match tick {
+        Tick::Read => 2,
+        Tick::Delivered | Tick::Partial => 1,
+        Tick::None | Tick::Pending => 0,
+    }
+}
+
+/// Read is blue. Delivered and partial stay muted.
+pub fn tick_tone_read(tick: Tick) -> bool {
+    tick == Tick::Read
+}
+
 pub fn tick_label(rows: Option<&Vec<Value>>) -> String {
     let Some(rows) = rows else {
         return String::new();
@@ -95,5 +124,48 @@ mod tests {
             assert_eq!(tick_glyph(tick), case["glyph"].as_str().unwrap(), "{case}");
             assert_eq!(tick_label(rows), case["label"].as_str().unwrap(), "{case}");
         }
+    }
+
+    fn read_rows() -> Value {
+        json_rows(true)
+    }
+
+    fn json_rows(read: bool) -> Value {
+        serde_json::json!([{
+            "name": "dev",
+            "deliveredAt": "2026-11-23T14:02:00.000Z",
+            "readAt": if read { serde_json::json!("2026-11-23T14:03:00.000Z") } else { serde_json::Value::Null }
+        }])
+    }
+
+    // I1 another participant's message, even fully read, draws no ticks.
+    // I2 the sender's delivered message draws one muted check.
+    // I3 the sender's read message draws two checks, the second a few px over.
+    // I4 pending and unaddressed messages draw nothing.
+    #[test]
+    fn given_who_sent_it_when_the_bubble_is_marked_then_only_the_sender_gets_ticks() {
+        let read = read_rows();
+        let rows = read.as_array();
+        assert_eq!(bubble_tick(false, rows), Tick::None);
+        assert_eq!(tick_marks(bubble_tick(false, rows)), 0);
+
+        assert_eq!(bubble_tick(true, rows), Tick::Read);
+        assert_eq!(tick_marks(Tick::Read), 2);
+        assert!(tick_tone_read(Tick::Read));
+
+        let delivered = json_rows(false);
+        assert_eq!(bubble_tick(true, delivered.as_array()), Tick::Delivered);
+        assert_eq!(tick_marks(Tick::Delivered), 1);
+        assert!(!tick_tone_read(Tick::Delivered));
+        assert_eq!(tick_marks(Tick::Partial), 1);
+        assert!(!tick_tone_read(Tick::Partial));
+
+        assert_eq!(bubble_tick(true, None), Tick::None);
+        assert_eq!(tick_marks(Tick::Pending), 0);
+        assert_eq!(tick_marks(Tick::None), 0);
+        assert!(
+            (2..=6).contains(&TICK_OFFSET_PX),
+            "the second check overlaps by a few px"
+        );
     }
 }
