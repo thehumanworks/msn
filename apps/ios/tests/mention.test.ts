@@ -46,7 +46,7 @@ test("people: listening personas, recent names newest first, then other personas
     [message("reviewer", "lead"), message("human"), message("builder", "tester")],
     "human",
   ).map((p) => p.name);
-  assert.deepEqual(names, ["channel", "lead", "builder", "tester", "reviewer", "idle-bot"]);
+  assert.deepEqual(names, ["lead", "builder", "tester", "reviewer", "idle-bot", "channel"]);
   assert.equal(isChannelMention("CHANNEL"), true);
   assert.deepEqual(splitChannelMentions("ping @channel now"), [
     { text: "ping ", channel: false },
@@ -54,6 +54,12 @@ test("people: listening personas, recent names newest first, then other personas
     { text: " now", channel: false },
   ]);
   assert.deepEqual(addressAfterPick("", null, "channel"), { to: "", mentionTo: null });
+  assert.deepEqual(splitChannelMentions("İ@channel"), [{ text: "İ@channel", channel: false }]);
+  assert.deepEqual(splitChannelMentions("İ @CHANNEL"), [
+    { text: "İ ", channel: false },
+    { text: "@CHANNEL", channel: true },
+  ]);
+  assert.equal(splitChannelMentions("**bold**@channel").some((part) => part.text === "@channel"), true);
 });
 
 test("suggest ranks prefix matches first and caps the list", () => {

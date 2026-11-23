@@ -7,6 +7,7 @@ import { answeredBy } from "./questions.ts";
 import { withClaim } from "./claims.ts";
 import type { ScheduledMessage } from "./scheduled.ts";
 import { ApiError, isAbortError } from "./errors.ts";
+import { channelMentionNotice } from "./mention.ts";
 import type { SessionController } from "./sessionController.ts";
 import { Store } from "./store.ts";
 import type {
@@ -960,6 +961,12 @@ export class ChannelController {
     if (error instanceof ApiError && error.isAuthExpired) {
       this.patchItem(id, { status: "rejected", error: "Your access key was revoked or reset." });
       this.ctl.reportAuthFailure();
+      return;
+    }
+    // @channel refusals store nothing. 429 would otherwise look like an uncertain delivery.
+    const mention = error instanceof ApiError ? channelMentionNotice(error) : null;
+    if (mention) {
+      this.patchItem(id, { status: "rejected", error: mention });
       return;
     }
     // A definitive 4xx (other than timeout/rate limit) proves nothing was stored.

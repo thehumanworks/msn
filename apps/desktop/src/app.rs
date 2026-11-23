@@ -3568,7 +3568,16 @@ fn render_message(
         // label it had before.
         let parsed = markdown::parse_cached(text);
         match &*parsed {
-            markdown::Parsed::Plain(plain) => Body::Rich(egui::RichText::new(plain)),
+            markdown::Parsed::Plain(plain) => {
+                if mention::channel_pieces(plain)
+                    .iter()
+                    .any(|(_, channel)| *channel)
+                {
+                    Body::Job(plain_channel_job(ui, plain))
+                } else {
+                    Body::Rich(egui::RichText::new(plain))
+                }
+            }
             // The salt keeps each message's copy buttons apart (ADR 0058); a search hit can show
             // the same message as the log, so it gets its own.
             markdown::Parsed::Blocks(_) => Body::Markdown(
@@ -4015,7 +4024,32 @@ fn message_header(
 /// it. The text is laid out first because a right-aligned bubble must know its width.
 enum Body {
     Rich(egui::RichText),
+    Job(egui::text::LayoutJob),
     Markdown(std::rc::Rc<markdown::Parsed>, egui::Id),
+}
+
+fn plain_channel_job(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let base = egui::TextFormat {
+        font_id: font_id.clone(),
+        color: ui.visuals().text_color(),
+        ..Default::default()
+    };
+    let mut accent = base.clone();
+    accent.color = theme::accent();
+    let mut job = egui::text::LayoutJob::default();
+    for (piece, channel) in mention::channel_pieces(text) {
+        job.append(
+            piece,
+            0.0,
+            if channel {
+                accent.clone()
+            } else {
+                base.clone()
+            },
+        );
+    }
+    job
 }
 
 impl From<egui::RichText> for Body {
@@ -4056,6 +4090,24 @@ fn bubble(
     let response = match body.into() {
         Body::Rich(text) => {
             let galley = egui::WidgetText::from(text).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                wrap_width,
+                egui::TextStyle::Body,
+            );
+            frame
+                .show(ui, |ui| {
+                    if let Some((text, clicked)) = quote.take() {
+                        *clicked = show_quote(ui, text);
+                    }
+                    long = fold_clip(ui, fold.as_deref(), |ui| {
+                        ui.label(galley);
+                    });
+                })
+                .response
+        }
+        Body::Job(job) => {
+            let galley = egui::WidgetText::from(job).into_galley(
                 ui,
                 Some(egui::TextWrapMode::Wrap),
                 wrap_width,
@@ -4918,16 +4970,15 @@ mod layout_tests {
 
         // A bare @ lists listening personas, recent senders, then the rest; never me (Alex).
         press(&ctx, &mut app, text("Please @"));
-        assert_eq!(names(&app), ["channel", "lead", "Jamie", "reviewer"]);
+        assert_eq!(names(&app), ["lead", "Jamie", "reviewer", "channel"]);
         // Typing narrows; arrows move; Enter picks instead of sending.
         press(&ctx, &mut app, text("e"));
-        // "channel" contains e, so it stays first. Two steps down lands on Jamie.
+        // "channel" contains e, and it stays last. One step down lands on Jamie.
         assert_eq!(
             names(&app),
-            ["channel", "lead", "Jamie", "reviewer"],
+            ["lead", "Jamie", "reviewer", "channel"],
             "contains e"
         );
-        press(&ctx, &mut app, key(egui::Key::ArrowDown));
         press(&ctx, &mut app, key(egui::Key::ArrowDown));
         press(&ctx, &mut app, key(egui::Key::Enter));
         press(&ctx, &mut app, vec![]);

@@ -19,6 +19,7 @@ import { renderMarkdown } from "./markdown.js";
 import {
   addressAfterEdit,
   addressAfterPick,
+  channelMentionNotice,
   insertMention,
   mentionAt,
   paintChannelMentions,
@@ -3581,7 +3582,10 @@ $("send-form").addEventListener("submit", async (event) => {
     poll($("live").checked); // Read from the last cursor, not the sent ID: no skipped concurrent replies.
   } catch (error) {
     if (session === connection && selected === channel)
-      status(`${error.message} Your draft is preserved; retry sends safely.`, true);
+      status(
+        `${channelMentionNotice(error) ?? error.message} Your draft is preserved; retry sends safely.`,
+        true,
+      );
   } finally {
     state.sending = false;
     if (session === connection && selected === channel) $("send").disabled = false;

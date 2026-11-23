@@ -1,15 +1,19 @@
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { splitChannelMentions } from "../public/mention.js";
 import {
-  automatedSender,
   CHANNEL_MENTION_CAP,
   CHANNEL_MENTION_WINDOW_MS,
   channelMentionLimited,
   expandChannelRecipients,
   mentionsChannel,
 } from "../src/channel-mention";
+import { sign } from "../src/github";
 import type { MsnDurableObject } from "../src/store";
+import { MAX_PENDING_NOTICES } from "../src/webhook";
+
+const ADMIN = "test-admin-secret-000000000000000000000";
 
 // @channel (ADR 0086).
 // I1 a member's @channel addresses every other member, not the sender -> sender is a member
@@ -17,7 +21,7 @@ import type { MsnDurableObject } from "../src/store";
 // I3 case, word boundary, code and JSON do not over-match -> token edges
 // I4 names are deduped; explicit To is kept; "channel" is not a person -> dedupe and reserved
 // I5 each recipient gets a delivery row; each other agent gets one addressed webhook -> ticks and webhooks
-// I6 an agent cannot @channel again inside the window; a person can -> echo cap
+// I6 a non-owner cannot @channel again inside the window; the owner can, and a person's mention counts -> echo cap
 // I7 more than CHANNEL_MENTION_CAP other members refuses the send -> fan-out cap
 // I8 an edit does not resolve the token again; a retry replays the first expansion -> edit and replay
 
@@ -84,8 +88,6 @@ async function fixture() {
 }
 
 describe("@channel rules", () => {
-  const now = Date.parse("2026-11-23T12:00:00.000Z");
-
   it("matches @channel outside code, in any case, and not inside a word or an address", () => {
     expect(mentionsChannel("@channel")).toBe(true);
     expect(mentionsChannel("hey @CHANNEL.")).toBe(true);
@@ -101,6 +103,42 @@ describe("@channel rules", () => {
     expect(mentionsChannel("```\n@channel\n```\n")).toBe(false);
     expect(mentionsChannel("~~~\n@channel\n~~~\nstill @channel")).toBe(true);
     expect(mentionsChannel("")).toBe(false);
+    expect(mentionsChannel("**@channel**")).toBe(true);
+    expect(mentionsChannel("_@channel_")).toBe(true);
+    expect(mentionsChannel("**bold**@channel")).toBe(true);
+    expect(mentionsChannel("``@channel``")).toBe(false);
+    expect(mentionsChannel("   ```\n@channel\n   ```\n")).toBe(false);
+    expect(mentionsChannel("İ@channel")).toBe(false);
+    expect(mentionsChannel("İ @channel")).toBe(true);
+  });
+
+  it("agrees with the web client on every token edge", () => {
+    const samples = [
+      "@channel",
+      "hey @CHANNEL.",
+      "(@Channel)",
+      "**@channel**",
+      "_@channel_",
+      "**bold**@channel",
+      "@channeling",
+      "a@channel",
+      "me@channel.com",
+      "İ@channel",
+      "İ @CHANNEL",
+      "see `@channel` please",
+      "see `@channel`\n@channel",
+      "``@channel``",
+      "```\n@channel\n```\n",
+      "   ```\n@channel\n   ```\nstill @channel",
+      "~~~\n@channel\n~~~\nstill @channel",
+    ];
+    for (const text of samples)
+      expect(
+        splitChannelMentions(text).some((part) => part.channel),
+        text,
+      ).toBe(mentionsChannel(text));
+    const marked = splitChannelMentions("İ @CHANNEL").find((part) => part.channel);
+    expect(marked?.text).toBe("@CHANNEL");
   });
 
   it("drops the sender and the token, keeps the first spelling, then explicit names", () => {
@@ -108,23 +146,14 @@ describe("@channel rules", () => {
       expandChannelRecipients(["human", "Human", "lead", "channel", " ada "], "Lead", ["guest", "human"]),
     ).toEqual(["human", "ada", "guest"]);
     expect(expandChannelRecipients(["only"], "only")).toEqual([]);
-    expect(automatedSender({ username: "lead", personaId: "lead" })).toBe(true);
-    expect(automatedSender({ username: "lead", agentUserId: "u" })).toBe(true);
-    expect(automatedSender({ username: "github" })).toBe(true);
-    expect(automatedSender({ username: "human", personaId: null, agentUserId: null })).toBe(false);
+    expect(CHANNEL_MENTION_CAP).toBeLessThanOrEqual(MAX_PENDING_NOTICES);
   });
 
-  it("limits only an automated sender, and only while a mention is inside the window", () => {
-    const hit = (age: number, text = "@channel") => ({
-      text,
-      createdAt: new Date(now - age).toISOString(),
-    });
-    expect(channelMentionLimited(false, [hit(0)], now)).toBe(false);
-    expect(channelMentionLimited(true, [hit(0)], now)).toBe(true);
-    expect(channelMentionLimited(true, [hit(CHANNEL_MENTION_WINDOW_MS - 1)], now)).toBe(true);
-    expect(channelMentionLimited(true, [hit(CHANNEL_MENTION_WINDOW_MS)], now)).toBe(false);
-    expect(channelMentionLimited(true, [hit(0, "see `@channel`")], now)).toBe(false);
-    expect(channelMentionLimited(true, [hit(0, "hello")], now)).toBe(false);
+  it("limits every non-owner while a flagged mention is inside the window", () => {
+    expect(channelMentionLimited(true, true)).toBe(false);
+    expect(channelMentionLimited(false, true)).toBe(true);
+    expect(channelMentionLimited(false, false)).toBe(false);
+    expect(channelMentionLimited(true, false)).toBe(false);
   });
 });
 
@@ -160,22 +189,28 @@ describe("@channel on a board", () => {
     );
     expect(notices.map((row) => row.personaId)).toEqual(["rev", "work"]);
     expect(notices.every((row) => row.body.includes("message.addressed"))).toBe(true);
-    // The same key replays the first expansion. A new key sees a member who joined after.
     await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
       state.storage.sql.exec(
-        "INSERT INTO personas VALUES (?, ?, ?, ?)",
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
         "work",
         "extra",
         "extra",
         new Date().toISOString(),
       );
     });
-    // A new key is a new send. The agent is still inside the echo window, so it is refused.
+    // A new key is a new send. The window is still open, so another non-owner is refused.
     expect((await f.post(f.agent, { username: "lead", text: "hey @CHANNEL" }, "once")).status).toBe(429);
     const quiet = await f.post(f.owner, { text: "see `@channel` in the docs" });
     expect(quiet.status).toBe(201);
     expect((await quiet.json<{ message: Msg }>()).message.to).toBeUndefined();
-    // A person is not limited, so this still expands, including a member who joined after the first send.
+    // ada is not the owner, so the open window still refuses them.
+    expect((await f.post(ada, { username: "ada", text: "@channel" })).status).toBe(429);
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "UPDATE messages SET createdAt = ?",
+        new Date(Date.now() - CHANNEL_MENTION_WINDOW_MS - 1000).toISOString(),
+      );
+    });
     const again = await f.post(ada, { username: "ada", text: "@channel" });
     expect(again.status).toBe(201);
     const people = (await again.json<{ message: Msg }>()).message.recipients;
@@ -209,18 +244,44 @@ describe("@channel on a board", () => {
     expect(message.delivery).toBeUndefined();
   });
 
-  it("refuses a second agent mention inside the window and allows it once that message is old", async () => {
+  it("refuses every non-owner inside the window, including after the text is edited or the message is deleted", async () => {
     const f = await fixture();
-    expect((await f.post(f.agent, { username: "lead", text: "@channel" })).status).toBe(201);
+    const first = await f.post(f.agent, { username: "lead", text: "@channel" });
+    expect(first.status).toBe(201);
+    const id = (await first.json<{ message: Msg }>()).message.id;
     const blocked = await f.post(f.agent, { username: "worker", text: "and @channel" });
     expect(blocked.status).toBe(429);
-    expect(await blocked.json()).toMatchObject({ error: { code: "channel_mention_limited" } });
+    const body = await blocked.json<{ error: { code: string; message: string } }>();
+    expect(body.error.code).toBe("channel_mention_limited");
+    expect(body.error.message).toContain("Only the owner");
+    expect(body.error.message).toContain("a person's mention counts");
+    const edited = await call(f.tenant, `/channels/work/messages/${id}`, f.agent, "PATCH", {
+      username: "lead",
+      text: "no token",
+    });
+    expect(edited.status).toBe(200);
+    expect((await f.post(f.agent, { username: "worker", text: "@channel" })).status).toBe(429);
+    const removed = await exports.default.fetch(
+      `https://msn.test/api/admin/tenants/${f.tenant}/channels/work/messages/${id}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${ADMIN}` } },
+    );
+    expect(removed.status).toBe(204);
+    expect((await f.post(f.agent, { username: "worker", text: "@channel" })).status).toBe(429);
     const human = await f.post(f.owner, { text: "@channel from me" });
     expect(human.status).toBe(201);
+    const humanId = (await human.json<{ message: Msg }>()).message.id;
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "UPDATE messages SET createdAt = ? WHERE id <> ?",
+        "2020-01-01T00:00:00.000Z",
+        humanId,
+      );
+    });
+    expect((await f.post(f.agent, { username: "worker", text: "@channel" })).status).toBe(429);
     await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
       state.storage.sql.exec(
         "UPDATE messages SET createdAt = ?",
-        new Date(Date.now() - CHANNEL_MENTION_WINDOW_MS - 1000).toISOString(),
+        new Date(Date.now() - CHANNEL_MENTION_WINDOW_MS).toISOString(),
       );
     });
     expect((await f.post(f.agent, { username: "worker", text: "@channel later" })).status).toBe(201);
@@ -231,7 +292,7 @@ describe("@channel on a board", () => {
     await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
       for (let i = 0; i < CHANNEL_MENTION_CAP - 3; i += 1)
         state.storage.sql.exec(
-          "INSERT INTO personas VALUES (?, ?, ?, ?)",
+          "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
           "work",
           `p${i}`,
           `agent-${i}`,
@@ -245,7 +306,7 @@ describe("@channel on a board", () => {
     expect((await within.json<{ message: Msg }>()).message.recipients).toHaveLength(CHANNEL_MENTION_CAP);
     await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
       state.storage.sql.exec(
-        "INSERT INTO personas VALUES (?, ?, ?, ?)",
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
         "work",
         "overflow",
         "overflow",
@@ -302,7 +363,7 @@ describe("@channel on a board", () => {
     await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
       state.storage.sql.exec("UPDATE messages SET createdAt = ?", "2020-01-01T00:00:00.000Z");
       state.storage.sql.exec(
-        "INSERT INTO personas VALUES (?, ?, ?, ?)",
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
         "work",
         "late",
         "late",
@@ -344,5 +405,206 @@ describe("@channel on a board", () => {
     const message = (await sent.json<{ message: Msg }>()).message;
     expect(message.recipients?.filter((name) => name.toLowerCase() === "human")).toEqual(["human"]);
     expect(message.recipients?.at(-1)).toBe("guest");
+  });
+
+  it("keeps an explicit name on an empty board, and a quoted @channel does not mention anyone", async () => {
+    const tenant = `empty-${crypto.randomUUID()}`;
+    const owner = (
+      await (await call(tenant, "", undefined, "PUT", { username: "human" })).json<{ token: string }>()
+    ).token;
+    expect(
+      (
+        await call(tenant, "/channels/quiet/board", owner, "PUT", {
+          credential: "a".repeat(64),
+          goal: "Quiet",
+        })
+      ).status,
+    ).toBe(201);
+    const kept = await call(tenant, "/channels/quiet/messages", owner, "POST", {
+      username: "human",
+      text: "@channel",
+      to: "guest",
+    });
+    expect(kept.status).toBe(201);
+    expect((await kept.json<{ message: Msg }>()).message.to).toBe("guest");
+    const f = await fixture();
+    const root = await f.post(f.owner, { text: "the plan" });
+    const rootId = (await root.json<{ message: Msg }>()).message.id;
+    const quoted = await f.post(f.agent, {
+      username: "lead",
+      text: "noted",
+      replyTo: rootId,
+      quote: "please @channel everyone",
+    });
+    expect(quoted.status).toBe(201);
+    expect((await quoted.json<{ message: Msg }>()).message.to).toBeUndefined();
+    const own = await f.post(f.agent, {
+      username: "reviewer",
+      text: "@channel",
+      replyTo: rootId,
+      quote: "the plan",
+    });
+    expect(own.status).toBe(201);
+    expect((await own.json<{ message: Msg }>()).message.recipients).toContain("human");
+  });
+
+  it("skips a revoked key and a key for another channel, and still lets a persona named channel post", async () => {
+    const f = await fixture();
+    const link = await (await call(f.tenant, "/invites", f.owner, "POST", { channel: "work" })).json<{
+      code: string;
+    }>();
+    const joined = await (
+      await call(f.tenant, "/invites/redeem", undefined, "POST", { code: link.code, username: "gone" })
+    ).json<{ token: string; keyId: string }>();
+    const revoked = await exports.default.fetch(
+      `https://msn.test/api/admin/tenants/${f.tenant}/keys/${joined.keyId}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${ADMIN}` } },
+    );
+    expect(revoked.status).toBe(204);
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope) VALUES (?, ?, ?, NULL, ?, ?)",
+        "other-key",
+        "b".repeat(64),
+        "bob",
+        new Date().toISOString(),
+        "other",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO access_keys (id, token_hash, bound_username, bound_prefix, createdAt, channel_scope) VALUES (?, ?, ?, NULL, ?, NULL)",
+        "wide-key",
+        "c".repeat(64),
+        "wide",
+        new Date().toISOString(),
+      );
+      state.storage.sql.exec(
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
+        "work",
+        "held",
+        "channel",
+        new Date().toISOString(),
+      );
+    });
+    const held = await f.post(f.agent, { username: "channel", text: "I can still talk" });
+    expect(held.status).toBe(201);
+    expect((await f.post(f.agent, { username: "lead", to: "channel", text: "hi" })).status).toBe(400);
+    const sent = await f.post(f.owner, { text: "@channel" });
+    expect(sent.status).toBe(201);
+    const names = (await sent.json<{ message: Msg }>()).message.recipients ?? [];
+    expect(names).toContain("wide");
+    expect(names).not.toContain("gone");
+    expect(names).not.toContain("bob");
+    expect(names).not.toContain("channel");
+  });
+
+  it("stores a GitHub delivery unaddressed instead of answering 429 when the window is open", async () => {
+    const f = await fixture();
+    expect((await f.post(f.owner, { text: "@channel" })).status).toBe(201);
+    const secretResponse = await call(f.tenant, "/github/secret", f.owner, "POST");
+    expect(secretResponse.status).toBe(200);
+    const { secret } = await secretResponse.json<{ secret: string }>();
+    expect(
+      (await call(f.tenant, "/channels/work/github/pulls/TheHumanWorks/msn/34", f.owner, "PUT")).status,
+    ).toBe(201);
+    const payload = {
+      action: "submitted",
+      repository: { full_name: "TheHumanWorks/msn" },
+      pull_request: { number: 34 },
+      review: {
+        state: "COMMENTED",
+        body: "please @channel",
+        user: { login: "reviewer" },
+        html_url: "https://github.com/thehumanworks/msn/pull/34#pullrequestreview-9",
+      },
+    };
+    const raw = new TextEncoder().encode(JSON.stringify(payload));
+    const delivered = await exports.default.fetch(`https://msn.test/api/github/hooks/${f.tenant}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": "pull_request_review",
+        "X-GitHub-Delivery": crypto.randomUUID(),
+        "X-Hub-Signature-256": await sign(secret, raw),
+      },
+      body: raw,
+    });
+    expect(delivered.status).toBe(200);
+    const page = await (await call(f.tenant, "/channels/work/messages", f.owner)).json<{ messages: Msg[] }>();
+    const github = page.messages.find(
+      (message) => message.username === "github" && message.text.includes("@channel"),
+    );
+    expect(github?.text).toContain("please @channel");
+    expect(github?.to).toBeUndefined();
+    expect(github?.recipients).toBeUndefined();
+  });
+
+  it("fails a scheduled @channel from a non-owner while the window is open", async () => {
+    const f = await fixture();
+    expect((await f.post(f.owner, { text: "@channel" })).status).toBe(201);
+    const scheduled = await f.post(f.agent, {
+      username: "worker",
+      text: "@channel later",
+      sendAt: new Date(Date.now() + 120_000).toISOString(),
+    });
+    expect(scheduled.status).toBe(201);
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "UPDATE scheduled_messages SET dueMs = ? WHERE failedAt IS NULL",
+        Date.now() - 1,
+      );
+      state.storage.setAlarm(Date.now() + 3_600_000);
+    });
+    await runDurableObjectAlarm(f.stub);
+    const listed = await (await call(f.tenant, "/channels/work/scheduled", f.agent)).json<{
+      scheduled: { status: string; error?: { code: string } }[];
+    }>();
+    expect(listed.scheduled[0]).toMatchObject({
+      status: "failed",
+      error: { code: "channel_mention_limited" },
+    });
+  });
+
+  it("wakes one webhook for each of the 32 agents a mention addresses", async () => {
+    const f = await fixture();
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      const now = new Date().toISOString();
+      for (const id of ["lead", "rev", "work"])
+        state.storage.sql.exec(
+          "INSERT INTO webhooks (channel, personaId, url, secret, origin, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+          "work",
+          id,
+          `https://agent.example.com/${id}`,
+          "secret",
+          "https://agent.example.com",
+          now,
+        );
+      for (let i = 0; i < CHANNEL_MENTION_CAP - 3; i += 1) {
+        state.storage.sql.exec(
+          "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
+          "work",
+          `p${i}`,
+          `agent-${i}`,
+          new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+        );
+        state.storage.sql.exec(
+          "INSERT INTO webhooks (channel, personaId, url, secret, origin, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+          "work",
+          `p${i}`,
+          `https://agent.example.com/p${i}`,
+          "secret",
+          "https://agent.example.com",
+          now,
+        );
+      }
+    });
+    const sent = await f.post(f.owner, { text: "@channel" });
+    expect(sent.status).toBe(201);
+    expect((await sent.json<{ message: Msg }>()).message.recipients).toHaveLength(CHANNEL_MENTION_CAP);
+    const count = await runInDurableObject(
+      f.stub,
+      (_instance: MsnDurableObject, state) =>
+        state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM webhook_notices").one().n,
+    );
+    expect(count).toBe(CHANNEL_MENTION_CAP);
   });
 });

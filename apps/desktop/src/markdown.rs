@@ -1262,7 +1262,23 @@ fn show_inline(ui: &mut egui::Ui, nodes: &[Inline], size: f32, base: egui::Color
     let mut links: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
     let mut chars = 0;
     for span in &spans {
-        job.append(&span.text, 0.0, format(ui, span.style, size, base));
+        if span.style.code {
+            job.append(&span.text, 0.0, format(ui, span.style, size, base));
+        } else {
+            let mut accent = format(ui, span.style, size, base);
+            accent.color = crate::theme::accent();
+            for (piece, channel) in crate::mention::channel_pieces(&span.text) {
+                job.append(
+                    piece,
+                    0.0,
+                    if channel {
+                        accent.clone()
+                    } else {
+                        format(ui, span.style, size, base)
+                    },
+                );
+            }
+        }
         let count = span.text.chars().count();
         if let Some(href) = span.href.as_deref().and_then(safe_href) {
             links.push((chars..chars + count, href));

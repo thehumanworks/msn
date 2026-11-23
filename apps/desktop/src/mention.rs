@@ -20,7 +20,67 @@ fn channel_token(name: &str) -> bool {
 }
 
 fn opens(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '(' | '[' | '{' | '"' | '\'' | '“' | '‘')
+    c.is_whitespace()
+        || matches!(
+            c,
+            '(' | '[' | '{' | '"' | '\'' | '“' | '‘' | '*' | '_' | '~'
+        )
+}
+
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// The name ends, or an emphasis mark does not continue into a word (`_@channel_`).
+fn token_ends(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    let Some(mark) = chars.next() else {
+        return true;
+    };
+    if !word_char(mark) {
+        return true;
+    }
+    if mark != '_' && mark != '*' && mark != '~' {
+        return false;
+    }
+    chars
+        .next()
+        .is_none_or(|after| !word_char(after) || after == mark)
+}
+
+/// Pieces of `text`, flagging each whole @channel. Same edges as the server. Code is left to
+/// the Markdown parser: this only splits a string the galley is about to draw.
+pub fn channel_pieces(text: &str) -> Vec<(&str, bool)> {
+    let mut out = Vec::new();
+    let mut last = 0;
+    let mut rest = text;
+    let mut offset = 0;
+    while let Some(at) = rest.find('@') {
+        let index = offset + at;
+        let tail = &text[index + 1..];
+        let name: String = tail.chars().take(7).collect();
+        let matched = name.eq_ignore_ascii_case("channel");
+        let end = index + 1 + name.len();
+        let prev_ok = text[..index].chars().next_back().is_none_or(opens);
+        let next_ok = token_ends(&text[end..]);
+        if matched && prev_ok && next_ok {
+            if index > last {
+                out.push((&text[last..index], false));
+            }
+            out.push((&text[index..end], true));
+            last = end;
+        }
+        let step = text[index..].chars().next().map_or(1, char::len_utf8);
+        offset = index + step;
+        rest = &text[offset..];
+    }
+    if last < text.len() {
+        out.push((&text[last..], false));
+    }
+    if out.is_empty() {
+        out.push((text, false));
+    }
+    out
 }
 
 /// The @ being typed at `caret`: `(start, query)`, where `start` is the @'s character index.
@@ -50,11 +110,7 @@ pub fn people<'a>(
     messages: impl DoubleEndedIterator<Item = &'a Value>,
     me: &str,
 ) -> Vec<Person> {
-    let mut out = vec![Person {
-        name: "channel".to_owned(),
-        listening: false,
-        everyone: true,
-    }];
+    let mut out: Vec<Person> = Vec::new();
     let mut add = |name: &str, listening: bool| {
         if name.trim().is_empty()
             || name == me
@@ -86,6 +142,12 @@ pub fn people<'a>(
     for (name, listening) in personas {
         add(name, *listening);
     }
+    // Last, so a bare @ lists people before the whole board.
+    out.push(Person {
+        name: "channel".to_owned(),
+        listening: false,
+        everyone: true,
+    });
     out
 }
 
@@ -189,6 +251,18 @@ mod tests {
     }
 
     #[test]
+    fn channel_pieces_keep_the_original_spelling() {
+        let marked: Vec<&str> = channel_pieces("İ @CHANNEL and İ@channel")
+            .into_iter()
+            .filter(|(_, channel)| *channel)
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(marked, ["@CHANNEL"]);
+        assert!(channel_pieces("**@channel**").iter().any(|(_, c)| *c));
+        assert!(!channel_pieces("_@channeling").iter().any(|(_, c)| *c));
+    }
+
+    #[test]
     fn people_puts_listening_then_recent_then_other_personas() {
         let personas = vec![
             ("idle-bot".to_owned(), false),
@@ -207,7 +281,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "channel", "lead", "builder", "tester", "reviewer", "idle-bot"
+                "lead", "builder", "tester", "reviewer", "idle-bot", "channel"
             ]
         );
     }

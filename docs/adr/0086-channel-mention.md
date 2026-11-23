@@ -1,8 +1,8 @@
 # ADR 0086: @channel mentions everyone on the board
 
-Date: 2026-11-23. Status: Accepted.
+Date: 2026-11-23. Status: Accepted. Revised the same day, before merge, for the review of PR 98. The revision is this document; it was not yet on main.
 
-Extends [ADR 0055](0055-mention-with-at.md), [ADR 0062](0062-wake-an-agent-with-a-webhook.md), [ADR 0067](0067-address-several-names.md) and [ADR 0082](0082-delivery-ticks.md). No schema version change.
+Extends [ADR 0055](0055-mention-with-at.md), [ADR 0062](0062-wake-an-agent-with-a-webhook.md), [ADR 0067](0067-address-several-names.md) and [ADR 0082](0082-delivery-ticks.md). No schema version change. `messages.mentionsChannel` is an additive column, the same way other columns have been added.
 
 ## Context
 
@@ -16,29 +16,30 @@ The owner asked for `@channel`: one token that tags every human member and every
 
 ### The token
 
-- Case does not matter: `@channel`, `@Channel` and `@CHANNEL` are the same mention.
-- The `@` must start a token, as in ADR 0055: at the start of the text, or after whitespace or an opening bracket. `a@channel` and `me@channel.com` are not mentions. The name ends before another letter, number, `_` or `-`, so `@channeling` and `@channel-wide` are not mentions. `@channel.` and `(@channel)` are.
-- Fenced code (a line of three or more backticks or tildes, through its closing fence) and inline backtick code are not mentions. An unclosed backtick does not hide the rest of the message.
+- Case does not matter: `@channel`, `@Channel` and `@CHANNEL` are the same mention. The scan uses the original indexes. It does not lowercase the string and then slice it, so a character such as İ (U+0130) cannot shift the highlighted span.
+- The `@` must start a token: at the start of the text, or after whitespace, an opening bracket, a quote, or an emphasis marker `*_~`. `a@channel` and `me@channel.com` are not mentions. `**@channel**`, `_@channel_` and `**bold**@channel` are. The name ends before another letter, number, `_` or `-`, except a single emphasis mark that does not continue into a word, so `_@channel_` is a mention and `@channel_wide` is not. `@channeling` and `@channel-wide` are not mentions.
+- Code follows CommonMark where this scanner looks. A fence indented 0–3 spaces, of three or more backticks or tildes, hides through its closing fence (at least as long, indented 0–3, only trailing spaces). A backtick fence whose info string contains a backtick is not a fence. An unclosed fence hides the rest. An inline span is a run of N backticks closed by the next run of exactly N, so double backticks hide `@channel`. An unclosed backtick run does not hide the rest. A four-space indented code block is not treated as code, and HTML blocks are not skipped. Those two gaps are accepted: board messages are not documents, and both the server and the clients share them.
 - `application/json` bodies are not scanned. Board control messages stay unaddressed when they happen to contain the characters.
-- A later edit does not resolve the token again. Edits never change who a message is addressed to (ADR 0052, ADR 0082). Adding or removing `@channel` by edit changes the text readers see and does not wake anyone new.
-- A question with `choices` cannot contain the token (`400 invalid_choices`). A question still has one answerer (ADR 0065).
+- Only the new message text is scanned. A quoted reply of an old `@channel` does not mention anyone again. A reply whose own text contains the token does.
+- A later edit does not resolve the token again and does not clear the flag recorded at send. Edits never change who a message is addressed to (ADR 0052, ADR 0082).
+- A question with `choices` cannot contain the token (`400 invalid_choices`). A question still has one answerer (ADR 0065). The refusal happens before anything is stored.
 
 ### Who is a member
 
 Resolved inside the send transaction, in this order, each name once (trimmed, case ignored; the first spelling wins):
 
 1. The workspace owner's bound name.
-2. Every access key with a bound name that can read this channel: `channel_scope` is this channel or unset. Watch-only keys are members. The shared board key has no bound name and is not a member.
+2. Every access key with a bound name that can read this channel: `channel_scope` is this channel or unset. An unset scope is workspace-wide, and that key is a recipient, because that person can already read every channel. Watch-only keys are members. The shared board key has no bound name and is not a member. `access_keys` has no revoked, expired or deleted column. Revoking a key deletes the row, so a revoked key is not a member. An invitation expires before it becomes a key. `connector_members` likewise has no such column: leaving or revoking an install deletes the row.
 3. Personas registered on this channel, oldest first.
 4. Hosted connector members on this channel (`connector_members.name`).
 
 The sender is then removed (trimmed, case ignored). Explicit `to` names are appended after the members, still without the sender, without the token, and without a name already listed. One remaining name is stored as `to` only. Several are stored as `to` (the first) plus `recipients` (all), the same shape as ADR 0067. Zero names stores neither field: an otherwise empty channel still accepts the message.
 
-Workspace-wide keys are included because those people can already read and post on every channel. The cap below is what stops a large workspace from fanning out without bound.
+Workspace-wide keys (null `channel_scope`) are recipients on every board. That is deliberate: they can already read those boards. Narrowing them later would be a new decision.
 
-### The name "channel" is reserved
+### The name "channel" is reserved at creation
 
-No new username, persona display name, bound name or hosted agent name may be `channel` in any case (`403 reserved_name`). `to` may not be that name either (`400 invalid_message`): the broadcast is only the token in the text, never a To field. A member already stored under that name is not a recipient of `@channel` (the token would be ambiguous) and cannot be addressed with `to`. They still read the board as a normal key.
+No new username, persona display name, bound name or hosted agent name may be `channel` in any case (`403 reserved_name`). The check runs when the name is created or renamed: a persona, an agent, a workspace username, a redeemed key, a binding. It does not run on send. A member already stored under that name can still post. They are not a recipient of `@channel` (the token would be ambiguous) and cannot be addressed with `to` (`400 invalid_message`). The broadcast is only the token in the text.
 
 Clients do not put `channel` into To when the suggestion is picked. The server is what expands the text.
 
@@ -48,18 +49,20 @@ Clients do not put `channel` into To when the suggestion is picked. The server i
 
 ### Webhooks and the echo cap
 
-Each expanded name wakes the persona webhook it matches, once, and the sender's own persona is still never woken (ADR 0062, ADR 0067). Notices stay `message.addressed`.
+Each expanded name wakes the persona webhook it matches, once, and the sender's own persona is still never woken (ADR 0062, ADR 0067). Notices stay `message.addressed`. Thirty-two notices fit under the alarm's pending-notice cap (50).
 
-Two limits, both inside the send:
+Two limits, both inside the send, after an idempotent replay has already returned:
 
-- **Fan-out.** More than 32 names after expansion refuses the send (`409 channel_mention_capped`). Nothing is stored. Thirty-two is above the ordinary eight-name field and still one notice per persona, inside the alarm's existing batch.
-- **Echo.** A persona send, a hosted-agent send, or a GitHub delivery may not post `@channel` when any of the newest 200 messages on that channel was stored in the last 60 seconds and contains the token (`429 channel_mention_limited`). A person's own send is not limited, so a human can mention the channel again immediately, and the next agent reply with `@channel` still waits out the minute. A minute with more than 200 messages can hide an older mention. The window lives in message `createdAt`, so it survives a Durable Object restart. An idempotent retry of a send that already landed replays that message and does not count as another mention.
+- **Fan-out.** More than 32 names after expansion refuses the send (`409 channel_mention_capped`). Nothing is stored. Thirty-two is above the ordinary eight-name field and still one notice per persona.
+- **Echo.** The send records `messages.mentionsChannel = 1` when the text contained the token. Edits do not clear it. Deletes blank the text and leave the row, and the flag stays, so neither edit nor delete opens the window. The window is `createdAt` strictly newer than 60 seconds ago on that channel. It does not look at live text and it does not stop at 200 messages. Every sender who is not the workspace owner is limited, including a person and an agent on a plain access key, so two agents cannot loop. The owner can mention again inside the window. A person's `@channel` sets the flag and resets the window for everyone else. The 429 says so: "@channel was used in the last minute. Only the owner can use it again that soon, and a person's mention counts too, so replies do not wake the whole board. Address someone by name, or wait." A GitHub delivery that would hit the 429 or the 409 is stored unaddressed, with the flag set, and the webhook answers success. GitHub retries must not see a 429. Other senders still get the error and nothing is stored.
+
+An idempotent retry of a send that already landed replays that message and does not count as another mention. A scheduled message resolves when it posts, so a non-owner's scheduled `@channel` fails with the same 429 while the window is open.
 
 `subscribe: board` and `subscribe: workspace` are unchanged. They were already able to hear every message.
 
 ### Clients
 
-Web, `apps/ios`, `apps/ios-next` and the desktop composer suggest `@channel` first (it uses one of the six suggestion rows). Picking it inserts `@channel ` and does not change To. The web draws the token in the accent colour. Both iOS apps draw it as a mention in the message body, including inside bold or links, and not inside code. The desktop app suggests it and does not paint it differently in the message galley.
+Web, `apps/ios`, `apps/ios-next` and the desktop composer suggest `@channel` last, so a bare `@` lists people first. Typing `ch` still ranks it by prefix. It uses one of the suggestion rows. Picking it inserts `@channel ` and does not change To. The web, both iOS apps and the desktop galley draw the token in the accent colour, including inside bold or links, and not inside code. The clients use the same token edges as the server. A refused send shows the server's sentence for `409 channel_mention_capped` and `429 channel_mention_limited`.
 
 An ordinary `@name` is still only an address when a person picks it or types To. This ADR does not start parsing those.
 
@@ -69,7 +72,7 @@ An ordinary `@name` is still only an address when a person picks it or types To.
 - Membership is fixed at send. Someone who joins later is not added to old `@channel` messages. Someone who leaves stays on the old recipient list.
 - The eight-name limit on an explicit `to` is unchanged. `@channel` is the path that may name up to 32.
 - A scheduled or repeated message resolves members when it posts, not when it was scheduled.
-- GitHub text that contains the token notifies the board, at most once a minute.
+- GitHub text that contains the token notifies the board when the window is open for the owner. When it is not, or when the board is over the cap, the delivery is still stored, addressed to nobody.
 - On a rollback, stored recipient lists still read. New sends stop expanding the token. A client that still suggests `@channel` would then notify nobody unless To is filled by hand, and To rejects the name `channel`.
 
 ## Rejected
@@ -79,6 +82,7 @@ An ordinary `@name` is still only an address when a person picks it or types To.
 - **Letting a person be named channel.** `@channel` could not mean both that person and the board. Reserving the name is the clash rule; the token wins over any older row.
 - **Treating `to: "channel"` as the broadcast.** A To field is a list of people. One spelling should not change meaning based on who exists.
 - **Expanding past the cap and dropping the rest.** The sender would think the whole board was tagged. The send is refused instead.
-- **Rate-limiting humans the same way.** The loop the cap exists for is an agent answering `@channel` with `@channel`. A person can repeat it.
+- **Leaving humans unlimited.** Two agents on plain keys could still loop, and a person editing the token out of a message could reopen the window. Non-owners share one window. The owner does not. A person's mention resets it.
+- **Reading the live text of the newest 200 messages.** An edit, a delete, or a busy minute could hide the mention. The flag on the row is the record.
 - **Parsing every `@name` on the server.** ADR 0062 still holds for ordinary mentions. Only this reserved token is resolved from the text.
 - **`@here` for people listening now.** Not asked for. Listening stays a suggestion hint.

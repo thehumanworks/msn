@@ -2,11 +2,13 @@ import { DurableObject } from "cloudflare:workers";
 import { AGENT_SCHEMA, type AgentPrincipal, type AgentUser, AgentUsers } from "./agent-users";
 import { channelInvitation } from "./channel-invitation";
 import {
-  automatedSender,
   CHANNEL_MENTION_CAP,
-  CHANNEL_MENTION_LOOKBACK,
+  CHANNEL_MENTION_LIMITED,
+  CHANNEL_MENTION_WINDOW_MS,
+  channelMentionCapped,
   channelMentionLimited,
   expandChannelRecipients,
+  foldName,
   mentionsChannel,
 } from "./channel-mention";
 import {
@@ -977,6 +979,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Additive, so no schema_version step and safe in any merge order.
         ["messages", "claimedBy", "TEXT"],
         ["messages", "claimedAt", "TEXT"],
+        // @channel was present when the message was stored (ADR 0086). Edits and deletes do not
+        // clear it, so the echo window cannot be dodged by rewriting or removing the text.
+        // 0 on every message from before this column. Additive, so no schema_version step.
+        ["messages", "mentionsChannel", "INTEGER NOT NULL DEFAULT 0"],
         // A saved template's brief (ADR 0074): NULL for templates saved before briefs or from a
         // board without one. Additive, so no schema_version step.
         ["board_templates", "brief", "TEXT"],
@@ -1086,6 +1092,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       // indexed; serves thread reads (ADR 0063). An index, so no version bump.
       ctx.storage.sql.exec(
         "CREATE INDEX IF NOT EXISTS message_replies ON messages(channel, replyTo) WHERE replyTo IS NOT NULL",
+      );
+      // After the column loop, which adds mentionsChannel. Serves the echo-window lookup.
+      ctx.storage.sql.exec(
+        "CREATE INDEX IF NOT EXISTS message_channel_mentions ON messages(channel, createdAt) WHERE mentionsChannel = 1",
       );
     });
     ctx.storage.transactionSync(() => this.coverSearchGap());
@@ -4648,6 +4658,8 @@ export class MsnDurableObject extends DurableObject<Env> {
   /**
    * Names @channel expands to (ADR 0086): the owner, bound keys that can read this channel,
    * this channel's personas, then its hosted agents. The sender is removed by the expander.
+   * access_keys and connector_members have no revoked, expiry or deleted column: revocation
+   * deletes the row, so a removed key is already absent here.
    */
   private channelMemberNames(channel: string): string[] {
     const names: string[] = [];
@@ -4680,22 +4692,35 @@ export class MsnDurableObject extends DurableObject<Env> {
     return names;
   }
 
-  /** Newest messages on the board, capped. The window itself is applied in channelMentionLimited. */
-  private recentMentionTexts(channel: string): { text: string; createdAt: string }[] {
-    return this.ctx.storage.sql
-      .exec<{ text: string; createdAt: string }>(
-        `SELECT text, createdAt FROM messages
-         WHERE channel = ? AND deleted = 0
-         ORDER BY id DESC LIMIT ?`,
-        channel,
-        CHANNEL_MENTION_LOOKBACK,
-      )
-      .toArray();
+  /** The workspace owner, by the bound name on the tenant. Everyone else is limited. */
+  private senderIsOwner(username: string): boolean {
+    const owner = this.tenantRow()?.bound_username;
+    return owner != null && foldName(owner) === foldName(username);
+  }
+
+  /**
+   * True when a flagged @channel is still inside the window. Deleted rows count: removing the
+   * message does not open the window. `createdAt` is ISO UTC, so the comparison is the time.
+   */
+  private channelMentionRecent(channel: string, now: number): boolean {
+    const cutoff = new Date(now - CHANNEL_MENTION_WINDOW_MS).toISOString();
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `SELECT 1 FROM messages
+           WHERE channel = ? AND mentionsChannel = 1 AND createdAt > ?
+           LIMIT 1`,
+          channel,
+          cutoff,
+        )
+        .toArray().length > 0
+    );
   }
 
   /**
    * When the text mentions @channel, replace the address with every other member (ADR 0086).
-   * Runs inside the send transaction, after an idempotent replay has already returned.
+   * Returns whether the stored row should carry the mention flag. Runs inside the send
+   * transaction, after an idempotent replay has already returned. A quote is not scanned.
    */
   private applyChannelMention(
     channel: string,
@@ -4703,49 +4728,50 @@ export class MsnDurableObject extends DurableObject<Env> {
     content: string,
     type: ContentType,
     correlation: Correlation,
-    personaId: string | null,
-    agentUserId: string | null,
-  ): void {
-    if (type !== "text/plain" || !mentionsChannel(content)) return;
+  ): boolean {
+    if (type !== "text/plain" || !mentionsChannel(content)) return false;
     if (correlation.choices !== undefined)
       throw new HttpError(
         400,
         "invalid_choices",
         "A question with choices cannot mention @channel. Address one person.",
       );
-    const now = Date.now();
-    if (
-      channelMentionLimited(
-        automatedSender({ username, personaId, agentUserId }),
-        this.recentMentionTexts(channel),
-        now,
-      )
-    )
-      throw new HttpError(
-        429,
-        "channel_mention_limited",
-        "An agent can mention @channel once a minute on this board, so replies do not wake everyone again. Address someone by name, or wait.",
-      );
+    const quiet = username === GITHUB_SENDER;
+    const limited = channelMentionLimited(
+      this.senderIsOwner(username),
+      this.channelMentionRecent(channel, Date.now()),
+    );
+    if (limited) {
+      if (quiet) {
+        delete correlation.to;
+        delete correlation.recipients;
+        return true;
+      }
+      throw new HttpError(429, "channel_mention_limited", CHANNEL_MENTION_LIMITED);
+    }
     const names = expandChannelRecipients(
       this.channelMemberNames(channel),
       username,
       addressees(correlation),
     );
-    if (names.length > CHANNEL_MENTION_CAP)
-      throw new HttpError(
-        409,
-        "channel_mention_capped",
-        `@channel can notify at most ${CHANNEL_MENTION_CAP} people besides you. This board has ${names.length}. Address people by name.`,
-      );
+    if (names.length > CHANNEL_MENTION_CAP) {
+      if (quiet) {
+        delete correlation.to;
+        delete correlation.recipients;
+        return true;
+      }
+      throw new HttpError(409, "channel_mention_capped", channelMentionCapped(names.length));
+    }
     if (!names.length) {
       delete correlation.to;
       delete correlation.recipients;
-      return;
+      return true;
     }
     const address = addressFields(names);
     correlation.to = address.to;
     if (address.recipients) correlation.recipients = address.recipients;
     else delete correlation.recipients;
+    return true;
   }
 
   private send(
@@ -4819,7 +4845,6 @@ export class MsnDurableObject extends DurableObject<Env> {
           return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: true };
         }
       }
-      reserveChannelName(username);
       // replyTo is only interpretable within one channel's log; a tombstoned id still counts as
       // "existed here", so a reply racing an admin deletion is not rejected.
       if (
@@ -4918,7 +4943,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             `Message ${correlation.replaces} was already replaced by message ${old.replacedBy}. Replace that one instead.`,
           );
       }
-      this.applyChannelMention(channel, username, content, type, correlation, personaId, agentUserId);
+      const mentioned = this.applyChannelMention(channel, username, content, type, correlation);
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
@@ -4950,7 +4975,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         correlation.choices === undefined ? null : this.resolveAnswerer(channel, correlation.to as string);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer, replaces, agentUserId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer, replaces, agentUserId, mentionsChannel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -4970,6 +4995,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           answerer,
           correlation.replaces ?? null,
           agentUserId,
+          mentioned ? 1 : 0,
         )
         .one();
       if (correlation.replaces !== undefined)
