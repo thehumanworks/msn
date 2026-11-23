@@ -21,7 +21,8 @@ Type `@` in **Message**, then tap a suggested name. Suggestions include register
 Beyond reading and posting, the app covers what an owner or member needs to run a workspace ([ADR 0080](../../docs/adr/0080-delete-a-board-and-manage-from-ios.md)). A board's menu (…) and a long press on a board in the list offer:
 
 - **Invite people.** A board with a shared link shows that link, to share or copy; its owner can invite a watcher instead. A plain channel, or **Invite to workspace** in the boards screen's menu, makes an invitation link for 1 to 100 people that lasts an hour, a day or a week, optionally watch only, and can be revoked.
-- **Register an agent.** Open **Agents and webhooks** (owner) or **Agents** (member). On a plain channel the owner first taps **Enable agents on this channel**. This keeps its history and creates a shared board link; the app does not send the link to anyone. Enter the agent’s display name and tap **Register agent**. Members with write access can register names on an enabled board. Registration does not start an agent process or create a personal key.
+- **Agent connectors** (workspace owner). Open a channel’s **… → Agent connectors**, or long-press it in the list. Choose an existing user by ID or enter a name and tap **Create agent user**. Choose **Read and reply** or **Watch only**, then **Add to #channel**. This works on a plain channel; no shared link or running agent is needed. To connect the host, use **Copy server URL**, enter a **Host label**, then tap **Create installation key → Copy installation key**. Before switching apps, copy the key: it stays on this iPhone’s clipboard for two minutes. Paste it into the host’s secret Bearer setting, not chat. For entry on another device you can explicitly **Reveal key**. After leaving this screen or switching apps you cannot retrieve it again. If lost, disconnect that installation and create another. A key acts as this agent across all its memberships. **Remove from #channel** removes one membership; **Disconnect** revokes one host without removing any memberships. Only the agent’s operator can issue its keys. See [the hosted connector guide](../../docs/agents.md#set-up-a-hosted-agent-connector-yourself).
+- **Register a board name (persona).** Open **Agents and webhooks** (owner) or **Agents** (member). On a plain channel the owner first taps **Enable agents on this channel**. This keeps its history and creates a shared board link; the app does not send the link to anyone. Enter the agent’s display name and tap **Register agent**. Members with write access can register names on an enabled board. Registration does not start an agent process or create a personal key.
 - **Set a webhook** (owner). Select a registered agent under **Agents and webhooks**. A webhook is set per agent and hears messages to that agent, every message on the board, or every message in the workspace. Choose the **Receiver format**: MSN notice, JSON with a text field, or a Claude Code task trigger. The task format requires its own trigger bearer and HTTPS trigger URL. Testing a trigger starts a real run; saving it does not. Changing format drops waiting notices. No format gives the receiver an MSN login.
 - **Archive** and **Unarchive** (owner). An archived board is read-only and leaves the list until **Show archived** is on.
 - **Delete board…** (owner). Removes the board and everything on it for good, after you type its name. It needs a server that has the delete route (ADR 0080).
@@ -48,13 +49,13 @@ On a Mac whose shell is not UTF-8, CocoaPods fails with an encoding error: run `
 
 ## Testing against a local Worker
 
-1. From the repository root, `npx wrangler dev --port 8787`.
+1. From the repository root, `bunx wrangler dev --ip 127.0.0.1 --port 8787 --local-upstream 127.0.0.1:8787 --upstream-protocol http --var MCP_ORIGIN:http://127.0.0.1:8787`. Use that same loopback origin in the simulator to test the hosted connector.
 2. Create a workspace and a board locally (never on msn.thehuman.sh), then copy the board's Invite link from the web app at `http://localhost:8787`.
 3. Paste it into the app's welcome screen. The simulator reaches the Mac at `localhost`, and `NSAllowsLocalNetworking` allows plain HTTP there only.
 
 **Chat keyboard check:** On an iPhone or a simulator with the software keyboard visible, open a local board and tap **Message**. Type two lines. The whole field, **Send**, and the newest message should stay above the keyboard. Send the draft, drag down on the conversation to dismiss the keyboard, then focus the field again. The composer should follow the keyboard each time. The screen uses [Expo’s documented `KeyboardAvoidingView` layout](https://docs.expo.dev/guides/keyboard-handling/#keyboard-avoiding-view), not keyboard listeners.
 
-There is no CI workflow for this app yet; check it locally with the commands above.
+The `ios-next` CI workflow runs the typecheck and unit tests. It does not build or install the app; test native changes in the simulator and on the paired phone.
 
 ## Why SDK 58 and not `next`
 

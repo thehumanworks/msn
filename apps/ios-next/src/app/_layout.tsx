@@ -45,6 +45,7 @@ export default function Layout() {
             <Stack.Protected guard={session !== null}>
               <Stack.Screen name="index" options={{ title: "Boards", headerLargeTitleEnabled: true }} />
               <Stack.Screen name="board/[name]" options={{ title: "" }} />
+              <Stack.Screen name="agent-connectors" options={{ title: "Agent connectors", contentStyle: { backgroundColor: color.grouped } }} />
               <Stack.Screen name="agents" options={{ title: "Agents" }} />
               <Stack.Screen
                 name="invite"

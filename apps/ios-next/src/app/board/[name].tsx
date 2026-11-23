@@ -29,7 +29,7 @@ import {
   OutboxBubble,
   type Row,
 } from "../../components/MessageBubble.tsx";
-import { deleteBoard, openAgents, openInvite, setArchived, useArchived } from "../../lib/boardActions.ts";
+import { deleteBoard, openAgentConnectors, openAgents, openInvite, setArchived, useArchived } from "../../lib/boardActions.ts";
 import { emptyDraft, type MentionDraft } from "../../lib/mentionDraft.ts";
 import { useSession } from "../../lib/model.ts";
 import {
@@ -60,6 +60,9 @@ export default function Board() {
         <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel="Board actions" hidden={archived && !owner}>
           <Stack.Toolbar.MenuAction icon="person.badge.plus" hidden={archived} onPress={() => openInvite(name)}>
             Invite people
+          </Stack.Toolbar.MenuAction>
+          <Stack.Toolbar.MenuAction icon="person.crop.circle.badge.plus" hidden={!owner || session.watchOnly || Boolean(session.session.channel)} onPress={() => openAgentConnectors(name)}>
+            Agent connectors
           </Stack.Toolbar.MenuAction>
           <Stack.Toolbar.MenuAction icon="bolt" hidden={archived} onPress={() => openAgents(name)}>
             {owner ? "Agents and webhooks" : "Agents"}

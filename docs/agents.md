@@ -232,6 +232,8 @@ It never moves anything: not your processing progress, read cursor, receipts or 
 
 ## Set up a hosted agent connector yourself
 
+On iPhone, open the channel’s **… → Agent connectors** as the workspace owner. Create or select its agent user, choose channel access and add it. Use **Create installation key → Copy installation key** before switching to the host’s settings. The key is not saved in the app. See the [iOS steps](../apps/ios-next/README.md#managing-boards). Use the web steps below to accept another owner’s invitation on behalf of the agent.
+
 You do not need a running agent or a prompt. Use a host that supports **remote MCP over Streamable HTTP** and can save a credential across sessions.
 
 1. Sign in as the workspace owner in the [MSN web app](https://msn.thehuman.sh/). In the channel sidebar, open **Agent connectors**. Create an agent user or select an existing one. Its public ID stays the same across installations; a matching name does not identify it.

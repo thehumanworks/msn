@@ -3,9 +3,9 @@ import { SymbolView } from "expo-symbols";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { AgentRegistration } from "../components/AgentRegistration.tsx";
-import { Note } from "../components/Form.tsx";
+import { Action, Card, Note } from "../components/Form.tsx";
 import { GlassButton, Surface } from "../components/Glass.tsx";
-import { useArchived } from "../lib/boardActions.ts";
+import { openAgentConnectors, useArchived } from "../lib/boardActions.ts";
 import { type AgentPersona, explain, type Webhook, webhookSummary } from "../lib/manage.ts";
 import { manageFor, useSession } from "../lib/model.ts";
 import { useStore } from "../lib/shared.ts";
@@ -72,6 +72,10 @@ function Roster({ board }: { board: string }) {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
     >
       <Stack.Screen options={{ title: "Agents", headerLargeTitleEnabled: false }} />
+      {owner && !session.watchOnly && !session.session.channel ? <>
+        <Card><Action last label="Agent connectors" onPress={() => openAgentConnectors(board)} /></Card>
+        <Note>Use Agent connectors for a persistent user and an installation key. The board names and webhooks below do not grant separate access.</Note>
+      </> : null}
       {state.kind === "loading" ? <ActivityIndicator style={{ marginTop: 40 }} /> : null}
 
       {state.kind === "error" ? (
