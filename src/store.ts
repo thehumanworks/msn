@@ -844,6 +844,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS attachment_signing (
           singleton INTEGER PRIMARY KEY CHECK (singleton = 1), secret BLOB NOT NULL
         );
+        -- Keys whose SQL row is already gone and whose R2 delete failed. Retried later. Never a live object.
+        CREATE TABLE IF NOT EXISTS attachment_gc (
+          key TEXT PRIMARY KEY, failedAt TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS github_hook (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), secret TEXT NOT NULL, createdAt TEXT NOT NULL
         );
@@ -2269,6 +2273,25 @@ export class MsnDurableObject extends DurableObject<Env> {
 
   /** Last push time per [board, reason, person]; memory only, so it resets when the object restarts. */
   private pushSentAt = new Map<string, number>();
+  /**
+   * One attachment body at a time. A Durable Object can run another request at an await, and two
+   * 25 MB buffers plus their copies would pass the 128 MB isolate limit.
+   */
+  private attachmentGate: Promise<void> = Promise.resolve();
+
+  private async withAttachmentSlot<T>(run: () => Promise<T>): Promise<T> {
+    const previous = this.attachmentGate;
+    let release: () => void = () => {};
+    this.attachmentGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  }
   /** Replaced in tests. */
   pushCooldownMs = 60_000;
   /** Replaced in tests; production calls the push service directly. */
@@ -2357,7 +2380,9 @@ export class MsnDurableObject extends DurableObject<Env> {
                     name: file.name,
                     mime: file.mime,
                     size: file.size,
-                    url: file.url,
+                    // Absolute, so a receiver off this host can open it with its own key.
+                    // The name is the sender's; it leaves the workspace in the notice (ADR 0087).
+                    url: `${hook.origin}${file.url}`,
                     ...(file.width !== undefined ? { width: file.width, height: file.height } : {}),
                   })),
                 }
@@ -3218,10 +3243,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         sqliteFiles +
         sum("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM board_briefs WHERE channel = ?");
       if (r2Files)
-        sql.exec(
-          "UPDATE usage SET attachmentBytes = MAX(0, attachmentBytes - ?) WHERE singleton = 1",
-          r2Files,
-        );
+        sql.exec("UPDATE usage SET attachmentBytes = attachmentBytes - ? WHERE singleton = 1", r2Files);
       const reactions = sql.exec("DELETE FROM reactions WHERE channel = ?", channel).rowsWritten;
       // Deleted text must not stay findable (ADR 0037). Before the messages go: this needs their ids.
       sql.exec(
@@ -3666,9 +3688,12 @@ export class MsnDurableObject extends DurableObject<Env> {
   /** Adds each message's current labels; one range query per page. */
   /** Every message output carries its labels (ADR 0032), attachments (ADR 0035), reactions (ADR 0047) and delivery (ADR 0082). */
   private withLabels(channel: string, messages: Message[]): Message[] {
+    // One tenant per workspace. Passing it in avoids a find() per attachment row, and a gap in the
+    // id range can no longer sign a URL with an empty tenant.
+    const tenant = messages[0]?.tenant ?? "";
     return this.withDelivery(
       channel,
-      this.withReactions(channel, this.withAttachments(channel, this.labelsOnly(channel, messages))),
+      this.withReactions(channel, this.withAttachments(tenant, channel, this.labelsOnly(channel, messages))),
     );
   }
 
@@ -4164,7 +4189,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     return this.withDelivery(
       channel,
-      this.withReactions(channel, this.withAttachments(channel, messages), true),
+      this.withReactions(channel, this.withAttachments(messages[0]?.tenant ?? "", channel, messages), true),
       true,
     );
   }
@@ -4790,6 +4815,7 @@ export class MsnDurableObject extends DurableObject<Env> {
               "The original message was deleted; retries cannot resurrect it.",
             );
           const { digest: _digest, deleted: _deleted, ...message } = old;
+          // Rebuild the message, including fresh download and preview URLs. The signed query is not stored.
           return { message: this.withLabels(channel, [toMessage(message, tenant)])[0], replayed: true };
         }
       }
@@ -5018,7 +5044,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** Adds attachment metadata to a page of same-channel messages with one range query. */
-  private withAttachments(channel: string, messages: Message[]): Message[] {
+  private withAttachments(tenant: string, channel: string, messages: Message[]): Message[] {
     if (!messages.length) return messages;
     const rows = this.ctx.storage.sql
       .exec<{
@@ -5045,8 +5071,6 @@ export class MsnDurableObject extends DurableObject<Env> {
     const exp = previewExpiry();
     const byMessage = new Map<number, Attachment[]>();
     for (const row of rows) {
-      const message = messages.find((item) => item.id === row.messageId);
-      const tenant = message?.tenant ?? "";
       const mime = row.mime ?? row.mediaType;
       const path = `/api/tenants/${tenant}/channels/${channel}/messages/${row.messageId}/attachments/${row.position}`;
       const sig = signPreview(secret, previewPayload(tenant, channel, row.messageId, row.position, exp));
@@ -5062,7 +5086,9 @@ export class MsnDurableObject extends DurableObject<Env> {
         url: path,
         downloadUrl: signed,
         ...(inlineMedia(mime) ? { previewUrl: signed } : {}),
-        ...(row.width != null && row.height != null ? { width: row.width, height: row.height } : {}),
+        ...(row.width != null && row.height != null && row.width > 0 && row.height > 0
+          ? { width: row.width, height: row.height }
+          : {}),
       };
       const list = byMessage.get(row.messageId) ?? [];
       list.push(file);
@@ -5086,8 +5112,37 @@ export class MsnDurableObject extends DurableObject<Env> {
     return `${tenant}/${channel}/${id}`;
   }
 
+  /**
+   * Best-effort R2 delete, in batches. A failure is logged and remembered for a later retry.
+   * It does not throw: the SQL commit has already happened, and a delete error must not skip
+   * waking listeners or fail an upload that already stored its own object.
+   * Keys are UUIDs and are not reused, so retrying a delete cannot remove a live object.
+   * Objects we lose track of are not listed from the bucket; that sweep would risk live data.
+   */
   private async removeObjects(keys: string[]): Promise<void> {
-    await Promise.all(keys.map((key) => this.env.ATTACHMENTS.delete(key)));
+    const remembered = this.ctx.storage.sql
+      .exec<{ key: string }>("SELECT key FROM attachment_gc ORDER BY failedAt LIMIT 100")
+      .toArray()
+      .map((row) => row.key);
+    const pending = [...new Set([...keys, ...remembered])];
+    for (let start = 0; start < pending.length; start += 1000) {
+      const batch = pending.slice(start, start + 1000);
+      try {
+        await this.env.ATTACHMENTS.delete(batch);
+        for (const key of batch) this.ctx.storage.sql.exec("DELETE FROM attachment_gc WHERE key = ?", key);
+      } catch (error) {
+        console.error(
+          `attachment delete failed for ${batch.length} object(s): ${error instanceof Error ? error.message : "unknown"}`,
+        );
+        const at = new Date().toISOString();
+        for (const key of batch)
+          this.ctx.storage.sql.exec(
+            "INSERT INTO attachment_gc(key, failedAt) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET failedAt = excluded.failedAt",
+            key,
+            at,
+          );
+      }
+    }
   }
 
   /**
@@ -5160,7 +5215,8 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
       });
     } catch (error) {
-      await this.env.ATTACHMENTS.delete(key);
+      // The row was not kept. Forget the object, but a delete failure must not hide the real error.
+      await this.removeObjects([key]);
       const winner = this.ctx.storage.sql
         .exec<{ id: string }>("SELECT id FROM attachments WHERE channel = ? AND sha = ?", channel, hash)
         .toArray()[0];
@@ -5170,8 +5226,12 @@ export class MsnDurableObject extends DurableObject<Env> {
     return { id, bytes: data.byteLength, created: true };
   }
 
-  /** One raw body, or a multipart body of several files. */
+  /** One raw body, or a multipart body of several files. Bodies are read one at a time. */
   private async upload(tenant: string, channel: string, request: Request): Promise<Response> {
+    return this.withAttachmentSlot(() => this.readUpload(tenant, channel, request));
+  }
+
+  private async readUpload(tenant: string, channel: string, request: Request): Promise<Response> {
     if (isMultipart(request)) {
       const stored: { id: string; bytes: number }[] = [];
       await readMultipart(request, async (file) => {
@@ -5188,28 +5248,12 @@ export class MsnDurableObject extends DurableObject<Env> {
     return json({ attachment: { id: saved.id, bytes: saved.bytes } }, saved.created ? 201 : 200);
   }
 
-  /** Serves one file of a live message. Only sniffed image types render inline. SVG and HTML do not. */
-  private async download(
-    tenant: string,
-    channel: string,
-    message: number,
-    index: number,
-    url?: URL,
-  ): Promise<Response> {
-    if (url?.searchParams.has("sig") || url?.searchParams.has("exp")) {
-      if (
-        !previewValid(
-          this.signingSecret(),
-          tenant,
-          channel,
-          message,
-          index,
-          url.searchParams.get("exp"),
-          url.searchParams.get("sig"),
-        )
-      )
-        throw new HttpError(401, "unauthorized", "This file link is invalid or has expired.");
-    }
+  /**
+   * Serves one file of a live message. Only sniffed image types render inline. SVG and HTML do not.
+   * The caller has already authorized: either a channel key, or a signature checked before this.
+   * A stray `exp` or `sig` on an authorized request is ignored, so a bearer is not rejected.
+   */
+  private async download(tenant: string, channel: string, message: number, index: number): Promise<Response> {
     const row = this.ctx.storage.sql
       .exec<{
         deleted: number;
@@ -5233,17 +5277,38 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
     if (!row.name || !row.mediaType || !row.id)
       throw new HttpError(404, "attachment_not_found", "This message has no attachment at that index.");
-    const mime = row.mime ?? row.mediaType;
-    let body: ArrayBuffer | Uint8Array | null = row.data;
+    let mime = row.mime ?? row.mediaType;
     if (row.backend === "r2") {
       const object = await this.env.ATTACHMENTS.get(this.objectKey(tenant, channel, row.id));
-      body = object ? await object.arrayBuffer() : null;
+      if (!object)
+        throw new HttpError(404, "attachment_not_found", "This message has no attachment at that index.");
+      return new Response(object.body, {
+        headers: {
+          "Content-Type": mime,
+          "Content-Length": String(object.size),
+          "Content-Disposition": contentDisposition(inlineMedia(mime), row.name),
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "private, no-store",
+        },
+      });
     }
-    if (!body)
+    if (!row.data)
       throw new HttpError(404, "attachment_not_found", "This message has no attachment at that index.");
-    return new Response(body, {
+    const bytes = new Uint8Array(row.data);
+    // ADR 0035 rows stored the client's type. Sniff once on first download and remember it.
+    if (!row.mime) {
+      mime = sniffedType(bytes);
+      this.ctx.storage.sql.exec(
+        "UPDATE attachments SET mime = ? WHERE channel = ? AND id = ?",
+        mime,
+        channel,
+        row.id,
+      );
+    }
+    return new Response(bytes, {
       headers: {
         "Content-Type": mime,
+        "Content-Length": String(bytes.byteLength),
         "Content-Disposition": contentDisposition(inlineMedia(mime), row.name),
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
@@ -5277,7 +5342,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (sqlite) this.ctx.storage.sql.exec("UPDATE usage SET bytes = bytes - ? WHERE singleton = 1", sqlite);
     if (r2)
       this.ctx.storage.sql.exec(
-        "UPDATE usage SET attachmentBytes = MAX(0, attachmentBytes - ?) WHERE singleton = 1",
+        "UPDATE usage SET attachmentBytes = attachmentBytes - ? WHERE singleton = 1",
         r2,
       );
   }
@@ -5323,7 +5388,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     }
     if (r2)
       this.ctx.storage.sql.exec(
-        "UPDATE usage SET attachmentBytes = MAX(0, attachmentBytes - ?) WHERE singleton = 1",
+        "UPDATE usage SET attachmentBytes = attachmentBytes - ? WHERE singleton = 1",
         r2,
       );
     return sqlite;
@@ -7458,23 +7523,29 @@ export class MsnDurableObject extends DurableObject<Env> {
           return new Response(null, { status: 204 });
         }
       } else {
-        // A signed file link carries its own credential (ADR 0087). Checked inside download.
+        // A signed file link is a credential only when both exp and sig are present and valid.
+        // One without the other, or a stale signature, falls through to the channel key so a
+        // bearer is not turned into a 401 (ADR 0087).
         if (
           request.method === "GET" &&
           rest[0] === "channels" &&
           rest[2] === "messages" &&
           rest[4] === "attachments" &&
           rest.length === 6 &&
-          url.searchParams.has("sig")
-        ) {
-          this.requireTenant();
-          return await this.download(
+          url.searchParams.has("sig") &&
+          url.searchParams.has("exp") &&
+          previewValid(
+            this.signingSecret(),
             tenant,
             slug(rest[1]),
             messageId(rest[3]),
             integer(rest[5], 0, 1000),
-            url,
-          );
+            url.searchParams.get("exp"),
+            url.searchParams.get("sig"),
+          )
+        ) {
+          this.requireTenant();
+          return await this.download(tenant, slug(rest[1]), messageId(rest[3]), integer(rest[5], 0, 1000));
         }
         const hash = await digest(bearer(request));
         // Watch-only keys (ADR 0039) read and never write. One gate in front of every route, so a
@@ -7550,11 +7621,36 @@ export class MsnDurableObject extends DurableObject<Env> {
           this.requireScope(capability, channel);
           this.requireActive(channel);
           const refs: { id: string; name: string }[] = [];
-          const fields = await readMultipart(request, async (file) => {
-            const name = attachmentName(file.name);
-            const saved = await this.storeObject(tenant, channel, file.bytes);
-            refs.push({ id: saved.id, name });
-          });
+          const allowedField = new Set(["username", "text", "contentType", "replyTo", "correlationId", "to"]);
+          const fields = await this.withAttachmentSlot(() =>
+            readMultipart(
+              request,
+              async (file) => {
+                const name = attachmentName(file.name);
+                const saved = await this.storeObject(tenant, channel, file.bytes);
+                refs.push({ id: saved.id, name });
+              },
+              undefined,
+              (name, value) => {
+                if (!allowedField.has(name))
+                  throw new HttpError(
+                    400,
+                    "invalid_attachment",
+                    `Unknown multipart field ${JSON.stringify(name)}.`,
+                  );
+                // Cheap checks before the next file is buffered. Text may arrive later, so JSON is
+                // checked with the rest of the send, after the body has been read.
+                if (name === "contentType" && value !== "text/plain" && value !== "application/json")
+                  throw new HttpError(
+                    400,
+                    "invalid_content_type",
+                    "contentType must be text/plain or application/json.",
+                  );
+                if (name === "to") recipients(value);
+                // sendAt is not in the allowlist: a scheduled message cannot carry files.
+              },
+            ),
+          );
           input = {
             username: fields.username,
             text: fields.text,
@@ -7933,7 +8029,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             request.method === "GET"
           ) {
             this.requireChannel(channel);
-            return await this.download(tenant, channel, messageId(rest[3]), integer(rest[5], 0, 1000), url);
+            return await this.download(tenant, channel, messageId(rest[3]), integer(rest[5], 0, 1000));
           }
           if (change) {
             this.requireChannel(channel);

@@ -100,21 +100,25 @@ export function decodeEventPage(raw: unknown, expected: EventExpectations): Even
 
 const INLINE_IMAGES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
-/** Absent field means no files. A present list is checked so a bad payload is not shown as a chip. */
+/**
+ * Absent, or not a list, means no files. One bad item is skipped so the message text still shows.
+ * A width or height below 1 is ignored; it does not drop the file or the message.
+ */
 function decodeAttachments(raw: unknown): Attachment[] | undefined {
-  if (!Array.isArray(raw)) bad("attachments");
-  if (!raw.length) return undefined;
-  return raw.map((item) => {
-    const file = obj(item, "attachment");
-    if (!safeInt(file.index, 0)) bad("attachment");
-    if (typeof file.id !== "string" || !file.id) bad("attachment");
-    if (typeof file.name !== "string" || !file.name) bad("attachment");
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  const files: Attachment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const file = item as Record<string, unknown>;
+    if (!safeInt(file.index, 0)) continue;
+    if (typeof file.id !== "string" || !file.id) continue;
+    if (typeof file.name !== "string" || !file.name) continue;
     const mime = typeof file.mime === "string" ? file.mime : file.mediaType;
     const size = typeof file.size === "number" ? file.size : file.bytes;
-    if (typeof mime !== "string" || !mime) bad("attachment");
-    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) bad("attachment");
+    if (typeof mime !== "string" || !mime) continue;
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) continue;
     const attachment: Attachment = {
-      index: file.index,
+      index: file.index as number,
       id: file.id,
       name: file.name,
       mediaType: mime,
@@ -126,13 +130,13 @@ function decodeAttachments(raw: unknown): Attachment[] | undefined {
     if (typeof file.downloadUrl === "string") attachment.downloadUrl = file.downloadUrl;
     // SVG and HTML never preview, even if a preview URL is present.
     if (typeof file.previewUrl === "string" && INLINE_IMAGES.has(mime)) attachment.previewUrl = file.previewUrl;
-    if (file.width !== undefined || file.height !== undefined) {
-      if (!safeInt(file.width, 1) || !safeInt(file.height, 1)) bad("attachment");
+    if (safeInt(file.width, 1) && safeInt(file.height, 1)) {
       attachment.width = file.width as number;
       attachment.height = file.height as number;
     }
-    return attachment;
-  });
+    files.push(attachment);
+  }
+  return files.length ? files : undefined;
 }
 
 export function decodeMessage(raw: unknown): Message {

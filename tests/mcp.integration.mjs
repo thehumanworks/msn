@@ -207,9 +207,12 @@ try {
   );
   await reviewer.ok("commit", { through: empty.nextCursor });
 
-  // Attachments (ADR 0035): evidence travels with the message, not on one agent's disk.
+  // Attachments (ADR 0087): evidence travels with the message, not on one agent's disk.
   await writeFile(join(dir, "build.log"), "step 1 ok\nstep 2 FAILED\n");
-  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "base64",
+  );
   await writeFile(join(dir, "shot.png"), png);
   const attached = await lead.ok("send", {
     text: "build failed, log and screenshot attached",
@@ -220,7 +223,7 @@ try {
     attached.message.attachments.map((a) => [a.index, a.name, a.mediaType, a.bytes]),
     [
       [0, "build.log", "text/plain", 24],
-      [1, "shot.png", "image/png", 12],
+      [1, "shot.png", "image/png", png.length],
     ],
   );
   // A retry with the same key and files re-uploads the same bytes and replays one message.

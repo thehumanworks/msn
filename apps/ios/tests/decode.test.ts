@@ -249,5 +249,14 @@ test("attachments decode when present and stay absent otherwise (ADR 0087)", asy
   assert.equal(file?.[0].previewUrl, "/a?sig=1");
   assert.equal(file?.[0].width, 1);
   assert.equal(file?.[1].previewUrl, undefined);
-  assert.throws(() => decodeMessage({ ...raw, attachments: [{ index: 0 }] }), ProtocolError);
+  const kept = decodeMessage({ ...raw, text: "still here", attachments: [{ index: 0 }, file?.[0]] });
+  assert.equal(kept.text, "still here");
+  assert.equal(kept.attachments?.length, 1);
+  assert.equal(kept.attachments?.[0].name, "shot.png");
+  const zero = decodeMessage({
+    ...raw,
+    attachments: [{ index: 0, id: "abc", name: "shot.png", mime: "image/png", size: 4, width: 0, height: 1 }],
+  });
+  assert.equal(zero.attachments?.[0].name, "shot.png");
+  assert.equal(zero.attachments?.[0].width, undefined);
 });

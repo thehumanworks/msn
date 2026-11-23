@@ -193,7 +193,8 @@ export type Notice = {
   createdAt: string;
   /**
    * Files on the message (ADR 0087). Absent when it has none, so a text notice stays the id list.
-   * `url` still needs the receiver's own key. The bytes are not included.
+   * `url` is absolute and still needs the receiver's own key. The name is the sender's and leaves
+   * the workspace. The bytes are not included.
    */
   attachments?: {
     index: number;
@@ -207,11 +208,21 @@ export type Notice = {
   }[];
 };
 
-export function noticeBody(notice: Notice): string {
+function encodedNotice(notice: Notice): string {
   const body = JSON.stringify(notice);
-  // Ids and short names only, so this never trips; it guards against a future field growing.
   if (new TextEncoder().encode(body).length > MAX_NOTICE_BYTES) throw new Error("webhook notice too large");
   return body;
+}
+
+/** The notice, or the same notice without its file list when that list is what would drop the wake. */
+export function noticeBody(notice: Notice): string {
+  try {
+    return encodedNotice(notice);
+  } catch (error) {
+    if (!notice.attachments?.length) throw error;
+    const { attachments: _attachments, ...rest } = notice;
+    return encodedNotice(rest);
+  }
 }
 
 /** Longest bearer key accepted, in characters. */

@@ -347,9 +347,40 @@ describe("persona webhooks", () => {
         size: 13,
       }),
     ]);
-    expect(body.attachments[0].url).toContain("/attachments/0");
+    expect(body.attachments[0].url).toBe(
+      `https://msn.test/api/tenants/${f.tenant}/channels/work/messages/1/attachments/0`,
+    );
     expect(JSON.stringify(body.attachments)).not.toContain("sig=");
     expect(f.sent[0].body).not.toContain("build failed");
+  });
+
+  it("still queues a notice when a message carries ten long file names", async () => {
+    const f = await fixture();
+    await f.register("rev", "https://agent.example.com/wake");
+    const name = (i: number) => `${"n".repeat(254)}${i}`;
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i += 1) {
+      const raw = await exports.default.fetch(
+        `https://msn.test/api/tenants/${f.tenant}/channels/work/attachments`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${f.agent}`, "Content-Type": "application/octet-stream" },
+          body: `file-${i}\n`,
+        },
+      );
+      expect(raw.status).toBe(201);
+      ids.push((await raw.json<{ attachment: { id: string } }>()).attachment.id);
+    }
+    const sent = await say(f, "please review", {
+      to: "reviewer",
+      attachments: ids.map((id, i) => ({ id, name: name(i) })),
+    });
+    expect(sent.status).toBe(201);
+    await vi.waitFor(() => expect(f.sent).toHaveLength(1));
+    const body = JSON.parse(f.sent[0].body);
+    expect(body.attachments).toHaveLength(10);
+    expect(body.attachments[0].name).toBe(name(0));
+    expect(body.attachments[0].url.startsWith(`https://msn.test/api/tenants/${f.tenant}/`)).toBe(true);
   });
 
   it("delivers generic text envelopes and direct task triggers only when the owner opts in", async () => {

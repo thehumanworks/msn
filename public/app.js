@@ -534,13 +534,23 @@ const attachmentMime = (file) => file.mime || file.mediaType;
 const attachmentSize = (file) => file.size ?? file.bytes;
 
 /** Opens the image at its full size. The preview itself stays inside the bubble. */
-function openAttachment(src, name) {
+function openAttachment(src, name, fallback) {
   const dialog = $("attachment-viewer");
   if (!dialog.dataset.bound) {
     dialog.dataset.bound = "1";
     dialog.addEventListener("click", () => dialog.close());
   }
   const image = dialog.querySelector("img");
+  image.onerror = () => {
+    if (image.dataset.fallback || !fallback) return;
+    image.dataset.fallback = "1";
+    fallback()
+      .then((blob) => {
+        image.src = URL.createObjectURL(blob);
+      })
+      .catch(() => {});
+  };
+  delete image.dataset.fallback;
   image.src = src;
   image.alt = name;
   dialog.showModal();
@@ -559,16 +569,30 @@ function attachmentList(message) {
       image.loading = "lazy";
       image.className = "attachment-preview";
       const preview = file.previewUrl;
+      const connection = session;
+      const fallback = () => attachmentBlob(message, file.index, connection);
+      const useBlob = (blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        image.src = objectUrl;
+        image.addEventListener("click", () => openAttachment(objectUrl, file.name));
+      };
       if (preview) {
         image.src = preview;
-        image.addEventListener("click", () => openAttachment(preview, file.name));
+        image.addEventListener(
+          "error",
+          () => {
+            if (image.dataset.fallback) return;
+            image.dataset.fallback = "1";
+            fallback()
+              .then(useBlob)
+              .catch(() => image.remove());
+          },
+          { once: true },
+        );
+        image.addEventListener("click", () => openAttachment(image.src, file.name, fallback));
       } else {
-        const connection = session;
-        attachmentBlob(message, file.index, connection)
-          .then((blob) => {
-            image.src = URL.createObjectURL(blob);
-            image.addEventListener("click", () => openAttachment(image.src, file.name));
-          })
+        fallback()
+          .then(useBlob)
           .catch(() => image.remove());
       }
       item.append(image);

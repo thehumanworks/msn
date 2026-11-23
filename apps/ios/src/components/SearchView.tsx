@@ -18,12 +18,14 @@ export function SearchView({
   me,
   onShareLink,
   origin,
+  token,
 }: {
   api: ApiClient;
   channel: string;
   me: string;
   onShareLink?: (message: Message) => void;
   origin?: string;
+  token?: string;
 }) {
   const search = useMemo(() => new ChannelSearch(api, channel), [api, channel]);
   useEffect(() => () => search.cancel(), [search]);
@@ -72,7 +74,7 @@ export function SearchView({
             ) : null
           }
           renderItem={({ item }) => (
-            <MessageRow message={item} own={!item.agentUserId && exactSender(item.username, me)} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} origin={origin} />
+            <MessageRow message={item} own={!item.agentUserId && exactSender(item.username, me)} quoted={undefined} selected={false} onReply={noop} replyable={false} onShareLink={onShareLink} origin={origin} token={token} />
           )}
         />
       )}

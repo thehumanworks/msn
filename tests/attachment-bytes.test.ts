@@ -21,6 +21,12 @@ describe("attachment bytes", () => {
     expect(hex(sha256Bytes(new Uint8Array()))).toBe(
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
+    expect(hex(sha256Bytes(text("abc")))).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+    expect(hex(sha256Bytes(text("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")))).toBe(
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+    );
   });
 
   it("signs with HMAC-SHA256", () => {
@@ -51,6 +57,23 @@ describe("attachment bytes", () => {
     expect(new TextDecoder().decode(stripped)).not.toContain("Exif");
     expect(new TextDecoder().decode(stripped)).not.toContain("GPSDATA");
     expect(imageSize(stripped, "image/jpeg")).toEqual({ width: 3, height: 2 });
+    // FF padding before the marker is fill, not a length. Parsing it as a length kept the GPS.
+    const padded = new Uint8Array(bytes.length + 1);
+    padded.set([0xff, 0xd8, 0xff, 0xff]);
+    padded.set(bytes.subarray(3), 4);
+    const paddedOut = stripMetadata(padded, "image/jpeg");
+    expect(new TextDecoder().decode(paddedOut)).not.toContain("GPSDATA");
+    const plain = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
+    ]);
+    expect(stripMetadata(plain, "image/jpeg")).toBe(plain);
+    expect(() =>
+      stripMetadata(new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00, 0x10, 0x00]), "image/jpeg"),
+    ).toThrow(HttpError);
+    const zero = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
+    ]);
+    expect(imageSize(zero, "image/jpeg")).toBeNull();
   });
 
   it("rejects a preview signature that was changed or has expired", () => {
@@ -58,7 +81,8 @@ describe("attachment bytes", () => {
     const exp = Date.now() + 60_000;
     const sig = signPreview(secret, `tenant/general/4/0/${exp}`);
     expect(previewValid(secret, "tenant", "general", 4, 0, String(exp), sig)).toBe(true);
-    expect(previewValid(secret, "tenant", "general", 4, 0, String(exp), sig.replace("a", "b"))).toBe(false);
+    const flipped = sig.slice(0, -1) + (sig.endsWith("0") ? "1" : "0");
+    expect(previewValid(secret, "tenant", "general", 4, 0, String(exp), flipped)).toBe(false);
     expect(previewValid(secret, "tenant", "general", 4, 1, String(exp), sig)).toBe(false);
     expect(previewValid(secret, "tenant", "general", 4, 0, String(exp - 120_000), sig, Date.now())).toBe(
       false,
@@ -147,4 +171,51 @@ describe("attachment bytes", () => {
       ),
     ).rejects.toMatchObject({ status: 413, code: "too_many_attachments" });
   });
+
+  it("reads a real lossy webp frame", () => {
+    const bytes = Uint8Array.from(
+      atob("UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoIAAYAAgA0JaACdLoB+AADsAD+8Oj3/yC5YXXI1/8gP+QH/ID/+PIAAAA="),
+      (c) => c.charCodeAt(0),
+    );
+    expect(sniffedType(bytes)).toBe("image/webp");
+    expect(imageSize(bytes, "image/webp")).toEqual({ width: 8, height: 6 });
+    expect(stripMetadata(bytes, "image/webp")).toBe(bytes);
+  });
+
+  it("scans a 20 MB multipart body from small chunks", async () => {
+    const size = 20 * 1024 * 1024;
+    const payload = new Uint8Array(size);
+    const enc = new TextEncoder();
+    const head = enc.encode(
+      `--bound\r\nContent-Disposition: form-data; name="file"; filename="big.bin"\r\n\r\n`,
+    );
+    const tail = enc.encode(`\r\n--bound--\r\n`);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(head);
+        for (let i = 0; i < size; i += 1024) controller.enqueue(payload.subarray(i, i + 1024));
+        controller.enqueue(tail);
+        controller.close();
+      },
+    });
+    const started = performance.now();
+    let got = 0;
+    const init = {
+      method: "POST" as const,
+      headers: { "Content-Type": "multipart/form-data; boundary=bound" },
+      body: stream,
+      duplex: "half" as const,
+    };
+    await readMultipart(
+      new Request("https://msn.test/up", init as unknown as RequestInit),
+      async (file) => {
+        got = file.bytes.byteLength;
+      },
+      { maxBytes: 25 * 1024 * 1024, maxFiles: 2 },
+    );
+    const elapsed = performance.now() - started;
+    console.info(`20MB multipart in ${elapsed.toFixed(0)}ms`);
+    expect(got).toBe(size);
+    expect(elapsed).toBeLessThan(15_000);
+  }, 30_000);
 });

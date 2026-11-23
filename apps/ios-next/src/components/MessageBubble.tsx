@@ -33,11 +33,13 @@ export const MessageBubble = memo(function MessageBubble({
   onLongPress,
   onAnswer,
   origin,
+  token,
 }: {
   row: Extract<Row, { kind: "message" }>;
   onLongPress: (message: Message) => void;
   onAnswer: (message: Message, choice: string) => void;
   origin: string;
+  token?: string;
 }) {
   const { message, mine, showName, replied, me } = row;
   const notice = boardNotice(message);
@@ -90,14 +92,14 @@ export const MessageBubble = memo(function MessageBubble({
         {recipients.length ? (
           <Text style={[styles.to, mine && { color: "rgba(255,255,255,0.85)" }]}>→ {recipients.join(", ")}</Text>
         ) : null}
-        {json ? (
+        {!message.text.trim() ? null : json ? (
           <Text style={[styles.json, { color: textColor }]} selectable>
             {message.text}
           </Text>
         ) : (
           <Markdown text={message.text} color={textColor} tint={mine ? MINE_TEXT : color.tint} />
         )}
-        <Attachments files={message.attachments} origin={origin} />
+        <Attachments files={message.attachments} origin={origin} token={token} />
         <View style={styles.timeRow}>
           <Text style={[styles.time, mine && { color: "rgba(255,255,255,0.75)" }]}>
             {message.claim ? `${message.claim.username} is on it · ` : ""}

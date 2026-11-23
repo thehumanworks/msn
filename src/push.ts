@@ -243,6 +243,7 @@ export function needsOwner(
       };
   }
   if (addressees(message).some((name) => owners.has(name)))
-    return { reason: "question", summary: excerpt(message.text) };
+    // A file with no text is still a message the owner was named in.
+    return { reason: "question", summary: excerpt(message.text) || "Sent a file" };
   return null;
 }

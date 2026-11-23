@@ -63,6 +63,8 @@ type Props = {
   onAnswer?: (message: Message, choice: string) => void;
   /** Server origin, so attachment previews and downloads can open. */
   origin?: string;
+  /** Channel key, used once a signed image link has expired. */
+  token?: string;
   /** An answer to this question is in flight: its buttons stay locked until it settles. */
   answering?: boolean;
 };
@@ -126,6 +128,7 @@ function MessageRowImpl({
   onAnswer,
   answering = false,
   origin = "",
+  token,
 }: Props) {
   const [bodyHeight, setBodyHeight] = useState<number | undefined>(undefined);
   const fold = onToggleFold ? foldState(bodyHeight, BODY_LINE, unfolded) : { long: false, maxHeight: null };
@@ -324,7 +327,7 @@ function MessageRowImpl({
         ]}
       >
         <View onLayout={onToggleFold ? (event) => setBodyHeight(event.nativeEvent.layout.height) : undefined}>
-          {task ? (
+          {!message.text.trim() ? null : task ? (
             <Text style={styles.body}>
               Task <Text style={{ fontWeight: "700" }}>{task.body.task}</Text> · {task.body.action}
               {task.body.title ? ` · ${task.body.title}` : ""}
@@ -338,7 +341,7 @@ function MessageRowImpl({
           )}
         </View>
       </View>
-      <Attachments files={message.attachments} origin={origin} />
+      <Attachments files={message.attachments} origin={origin} token={token} />
       {fold.long && onToggleFold ? (
         <Pressable
           accessibilityRole="button"

@@ -10,33 +10,72 @@ function sizeLabel(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
-function absolute(origin: string, path: string): string {
-  if (path.startsWith("https://") || path.startsWith("http://")) return path;
-  return `${origin.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+/** A root-relative path, or an https URL on the same origin. Anything else is not opened. */
+function absolute(origin: string, path: string): string | null {
+  const base = origin.replace(/\/$/, "");
+  if (path.startsWith("/") && !path.startsWith("//")) return `${base}${path}`;
+  try {
+    const url = new URL(path);
+    const home = new URL(base);
+    if (url.protocol === "https:" && url.origin === home.origin) return url.toString();
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Signed links last about ten minutes. Use the channel key once that window is close. */
+function signedStillFresh(url: string, origin: string): boolean {
+  try {
+    const exp = new URL(url, origin).searchParams.get("exp");
+    if (!exp) return true;
+    const at = Number(exp);
+    return Number.isFinite(at) && at - Date.now() > 60_000;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Inline image preview (tap for the full frame) and a chip with the name and size for every
  * other file. Images load from the short-lived signed URL. Other files open that download URL.
  */
-export function Attachments({ files, origin }: { files: Attachment[] | undefined; origin: string }) {
+export function Attachments({
+  files,
+  origin,
+  token,
+}: {
+  files: Attachment[] | undefined;
+  origin: string;
+  token?: string;
+}) {
   const [full, setFull] = useState<string | null>(null);
+  const [retried, setRetried] = useState<Record<string, boolean>>({});
   if (!files?.length) return null;
   return (
     <View style={styles.list}>
       {files.map((file) => {
         const mime = file.mime || file.mediaType;
-        const preview = file.previewUrl && INLINE.has(mime) ? absolute(origin, file.previewUrl) : null;
-        const download = file.downloadUrl ?? file.url;
+        const previewPath = file.previewUrl && INLINE.has(mime) ? absolute(origin, file.previewUrl) : null;
+        const stable = file.url ? absolute(origin, file.url) : null;
+        const authed = Boolean(token && stable);
+        const preview =
+          previewPath && signedStillFresh(previewPath, origin) && !retried[file.id] ? previewPath : authed ? stable : previewPath;
+        const download = (file.downloadUrl ? absolute(origin, file.downloadUrl) : null) ?? stable;
+        const bearer = token && preview === stable ? { Authorization: `Bearer ${token}` } : undefined;
         return (
           <View key={`${file.index}-${file.id}`} style={styles.item}>
             {preview ? (
               <Pressable onPress={() => setFull(preview)} accessibilityRole="imagebutton" accessibilityLabel={file.name}>
                 <Image
-                  source={{ uri: preview }}
+                  source={bearer ? { uri: preview, headers: bearer } : { uri: preview }}
                   style={[styles.preview, file.width && file.height ? { aspectRatio: file.width / file.height } : null]}
                   resizeMode="contain"
                   accessibilityIgnoresInvertColors
+                  onError={() => {
+                    if (retried[file.id] || !authed) return;
+                    setRetried((current) => ({ ...current, [file.id]: true }));
+                  }}
                 />
               </Pressable>
             ) : null}
@@ -46,7 +85,7 @@ export function Attachments({ files, origin }: { files: Attachment[] | undefined
               accessibilityLabel={`${preview ? "View" : "Download"} ${file.name}, ${sizeLabel(file.size ?? file.bytes)}`}
               onPress={() => {
                 if (preview) setFull(preview);
-                else if (download) void Linking.openURL(absolute(origin, download));
+                else if (download) void Linking.openURL(download);
               }}
             >
               <Text style={styles.chipText} numberOfLines={2}>
@@ -58,7 +97,17 @@ export function Attachments({ files, origin }: { files: Attachment[] | undefined
       })}
       <Modal visible={full !== null} transparent animationType="fade" onRequestClose={() => setFull(null)}>
         <Pressable style={styles.backdrop} onPress={() => setFull(null)} accessibilityLabel="Close image">
-          {full ? <Image source={{ uri: full }} style={styles.full} resizeMode="contain" /> : null}
+          {full ? (
+            <Image
+              source={
+                token && !full.includes("sig=")
+                  ? { uri: full, headers: { Authorization: `Bearer ${token}` } }
+                  : { uri: full }
+              }
+              style={styles.full}
+              resizeMode="contain"
+            />
+          ) : null}
         </Pressable>
       </Modal>
     </View>

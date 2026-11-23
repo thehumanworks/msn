@@ -23,7 +23,11 @@ function rotr(x: number, n: number): number {
   return (x >>> n) | (x << (32 - n));
 }
 
-/** SHA-256. Sync on purpose: preview URLs are signed inside a Durable Object transaction. */
+/**
+ * SHA-256. Sync on purpose: preview URLs are signed inside a Durable Object transaction.
+ * The message bit length is written in the low 32 bits only, so an input of 512 MiB or more
+ * would hash wrong. Attachment bodies are capped at 25 MB, under that limit.
+ */
 export function sha256Bytes(message: Uint8Array): Uint8Array {
   const bitLen = message.length * 8;
   const padded = new Uint8Array(((message.length + 9 + 63) >> 6) << 6);
@@ -189,14 +193,23 @@ function u16(bytes: Uint8Array, offset: number): number {
 
 export type ImageSize = { width: number; height: number };
 
-/** Frame size. Absent when the file is that type but truncated. Orientation is not applied. */
+/**
+ * Frame size. Absent when the file is that type but truncated, or when a crafted frame claims a
+ * dimension below 1 (those are not sent to clients). Orientation is not applied.
+ */
 export function imageSize(bytes: Uint8Array, mime: string): ImageSize | null {
-  if (mime === "image/png" && bytes.length >= 24 && bytes[12] === 0x49 && bytes[13] === 0x48)
-    return { width: u32(bytes, 16), height: u32(bytes, 20) };
-  if (mime === "image/gif" && bytes.length >= 10) return { width: u16(bytes, 6), height: u16(bytes, 8) };
-  if (mime === "image/jpeg") return jpegSize(bytes);
-  if (mime === "image/webp") return webpSize(bytes);
-  return null;
+  const size =
+    mime === "image/png" && bytes.length >= 24 && bytes[12] === 0x49 && bytes[13] === 0x48
+      ? { width: u32(bytes, 16), height: u32(bytes, 20) }
+      : mime === "image/gif" && bytes.length >= 10
+        ? { width: u16(bytes, 6), height: u16(bytes, 8) }
+        : mime === "image/jpeg"
+          ? jpegSize(bytes)
+          : mime === "image/webp"
+            ? webpSize(bytes)
+            : null;
+  if (!size || size.width < 1 || size.height < 1) return null;
+  return size;
 }
 
 function jpegSize(bytes: Uint8Array): ImageSize | null {
@@ -231,10 +244,9 @@ function webpSize(bytes: Uint8Array): ImageSize | null {
     return { width, height };
   }
   if (fourcc === "VP8 " && bytes.length >= 30) {
-    // Lossy frame: 3 bytes of frame tag, then a 3-byte start code, then 14-bit dimensions.
-    const start = 20;
-    if (bytes[start] !== 0x9d || bytes[start + 1] !== 0x01 || bytes[start + 2] !== 0x2a) return null;
-    return { width: u16(bytes, start + 3) & 0x3fff, height: u16(bytes, start + 5) & 0x3fff };
+    // Lossy frame: 3-byte frame tag at 20, start code at 23–25, 14-bit dimensions at 26 and 28.
+    if (bytes[23] !== 0x9d || bytes[24] !== 0x01 || bytes[25] !== 0x2a) return null;
+    return { width: u16(bytes, 26) & 0x3fff, height: u16(bytes, 28) & 0x3fff };
   }
   if (fourcc === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
     const bits = bytes[21] | (bytes[22] << 8) | (bytes[23] << 16) | (bytes[24] << 24);
@@ -244,8 +256,10 @@ function webpSize(bytes: Uint8Array): ImageSize | null {
 }
 
 /**
- * Drops location and camera metadata. JPEG APP1 Exif and XMP, PNG eXIf chunks, WebP EXIF
- * chunks. The frame itself is copied through, so a decoder is not required.
+ * Drops JPEG APP1 Exif and XMP, PNG `eXIf` chunks and WebP `EXIF` chunks.
+ * A file that parses and has none of those is returned unchanged.
+ * A truncated or inconsistent container is rejected: returning the original would keep GPS.
+ * APP2 ICC, APP13 IPTC, JPEG COM, PNG text chunks and WebP XMP are not removed (ADR 0087).
  */
 export function stripMetadata(bytes: Uint8Array, mime: string): Uint8Array {
   if (mime === "image/jpeg") return stripJpeg(bytes);
@@ -254,93 +268,119 @@ export function stripMetadata(bytes: Uint8Array, mime: string): Uint8Array {
   return bytes;
 }
 
+function malformed(what: string): HttpError {
+  return new HttpError(400, "invalid_attachment", `This ${what} is truncated or malformed.`);
+}
+
 function stripJpeg(bytes: Uint8Array): Uint8Array {
-  if (!starts(bytes, [0xff, 0xd8])) return bytes;
-  const parts: Uint8Array[] = [bytes.subarray(0, 2)];
+  if (!starts(bytes, [0xff, 0xd8])) throw malformed("JPEG");
+  const keep: Array<[number, number]> = [[0, 2]];
+  let removed = false;
+  let sawEnd = false;
   let i = 2;
-  while (i + 4 <= bytes.length) {
-    if (bytes[i] !== 0xff) {
-      parts.push(bytes.subarray(i));
-      break;
-    }
-    const marker = bytes[i + 1];
+  while (i < bytes.length) {
+    if (bytes[i] !== 0xff) throw malformed("JPEG");
+    const markerStart = i;
+    i += 1;
+    // Fill bytes: FF FF … then the real marker. Treating FF as a length field kept the EXIF.
+    while (i < bytes.length && bytes[i] === 0xff) i += 1;
+    if (i >= bytes.length) throw malformed("JPEG");
+    const marker = bytes[i];
+    i += 1;
     if (marker === 0xd9) {
-      parts.push(bytes.subarray(i, i + 2));
+      keep.push([markerStart, i]);
+      sawEnd = true;
       break;
     }
-    if (marker === 0xda) {
-      // Compressed scan runs to the end. Keep it whole.
-      parts.push(bytes.subarray(i));
-      break;
-    }
-    if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) {
-      parts.push(bytes.subarray(i, i + 2));
-      i += 2;
+    if (marker === 0x00 || marker === 0xd8) throw malformed("JPEG");
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      keep.push([markerStart, i]);
       continue;
     }
-    const length = (bytes[i + 2] << 8) | bytes[i + 3];
-    if (length < 2 || i + 2 + length > bytes.length) return bytes;
-    const segment = bytes.subarray(i, i + 2 + length);
-    const payload = segment.subarray(4);
-    const exif = starts(payload, ascii("Exif\0\0"));
-    const xmp = starts(payload, ascii("http://ns.adobe.com/xap/1.0/\0"));
-    if (!(marker === 0xe1 && (exif || xmp))) parts.push(segment);
-    i += 2 + length;
+    if (i + 2 > bytes.length) throw malformed("JPEG");
+    const length = (bytes[i] << 8) | bytes[i + 1];
+    if (length < 2 || i + length > bytes.length) throw malformed("JPEG");
+    const end = i + length;
+    const payload = bytes.subarray(i + 2, end);
+    const drop =
+      marker === 0xe1 &&
+      (starts(payload, ascii("Exif\0\0")) || starts(payload, ascii("http://ns.adobe.com/xap/1.0/\0")));
+    if (drop) removed = true;
+    else keep.push([markerStart, end]);
+    i = end;
+    if (marker === 0xda) {
+      // The compressed scan follows, with FF 00 stuffing. Keep it whole through the EOI.
+      if (i < bytes.length) keep.push([i, bytes.length]);
+      sawEnd = true;
+      break;
+    }
   }
-  const size = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
+  if (!sawEnd || i > bytes.length) throw malformed("JPEG");
+  if (!removed) return bytes;
+  return concatRanges(bytes, keep);
 }
 
 function stripPng(bytes: Uint8Array): Uint8Array {
-  if (!starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return bytes;
-  const parts: Uint8Array[] = [bytes.subarray(0, 8)];
+  if (!starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) throw malformed("PNG");
+  const keep: Array<[number, number]> = [[0, 8]];
+  let removed = false;
   let i = 8;
+  let ended = false;
   while (i + 12 <= bytes.length) {
     const length = u32(bytes, i);
-    if (i + 12 + length > bytes.length) return bytes;
+    if (i + 12 + length > bytes.length) throw malformed("PNG");
     const type = String.fromCharCode(bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]);
-    if (type !== "eXIf") parts.push(bytes.subarray(i, i + 12 + length));
-    i += 12 + length;
-    if (type === "IEND") break;
+    const end = i + 12 + length;
+    if (type === "eXIf") removed = true;
+    else keep.push([i, end]);
+    i = end;
+    if (type === "IEND") {
+      ended = true;
+      break;
+    }
   }
-  const size = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
+  if (!ended) throw malformed("PNG");
+  if (!removed) return bytes;
+  return concatRanges(bytes, keep);
 }
 
 function stripWebp(bytes: Uint8Array): Uint8Array {
   if (!(bytes.length >= 12 && starts(bytes, ascii("RIFF")) && starts(bytes.subarray(8), ascii("WEBP"))))
-    return bytes;
-  const parts: Uint8Array[] = [];
+    throw malformed("WebP");
+  const keep: Array<[number, number]> = [];
+  let removed = false;
   let i = 12;
   while (i + 8 <= bytes.length) {
     const type = String.fromCharCode(bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]);
     const length = new DataView(bytes.buffer, bytes.byteOffset + i + 4, 4).getUint32(0, true);
     const padded = length + (length & 1);
-    if (i + 8 + padded > bytes.length) return bytes;
-    if (type !== "EXIF") parts.push(bytes.subarray(i, i + 8 + padded));
+    if (i + 8 + padded > bytes.length) throw malformed("WebP");
+    if (type === "EXIF") removed = true;
+    else keep.push([i, i + 8 + padded]);
     i += 8 + padded;
   }
-  const payload = parts.reduce((sum, part) => sum + part.length, 0);
+  if (i !== bytes.length) throw malformed("WebP");
+  if (!removed) return bytes;
+  const payload = keep.reduce((sum, [start, end]) => sum + (end - start), 0);
   const out = new Uint8Array(12 + payload);
   out.set(bytes.subarray(0, 4));
   new DataView(out.buffer).setUint32(4, payload + 4, true);
   out.set(bytes.subarray(8, 12), 8);
   let offset = 12;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
+  for (const [start, end] of keep) {
+    out.set(bytes.subarray(start, end), offset);
+    offset += end - start;
+  }
+  return out;
+}
+
+function concatRanges(bytes: Uint8Array, ranges: Array<[number, number]>): Uint8Array {
+  const size = ranges.reduce((sum, [start, end]) => sum + (end - start), 0);
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const [start, end] of ranges) {
+    out.set(bytes.subarray(start, end), offset);
+    offset += end - start;
   }
   return out;
 }
@@ -431,6 +471,8 @@ export async function readCapped(request: Request, maxBytes: number): Promise<Ui
     bytes.set(chunk, offset);
     offset += chunk.length;
   }
+  // Drop the chunk list before the caller parses or strips, so the peak is one buffer.
+  chunks.length = 0;
   return bytes;
 }
 
@@ -462,8 +504,8 @@ export function fileNameOf(disposition: string): string | null {
 
 class ByteBuf {
   private chunks: Uint8Array[] = [];
-  private start = 0;
-  private head: Uint8Array = new Uint8Array(0);
+  /** Bytes already consumed in `chunks[0]`. */
+  private offset = 0;
   size = 0;
 
   push(chunk: Uint8Array): void {
@@ -472,63 +514,105 @@ class ByteBuf {
     this.size += chunk.length;
   }
 
-  /** Index of `needle`, or -1. Does not consume. */
-  indexOf(needle: Uint8Array): number {
-    if (!needle.length || this.size < needle.length) return -1;
-    const window = this.peek(this.size);
-    outer: for (let i = 0; i + needle.length <= window.length; i++) {
-      for (let j = 0; j < needle.length; j++) if (window[i + j] !== needle[j]) continue outer;
-      return i;
+  /**
+   * Index of `needle` at or after `from`, or -1. Scans each new chunk once and carries only
+   * `needle.length - 1` bytes across the boundary, so a large part is not recopied or rescanned.
+   */
+  indexOf(needle: Uint8Array, from = 0): number {
+    if (!needle.length || this.size < from + needle.length) return -1;
+    const overlap = needle.length - 1;
+    let carry: Uint8Array = new Uint8Array(0);
+    let pos = 0;
+    for (let c = 0; c < this.chunks.length; c++) {
+      const start = c === 0 ? this.offset : 0;
+      const view = this.chunks[c].subarray(start);
+      const end = pos + view.length;
+      if (end <= from) {
+        pos = end;
+        continue;
+      }
+      const sliceFrom = Math.max(0, from - pos);
+      const piece = view.subarray(sliceFrom);
+      const piecePos = pos + sliceFrom;
+      const minFound = Math.max(0, from - (piecePos - carry.length));
+      const found = findAcross(carry, piece, needle, minFound);
+      if (found >= 0) return piecePos - carry.length + found;
+      carry = tailOf(carry, piece, overlap);
+      pos = end;
     }
     return -1;
   }
 
   peek(n: number): Uint8Array {
     const count = Math.min(n, this.size);
-    if (this.head.length >= count && this.start + count <= this.head.length)
-      return this.head.subarray(this.start, this.start + count);
-    this.compact();
-    return this.head.subarray(0, count);
+    const first = this.chunks[0];
+    if (first && this.offset + count <= first.length) return first.subarray(this.offset, this.offset + count);
+    return this.copy(count);
   }
 
+  /** One copy of the next `n` bytes, then those bytes are dropped. */
   take(n: number): Uint8Array {
-    const out = this.peek(n).slice();
+    const out = this.copy(Math.min(n, this.size));
     this.drop(out.length);
     return out;
   }
 
   drop(n: number): void {
-    let left = n;
-    while (left > 0 && this.head.length > this.start) {
-      const have = this.head.length - this.start;
+    let left = Math.min(n, this.size);
+    this.size -= left;
+    while (left > 0 && this.chunks.length) {
+      const have = this.chunks[0].length - this.offset;
       if (have > left) {
-        this.start += left;
-        this.size -= left;
+        this.offset += left;
         return;
       }
       left -= have;
-      this.size -= have;
-      this.start = 0;
-      this.head = this.chunks.shift() ?? new Uint8Array(0);
+      this.chunks.shift();
+      this.offset = 0;
     }
   }
 
-  private compact(): void {
-    if (this.start === 0 && this.chunks.length === 0) return;
-    const out = new Uint8Array(this.size);
-    let offset = 0;
-    if (this.head.length > this.start) {
-      out.set(this.head.subarray(this.start), 0);
-      offset = this.head.length - this.start;
+  private copy(n: number): Uint8Array {
+    const out = new Uint8Array(n);
+    let filled = 0;
+    for (let c = 0; c < this.chunks.length && filled < n; c++) {
+      const start = c === 0 ? this.offset : 0;
+      const view = this.chunks[c].subarray(start);
+      const take = Math.min(view.length, n - filled);
+      out.set(view.subarray(0, take), filled);
+      filled += take;
     }
-    for (const chunk of this.chunks) {
-      out.set(chunk, offset);
-      offset += chunk.length;
-    }
-    this.head = out;
-    this.chunks = [];
-    this.start = 0;
+    return out;
   }
+}
+
+function findAcross(carry: Uint8Array, piece: Uint8Array, needle: Uint8Array, from = 0): number {
+  if (!carry.length) return indexOfBytes(piece, needle, from);
+  const combined = new Uint8Array(carry.length + piece.length);
+  combined.set(carry);
+  combined.set(piece, carry.length);
+  return indexOfBytes(combined, needle, from);
+}
+
+function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): number {
+  if (haystack.length < from + needle.length) return -1;
+  const last = haystack.length - needle.length;
+  outer: for (let i = from; i <= last; i++) {
+    for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+function tailOf(carry: Uint8Array, piece: Uint8Array, n: number): Uint8Array {
+  if (n <= 0) return new Uint8Array(0);
+  const take = Math.min(n, carry.length + piece.length);
+  const out = new Uint8Array(take);
+  const fromPiece = Math.min(piece.length, take);
+  out.set(piece.subarray(piece.length - fromPiece), take - fromPiece);
+  const fromCarry = take - fromPiece;
+  if (fromCarry) out.set(carry.subarray(carry.length - fromCarry));
+  return out;
 }
 
 /**
@@ -540,6 +624,7 @@ export async function readMultipart(
   request: Request,
   onFile: (file: MultipartFile) => Promise<void>,
   limits: MultipartLimits = { maxBytes: MAX_ATTACHMENT_BYTES, maxFiles: MAX_ATTACHMENTS_PER_MESSAGE },
+  onField?: (name: string, value: string) => void,
 ): Promise<Record<string, string>> {
   const contentType = request.headers.get("Content-Type") ?? "";
   const token = boundaryOf(contentType);
@@ -561,8 +646,11 @@ export async function readMultipart(
     return true;
   };
   const readUntil = async (needle: Uint8Array, cap: number): Promise<Uint8Array | null> => {
+    let scanned = 0;
     for (;;) {
-      const at = buf.indexOf(needle);
+      // Recheck only the overlap with the previous chunk, not the bytes already scanned.
+      const from = scanned > needle.length ? scanned - (needle.length - 1) : 0;
+      const at = buf.indexOf(needle, from);
       if (at >= 0) {
         if (at > cap) return null;
         const body = buf.take(at);
@@ -570,6 +658,7 @@ export async function readMultipart(
         return body;
       }
       if (buf.size > cap + needle.length) return null;
+      scanned = buf.size;
       const { done, value } = await reader.read();
       if (done) throw new HttpError(400, "invalid_attachment", "The multipart body ended early.");
       buf.push(value);
@@ -613,7 +702,11 @@ export async function readMultipart(
       } else {
         const body = await readUntil(crlfBoundary, FIELD_MAX);
         if (!body) throw new HttpError(400, "invalid_attachment", "A multipart field is too large.");
-        if (fieldName) fields[fieldName] = new TextDecoder().decode(body);
+        if (fieldName) {
+          const value = new TextDecoder().decode(body);
+          fields[fieldName] = value;
+          onField?.(fieldName, value);
+        }
       }
     }
   } finally {
