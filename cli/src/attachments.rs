@@ -1,4 +1,4 @@
-//! Message attachments (ADR 0086): upload local files before a send, download a message's file.
+//! Message attachments (ADR 0087): upload local files before a send, download a message's file.
 //!
 //! The server names each object with a UUID and treats identical bytes as the same object, so
 //! re-running a send with the same files and the same Idempotency-Key replays the same message.
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::client::{MsnClient, classify, status_error};
 use crate::error::CliError;
 
-/// Server limits (ADR 0086), checked locally first so a too-large file fails before any network call.
+/// Server limits (ADR 0087), checked locally first so a too-large file fails before any network call.
 pub const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 10;
 
@@ -60,7 +60,7 @@ pub fn read_files(paths: &[String]) -> Result<Vec<LocalFile>, CliError> {
     Ok(files)
 }
 
-/// A new id is a UUID. An object stored before ADR 0086 is 64 hex characters.
+/// A new id is a UUID. An object stored before ADR 0087 is 64 hex characters.
 fn attachment_id(id: &str) -> bool {
     if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return true;

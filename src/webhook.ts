@@ -9,7 +9,7 @@ export const MAX_WEBHOOK_URL = 2048;
 /** One attempt may take this long, from connect to response headers. */
 export const WEBHOOK_TIMEOUT_MS = 5000;
 /** A notice body never exceeds this many bytes (it holds ids only). */
-/** Ten named files fit; a text-only notice stays a few hundred bytes (ADR 0086). */
+/** Ten named files fit; a text-only notice stays a few hundred bytes (ADR 0087). */
 export const MAX_NOTICE_BYTES = 16 * 1024;
 /** Waits after attempt 1, 2, 3 and 4. Five attempts in all, over about 73 minutes. */
 export const WEBHOOK_RETRY_DELAYS_MS = [30_000, 120_000, 600_000, 3_600_000];
@@ -192,7 +192,7 @@ export type Notice = {
   messageUrl: string | null;
   createdAt: string;
   /**
-   * Files on the message (ADR 0086). Absent when it has none, so a text notice stays the id list.
+   * Files on the message (ADR 0087). Absent when it has none, so a text notice stays the id list.
    * `url` still needs the receiver's own key. The bytes are not included.
    */
   attachments?: {

@@ -215,7 +215,7 @@ test("status.changed events and status lists decode; bad rows are protocol error
   assert.equal(formatAgo("bad", at), "bad");
 });
 
-test("attachments decode when present and stay absent otherwise (ADR 0086)", async () => {
+test("attachments decode when present and stay absent otherwise (ADR 0087)", async () => {
   const { decodeMessage } = await import("../src/core/decode.ts");
   const raw = {
     id: 3,

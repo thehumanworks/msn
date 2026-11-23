@@ -191,7 +191,7 @@ export type Claim = { username: string; claimedAt: string };
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
 export type Answered = { id: number; choice: string; username: string; answeredAt: string };
 /**
- * Attachment metadata on a message (ADR 0035, ADR 0086). `mediaType`/`bytes` are the original
+ * Attachment metadata on a message (ADR 0035, ADR 0087). `mediaType`/`bytes` are the original
  * names; `mime`/`size` are the same values. Bytes come from the download route, not this object.
  */
 export type Attachment = {
@@ -338,7 +338,7 @@ export const PRESENCE_WRITE_INTERVAL_MS = 5 * 60_000;
 const QUIET_CONCLUSIONS = new Set(["skipped", "neutral"]);
 /** Owner devices that receive push notifications (ADR 0029). */
 const MAX_PUSH_SUBSCRIPTIONS = 20;
-/** R2 bytes per workspace (ADR 0086). Separate from the 128 MiB text quota. */
+/** R2 bytes per workspace (ADR 0087). Separate from the 128 MiB text quota. */
 const MAX_ATTACHMENT_QUOTA = 1024 * 1024 * 1024;
 /** How long a timed board mute lasts (ADR 0044). No `for` mutes until unmuted. */
 const MUTE_DURATIONS: Record<string, number | undefined> = Object.assign(Object.create(null), {
@@ -1007,7 +1007,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         // A saved template's brief (ADR 0074): NULL for templates saved before briefs or from a
         // board without one. Additive, so no schema_version step.
         ["board_templates", "brief", "TEXT"],
-        // Attachment objects in R2 (ADR 0086). sqlite rows from ADR 0035 keep a null mime and
+        // Attachment objects in R2 (ADR 0087). sqlite rows from ADR 0035 keep a null mime and
         // backend 'sqlite'. Additive, so no schema_version step.
         ["attachments", "sha", "TEXT"],
         ["attachments", "mime", "TEXT"],
@@ -2348,7 +2348,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             eventId,
             messageUrl: `${hook.origin}${path}`,
             createdAt: message.createdAt,
-            // Names and sizes only. The bytes and the signed URL stay off the notice (ADR 0086).
+            // Names and sizes only. The bytes and the signed URL stay off the notice (ADR 0087).
             ...(message.attachments?.length
               ? {
                   attachments: message.attachments.map((file) => ({
@@ -3197,7 +3197,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     const removed: string[] = [];
     this.ctx.storage.transactionSync(() => {
       const sum = (query: string) => sql.exec<{ bytes: number }>(query, channel).one().bytes;
-      // Text quota counts SQLite attachment rows only. R2 bytes have their own counter (ADR 0086).
+      // Text quota counts SQLite attachment rows only. R2 bytes have their own counter (ADR 0087).
       const files = sql
         .exec<{ id: string; bytes: number; backend: string }>(
           "SELECT id, bytes, backend FROM attachments WHERE channel = ?",
@@ -4981,7 +4981,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         );
       for (const [position, ref] of attachments.entries()) {
         // The served type is the sniff stored on the object. The client's mediaType stays in the
-        // idempotency digest only, so an older retry still matches (ADR 0086).
+        // idempotency digest only, so an older retry still matches (ADR 0087).
         const stored = this.ctx.storage.sql
           .exec<{ mime: string | null }>(
             "SELECT mime FROM attachments WHERE channel = ? AND id = ?",
@@ -5091,7 +5091,7 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /**
-   * Stores one file in R2 under a UUID key (ADR 0086). The same bytes in the same channel return
+   * Stores one file in R2 under a UUID key (ADR 0087). The same bytes in the same channel return
    * the same id. A retry just before the orphan window refreshes it. Counted in the attachment
    * quota, not the 128 MiB text quota.
    */
@@ -7458,7 +7458,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           return new Response(null, { status: 204 });
         }
       } else {
-        // A signed file link carries its own credential (ADR 0086). Checked inside download.
+        // A signed file link carries its own credential (ADR 0087). Checked inside download.
         if (
           request.method === "GET" &&
           rest[0] === "channels" &&
@@ -7541,7 +7541,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (rest[0] === "channels" && rest[1] && ["board", "personas"].includes(rest[2]))
           return await this.boardRoute(request, tenant, slug(rest[1]), rest.slice(2), hash);
         // Parse/digest before the final authorization check: rotation cannot race a write.
-        // Multipart sends upload each file as it ends, so a 25 MB cap is applied per file (ADR 0086).
+        // Multipart sends upload each file as it ends, so a 25 MB cap is applied per file (ADR 0087).
         const sending = request.method === "POST" && rest.length === 3 && rest[2] === "messages";
         let input: Record<string, unknown> | null = null;
         if (sending && isMultipart(request)) {
@@ -7569,7 +7569,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         let personaId = input?.personaId === undefined ? null : slug(text(input.personaId, "personaId", 64));
         const files = input ? attachmentRefs(input.attachments) : [];
         // An answer (ADR 0065) may leave out text: the reply then reads as the choice itself.
-        // A message that carries a file may have empty text (ADR 0086).
+        // A message that carries a file may have empty text (ADR 0087).
         const rawText =
           input && input.text === undefined && typeof input.answer === "string"
             ? input.answer.trim()

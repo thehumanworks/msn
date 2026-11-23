@@ -475,7 +475,7 @@ export function labelFilters(params: URLSearchParams): LabelFilter[] {
   });
 }
 
-/** Attachments (ADR 0086): 25 MB in R2. The SQLite row limit is 8 MB, so the bytes are not a row. */
+/** Attachments (ADR 0087): 25 MB in R2. The SQLite row limit is 8 MB, so the bytes are not a row. */
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
 /** An uploaded file that no message references after this long is deleted on a later upload. */

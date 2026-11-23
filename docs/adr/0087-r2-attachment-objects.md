@@ -1,4 +1,4 @@
-# ADR 0086: attachment bytes live in R2
+# ADR 0087: attachment bytes live in R2
 
 Date: 2026-11-23. Status: Accepted.
 

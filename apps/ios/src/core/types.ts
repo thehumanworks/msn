@@ -52,7 +52,7 @@ export type Message = {
   claim?: Claim;
   /** Per-recipient delivery and read (ADR 0082); absent when the message names nobody. */
   delivery?: Delivery[];
-  /** Files sent with the message (ADR 0086). Absent when it has none. */
+  /** Files sent with the message (ADR 0087). Absent when it has none. */
   attachments?: Attachment[];
 };
 

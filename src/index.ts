@@ -155,7 +155,7 @@ export default {
         else if (
           !(request.method === "PUT" && !match[3]) &&
           !(request.method === "POST" && match[3] === "/invites/redeem") &&
-          // A signed file link is the credential (ADR 0086). The object checks the signature.
+          // A signed file link is the credential (ADR 0087). The object checks the signature.
           !(
             request.method === "GET" &&
             /\/messages\/[1-9]\d*\/attachments\/\d+$/.test(match[3] ?? "") &&
