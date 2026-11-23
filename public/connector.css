@@ -1,0 +1,23 @@
+:root {
+  color-scheme: light dark;
+  font:
+    100% / 1.5 system-ui,
+    sans-serif;
+}
+main {
+  max-width: 38rem;
+  padding: 1.25rem;
+  margin: 5vh auto;
+  overflow-wrap: anywhere;
+}
+label,
+select {
+  display: block;
+  width: 100%;
+}
+select,
+button {
+  font: inherit;
+  margin: 0.4rem 0;
+  padding: 0.55em;
+}

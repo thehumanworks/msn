@@ -1,4 +1,4 @@
-import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, createExecutionContext, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
@@ -134,10 +134,14 @@ describe("channel messaging on real workerd SQLite Durable Objects", () => {
   it("fails closed for missing admin configuration and invalid credentials", async () => {
     expect(
       (
-        await worker.fetch(new Request("https://msn.test/api/admin/tenants/test", { method: "PUT" }), {
-          ...env,
-          ADMIN_TOKEN: "",
-        })
+        await worker.fetch(
+          new Request("https://msn.test/api/admin/tenants/test", { method: "PUT" }),
+          {
+            ...env,
+            ADMIN_TOKEN: "",
+          },
+          createExecutionContext(),
+        )
       ).status,
     ).toBe(503);
     expect((await call("/api/admin/tenants/test", undefined, { method: "PUT" })).status).toBe(401);

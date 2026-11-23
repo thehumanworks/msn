@@ -7,6 +7,7 @@
   "preview_urls": true,
   "routes": [{ "pattern": "msn.thehuman.sh", "custom_domain": true }],
   "vars": {
+    "MCP_ORIGIN": "https://msn.thehuman.sh",
     "ACCESS_AUD": "fc4fca07af05bc0cc24884f638d0226e82a213de16e695fe089a3c52896c71a4",
     "ACCESS_TEAM_DOMAIN": "nothumanlabs.cloudflareaccess.com",
     "ACCESS_LOGIN_URL": "https://msn.thehuman.sh/login",

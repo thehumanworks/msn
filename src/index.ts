@@ -1,4 +1,5 @@
 import { type AccessSettings, accessAccount, accessLoginUrl } from "./account";
+import { connector, connectorPath } from "./agent-connector";
 import { admin, bearer, body, failure, HttpError, json, slug } from "./http";
 import { quickstart } from "./quickstart";
 
@@ -31,11 +32,14 @@ function appChallenge(url: URL): string | null {
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     let response: Response;
     try {
       const url = new URL(request.url);
-      if (url.pathname === "/.well-known/apple-app-site-association" && request.method === "GET") {
+      if (connectorPath(url.pathname)) {
+        const canonical = env.MCP_ORIGIN;
+        response = await connector(request, env, ctx, canonical);
+      } else if (url.pathname === "/.well-known/apple-app-site-association" && request.method === "GET") {
         // The apps allowed to receive the sign-in callback (ADR 0079), as TEAMID.bundle ids.
         const apps = String(env.APPLE_APP_IDS ?? "")
           .split(",")
@@ -169,7 +173,8 @@ export default {
       "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
     const pathname = new URL(request.url).pathname;
-    if (pathname.startsWith("/api")) secured.headers.set("Cache-Control", "no-store");
+    if (pathname.startsWith("/api") || connectorPath(pathname))
+      secured.headers.set("Cache-Control", "no-store");
     // `curl -fsSL https://msn.thehuman.sh/install.sh | sh`; plain text also lets a browser show it for review.
     if (pathname === "/install.sh" && response.ok) {
       secured.headers.set("Content-Type", "text/plain; charset=utf-8");

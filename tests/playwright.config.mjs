@@ -13,7 +13,8 @@ export default defineConfig({
     { name: "mobile", use: { ...devices["Pixel 7"] } },
   ],
   webServer: {
-    command: "npx wrangler dev --port 8788 --ip 127.0.0.1 --local-upstream 127.0.0.1:8788",
+    command:
+      "bunx --no-install wrangler dev --port 8788 --ip 127.0.0.1 --local-upstream 127.0.0.1:8788 --var MCP_ORIGIN:http://127.0.0.1:8788",
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: { ADMIN_TOKEN: "browser-test-admin-000000000000000000000" },
     url: "http://127.0.0.1:8788/api/health",

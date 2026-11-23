@@ -1,5 +1,6 @@
 import { acquire, invitation, savePassword } from "./access.js";
 import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
+import { openAgentConnectors } from "./agent-connectors.js";
 import { briefCount, briefLabel, briefNotice, closedKey, startsOpen } from "./brief.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
@@ -297,6 +298,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("invite-link").value = "";
   inviteCurlText = null;
   $("invite-dialog").close();
+  $("connector-dialog").close();
   $("message").value = "";
   $("recipient").value = "";
   closeMentions();
@@ -518,9 +520,13 @@ function showFiles(state) {
   list.hidden = !state.files.length && !(state.missingFiles > 0);
 }
 
+// The browser uses a human/legacy connection, never an authenticated MCP installation.
+function myMessage(message) {
+  return !message.agentUserId && message.username === session?.username;
+}
 function appendMessage(message, target = $("messages")) {
   const article = document.createElement("article");
-  article.className = message.username === session?.username ? "message mine" : "message";
+  article.className = myMessage(message) ? "message mine" : "message";
   article.dataset.id = message.id;
   // Log rows take focus from j and k (ADR 0054); Tab still moves only between controls.
   if (target === $("messages")) {
@@ -553,7 +559,15 @@ function appendMessage(message, target = $("messages")) {
     board.addEventListener("click", () => void openLink({ channel: message.channel, id: message.id }));
     meta.append(board);
   }
-  meta.append(name, time);
+  meta.append(name);
+  if (message.agentUserId) {
+    const mark = document.createElement("span");
+    mark.className = "message-kind";
+    mark.textContent = `Agent · ${message.agentUserId.slice(0, 8)}`;
+    mark.title = `MSN agent user ${message.agentUserId}`;
+    meta.append(mark);
+  }
+  meta.append(time);
   if (message.editedAt) meta.append(editedMark(message));
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
   const boardUpdate = boardNotice(message);
@@ -1037,7 +1051,7 @@ function canEdit(message) {
   return (
     Boolean(session) &&
     !session.watchOnly &&
-    message.username === session.username &&
+    myMessage(message) &&
     message.username !== "github" &&
     !archivedBoards.has(message.channel)
   );
@@ -2430,12 +2444,7 @@ function render(messages, state) {
       // below it. On a board you have never read, nothing is new yet.
       const id = Number(topLevel(article).dataset.id);
       const mark = readMark(channel);
-      if (
-        message.username !== session?.username &&
-        mark !== undefined &&
-        message.id > mark &&
-        !state.expanded?.has(id)
-      ) {
+      if (!myMessage(message) && mark !== undefined && message.id > mark && !state.expanded?.has(id)) {
         state.unseen ??= new Map();
         if (!state.unseen.has(id)) state.unseen.set(id, new Set());
         state.unseen.get(id).add(message.id);
@@ -2833,6 +2842,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("channel-form").hidden = Boolean(identity.channel);
     $("invite-workspace").hidden = Boolean(identity.channel);
     $("start-template").hidden = !connection.owner;
+    $("agent-connectors").hidden = !connection.owner;
     void showNotify(connection);
     void loadMutes(connection);
     $("credential-name").value = `${connection.tenant}/${connection.username}`;
@@ -3002,6 +3012,10 @@ $("invite-watch-instead").addEventListener("click", () => {
   showInviteForm(channel, { watch: true });
 });
 $("invite-channel").addEventListener("click", () => openInvite(channel));
+$("agent-connectors").addEventListener("click", () => {
+  const c = session;
+  if (c?.owner) openAgentConnectors((path, options) => api(path, options, c), c.tenant, channel);
+});
 $("invite-workspace").addEventListener("click", () => openInvite(null));
 $("close-invite").addEventListener("click", () => $("invite-dialog").close());
 $("invite-form").addEventListener("submit", async (event) => {
