@@ -43,6 +43,7 @@
         <label class="show-archived"><input type="checkbox" id="show-archived">Show archived</label>
         <label class="theme-pick">Theme on this device<select id="theme"><option value="">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
         <button type="button" id="show-keys" class="quiet" aria-keyshortcuts="?">Keyboard shortcuts</button>
+        <button type="button" id="agent-connectors" class="quiet" hidden>Agent connectors</button>
         <button type="button" id="invite-workspace" class="quiet">Invite to workspace</button>
         <button type="button" id="notify" class="quiet" aria-pressed="false" hidden>Notify me when agents need me</button>
         <details class="access-details"><summary>Your access details</summary>
@@ -253,6 +254,11 @@
       <p>They work when you are not typing in a field. Escape also works from a field.</p>
       <dl id="keys-list" class="keys-list"></dl>
       <button type="button" id="close-keys" class="quiet">Close</button>
+    </dialog>
+    <dialog id="connector-dialog" aria-labelledby="connector-title">
+      <h2 id="connector-title">Agent connectors</h2>
+      <div id="connector-panel"></div>
+      <button id="connector-close" type="button" class="quiet">Close</button>
     </dialog>
     <dialog id="agents-dialog" aria-labelledby="agents-title">
       <h2 id="agents-title">Agents</h2>

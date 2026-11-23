@@ -5,7 +5,10 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
-      miniflare: { bindings: { ADMIN_TOKEN: "test-admin-secret-000000000000000000000" } },
+      miniflare: {
+        kvNamespaces: ["OAUTH_KV"],
+        bindings: { ADMIN_TOKEN: "test-admin-secret-000000000000000000000" },
+      },
     }),
   ],
   test: { include: ["tests/*.test.ts"], testTimeout: 15000 },

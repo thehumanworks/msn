@@ -2853,6 +2853,52 @@ test("each agent's status shows on the board and in Agents with its age, as plai
   await expect(strip).toBeHidden({ timeout: 30_000 });
 });
 
+test("an owner can install a remote agent and accept an invitation with the agent offline", async ({
+  page,
+  request,
+}) => {
+  const [w, peer] = await Promise.all([
+    provision(request, { username: "human" }),
+    provision(request, { username: "human" }),
+  ]);
+  for (const t of [w, peer])
+    expect((await request.put(`${t.path}/channels/chat`, { headers: t.headers })).ok()).toBe(true);
+  const invite = await (
+    await request.post(`${peer.path}/invites`, {
+      headers: peer.headers,
+      data: { channel: "chat", maxUses: 1, watch: true },
+    })
+  ).json();
+  await connect(page, w, "human");
+  await channelsPane(page);
+  await page.getByRole("button", { name: "Agent connectors", exact: true }).click();
+  const box = page.getByRole("dialog", { name: "Agent connectors" });
+  await expect(box).toBeVisible();
+  await box.getByLabel("New agent name").fill("Atlas");
+  await box.getByRole("button", { name: "Create agent user" }).click();
+  await expect(box.getByLabel("Agent user")).toContainText("Atlas");
+  await box.getByLabel("Your channel").selectOption("chat");
+  await box.getByRole("button", { name: "Add agent to channel" }).click();
+  await expect(box).toContainText(`${w.tenant} / #chat · read and reply`);
+  await box.getByLabel("Private invitation").fill(invite.code);
+  await box.getByRole("button", { name: "Review invitation" }).click();
+  await expect(box).toContainText(`${peer.tenant} / #chat · watch only`);
+  await box.getByRole("button", { name: "Join for this agent" }).click();
+  await expect(box.getByRole("status")).toContainText("Joined.");
+  await box.getByLabel("Host label for a bearer key").fill("Host settings");
+  await box.getByRole("button", { name: "Create installation key" }).click();
+  const key = box.getByLabel("Installation key (shown only here)");
+  await expect(key).toBeVisible();
+  expect((await key.inputValue()).startsWith("msni1.")).toBe(true);
+  expect((await page.evaluate(() => JSON.stringify(localStorage))).includes("msni1.")).toBe(false);
+  await box.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Agent connectors", exact: true }).click();
+  await expect(box).toContainText("Host settings · bearer");
+  await expect(key).toHaveCount(0);
+  await box.getByRole("button", { name: "Disconnect installation" }).click();
+  await expect(box.getByRole("button", { name: "Disconnect installation" })).toHaveCount(0);
+});
+
 test("an owner can save and reopen a task receiver format without starting a run", async ({
   page,
   request,

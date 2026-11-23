@@ -6,7 +6,11 @@
  */
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { channelInvitation } from "./channel-invitation";
 import { HttpError } from "./http";
+
+export { channelInvitation } from "./channel-invitation";
+
 import type { Message } from "./store";
 
 export type BoardRef = { tenant: string; channel: string };
@@ -16,6 +20,8 @@ export type ChatPage = { messages: Message[]; nextCursor: number; hasMore: boole
 
 /** Directory misses and removals must not fall back to a workspace, owner, or shared board key. */
 export interface AgentChat {
+  /** Validate the live installation again after reading the HTTP request body. */
+  check?(): Promise<void>;
   user: { id: string; name: string };
   list(): Promise<Membership[]>;
   /** Atomically join one channel only; never consume a workspace invitation or upgrade a watcher. */
@@ -24,30 +30,6 @@ export interface AgentChat {
   read(board: BoardRef, after: number, limit: number): Promise<ChatPage>;
   /** The authenticated actor, never a caller-supplied username, is the sender. */
   send(board: BoardRef, message: Send): Promise<{ message: Message; replayed: boolean }>;
-}
-
-/** Parse only same-server, channel-invitation-shaped input. The tenant checks its scope at redemption. */
-export function channelInvitation(value: string, origin: string) {
-  const invalid = () =>
-    new HttpError(400, "invalid_invite", "Use a channel invitation from this MSN server.");
-  if (!value || value.length > 2048) throw invalid();
-  let code = value.trim();
-  if (code.includes("://")) {
-    let url: URL;
-    try {
-      url = new URL(code);
-    } catch {
-      throw invalid();
-    }
-    if (url.origin !== origin || url.username || url.password || url.search || url.pathname !== "/")
-      throw invalid();
-    const fragment = new URLSearchParams(url.hash.slice(1));
-    if (fragment.size !== 1 || !fragment.has("invite")) throw invalid();
-    code = fragment.get("invite") ?? "";
-  }
-  const match = /^([a-z0-9][a-z0-9_-]{0,63})\.[a-f0-9]{64}$/.exec(code);
-  if (!match) throw invalid();
-  return { tenant: match[1], code };
 }
 
 const boardName = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/);
@@ -65,6 +47,7 @@ function message(m: Message) {
   return {
     id: m.id,
     username: m.username,
+    ...(m.agentUserId ? { agentUserId: m.agentUserId } : {}),
     text: m.text,
     contentType: m.contentType,
     createdAt: m.createdAt,
@@ -82,17 +65,25 @@ const problems: ReadonlyMap<string, string> = new Map([
     "Use a channel invitation from this MSN server, not a shared board link or account connection.",
   ],
   ["invite_unavailable", "This invitation has expired, was revoked, or has no remaining uses."],
+  [
+    "installation_revoked",
+    "This installation is disconnected. The operator can reconnect it in host settings.",
+  ],
   ["channel_invite_required", "Ask for an invitation to one channel, not the workspace."],
   ["board_archived", "This channel is archived and cannot be changed."],
   ["watch_only", "This membership is read-only."],
   ["idempotency_conflict", "This key already describes a different message. Check the thread before acting."],
   ["invalid_reply_to", "Reply to a message that exists in this channel."],
+  [
+    "operator_approval_required",
+    "Your operator can accept or approve this invitation in MSN → Agent connectors. Do not post the invitation in chat.",
+  ],
   ["invalid_cursor", "Use a message cursor from this channel."],
   ["invalid_message", "Check the message text and recipients."],
 ]);
 
 /** Do not echo exception messages: a failed join could otherwise repeat its invitation or a key. */
-async function result(run: () => Promise<Record<string, unknown>>, sendKey?: string) {
+async function toolResult(run: () => Promise<Record<string, unknown>>, sendKey?: string) {
   let payload: Record<string, unknown>;
   let isError = false;
   try {
@@ -120,6 +111,11 @@ async function result(run: () => Promise<Record<string, unknown>>, sendKey?: str
 }
 
 function server(agent: AgentChat, origin: string) {
+  const result = (run: () => Promise<Record<string, unknown>>, key?: string) =>
+    toolResult(async () => {
+      await agent.check?.();
+      return run();
+    }, key);
   const s = new McpServer({ name: "msn", title: "MSN agent chat", version: "1.0.0" });
   s.registerTool(
     "whoami",

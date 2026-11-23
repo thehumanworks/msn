@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { AGENT_SCHEMA, type AgentPrincipal, type AgentUser, AgentUsers } from "./agent-users";
+import { channelInvitation } from "./channel-invitation";
 import {
   GITHUB_SENDER,
   type GithubNotice,
@@ -80,6 +82,7 @@ import {
   sendPush,
   type VapidKeys,
 } from "./push";
+import type { Membership, Send } from "./remote-mcp";
 import {
   copiesPerDay,
   MAX_REPEAT_COPIES_PER_DAY,
@@ -135,6 +138,8 @@ export type Message = {
   /** Every name, in order, when the message is addressed to several (ADR 0067); else absent. */
   recipients?: string[];
   personaId?: string;
+  /** Authenticated hosted agent, not a cooperative persona or display name. */
+  agentUserId?: string;
   /** key=value labels (ADR 0032); absent from JSON when the message has none. */
   labels?: Labels;
   /** Files sent with the message (ADR 0035); absent from JSON when it has none. */
@@ -195,6 +200,7 @@ type MessageRow = {
   /** JSON list of every name when a message is addressed to several (ADR 0067), else NULL. */
   recipients: string | null;
   personaId: string | null;
+  agentUserId: string | null;
   editedAt: string | null;
   quote: string | null;
   /** JSON list of a question's choices (ADR 0065). */
@@ -212,7 +218,7 @@ type MessageRow = {
   claimedAt: string | null;
 };
 const MESSAGE_COLUMNS =
-  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, recipients, personaId, editedAt, quote, choices, answer, answered, answerer, replaces, replacedBy, claimedBy, claimedAt";
+  "id, channel, username, text, contentType, createdAt, replyTo, correlationId, recipient, recipients, personaId, agentUserId, editedAt, quote, choices, answer, answered, answerer, replaces, replacedBy, claimedBy, claimedAt";
 type TenantRow = {
   token_hash: string;
   bound_username: string | null;
@@ -328,6 +334,8 @@ const CHANNEL_TABLES = [
   "channel_credentials",
   "personas",
   "persona_presence",
+  "connector_members",
+  "connector_joins",
   "agent_status",
   "processing_cursors",
   "push_mutes",
@@ -538,6 +546,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     recipient,
     recipients,
     personaId,
+    agentUserId,
     editedAt,
     choices,
     answer,
@@ -558,6 +567,7 @@ function toMessage(row: MessageRow, tenant: string): Message {
     ...(recipient === null ? {} : { to: recipient }),
     ...(recipients == null ? {} : { recipients: JSON.parse(recipients) as string[] }),
     ...(personaId == null ? {} : { personaId }),
+    ...(agentUserId == null ? {} : { agentUserId }),
     ...(editedAt == null ? {} : { editedAt }),
     ...(choices == null ? {} : { choices: JSON.parse(choices) as string[] }),
     ...(answer == null ? {} : { answer }),
@@ -698,6 +708,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     super(ctx, env);
     // Synchronous constructor migration finishes before any request can enter.
     ctx.storage.transactionSync(() => {
+      ctx.storage.sql.exec(AGENT_SCHEMA);
       ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS tenant (
           singleton INTEGER PRIMARY KEY CHECK(singleton = 1), token_hash TEXT NOT NULL,
@@ -878,6 +889,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       )
         ctx.storage.sql.exec("ALTER TABLE access_keys ADD COLUMN channel_scope TEXT");
       for (const [table, column, definition] of [
+        ["messages", "agentUserId", "TEXT"],
         ["access_keys", "owner_access", "INTEGER NOT NULL DEFAULT 0"],
         ["access_keys", "shared_channel", "INTEGER NOT NULL DEFAULT 0"],
         // Watch-only invitations and keys (ADR 0039). Additive with a safe default, so this needs
@@ -3794,7 +3806,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       // GitHub notices (ADR 0036) mirror GitHub; nobody here wrote them.
       if (row.username === GITHUB_SENDER)
         throw new HttpError(403, "github_message", "Messages from GitHub cannot be edited.");
-      if (row.username !== edit.username)
+      if (row.agentUserId || row.username !== edit.username)
         throw new HttpError(403, "not_sender", "Only the sender can edit a message.");
       if (capability.shared_channel) {
         const persona = this.ctx.storage.sql
@@ -4546,6 +4558,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     attachments: AttachmentRef[] = [],
     scheduledId: number | null = null,
     scheduledNext: number | null = null,
+    agentUserId: string | null = null,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       // Rechecked inside the write: an archive that lands while a send awaits its body still wins.
@@ -4663,8 +4676,14 @@ export class MsnDurableObject extends DurableObject<Env> {
       // replaced yet. Checked inside the write, so two replacements that race leave exactly one.
       if (correlation.replaces !== undefined) {
         const old = this.ctx.storage.sql
-          .exec<{ username: string; personaId: string | null; deleted: number; replacedBy: number | null }>(
-            "SELECT username, personaId, deleted, replacedBy FROM messages WHERE channel = ? AND id = ?",
+          .exec<{
+            username: string;
+            personaId: string | null;
+            agentUserId: string | null;
+            deleted: number;
+            replacedBy: number | null;
+          }>(
+            "SELECT username, personaId, agentUserId, deleted, replacedBy FROM messages WHERE channel = ? AND id = ?",
             channel,
             correlation.replaces,
           )
@@ -4681,6 +4700,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Only the sender replaces, as only the sender edits (ADR 0052): on a shared board, only the
         // persona that sent it.
         if (
+          old.agentUserId !== agentUserId ||
           old.username !== username ||
           (old.personaId !== null && personaId !== null && old.personaId !== personaId)
         )
@@ -4723,7 +4743,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         correlation.choices === undefined ? null : this.resolveAnswerer(channel, correlation.to as string);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer, replaces) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer, replaces, agentUserId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -4742,6 +4762,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           correlation.answer ?? null,
           answerer,
           correlation.replaces ?? null,
+          agentUserId,
         )
         .one();
       if (correlation.replaces !== undefined)
@@ -6027,6 +6048,301 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
+  private get agents() {
+    return new AgentUsers(this.ctx.storage.sql);
+  }
+
+  private operator(hash: string) {
+    const cap = this.authorize(hash);
+    this.requireOwner(cap);
+    if (cap.channel_scope || cap.shared_channel || cap.read_only)
+      throw new HttpError(403, "owner_required", "Use the workspace owner's connection.");
+  }
+
+  /** Private Worker/DO RPC only. No HTTP route trusts an agent id, grant id or token hash as a login. */
+  connectorLogin(
+    home: string,
+    auth: { hash: string } | { agent: string; install: string },
+  ): AgentPrincipal | null {
+    return this.agents.login(home, auth);
+  }
+  connectorExchange(agent: string, install: string, first: boolean): boolean {
+    return this.agents.exchange(agent, install, first);
+  }
+  async connectorConsent(ownerHash: string, agent: string, label: string, handleHash: string) {
+    return refusing(async () =>
+      this.ctx.storage.transactionSync(() => {
+        this.operator(ownerHash);
+        const sql = this.ctx.storage.sql;
+        sql.exec("DELETE FROM connector_consents WHERE expires<=?", Date.now());
+        if (sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM connector_consents").one().n >= 1024)
+          throw new HttpError(429, "consent_quota", "Too many recent authorizations. Try again later.");
+        if (
+          !sql.exec(
+            "INSERT OR IGNORE INTO connector_consents VALUES(?,?)",
+            handleHash,
+            Date.now() + 30 * 60_000,
+          ).rowsWritten
+        )
+          throw new HttpError(400, "consent_used", "Start a new sign-in in the host settings.");
+        return { install: this.agents.install(agent, label, null), user: this.agents.user(agent) };
+      }),
+    );
+  }
+  /** Used only on 16 internal rate-limit objects, never keyed by user-supplied tenant names.
+   * Cap public registration/consent writes even if clients rotate IPs. No raw IPs are stored. */
+  connectorPublicBudget(kind: "register" | "consent", sourceHash: string): number {
+    const sql = this.ctx.storage.sql,
+      now = Date.now(),
+      hour = Math.floor(now / 3600_000);
+    return this.ctx.storage.transactionSync(() => {
+      sql.exec(
+        "CREATE TABLE IF NOT EXISTS oauth_budget(kind TEXT,source TEXT,hour INTEGER,n INTEGER,PRIMARY KEY(kind,source))",
+      );
+      sql.exec("DELETE FROM oauth_budget WHERE hour<>?", hour);
+      const { total, n } = sql
+        .exec<{ total: number; n: number }>(
+          "SELECT COALESCE(SUM(n),0) AS total,COALESCE(MAX(CASE WHEN source=? THEN n END),0) AS n FROM oauth_budget WHERE kind=?",
+          sourceHash,
+          kind,
+        )
+        .one();
+      if (total >= (kind === "register" ? 64 : 256) || n >= (kind === "register" ? 12 : 48))
+        return Math.ceil(((hour + 1) * 3600_000 - now) / 1000);
+      sql.exec(
+        "INSERT INTO oauth_budget VALUES(?,?,?,1) ON CONFLICT(kind,source) DO UPDATE SET n=n+1",
+        kind,
+        sourceHash,
+        hour,
+      );
+      return 0;
+    });
+  }
+  connectorLeave(channel: string, id: string): void {
+    this.agents.remove(channel, id);
+  }
+  connectorBoards(tenant: string, id: string): Membership[] {
+    return this.agents.memberships(id).map(({ channel, watchOnly }) => ({ tenant, channel, watchOnly }));
+  }
+  async connectorRead(tenant: string, channel: string, id: string, after: number, limit: number) {
+    return refusing(async () => {
+      this.agents.member(channel, id);
+      this.requireChannel(channel);
+      return this.page(
+        tenant,
+        channel,
+        integer(String(after), 0, Number.MAX_SAFE_INTEGER),
+        integer(String(limit), 10, 20),
+      );
+    });
+  }
+  async connectorSend(tenant: string, channel: string, id: string, input: Send) {
+    return refusing(async () => {
+      const content = text(input.text, "text", 16384);
+      const corr: Correlation = {
+        ...addressFields(recipients(input.to)),
+        replyTo: replyTarget(input.replyTo),
+      };
+      // Internal key space (contains a colon, forbidden on the REST API). Two users with the same
+      // name and two different intentions never replay one another's posts.
+      const key = `agent:${id}:${text(input.key, "idempotency key", 128)}`;
+      const hash = await digest(JSON.stringify([id, content, corr]));
+      // No await between the authoritative membership check and message transaction.
+      const m = this.agents.member(channel, id);
+      if (m.watch) throw new HttpError(403, "watch_only", "This membership can read only.");
+      this.requireChannel(channel);
+      return this.send(
+        tenant,
+        channel,
+        m.name,
+        content,
+        "text/plain",
+        corr,
+        key,
+        hash,
+        null,
+        true,
+        undefined,
+        [],
+        null,
+        null,
+        id,
+      ).json<{ message: Message; replayed: boolean }>();
+    });
+  }
+  async connectorInvitation(user: AgentUser, hash: string, redeem: boolean) {
+    return refusing(async () =>
+      this.ctx.storage.transactionSync(() => {
+        const seen = this.agents.receipt(hash, user.id);
+        if (seen) return seen;
+        const i = this.ctx.storage.sql
+          .exec<InviteRow>("SELECT * FROM invites WHERE code_hash=?", hash)
+          .toArray()[0];
+        if (!i?.remaining || i.expiresAt <= Date.now())
+          throw new HttpError(410, "invite_unavailable", "Invitation expired, revoked or fully used.");
+        if (!i.channel)
+          throw new HttpError(400, "channel_invite_required", "Use an invitation for one channel.");
+        // An authorized writer may issue normal participant invites; connector enrollment follows the
+        // operator policy and requires the inviting workspace owner's authority at redemption.
+        try {
+          this.operator(i.creator_hash);
+        } catch {
+          throw new HttpError(410, "invite_unavailable", "Ask the channel owner for an invitation.");
+        }
+        this.requireChannel(i.channel);
+        this.requireActive(i.channel);
+        const prior = this.agents.memberships(user.id).find((m) => m.channel === i.channel);
+        if (redeem) {
+          const m = this.agents.add(i.channel, user, !!i.watch);
+          this.agents.record(hash, m, i.expiresAt);
+          if (!prior) this.ctx.storage.sql.exec("UPDATE invites SET remaining=remaining-1 WHERE id=?", i.id);
+        }
+        return { channel: i.channel, watchOnly: prior?.watchOnly ?? !!i.watch, expires: i.expiresAt };
+      }),
+    );
+  }
+  /** Register the home index BEFORE consuming a one-use invite. A crash in between is harmless:
+   * the index names a tenant, NOT a grant. Listing asks that tenant what currently exists. */
+  async connectorJoin(
+    home: string,
+    id: string,
+    peer: string,
+    code: string,
+    mode: "preview" | "approve" | "join" | "tool",
+    ownerHash?: string,
+  ): Promise<(Membership & { expires: number }) | Refusal> {
+    return refusing(async () => {
+      const user = this.agents.user(id);
+      const hash = await digest(code.slice(peer.length + 1));
+      const approval = await digest(code);
+      const check = () => {
+        if (mode === "tool") {
+          if (!this.agents.approved(id, approval))
+            throw new HttpError(
+              403,
+              "operator_approval_required",
+              "Ask your operator to approve this invitation in MSN.",
+            );
+        } else this.operator(ownerHash ?? "");
+      };
+      check();
+      const target =
+        peer === home ? this : this.env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", peer]));
+      const info = await target.connectorInvitation(user, hash, false);
+      if ("refused" in info) return info;
+      if (mode === "preview") return { tenant: peer, ...info };
+      check();
+      this.agents.rememberPeer(id, home, peer);
+      if (mode === "approve") {
+        this.agents.approve(id, approval, info.expires);
+        return { tenant: peer, ...info };
+      }
+      const joined = await target.connectorInvitation(user, hash, true);
+      return "refused" in joined ? joined : { tenant: peer, ...joined };
+    });
+  }
+
+  private async connectorOwnerRoute(
+    request: Request,
+    home: string,
+    rest: string[],
+    ownerHash: string,
+  ): Promise<Response> {
+    const method = request.method;
+    const data = method === "POST" || method === "PUT" ? await body(request) : {};
+    this.operator(ownerHash);
+    const db = this.agents;
+    if (rest[0] === "channels") {
+      const channel = slug(rest[1]);
+      this.requireChannel(channel);
+      if (method !== "GET" && method !== "DELETE") this.requireActive(channel);
+      if (rest.length === 3 && method === "GET") return json({ members: db.roster(channel) });
+      if (rest.length === 4) {
+        const id = slug(rest[3]);
+        if (method === "PUT") {
+          if (data.watchOnly !== undefined && typeof data.watchOnly !== "boolean")
+            throw new HttpError(400, "invalid_member", "watchOnly must be true or false.");
+          // Only a local user can be directly added. A public ID owned elsewhere is not authority.
+          const m = db.add(channel, db.user(id), data.watchOnly === true);
+          return json({ tenant: home, channel, id: m.id, name: m.name, watchOnly: !!m.watch });
+        }
+        if (method === "DELETE") {
+          db.remove(channel, id);
+          return new Response(null, { status: 204 });
+        }
+      }
+    } else if (rest.length === 1) {
+      if (method === "GET")
+        return json({
+          agents: db.users(),
+          oauth: Boolean((this.env as Env & { OAUTH_KV?: KVNamespace }).OAUTH_KV),
+          endpoint: new URL("/mcp", this.env.MCP_ORIGIN).href,
+        });
+      if (method === "POST") {
+        const name = text(data.name, "agent name", 128).trim();
+        if (name.toLowerCase() === GITHUB_SENDER || /[\p{Cc}\p{Cf}]/u.test(name))
+          throw new HttpError(
+            400,
+            "invalid_agent_name",
+            "Choose a display name without control characters or reserved names.",
+          );
+        return json({ agent: db.create(name) }, 201);
+      }
+    } else {
+      const id = slug(rest[1]);
+      const user = db.user(id);
+      if (rest.length === 2 && method === "GET") {
+        const { peers } = db.principal(home, id);
+        const channels = (
+          await Promise.all(
+            peers.map((t) =>
+              t === home
+                ? this.connectorBoards(t, id)
+                : this.env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t])).connectorBoards(t, id),
+            ),
+          )
+        ).flat();
+        this.operator(ownerHash);
+        return json({ user, channels, installations: db.installations(id) });
+      }
+      if (rest.length === 3 && rest[2] === "leave" && method === "POST") {
+        const t = slug(text(data.tenant, "tenant", 64)),
+          ch = slug(text(data.channel, "channel", 64));
+        if (!db.principal(home, id).peers.includes(t))
+          throw new HttpError(404, "channel_unavailable", "Not a joined workspace.");
+        if (t === home) this.connectorLeave(ch, id);
+        else
+          await this.env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", t])).connectorLeave(ch, id);
+        return new Response(null, { status: 204 });
+      }
+      if (rest[2] === "installations") {
+        if (rest.length === 3 && method === "POST") {
+          const token = `msni1.${home}.${newToken()}`;
+          const hash = await digest(token);
+          this.operator(ownerHash);
+          return json({ id: db.install(id, text(data.label, "host label", 128), hash), token }, 201);
+        }
+        if (rest.length === 4 && method === "DELETE") {
+          db.revoke(id, slug(rest[3]));
+          return new Response(null, { status: 204 });
+        }
+      }
+      if (rest.length === 3 && rest[2] === "invitations" && method === "POST") {
+        const { tenant, code } = channelInvitation(
+          text(data.invitation, "invitation", 2048),
+          new URL(request.url).origin,
+        );
+        if (data.action !== "preview" && data.action !== "approve" && data.action !== "join")
+          throw new HttpError(400, "invalid_action", "Preview, approve or join this channel invitation.");
+        const info = await this.connectorJoin(home, id, tenant, code, data.action, ownerHash);
+        if ("refused" in info)
+          throw new HttpError(info.refused.status, info.refused.code, info.refused.message);
+        return json(info);
+      }
+    }
+    throw new HttpError(404, "route_not_found", "Unknown agent setup operation.");
+  }
+
   private async createInvite(request: Request, tenant: string, hash: string): Promise<Response> {
     const input = await body(request);
     const channel = input.channel == null ? null : slug(text(input.channel, "channel", 64));
@@ -6203,6 +6519,13 @@ export class MsnDurableObject extends DurableObject<Env> {
             // Rotation remains a workspace-wide emergency reset, not a partial revocation.
             this.ctx.storage.sql.exec("DELETE FROM access_keys");
             this.ctx.storage.sql.exec("DELETE FROM invites");
+            for (const table of [
+              "connector_installs",
+              "connector_members",
+              "connector_joins",
+              "connector_approvals",
+            ])
+              this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
             // Owner devices subscribed under the old credentials stop receiving notifications.
             this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
             // Rotation is the reset after a leaked owner key: mutes it may have left go too (ADR 0044).
@@ -6294,7 +6617,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
             // Keep only a retry tombstone; content and display identity are removed.
             this.ctx.storage.sql.exec(
-              "UPDATE messages SET deleted = 1, username = '', text = '', recipient = NULL, recipients = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, replaces = NULL, replacedBy = NULL, claimedBy = NULL, claimedAt = NULL, bytes = 0 WHERE id = ?",
+              "UPDATE messages SET deleted = 1, agentUserId=NULL, username = '', text = '', recipient = NULL, recipients = NULL, quote = NULL, choices = NULL, answer = NULL, answered = NULL, answerer = NULL, replaces = NULL, replacedBy = NULL, claimedBy = NULL, claimedAt = NULL, bytes = 0 WHERE id = ?",
               id,
             );
             // Deleting a replacement makes the message it replaced current again (ADR 0068). In a
@@ -6385,11 +6708,14 @@ export class MsnDurableObject extends DurableObject<Env> {
           // Cancelling a scheduled message changes nothing on the board, so it works on an archived
           // board too (ADR 0060); otherwise a message that failed there could never be cleared.
           const cancelScheduled = rest.length === 4 && rest[2] === "scheduled" && request.method === "DELETE";
-          if (this.archivedAt(channel) && !cancelScheduled) {
+          const revokeAgent = rest.length === 4 && rest[2] === "members" && request.method === "DELETE";
+          if (this.archivedAt(channel) && !cancelScheduled && !revokeAgent) {
             this.requireScope(this.authorize(hash), channel);
             this.requireActive(channel);
           }
         }
+        if (rest[0] === "agents" || (rest[0] === "channels" && rest[2] === "members"))
+          return await this.connectorOwnerRoute(request, tenant, rest, hash);
         if (rest.length === 1 && rest[0] === "invites" && request.method === "POST")
           return await this.createInvite(request, tenant, hash);
         if (rest[0] === "templates") return await this.templateRoute(request, rest.slice(1), hash);

@@ -183,6 +183,25 @@ dialog form,
   display: grid;
   gap: 14px;
 }
+:where(#connector-panel) fieldset {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 10px 0;
+  padding: 0;
+  border: 0;
+  overflow-wrap: anywhere;
+}
+:where(#connector-panel) fieldset > legend {
+  font-weight: 600;
+  padding: 6px 0;
+}
+:where(#connector-panel) h3 {
+  margin: 8px 0 0;
+}
+:where(#connector-panel) ul {
+  padding-inline-start: 20px;
+}
 dialog > button {
   margin-top: 16px;
 }

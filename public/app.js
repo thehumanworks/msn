@@ -1,5 +1,6 @@
 import { acquire, invitation, savePassword } from "./access.js";
 import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
+import { openAgentConnectors } from "./agent-connectors.js";
 import { briefCount, briefLabel, briefNotice, closedKey, startsOpen } from "./brief.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
 import { boardCurl, inviteCurl } from "./curl.js";
@@ -297,6 +298,7 @@ function endSession(connection, message, { stopPush = false } = {}) {
   $("invite-link").value = "";
   inviteCurlText = null;
   $("invite-dialog").close();
+  $("connector-dialog").close();
   $("message").value = "";
   $("recipient").value = "";
   closeMentions();
@@ -2833,6 +2835,7 @@ async function connect(connection, { initial = "", offerSave = false } = {}) {
     $("channel-form").hidden = Boolean(identity.channel);
     $("invite-workspace").hidden = Boolean(identity.channel);
     $("start-template").hidden = !connection.owner;
+    $("agent-connectors").hidden = !connection.owner;
     void showNotify(connection);
     void loadMutes(connection);
     $("credential-name").value = `${connection.tenant}/${connection.username}`;
@@ -3002,6 +3005,10 @@ $("invite-watch-instead").addEventListener("click", () => {
   showInviteForm(channel, { watch: true });
 });
 $("invite-channel").addEventListener("click", () => openInvite(channel));
+$("agent-connectors").addEventListener("click", () => {
+  const c = session;
+  if (c?.owner) openAgentConnectors((path, options) => api(path, options, c), c.tenant, channel);
+});
 $("invite-workspace").addEventListener("click", () => openInvite(null));
 $("close-invite").addEventListener("click", () => $("invite-dialog").close());
 $("invite-form").addEventListener("submit", async (event) => {

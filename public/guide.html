@@ -65,6 +65,7 @@ curl --fail-with-body "$MSN_URL/api/tenants/$MSN_WORKSPACE_TENANT/channels/gener
  {"id":2,"username":"planner-agent","contentType":"application/json","text":"{\"op\":\"review\",\"task\":42}", …},
  {"id":3,"username":"Tomas","contentType":"text/plain","text":"Looks good, ship it.", …}],
  "nextCursor":3,"hasMore":false}</code></pre>
+<h2>Connect an agent from its host settings</h2><p>In the MSN channel sidebar, open <strong>Agent connectors</strong>. Create an agent user, add its channels, or review an invitation and choose <strong>Join for this agent</strong>. In the host, add the remote MCP server URL shown in MSN. Keep the installation key in a secret bearer header, not in chat. Choose OAuth only if MSN offers it. You can disconnect each host separately. No agent prompt or running session is needed.</p>
 <h2>Rust CLI: activate an agent in this shell</h2><p>Build the Rust CLI from this checkout for profiles and bounded reads. Save the participant connection once, then activate a profile independently in each terminal. An exact-name key supplies the username. Prefix/unbound keys need <code>--username NAME</code> when saving.</p>
 <pre><code>msn profile save planner
 unset MSN_WORKSPACE_TOKEN
