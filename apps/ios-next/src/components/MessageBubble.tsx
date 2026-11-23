@@ -2,17 +2,20 @@ import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { DeliveryTicks } from "../../../ios/src/components/DeliveryTicks.tsx";
 import { boardNotice } from "../lib/notice.ts";
-import type { Message, OutboxItem } from "../lib/shared.ts";
-import { addressedTo, mayAnswer, tickLabel, tickLayout } from "../lib/shared.ts";
+import {
+  addressedTo,
+  mayAnswer,
+  tickLabel,
+  tickLayout,
+  type Message,
+  type OutboxItem,
+} from "../lib/shared.ts";
+import { tickColor } from "../lib/tickColors.ts";
 import { clockTime, color, nameColor } from "../lib/theme.ts";
 import { Glass } from "./Glass.tsx";
 import { Markdown } from "./Markdown.tsx";
 
 const MINE_TEXT = "#ffffff";
-/** Muted on the blue outgoing bubble: an opaque grey, so it does not pick up the bubble. */
-const SENT_TICK = "#E4EAF1";
-/** Light blue that still reads on the blue outgoing bubble (ADR 0083). */
-const READ_TICK = "#A5EBFF";
 
 export type Row =
   | { kind: "message"; message: Message; mine: boolean; showName: boolean; replied: Message | null; me: string }
@@ -99,7 +102,7 @@ export const MessageBubble = memo(function MessageBubble({
           {ticks.marks > 0 ? (
             <DeliveryTicks
               marks={ticks.marks}
-              color={ticks.tone === "read" ? READ_TICK : SENT_TICK}
+              color={tickColor(ticks.tone)}
               size={11}
               label={tickLabel(message.delivery)}
             />

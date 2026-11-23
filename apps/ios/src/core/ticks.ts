@@ -54,6 +54,39 @@ export function tickTone(tick: Tick): "read" | "muted" {
   return tick === "read" ? "read" : "muted";
 }
 
+/**
+ * The box that holds one or two rotated checks. Width is the rotated stroke plus the real
+ * offset of the second check, so the second stroke is not clipped by a guessed slack.
+ */
+export function tickFrame(size: number, marks: number): {
+  width: number;
+  height: number;
+  overhang: number;
+  bottom: number;
+  markW: number;
+  markH: number;
+  count: number;
+} {
+  const count = marks >= 2 ? 2 : 1;
+  const markW = size * 0.38;
+  const markH = size * 0.7;
+  const axis = Math.SQRT1_2;
+  const boxW = markW * axis + markH * axis;
+  const boxH = markW * axis + markH * axis;
+  const overhang = (boxW - markW) / 2;
+  const bottom = Math.max(0, (boxH - markH) / 2);
+  const span = (count === 2 ? TICK_OFFSET_PX : 0) + markW;
+  return {
+    width: overhang + span + overhang,
+    height: Math.max(size, markH + bottom * 2),
+    overhang,
+    bottom,
+    markW,
+    markH,
+    count,
+  };
+}
+
 /** What one bubble paints: nothing unless this viewer sent the message. */
 export function tickLayout(own: boolean, rows: DeliveryRow[] | null | undefined): {
   tick: Tick;

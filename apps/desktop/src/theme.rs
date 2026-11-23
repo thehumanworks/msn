@@ -581,6 +581,45 @@ mod palette_tests {
         assert!(ctx.style_of(egui::Theme::Dark).visuals.dark_mode);
     }
 
+    /// Hue in degrees. Read ticks reuse [`accent`] only while this stays in the blue range.
+    /// The web accent is magenta (~310°) and must not pass.
+    fn hue(color: Color32) -> f32 {
+        let [r, g, b, _] = color.to_array();
+        let (r, g, b) = (r as f32, g as f32, b as f32);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        if max == min {
+            return 0.0;
+        }
+        let span = max - min;
+        let raw = if max == r {
+            (g - b) / span
+        } else if max == g {
+            (b - r) / span + 2.0
+        } else {
+            (r - g) / span + 4.0
+        };
+        let degrees = raw * 60.0;
+        if degrees < 0.0 {
+            degrees + 360.0
+        } else {
+            degrees
+        }
+    }
+
+    #[test]
+    fn accent_is_blue_so_read_ticks_use_it() {
+        let blue = |color: Color32| (170.0..=230.0).contains(&hue(color));
+        assert!(blue(DARK.accent), "dark accent hue {:.1}", hue(DARK.accent));
+        assert!(
+            blue(LIGHT.accent),
+            "light accent hue {:.1}",
+            hue(LIGHT.accent)
+        );
+        // The web accent (#ff2bd6) is magenta. A palette that drifted there would need its own read blue.
+        assert!(!blue(Color32::from_rgb(255, 43, 214)));
+    }
+
     #[test]
     fn the_saved_preference_round_trips_and_system_removes_the_file() {
         let dir = std::env::temp_dir().join(format!("msn-theme-{}", uuid::Uuid::new_v4()));

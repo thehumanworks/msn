@@ -31,7 +31,7 @@ import {
 } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
-import { tickLabel, tickLayout } from "./ticks.js";
+import { ownBubble, tickAttrs } from "./ticks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -164,28 +164,28 @@ function visibleMessageIds() {
 
 /** One or two ticks on the sender's own message (ADR 0083). No node when there is nothing to show. */
 function paintTicks(article, message) {
-  const shown = tickLayout(myMessage(message), message.delivery);
+  const shown = tickAttrs(message, session?.username);
   let ticks = article.querySelector(":scope > .message-meta .ticks");
-  if (!shown.marks) {
+  if (!shown) {
     ticks?.remove();
     return;
   }
   if (!ticks) {
     ticks = document.createElement("span");
-    const time = article.querySelector(":scope > .message-meta time");
-    if (time) time.after(ticks);
+    const stamp = article.querySelector(":scope > .message-meta .message-stamp");
+    if (stamp) stamp.append(ticks);
     else article.querySelector(":scope > .message-meta")?.append(ticks);
   }
-  ticks.className = shown.tone === "read" ? "ticks read" : "ticks";
+  ticks.className = shown.className;
   ticks.replaceChildren();
-  const label = tickLabel(message.delivery);
-  ticks.title = label;
-  ticks.setAttribute("aria-label", label);
-  for (const offset of shown.offsets) {
+  ticks.title = shown.label;
+  ticks.setAttribute("role", "img");
+  ticks.setAttribute("aria-label", shown.label);
+  ticks.style.setProperty("--tick-offset", `${shown.offset}px`);
+  for (let index = 0; index < shown.offsets.length; index += 1) {
     const mark = document.createElement("span");
     mark.className = "tick-mark";
     mark.setAttribute("aria-hidden", "true");
-    mark.style.left = `${offset}px`;
     ticks.append(mark);
   }
 }
@@ -613,7 +613,7 @@ function showFiles(state) {
 
 // The browser uses a human/legacy connection, never an authenticated MCP installation.
 function myMessage(message) {
-  return !message.agentUserId && message.username === session?.username;
+  return ownBubble(message, session?.username);
 }
 function appendMessage(message, target = $("messages")) {
   const article = document.createElement("article");
@@ -658,7 +658,10 @@ function appendMessage(message, target = $("messages")) {
     mark.title = `MSN agent user ${message.agentUserId}`;
     meta.append(mark);
   }
-  meta.append(time);
+  const stamp = document.createElement("span");
+  stamp.className = "message-stamp";
+  stamp.append(time);
+  meta.append(stamp);
   if (message.editedAt) meta.append(editedMark(message));
   // Untrusted content only ever goes through textContent, whatever its contentType claims.
   const boardUpdate = boardNotice(message);
@@ -1143,7 +1146,8 @@ function canEdit(message) {
   return (
     Boolean(session) &&
     !session.watchOnly &&
-    myMessage(message) &&
+    !message.agentUserId &&
+    message.username === session.username &&
     message.username !== "github" &&
     !archivedBoards.has(message.channel)
   );

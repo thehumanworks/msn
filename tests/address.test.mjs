@@ -8,6 +8,7 @@ import {
   namesProblem,
   namesText,
   parseNames,
+  sentBy,
   toField,
   withName,
 } from "../public/address.js";
@@ -82,4 +83,15 @@ test("since you left shows a message to you when you are any of its names", () =
     summary.items.map((item) => item.text),
     ["lead to you: “Which region?”"],
   );
+});
+
+test("given a bound name or a name/worker suffix, when asking who sent it, then it is the viewer's", () => {
+  assert.equal(sentBy("Ada", "Ada"), true);
+  assert.equal(sentBy("Ada/worker", "Ada"), true);
+  assert.equal(sentBy("Ada/worker", "Ada/worker"), true);
+  assert.equal(sentBy("Ada", "Ada/worker"), false);
+  assert.equal(sentBy("Bob", "Ada"), false);
+  assert.equal(sentBy("Adaworker", "Ada"), false);
+  assert.equal(sentBy("Ada", ""), false);
+  assert.equal(sentBy(undefined, "Ada"), false);
 });

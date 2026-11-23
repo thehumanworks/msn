@@ -1,3 +1,5 @@
+import { sentBy } from "./address.js";
+
 /**
  * One mark for an addressed message's per-recipient delivery (ADR 0082).
  * `rows` is the message's `delivery` array, or missing when the message has none.
@@ -52,6 +54,30 @@ export function tickMarks(tick) {
 /** Read is blue. Delivered and partial stay muted. @param {ReturnType<typeof tickOf>} tick */
 export function tickTone(tick) {
   return tick === "read" ? "read" : "muted";
+}
+
+/**
+ * This viewer sent the bubble: their bound name or a `/worker` suffix of it, and not an agent
+ * posting under that name (ADR 0084).
+ */
+export function ownBubble(message, me) {
+  return Boolean(message) && !message.agentUserId && sentBy(message.username, me);
+}
+
+/**
+ * What the web painter puts on the ticks node, or null when the bubble stays unmarked.
+ * `offset` is the shared px constant the stylesheet's `--tick-offset` is set from.
+ */
+export function tickAttrs(message, me) {
+  const shown = tickLayout(ownBubble(message, me), message?.delivery);
+  if (!shown.marks) return null;
+  return {
+    role: "img",
+    label: tickLabel(message.delivery),
+    className: shown.tone === "read" ? "ticks read" : "ticks",
+    offsets: shown.offsets,
+    offset: TICK_OFFSET_PX,
+  };
 }
 
 /** What one bubble paints: nothing unless this viewer sent the message. */

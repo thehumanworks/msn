@@ -20,6 +20,7 @@ import {
   threadRows,
   type ThreadRow,
 } from "../core/threads.ts";
+import { sentBy } from "../core/address.ts";
 import { baseAfterSave } from "../core/brief.ts";
 import { toggled } from "../core/fold.ts";
 import { messageLink } from "../core/links.ts";
@@ -444,7 +445,7 @@ function ChannelBody({
             return (
               <MessageRow
                 message={item}
-                own={item.username === me}
+                own={sentBy(item.username, me)}
                 quoted={
                   item.replyTo === undefined
                     ? undefined

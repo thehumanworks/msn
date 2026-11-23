@@ -19,6 +19,11 @@
   --error: #ff7a7a;
   --presence: #3ddc84;
   --tick-read: #53bdeb;
+  /* Layout of the checks, shared with TICK_OFFSET_PX. Not colours, so the light blocks do not repeat them. */
+  --tick-offset: 4px;
+  --tick-mark: 4px;
+  --tick-stem: 7px;
+  --tick-gap: 3px;
   --backdrop: #000a;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -604,11 +609,20 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
-/* One thin check, or two overlapping by a few px, beside the time (ADR 0083). */
+/* One thin check, or two overlapping by --tick-offset, beside the time (ADR 0083). */
+.message-meta .message-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--tick-gap);
+  margin-left: 0;
+  font-family: inherit;
+}
 .ticks {
+  --tick-box: calc((var(--tick-mark) + var(--tick-stem)) * 0.7071);
+  --tick-overhang: calc((var(--tick-box) - var(--tick-mark)) / 2);
   position: relative;
   display: inline-block;
-  width: 10px;
+  width: var(--tick-box);
   height: 12px;
   flex: none;
   align-self: center;
@@ -616,27 +630,26 @@ nav .empty {
   vertical-align: -1px;
 }
 .message-meta .ticks {
-  margin-left: -5px;
-  font-family: inherit;
+  margin-left: 0;
 }
 .ticks.read {
   color: var(--tick-read);
-  width: 14px;
-}
-.ticks:empty {
-  display: none;
+  width: calc(var(--tick-box) + var(--tick-offset));
 }
 .message-meta .ticks .tick-mark {
   position: absolute;
-  left: 0;
+  left: var(--tick-overhang);
   bottom: 1px;
-  width: 4px;
-  height: 7px;
+  width: var(--tick-mark);
+  height: var(--tick-stem);
   margin-left: 0;
-  font-family: inherit;
   border-right: 1.5px solid currentColor;
   border-bottom: 1.5px solid currentColor;
   transform: rotate(45deg);
+  transform-origin: center;
+}
+.message-meta .ticks .tick-mark + .tick-mark {
+  left: calc(var(--tick-overhang) + var(--tick-offset));
 }
 
 .message-receipts {

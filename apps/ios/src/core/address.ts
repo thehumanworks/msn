@@ -5,6 +5,11 @@ export function sameName(a: string, b: string): boolean {
   return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+/** The viewer sent this message: their name, or that name with a `/worker` suffix (ADR 0084). */
+export function sentBy(username: string, me: string): boolean {
+  return me !== "" && (username === me || username.startsWith(`${me}/`));
+}
+
 /** Whether `me` is one of the message's addressees. */
 export function isAddressed(me: string, message: Pick<Message, "to" | "recipients">): boolean {
   return addressees(message).some((name) => sameName(me, name));

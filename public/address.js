@@ -21,6 +21,15 @@ export function sameName(a, b) {
   return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+/**
+ * The viewer sent this message: their bound name, or that name with a `/worker` suffix
+ * (ADR 0084). A longer name that merely starts the same is someone else.
+ */
+export function sentBy(username, me) {
+  if (typeof username !== "string" || typeof me !== "string" || me === "") return false;
+  return username === me || username.startsWith(`${me}/`);
+}
+
 /** Whether `me` is one of the message's addressees, exactly or trimmed and ignoring case. */
 export function isAddressedTo(me, message) {
   return addressees(message).some((name) => sameName(me, name));

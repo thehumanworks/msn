@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { TICK_OFFSET_PX, tickGlyph, tickLabel, tickLayout, tickOf } from "../src/core/ticks.ts";
+import { TICK_OFFSET_PX, tickFrame, tickGlyph, tickLabel, tickLayout, tickOf } from "../src/core/ticks.ts";
 
 // Delivery ticks on the bubble (ADR 0083).
 // I1 another participant's message, even fully read, draws no ticks -> only the sender
@@ -60,6 +60,20 @@ test("given the sender's pending or unaddressed message, when the bubble is mark
   assert.equal(tickLayout(true, pending).marks, 0);
   assert.equal(tickLayout(true, null).marks, 0);
   assert.equal(tickLayout(true, []).marks, 0);
+});
+
+test("given two checks, when the frame is sized from the offset, then the second rotated edge fits", () => {
+  const frame = tickFrame(11, 2);
+  const right = frame.overhang + TICK_OFFSET_PX + frame.markW + frame.overhang;
+  assert.ok(Math.abs(frame.width - right) < 1e-9);
+  assert.ok(frame.width > frame.markW + TICK_OFFSET_PX);
+  assert.ok(frame.overhang > 0);
+  const single = tickFrame(11, 1);
+  assert.ok(Math.abs(single.width - (single.overhang + single.markW + single.overhang)) < 1e-9);
+  assert.ok(single.width < frame.width);
+  const source = readFileSync(new URL("../src/components/DeliveryTicks.tsx", import.meta.url), "utf8");
+  assert.match(source, /tickFrame\(size, marks\)/);
+  assert.doesNotMatch(source, /0\.35/);
 });
 
 test("the message row asks for ticks only on the sender's own bubble", () => {
