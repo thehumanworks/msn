@@ -41,9 +41,13 @@ test("ack posts the recipient and infers an exact-bound name", async () => {
   assert.equal(h.calls[0].method, "POST");
   assert.deepEqual(JSON.parse(h.calls[0].body), { username: "ada" });
   const noName = { ...env, MSN_USERNAME: undefined };
-  const inferred = harness(["ack", "general", "7"], [{ tenant: "team", username: "planner" }, { changed: true }], {
-    env: noName,
-  });
+  const inferred = harness(
+    ["ack", "general", "7"],
+    [{ tenant: "team", username: "planner" }, { changed: true }],
+    {
+      env: noName,
+    },
+  );
   await inferred.execute();
   assert.equal(inferred.calls[0].url, "https://msn.test/api/tenants/team");
   assert.deepEqual(JSON.parse(inferred.calls[1].body), { username: "planner" });
