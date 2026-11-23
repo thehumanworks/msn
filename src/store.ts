@@ -5674,7 +5674,10 @@ export class MsnDurableObject extends DurableObject<Env> {
           )
           .toArray()
           .some((row) => addressedTo(username, row.name) && row.readAt !== null);
-        // A second ack is unchanged. A first ack that still has no read stamp did not record.
+        // Unreachable through the API, so there is no delivery_missing test. ensureDelivery
+        // and touchDelivery share this transaction and the same addressee match, so a missing
+        // row is inserted and then stamped. A second ack finds readAt and returns changed:false.
+        // This 500 only fires if those two helpers stop agreeing.
         if (!recorded)
           throw new HttpError(500, "delivery_missing", "This recipient's delivery could not be recorded.");
       }
