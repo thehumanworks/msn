@@ -3,6 +3,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { hex, hmacSha256, previewPayload } from "../src/attachment-bytes";
 import type { Message } from "../src/store";
+import { join, maxSizePng, privateJpeg, text } from "./fixtures/image-sanitisation";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv extends Env {}
@@ -411,37 +412,82 @@ describe("message attachments (ADR 0035)", () => {
     expect((await call(`${path}?exp=1&sig=00`, t.token)).status).toBe(200);
   });
 
-  it("omits a zero dimension and does not emit it", async () => {
+  it("rejects a malformed image before storage and omits invalid legacy dimensions", async () => {
     const t = await tenant();
     const jpeg = new Uint8Array([
       0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
     ]);
-    const { attachment } = await (await upload(t, jpeg)).json<Upload>();
-    const sent = await (await send(t, [{ id: attachment.id, name: "flat.jpg" }])).json<{
-      message: Message;
-    }>();
-    expect(sent.message.attachments?.[0].mime).toBe("image/jpeg");
-    expect(sent.message.attachments?.[0].width).toBeUndefined();
-    expect(sent.message.attachments?.[0].height).toBeUndefined();
-    const stored = await runInDurableObject(t.stub, (_instance, state) =>
-      state.storage.sql
-        .exec<{ width: number | null; height: number | null }>(
-          "SELECT width, height FROM attachments WHERE id = ?",
-          attachment.id,
-        )
-        .one(),
-    );
-    expect(stored.width).toBeNull();
-    expect(stored.height).toBeNull();
+    const rejected = await upload(t, jpeg);
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ error: { code: "invalid_attachment" } });
+    expect(await attachmentBytes(t)).toBe(0);
+    expect((await env.ATTACHMENTS.list({ prefix: t.name + "/" })).objects).toHaveLength(0);
+
+    const { attachment } = await (await upload(t, PNG)).json<Upload>();
+    const sent = await (await send(t, [{ id: attachment.id, name: "flat.png" }])).json<{ message: Message }>();
+    expect(sent.message.attachments?.[0]).toMatchObject({ width: 1, height: 1 });
     await runInDurableObject(t.stub, (_instance, state) => {
       state.storage.sql.exec("UPDATE attachments SET width = 0, height = 1 WHERE id = ?", attachment.id);
     });
-    const again = await (await call(`${t.path}/channels/general/messages/${sent.message.id}`, t.token)).json<{
+    const again = await (await call(t.path + "/channels/general/messages/" + sent.message.id, t.token)).json<{
       message: Message;
     }>();
     expect(again.message.attachments?.[0].width).toBeUndefined();
     expect(again.message.attachments?.[0].height).toBeUndefined();
   });
+
+  it("sanitises every upload route before hashing, storing, accounting and signing", async () => {
+    const t = await tenant();
+    const { attachment } = await (await upload(t, privateJpeg(6))).json<Upload>();
+    const duplicate = await upload(t, privateJpeg(6, "different-camera", false));
+    expect(duplicate.status).toBe(200);
+    expect((await duplicate.json<Upload>()).attachment.id).toBe(attachment.id);
+    const other = await (await upload(t, privateJpeg(8))).json<Upload>();
+    expect(other.attachment.id).not.toBe(attachment.id);
+    const stored = await env.ATTACHMENTS.get(t.name + "/general/" + attachment.id);
+    if (!stored) throw new Error("Sanitised R2 object missing");
+    const bytes = new Uint8Array(await stored.arrayBuffer());
+    expect(bytes.length).toBe(attachment.bytes);
+    expect(new TextDecoder().decode(bytes)).not.toContain("private-camera-location");
+    expect(await attachmentBytes(t)).toBe(attachment.bytes + other.attachment.bytes);
+
+    const boundary = "image-boundary";
+    const multipart = (path: string, fields: string) =>
+      call(t.path + "/channels/general/" + path, t.token, {
+        method: "POST",
+        headers: { "Content-Type": "multipart/form-data; boundary=" + boundary },
+        body: join(
+          text(fields + "--" + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="photo.jpg"\r\n\r\n'),
+          privateJpeg(6, "third-camera"),
+          text("\r\n--" + boundary + "--\r\n"),
+        ),
+      });
+    const uploaded = await multipart("attachments", "");
+    expect(uploaded.status).toBe(201);
+    expect(await uploaded.json()).toMatchObject({ attachments: [{ id: attachment.id, bytes: attachment.bytes }] });
+    const sent = await multipart(
+      "messages",
+      "--" + boundary + '\r\nContent-Disposition: form-data; name="username"\r\n\r\nagent\r\n',
+    );
+    expect(sent.status).toBe(201);
+    const { message } = await sent.json<{ message: Message }>();
+    const file = message.attachments?.[0];
+    expect(file).toMatchObject({ id: attachment.id, width: 6, height: 8, mime: "image/jpeg", size: attachment.bytes });
+    const downloaded = await call(file?.previewUrl ?? "");
+    expect(downloaded.status).toBe(200);
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
+    expect(await attachmentBytes(t)).toBe(attachment.bytes + other.attachment.bytes);
+  });
+
+  it("accepts an actual 25 MiB image and accounts only for the sanitised bytes", async () => {
+    const t = await tenant();
+    const response = await upload(t, maxSizePng());
+    expect(response.status).toBe(201);
+    const { attachment } = await response.json<Upload>();
+    expect(attachment.bytes).toBeLessThan(25 * MiB);
+    expect(attachment.bytes).toBeGreaterThan(24 * MiB);
+    expect(await attachmentBytes(t)).toBe(attachment.bytes);
+  }, 60_000);
 
   it("downloads a replayed preview and an expired signature falls back to the channel key", async () => {
     const t = await tenant();

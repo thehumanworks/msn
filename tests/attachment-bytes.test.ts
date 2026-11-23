@@ -3,14 +3,13 @@ import {
   fileNameOf,
   hex,
   hmacSha256,
-  imageSize,
   previewValid,
   readCapped,
   readMultipart,
+  sanitiseImage,
   sha256Bytes,
   signPreview,
   sniffedType,
-  stripMetadata,
 } from "../src/attachment-bytes";
 import { HttpError } from "../src/http";
 
@@ -40,40 +39,6 @@ describe("attachment bytes", () => {
     expect(sniffedType(text("plain words"))).toBe("text/plain");
     expect(sniffedType(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe("image/png");
     expect(sniffedType(new Uint8Array([0, 1, 2, 255]))).toBe("application/octet-stream");
-  });
-
-  it("reads a jpeg frame and drops the exif segment", () => {
-    const exif = text("Exif\0\0GPSDATA");
-    const sof = new Uint8Array([
-      0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x01, 0x11, 0x00,
-    ]);
-    const bytes = new Uint8Array(2 + 4 + exif.length + sof.length + 2);
-    bytes.set([0xff, 0xd8, 0xff, 0xe1, 0x00, exif.length + 2], 0);
-    bytes.set(exif, 6);
-    bytes.set(sof, 6 + exif.length);
-    bytes.set([0xff, 0xd9], 6 + exif.length + sof.length);
-    expect(imageSize(bytes, "image/jpeg")).toEqual({ width: 3, height: 2 });
-    const stripped = stripMetadata(bytes, "image/jpeg");
-    expect(new TextDecoder().decode(stripped)).not.toContain("Exif");
-    expect(new TextDecoder().decode(stripped)).not.toContain("GPSDATA");
-    expect(imageSize(stripped, "image/jpeg")).toEqual({ width: 3, height: 2 });
-    // FF padding before the marker is fill, not a length. Parsing it as a length kept the GPS.
-    const padded = new Uint8Array(bytes.length + 1);
-    padded.set([0xff, 0xd8, 0xff, 0xff]);
-    padded.set(bytes.subarray(3), 4);
-    const paddedOut = stripMetadata(padded, "image/jpeg");
-    expect(new TextDecoder().decode(paddedOut)).not.toContain("GPSDATA");
-    const plain = new Uint8Array([
-      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x03, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
-    ]);
-    expect(stripMetadata(plain, "image/jpeg")).toBe(plain);
-    expect(() =>
-      stripMetadata(new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00, 0x10, 0x00]), "image/jpeg"),
-    ).toThrow(HttpError);
-    const zero = new Uint8Array([
-      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9,
-    ]);
-    expect(imageSize(zero, "image/jpeg")).toBeNull();
   });
 
   it("rejects a preview signature that was changed or has expired", () => {
@@ -178,8 +143,9 @@ describe("attachment bytes", () => {
       (c) => c.charCodeAt(0),
     );
     expect(sniffedType(bytes)).toBe("image/webp");
-    expect(imageSize(bytes, "image/webp")).toEqual({ width: 8, height: 6 });
-    expect(stripMetadata(bytes, "image/webp")).toBe(bytes);
+    const image = sanitiseImage(bytes, "image/webp");
+    expect(image.size).toEqual({ width: 8, height: 6 });
+    expect(image.bytes).toBe(bytes);
   });
 
   it("scans a 20 MB multipart body from small chunks", async () => {

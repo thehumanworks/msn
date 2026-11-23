@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { AGENT_SCHEMA, type AgentPrincipal, type AgentUser, AgentUsers } from "./agent-users";
 import {
-  imageSize,
   inlineMedia,
   isMultipart,
   previewExpiry,
@@ -9,9 +8,9 @@ import {
   previewValid,
   readCapped,
   readMultipart,
+  sanitiseImage,
   signPreview,
   sniffedType,
-  stripMetadata,
 } from "./attachment-bytes";
 import { channelInvitation } from "./channel-invitation";
 import {
@@ -5156,8 +5155,9 @@ export class MsnDurableObject extends DurableObject<Env> {
     raw: Uint8Array,
   ): Promise<{ id: string; bytes: number; created: boolean }> {
     const mime = sniffedType(raw);
-    const data = stripMetadata(raw, mime);
-    const size = imageSize(data, mime);
+    const { bytes: data, size } = sanitiseImage(raw, mime);
+    if (data.byteLength > MAX_ATTACHMENT_BYTES)
+      throw new HttpError(413, "attachment_too_large", "Sanitised attachment exceeds the size limit.");
     const hash = await sha256(data);
     const removed: string[] = [];
     const existing = this.ctx.storage.transactionSync(() => {
