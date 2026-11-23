@@ -151,6 +151,7 @@ test("an agent id is kept, and a non-string id is rejected", async () => {
     createdAt: "2026-11-20T00:00:00.000Z",
   };
   assert.equal(decodeMessage(raw).agentUserId, undefined);
+  assert.equal(decodeMessage({ ...raw, agentUserId: null }).agentUserId, undefined);
   assert.equal(decodeMessage({ ...raw, agentUserId: "agent-1" }).agentUserId, "agent-1");
   assert.equal(decodeMessage({ ...raw, agentUserId: "" }).agentUserId, undefined);
   assert.throws(() => decodeMessage({ ...raw, agentUserId: 5 }), ProtocolError);

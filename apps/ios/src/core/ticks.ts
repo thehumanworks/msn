@@ -31,7 +31,7 @@ export function tickOf(rows: DeliveryRow[] | null | undefined): Tick {
  */
 export const TICK_OFFSET_PX = 4;
 
-/** Ticks only: the exact sender, and not an agent posting under that name (ADR 0085). */
+/** Exact sender, and not an agent under that name (ADR 0085). */
 export function ownBubble(
   message: { username: string; agentUserId?: string } | null | undefined,
   me: string | undefined,

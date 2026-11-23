@@ -103,7 +103,7 @@ export function decodeMessage(raw: unknown): Message {
   if (typeof m.tenant !== "string" || typeof m.channel !== "string" || !SLUG.test(m.channel)) bad("message");
   if (typeof m.username !== "string" || typeof m.text !== "string" || typeof m.createdAt !== "string")
     bad("message");
-  if (m.agentUserId !== undefined && typeof m.agentUserId !== "string") bad("message");
+  if (m.agentUserId != null && typeof m.agentUserId !== "string") bad("message");
   if (m.contentType !== "text/plain" && m.contentType !== "application/json") bad("message");
   const message: Message = {
     id: m.id,

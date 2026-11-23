@@ -49,9 +49,7 @@ export function tickTone(tick) {
   return tick === "read" ? "read" : "muted";
 }
 
-/**
- * Ticks only: the exact sender, and not an agent posting under that name (ADR 0085).
- */
+/** Exact sender, and not an agent under that name (ADR 0085). */
 export function ownBubble(message, me) {
   return Boolean(message) && !message.agentUserId && sentByViewer(message.username, me);
 }

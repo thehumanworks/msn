@@ -91,7 +91,9 @@ test("no rule outside the token blocks hard-codes a colour", () => {
 });
 
 test("light --tick-read overrides the dark token and clears 3:1 on white", () => {
+  const lightMedia = tokens(lightSystem.body);
   assert.equal(light.get("--tick-read"), "#0757a8");
+  assert.equal(lightMedia.get("--tick-read"), "#0757a8");
   assert.equal(darkTokens.get("--tick-read"), "#53bdeb");
   const onWhite = contrast(rgba("#0757a8"), rgba("#ffffff"));
   const onBg = contrast(rgba(light.get("--tick-read")), rgba(light.get("--bg")));

@@ -609,7 +609,9 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
-/* One thin check, or two overlapping by --tick-offset, beside the time (ADR 0083). */
+/* One thin check, or two overlapping by --tick-offset, beside the time (ADR 0083).
+   The stamp is a div so `.message-meta span` does not push it or set mono.
+   inline-flex still lays the time and the checks on one line. */
 .message-meta .message-stamp {
   display: inline-flex;
   align-items: center;
