@@ -16,6 +16,7 @@ import type {
   Snapshot,
   PinnedMessage,
   Claim,
+  Delivery,
   Reactions,
 } from "./types.ts";
 import { REACTION_KINDS } from "./types.ts";
@@ -162,7 +163,28 @@ export function decodeMessage(raw: unknown): Message {
   // Take a request (ADR 0075). A malformed claim is dropped: the message still reads.
   const claim = decodeClaim(m.claim);
   if (claim) message.claim = claim;
+  const delivery = decodeDelivery(m.delivery);
+  if (delivery) message.delivery = delivery;
   return message;
+}
+
+/** Delivery rows (ADR 0082). A malformed list is dropped; the message still reads. */
+function decodeDelivery(raw: unknown): Delivery[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const rows: Delivery[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.name !== "string") continue;
+    if (row.deliveredAt !== null && typeof row.deliveredAt !== "string") continue;
+    if (row.readAt !== null && typeof row.readAt !== "string") continue;
+    rows.push({
+      name: row.name,
+      deliveredAt: (row.deliveredAt as string | null) ?? null,
+      readAt: (row.readAt as string | null) ?? null,
+    });
+  }
+  return rows.length ? rows : undefined;
 }
 
 /** A question's answer record (ADR 0065). */
@@ -255,7 +277,15 @@ export function decodeMessagePage(raw: unknown, after: number): MessagePage {
   const messages = decodeMessages(page.messages, after);
   if (typeof page.hasMore !== "boolean" || !safeInt(page.nextCursor, 0)) bad("message page");
   if (page.nextCursor !== (messages.at(-1)?.id ?? after)) bad("message cursor");
-  return { messages, nextCursor: page.nextCursor, hasMore: page.hasMore };
+  const result: MessagePage = { messages, nextCursor: page.nextCursor, hasMore: page.hasMore };
+  if (page.acks !== undefined) {
+    if (!Array.isArray(page.acks) || !safeInt(page.ackCursor, 0) || typeof page.acksHasMore !== "boolean")
+      bad("message page");
+    result.acks = (page.acks as unknown[]).map(decodeMessage);
+    result.ackCursor = page.ackCursor as number;
+    result.acksHasMore = page.acksHasMore as boolean;
+  }
+  return result;
 }
 
 /** Search pages run newest first and must hold only the asked channel's messages. */

@@ -122,6 +122,16 @@ pub enum Command {
         channel: String,
         after: u64,
     },
+    /// Tick changes on messages at or before the loaded head (ADR 0082).
+    LoadDelivery {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        /// Latest loaded message id. Acks are for messages at or before it.
+        through: u64,
+        after: u64,
+        participant: Option<String>,
+    },
     /// Messages edited after `after` on the open channel (ADR 0052); `None` learns the cursor.
     LoadEdits {
         generation: u64,
@@ -279,6 +289,7 @@ impl Command {
             | Command::React { generation, .. }
             | Command::Claim { generation, .. }
             | Command::Answer { generation, .. }
+            | Command::LoadDelivery { generation, .. }
             | Command::LoadEdits { generation, .. }
             | Command::EditMessage { generation, .. }
             | Command::SendMessage { generation, .. }
@@ -428,6 +439,14 @@ pub enum UiEvent {
         channel: String,
         id: u64,
         claim: Value,
+    },
+    /// Tick changes since the last ack cursor (ADR 0082), and the cursor to ask from next.
+    Delivery {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        messages: Vec<Value>,
+        ack_cursor: u64,
     },
     /// Messages edited since the last edit cursor, and the cursor to ask from next (ADR 0052).
     Edits {
@@ -1003,6 +1022,44 @@ fn handle_command(
                 ),
             }
         }
+        Command::LoadDelivery {
+            generation,
+            channel_generation,
+            channel,
+            through,
+            after,
+            participant,
+        } => match client_ops::fetch_delivery(
+            &cc.client,
+            &cc.tenant,
+            &cc.token,
+            &channel,
+            through,
+            after,
+            participant.as_deref(),
+        ) {
+            Ok((messages, ack_cursor)) => emit(
+                tx,
+                wake,
+                UiEvent::Delivery {
+                    generation,
+                    channel_generation,
+                    channel,
+                    messages,
+                    ack_cursor,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "delivery",
+                err,
+                false,
+                None,
+            ),
+        },
         Command::LoadEdits {
             channel_generation,
             channel,

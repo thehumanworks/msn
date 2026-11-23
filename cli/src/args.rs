@@ -480,6 +480,12 @@ pub enum Command {
     Claim(ClaimArgs),
     /// Release a message you took; the board owner can release anyone's. Succeeds when nobody held it
     Unclaim(ClaimArgs),
+    /// Mark a message addressed to you as read (the double tick). Sends no message
+    #[command(
+        long_about = "Mark a message addressed to you as read (ADR 0082).\n\nActs as this key's name, or --username when the key is unbound. The name must be one of the message's addressees. Calling it again changes nothing and keeps the first read time. A message nobody was addressed does not grow ticks from this command. It sends no message.\n\nJSON: {message, changed}. The message then carries delivery: [{name, deliveredAt, readAt}] for each addressee.",
+        after_help = "Examples:\n  msn ack general 42    # mark message 42 read"
+    )]
+    Ack(AckArgs),
     /// List current reactions by message id, oldest first, as JSON (500 messages per page)
     Reactions {
         channel: String,
@@ -933,6 +939,15 @@ pub enum WebhookCommand {
 /// `GatherArgs`, so clap builds them outside the large subcommand function.
 #[derive(Debug, clap::Args)]
 pub struct ClaimArgs {
+    /// Channel slug
+    pub channel: String,
+    /// Id of the message
+    pub message_id: String,
+}
+
+/// The arguments of `msn ack` (ADR 0082). Channel and message id, like `ClaimArgs`.
+#[derive(Debug, clap::Args)]
+pub struct AckArgs {
     /// Channel slug
     pub channel: String,
     /// Id of the message

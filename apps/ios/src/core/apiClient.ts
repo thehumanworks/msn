@@ -123,10 +123,17 @@ export class ApiClient {
     limit: number,
     wait: number,
     signal?: AbortSignal,
+    extra?: { acksAfter?: number; participant?: string },
   ): Promise<MessagePage> {
     return decodeMessagePage(
       await this.http.request<unknown>(`/channels/${encodeURIComponent(channel)}/messages`, {
-        query: { after, limit, wait },
+        query: {
+          after,
+          limit,
+          wait,
+          ...(extra?.acksAfter === undefined ? {} : { acksAfter: extra.acksAfter }),
+          ...(extra?.participant ? { participant: extra.participant } : {}),
+        },
         timeoutMs: (wait + 15) * 1000,
         signal,
       }),
@@ -291,6 +298,21 @@ export class ApiClient {
     const message = decodeMessage(r?.message);
     if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
       throw new ProtocolError("Claim response named a different message.");
+    return message;
+  }
+
+  /**
+   * POST …/messages/{id}/ack (ADR 0082): the named addressee has read the message.
+   * Idempotent. A name that was not addressed gets 403 not_recipient.
+   */
+  async ack(channel: string, id: number, username: string, signal?: AbortSignal): Promise<Message> {
+    const r = await this.http.request<{ message: unknown }>(
+      `/channels/${encodeURIComponent(channel)}/messages/${id}/ack`,
+      { method: "POST", body: { username }, signal },
+    );
+    const message = decodeMessage(r?.message);
+    if (message.id !== id || message.channel !== channel || message.tenant !== this.tenant)
+      throw new ProtocolError("Ack response named a different message.");
     return message;
   }
 

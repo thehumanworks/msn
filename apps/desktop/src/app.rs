@@ -447,6 +447,9 @@ impl MsnDesktopApp {
             // Edits send no new message either (ADR 0052).
             let command = self.state.edits_command();
             self.dispatch_all(command.into_iter().collect());
+            // Delivery ticks send no event (ADR 0082), so they share this timer too.
+            let command = self.state.delivery_command();
+            self.dispatch_all(command.into_iter().collect());
             // Scheduled messages (ADR 0060) post on the server; the list is re-read here too.
             let command = self.state.scheduled_command();
             self.dispatch_all(command.into_iter().collect());
@@ -3889,6 +3892,12 @@ fn message_header(
     }
     if message["editedAt"].is_string() {
         meta.push_str(" · edited");
+    }
+    let tick = msn_cli::ticks::tick_of(msn_cli::ticks::delivery_rows(message));
+    let glyph = msn_cli::ticks::tick_glyph(tick);
+    if !glyph.is_empty() {
+        meta.push(' ');
+        meta.push_str(glyph);
     }
     // Replace an instruction (ADR 0068): each end names the other.
     if let Some(old) = message["replaces"].as_u64() {

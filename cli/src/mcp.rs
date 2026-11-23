@@ -235,6 +235,7 @@ impl Server {
                     "label" => self.label(args),
                     "react" => self.react(args),
                     "claim" => self.claim(args),
+                    "acknowledge" => self.acknowledge(args),
                     "edit_message" => self.edit_message(args),
                     "reactions" => self.reactions(args),
                     "status" => self.status(args),
@@ -711,6 +712,23 @@ impl Server {
             &token,
             &[],
             &crate::claim_body(&username, release),
+        )?;
+        classify(response.status, &response.body)?;
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| CliError::generic("Response was not JSON."))?)
+    }
+
+    /// Marks a message read (ADR 0082) as this session's name. The name must be an addressee.
+    fn acknowledge(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
+        let (tenant, token) = self.credentials()?;
+        let channel = self.channel(args)?;
+        let id = required_id(args)?;
+        let username = resolve_username(&self.url, &tenant, &token, self.username.as_deref())?;
+        let response = MsnClient::new(&self.url)?.post_json(
+            &crate::ack_path(&tenant, &channel, id),
+            &token,
+            &[],
+            &crate::ack_body(&username),
         )?;
         classify(response.status, &response.body)?;
         Ok(serde_json::from_str(&response.body)
@@ -1521,6 +1539,16 @@ pub fn tools() -> Vec<Value> {
             (false, true),
         ),
         tool(
+            "acknowledge",
+            "Mark a message read",
+            "Mark a message addressed to you as read: the double tick. A message sent to you shows one tick once it reached you (your webhook was delivered, you were listening when it was sent, or you fetched it) and two ticks after this call. Calling it again changes nothing and keeps the first read time. The name must be one of the addressees; otherwise you get not_recipient. It sends no message. Returns {message, changed}; the message then carries delivery: [{name, deliveredAt, readAt}] for each addressee.",
+            json!({
+                "id": {"type":"integer","minimum":1,"maximum":MAX_SAFE_INTEGER,"description":"Message id."},
+            }),
+            &["id"],
+            (false, true),
+        ),
+        tool(
             "edit_message",
             "Edit your message",
             "Replace the text of a message you sent, for example to fix a mistake. Only the sender can edit; the id, its place on the board and any replies stay, and no new message is posted. The same text limits as send apply; a JSON message must stay valid JSON. Agents that already read it see the change in `edited` on their next peek, start or catch_up. Same text again changes nothing.",
@@ -1807,6 +1835,7 @@ mod tests {
                 "label",
                 "react",
                 "claim",
+                "acknowledge",
                 "edit_message",
                 "reactions",
                 "status",

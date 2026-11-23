@@ -1,5 +1,5 @@
 import { BRIEF_CONFLICT, BRIEF_MAX_BYTES, type Brief, briefCount, briefNoticeVersion } from "./brief.ts";
-import { outgoingAddress } from "./address.ts";
+import { isAddressed, outgoingAddress } from "./address.ts";
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
@@ -111,6 +111,10 @@ export class ChannelController {
   private scheduledAt = 0;
   /** Edit cursor (ADR 0052); 0 reads every edit once, so none made while loading is missed. */
   private editCursor = 0;
+  /** Tick cursor (ADR 0082). A long poll asks for changes after this. */
+  private ackCursor = 0;
+  private readonly acked = new Set<number>();
+  private deliveryAbort: AbortController | null = null;
   private needReload = true;
   private needSync = false;
   /** A status.changed event (ADR 0064) for this board, or a reload, asks to reread statuses. */
@@ -155,6 +159,7 @@ export class ChannelController {
 
   start(): void {
     void this.pump();
+    void this.watchDelivery();
   }
 
   refresh(): void {
@@ -171,8 +176,96 @@ export class ChannelController {
 
   dispose(): void {
     this.disposed = true;
+    this.deliveryAbort?.abort();
     if (this.retryTimer) clearTimeout(this.retryTimer);
     for (const off of this.unsubscribe) off();
+  }
+
+  /**
+   * Messages on screen that name this viewer are read (ADR 0082). Idempotent per id.
+   * A watch-only session may still ack: seeing the message is the point of the link.
+   */
+  noteSeen(ids: readonly number[]): void {
+    const me = this.ctl.session.username;
+    if (!me || this.disposed) return;
+    for (const id of ids) {
+      if (this.acked.has(id)) continue;
+      const message = this.byId.get(id);
+      if (!message || !isAddressed(me, message)) continue;
+      this.acked.add(id);
+      void this.ctl.api
+        .ack(this.channel, id, me, this.ctl.signal)
+        .then((updated) => {
+          const known = this.byId.get(id);
+          if (!known || this.disposed) return;
+          known.delivery = updated.delivery;
+          this.publishMessages();
+        })
+        .catch(() => {
+          this.acked.delete(id);
+        });
+    }
+  }
+
+  /** Long-poll tick changes without moving the history cursor (ADR 0082). */
+  private async watchDelivery(): Promise<void> {
+    const controller = new AbortController();
+    this.deliveryAbort = controller;
+    const parent = this.ctl.signal;
+    const stop = () => controller.abort();
+    if (parent.aborted) controller.abort();
+    else parent.addEventListener("abort", stop, { once: true });
+    try {
+      while (!this.disposed && !controller.signal.aborted) {
+        if (this.state.get().phase === "loading") {
+          await this.sleep(50, controller.signal);
+          continue;
+        }
+        const started = Date.now();
+        try {
+          const me = this.ctl.session.username;
+          const page = await this.ctl.api.listMessages(this.channel, this.syncCursor, 1, 25, controller.signal, {
+            acksAfter: this.ackCursor,
+            ...(me ? { participant: me } : {}),
+          });
+          if (this.disposed) return;
+          if (typeof page.ackCursor === "number") this.ackCursor = page.ackCursor;
+          let changed = false;
+          for (const message of page.acks ?? []) {
+            const known = this.byId.get(message.id);
+            if (!known) continue;
+            known.delivery = message.delivery;
+            changed = true;
+          }
+          if (changed) this.publishMessages();
+          if (page.messages.length) {
+            this.needSync = true;
+            void this.pump();
+          }
+          if (page.acksHasMore) continue;
+        } catch (error) {
+          if (this.disposed || isAbortError(error)) return;
+        }
+        // A server that answers at once must not spin. A real long poll already waited.
+        const elapsed = Date.now() - started;
+        if (elapsed < 1000) await this.sleep(1000 - elapsed, controller.signal);
+      }
+    } finally {
+      parent.removeEventListener("abort", stop);
+    }
+  }
+
+  private sleep(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      if (signal.aborted) finish();
+      else signal.addEventListener("abort", finish, { once: true });
+    });
   }
 
   // ---- canonical reads ---------------------------------------------------------------------

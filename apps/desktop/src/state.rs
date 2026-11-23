@@ -184,6 +184,10 @@ pub struct ChannelState {
     pub reactions_flight: Flight,
     /// Edits (ADR 0052) send no message either; re-read on the same timer from `edit_cursor`.
     pub edits_flight: Flight,
+    /// Delivery ticks (ADR 0082) send no event; re-read on the same timer from `ack_cursor`.
+    pub delivery_flight: Flight,
+    /// The last tick cursor applied. 0 reads every change once.
+    pub ack_cursor: u64,
     /// The board's edit cursor from the last edits page; 0 reads every edit once.
     pub edit_cursor: u64,
     /// The board's scheduled messages (ADR 0060), soonest first; re-read on the receipts timer.
@@ -497,6 +501,36 @@ impl AppState {
                 channel_generation,
                 channel,
                 after: first - 1,
+            })
+    }
+
+    /// Re-reads delivery ticks (ADR 0082) for messages already loaded. The desktop app has no
+    /// event for a tick, so this shares the receipts timer with edits.
+    pub fn delivery_command(&mut self) -> Option<Command> {
+        let generation = self.generation()?;
+        let channel = self.selected_channel.clone()?;
+        let channel_generation = self.channel_generation;
+        let participant = self
+            .connection
+            .as_ref()
+            .map(|connection| connection.username.clone())
+            .filter(|name| !name.is_empty());
+        let state = self.channel.as_mut()?;
+        if !state.loaded {
+            return None;
+        }
+        let through = state.head;
+        let after = state.ack_cursor;
+        state
+            .delivery_flight
+            .request()
+            .then_some(Command::LoadDelivery {
+                generation,
+                channel_generation,
+                channel,
+                through,
+                after,
+                participant,
             })
     }
 
@@ -1245,6 +1279,11 @@ impl AppState {
                     state.scheduled_flight.fail();
                 }
             }
+            Command::LoadDelivery { .. } => {
+                if let Some(state) = self.channel.as_mut() {
+                    state.delivery_flight.fail();
+                }
+            }
             Command::LoadEdits { .. } => {
                 if let Some(state) = self.channel.as_mut() {
                     state.edits_flight.fail();
@@ -1580,6 +1619,42 @@ impl AppState {
                         channel_generation,
                         channel,
                         after,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            UiEvent::Delivery {
+                generation,
+                channel_generation,
+                channel,
+                messages,
+                ack_cursor,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                let Some(state) = self.channel.as_mut() else {
+                    return Vec::new();
+                };
+                for message in &messages {
+                    apply_delivery(state, message);
+                }
+                state.ack_cursor = state.ack_cursor.max(ack_cursor);
+                if state.delivery_flight.finish() {
+                    let through = state.head;
+                    let after = state.ack_cursor;
+                    vec![Command::LoadDelivery {
+                        generation,
+                        channel_generation,
+                        channel,
+                        through,
+                        after,
+                        participant: self
+                            .connection
+                            .as_ref()
+                            .map(|connection| connection.username.clone())
+                            .filter(|name| !name.is_empty()),
                     }]
                 } else {
                     Vec::new()
@@ -2121,6 +2196,13 @@ impl AppState {
             }
             "schedule" => self.status = Some(format!("Scheduled message not changed: {message}")),
             // Edits (ADR 0052): a failed refresh keeps what is shown.
+            "delivery" => {
+                if channel_generation == Some(self.channel_generation)
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.delivery_flight.fail();
+                }
+            }
             "edits" => {
                 if channel_generation == Some(self.channel_generation)
                     && let Some(state) = self.channel.as_mut()
@@ -2152,6 +2234,19 @@ impl AppState {
 
 /// Takes an edited message's text and editedAt (ADR 0052) into the cached copy, if it is loaded.
 /// Everything else on the cached message (reactions, labels, attachments) stays.
+/// Copies `delivery` onto a loaded message (ADR 0082). A missing field leaves the cache as it is.
+fn apply_delivery(state: &mut ChannelState, message: &Value) {
+    let Some(id) = message["id"].as_u64() else {
+        return;
+    };
+    let Some(cached) = state.messages.get_mut(&id).and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(delivery) = message.get("delivery") {
+        cached.insert("delivery".into(), delivery.clone());
+    }
+}
+
 fn apply_edit(state: &mut ChannelState, edited: &Value) {
     let Some(id) = edited["id"].as_u64() else {
         return;

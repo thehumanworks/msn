@@ -1,6 +1,15 @@
 // Addressing a message to several names (ADR 0067), mirroring public/address.js.
 import type { Message } from "./types.ts";
 
+function sameName(a: string, b: string): boolean {
+  return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** Whether `me` is one of the message's addressees. */
+export function isAddressed(me: string, message: Pick<Message, "to" | "recipients">): boolean {
+  return addressees(message).some((name) => sameName(me, name));
+}
+
 /** Every name a message is addressed to: `recipients` when present, else `to` alone, else none. */
 export function addressees(message: Pick<Message, "to" | "recipients">): string[] {
   const list = message.recipients;

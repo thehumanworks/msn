@@ -9,6 +9,7 @@ import { choiceMode, choiceNote } from "../core/questions.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
+import { tickGlyph, tickLabel, tickOf } from "../core/ticks.ts";
 import { formatTime } from "./format.ts";
 import { MarkdownText, openMessageLink } from "./MarkdownText.tsx";
 import { colors, mono, radius, spacing } from "./theme.ts";
@@ -219,6 +220,14 @@ function MessageRowImpl({
           </Text>
         ) : null}
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
+        {tickGlyph(tickOf(message.delivery)) ? (
+          <Text
+            style={[styles.ticks, tickOf(message.delivery) === "read" && { color: colors.accent }]}
+            accessibilityLabel={tickLabel(message.delivery)}
+          >
+            {tickGlyph(tickOf(message.delivery))}
+          </Text>
+        ) : null}
         {message.editedAt ? (
           <Text style={styles.edited} accessibilityLabel={`edited ${formatTime(message.editedAt)}`}>
             edited
@@ -421,6 +430,7 @@ const styles = StyleSheet.create({
   author: { fontWeight: "700", fontSize: 14, flexShrink: 1 },
   to: { color: colors.warning, fontSize: 13, flexShrink: 1 },
   time: { color: colors.muted, fontSize: 12, marginLeft: "auto" },
+  ticks: { color: colors.muted, fontSize: 12, letterSpacing: -1 },
   quote: { borderLeftWidth: 3, borderLeftColor: colors.border, paddingLeft: spacing.sm },
   quoteText: { color: colors.muted, fontSize: 13 },
   body: { fontSize: 16 },

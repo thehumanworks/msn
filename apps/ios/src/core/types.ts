@@ -48,7 +48,12 @@ export type Message = {
   replacedBy?: number;
   /** Who said they are handling this message (ADR 0075); absent while nobody has taken it. */
   claim?: Claim;
+  /** Per-recipient delivery and read (ADR 0082); absent when the message names nobody. */
+  delivery?: Delivery[];
 };
+
+/** One addressee's delivery and read time (ADR 0082). Null means not yet. */
+export type Delivery = { name: string; deliveredAt: string | null; readAt: string | null };
 
 /** The one name handling a message, and since when (ADR 0075). A signal, not a lock. */
 export type Claim = { username: string; claimedAt: string };
@@ -70,6 +75,10 @@ export type MessagePage = {
   messages: Message[];
   nextCursor: number;
   hasMore: boolean;
+  /** Tick changes on messages at or before the page start (ADR 0082), when `acksAfter` was asked. */
+  acks?: Message[];
+  ackCursor?: number;
+  acksHasMore?: boolean;
 };
 
 export type Snapshot = {

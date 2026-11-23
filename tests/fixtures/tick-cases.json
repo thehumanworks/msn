@@ -1,0 +1,55 @@
+[
+  {"rows": null, "tick": "none", "glyph": "", "label": ""},
+  {"rows": [], "tick": "none", "glyph": "", "label": ""},
+  {
+    "rows": [{"name": "reviewer", "deliveredAt": null, "readAt": null}],
+    "tick": "pending",
+    "glyph": "",
+    "label": "reviewer not yet delivered"
+  },
+  {
+    "rows": [{"name": "reviewer", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": null}],
+    "tick": "delivered",
+    "glyph": "✓",
+    "label": "reviewer delivered"
+  },
+  {
+    "rows": [{"name": "reviewer", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": "2026-11-23T00:01:00.000Z"}],
+    "tick": "read",
+    "glyph": "✓✓",
+    "label": "reviewer read"
+  },
+  {
+    "rows": [{"name": "reviewer", "deliveredAt": null, "readAt": "2026-11-23T00:01:00.000Z"}],
+    "tick": "read",
+    "glyph": "✓✓",
+    "label": "reviewer read"
+  },
+  {
+    "rows": [
+      {"name": "reviewer", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": null},
+      {"name": "worker", "deliveredAt": null, "readAt": null}
+    ],
+    "tick": "partial",
+    "glyph": "✓",
+    "label": "reviewer delivered, worker not yet delivered"
+  },
+  {
+    "rows": [
+      {"name": "reviewer", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": "2026-11-23T00:01:00.000Z"},
+      {"name": "worker", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": null}
+    ],
+    "tick": "delivered",
+    "glyph": "✓",
+    "label": "reviewer read, worker delivered"
+  },
+  {
+    "rows": [
+      {"name": "reviewer", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": "2026-11-23T00:01:00.000Z"},
+      {"name": "worker", "deliveredAt": "2026-11-23T00:00:00.000Z", "readAt": "2026-11-23T00:02:00.000Z"}
+    ],
+    "tick": "read",
+    "glyph": "✓✓",
+    "label": "reviewer read, worker read"
+  }
+]

@@ -645,6 +645,55 @@ pub fn edit_message(
     Ok(message)
 }
 
+/// Tick changes on messages at or before `through` (ADR 0082). At most a few pages.
+pub fn fetch_delivery(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    through: u64,
+    mut after: u64,
+    participant: Option<&str>,
+) -> Result<(Vec<Value>, u64), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let who = participant
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("&participant={}", query_escape(name)))
+        .unwrap_or_default();
+    let mut found = Vec::new();
+    for _ in 0..5 {
+        let value = get_json(
+            client,
+            &format!(
+                "/api/tenants/{tenant}/channels/{channel}/messages?after={through}&limit=1&acksAfter={after}{who}"
+            ),
+            token,
+        )?;
+        if let Some(rows) = value["acks"].as_array() {
+            found.extend(rows.iter().cloned());
+        }
+        after = value["ackCursor"].as_u64().unwrap_or(after);
+        if !value["acksHasMore"].as_bool().unwrap_or(false) {
+            break;
+        }
+    }
+    Ok((found, after))
+}
+
+fn query_escape(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Messages edited after edit cursor `after` (ADR 0052), oldest edit first, and the cursor to
 /// ask from next. `None` only learns the board's current cursor. At most a few pages.
 pub fn fetch_edits(

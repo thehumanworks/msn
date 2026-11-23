@@ -1,5 +1,5 @@
 import { acquire, invitation, savePassword } from "./access.js";
-import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
+import { addressees, isAddressedTo, namesProblem, namesText, parseNames, toField } from "./address.js";
 import { openAgentConnectors } from "./agent-connectors.js";
 import { briefCount, briefLabel, briefNotice, closedKey, startsOpen } from "./brief.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
@@ -23,6 +23,7 @@ import {
 } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
+import { tickGlyph, tickLabel, tickOf } from "./ticks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -135,6 +136,60 @@ function advanceMark() {
   if (!next) return;
   session.marks = next;
   if (session.remember) storage.set(MARKS_KEY(session.tenant), JSON.stringify(next));
+  // A row on screen that names this viewer is read (ADR 0082). The local mark stays local.
+  ackSeen(state, seen);
+}
+
+/** One or two ticks on an addressed message (ADR 0082). No node when there is nothing to show. */
+function paintTicks(article, message) {
+  const kind = tickOf(message.delivery);
+  const glyph = tickGlyph(kind);
+  let ticks = article.querySelector(":scope > .message-meta .ticks");
+  if (!glyph) {
+    ticks?.remove();
+    return;
+  }
+  if (!ticks) {
+    ticks = document.createElement("span");
+    ticks.className = "ticks";
+    article.querySelector(":scope > .message-meta")?.append(ticks);
+  }
+  ticks.className = kind === "read" ? "ticks read" : "ticks";
+  ticks.textContent = glyph;
+  ticks.title = tickLabel(message.delivery);
+}
+
+/** Apply tick changes from a long poll onto rows already in the log. */
+function applyAcks(messages, state) {
+  for (const message of messages) {
+    const known = state.messages.find((item) => item.id === message.id);
+    if (known) known.delivery = message.delivery;
+    const article = document.querySelector(`#messages article[data-id="${message.id}"]`);
+    if (article) paintTicks(article, known ?? message);
+  }
+}
+
+/** Mark messages through `through` read when they name the signed-in viewer. Idempotent per id. */
+function ackSeen(state, through) {
+  if (!session || !channel || !state || through == null || !session.username) return;
+  const me = session.username;
+  state.acked ??= new Set();
+  for (const message of state.messages) {
+    if (message.id > through || state.acked.has(message.id) || !isAddressedTo(me, message)) continue;
+    state.acked.add(message.id);
+    const id = message.id;
+    void api(`/channels/${channel}/messages/${id}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ username: me }),
+    })
+      .then((data) => {
+        if (!data?.message?.delivery) return;
+        message.delivery = data.message.delivery;
+        const article = document.querySelector(`#messages article[data-id="${id}"]`);
+        if (article) paintTicks(article, message);
+      })
+      .catch(() => state.acked.delete(id));
+  }
 }
 
 function draft(connection = session, name = channel) {
@@ -658,6 +713,7 @@ function appendMessage(message, target = $("messages")) {
   }
   const content = messageContent(message, boardUpdate, structured);
   article.append(meta);
+  paintTicks(article, message);
   for (const [field, label] of [
     ["to", "To"],
     ["replyTo", "Reply to"],
@@ -2485,13 +2541,18 @@ async function poll(live = false) {
   let backoff = 1000;
   do {
     try {
+      const participant = connection.username
+        ? `&participant=${encodeURIComponent(connection.username)}`
+        : "";
       const data = await api(
-        `/channels/${selected}/messages?after=${state.cursor}&limit=100&wait=${live ? 25 : 0}`,
+        `/channels/${selected}/messages?after=${state.cursor}&limit=100&wait=${live ? 25 : 0}${participant}&acksAfter=${state.ackCursor ?? 0}`,
         { signal: controller.signal },
         connection,
       );
       if (generation !== epoch) return;
       render(data.messages, state);
+      if (Array.isArray(data.acks)) applyAcks(data.acks, state);
+      if (typeof data.ackCursor === "number") state.ackCursor = data.ackCursor;
       void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
       markArchived(selected, data.archived === true);
       state.cursor = data.nextCursor;
