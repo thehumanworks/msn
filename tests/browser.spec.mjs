@@ -3444,13 +3444,21 @@ test("image previews honour all eight orientations after server sanitisation", a
     [privateWebp, "webp"],
   ]) {
     const attachments = [];
-    for (let orientation = 1; orientation <= 8; orientation++) {
+    const count = extension === "webp" ? 1 : 8;
+    for (let orientation = 1; orientation <= count; orientation++) {
       const response = await request.post(`${t.path}/channels/general/attachments`, {
         headers: { ...t.headers, "Content-Type": "application/octet-stream" },
         data: Buffer.from(make(orientation)),
       });
       expect(response.ok()).toBe(true);
       attachments.push({ id: (await response.json()).attachment.id, name: `${orientation}.${extension}` });
+    }
+    if (extension === "webp") {
+      const rejected = await request.post(`${t.path}/channels/general/attachments`, {
+        headers: { ...t.headers, "Content-Type": "application/octet-stream" },
+        data: Buffer.from(make(6)),
+      });
+      expect(rejected.status()).toBe(400);
     }
     const sent = await request.post(`${t.path}/channels/general/messages`, {
       headers: t.headers,
@@ -3482,7 +3490,9 @@ test("image previews honour all eight orientations after server sanitisation", a
         ];
         const order = corners.map(([x, y]) => {
           const pixel = ctx.getImageData(x, y, 1, 1).data;
-          const distances = colours.map((colour) => colour.reduce((sum, v, i) => sum + (v - pixel[i]) ** 2, 0));
+          const distances = colours.map((colour) =>
+            colour.reduce((sum, v, i) => sum + (v - pixel[i]) ** 2, 0),
+          );
           return distances.indexOf(Math.min(...distances));
         });
         return { width: canvas.width, height: canvas.height, order };

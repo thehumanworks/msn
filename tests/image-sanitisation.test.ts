@@ -23,7 +23,9 @@ import {
 const clean = (bytes: Uint8Array, mime: string) => sanitiseImage(bytes, `image/${mime}`);
 const readable = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const invalid = (bytes: Uint8Array, mime: string) => {
-  expect(() => clean(bytes, mime)).toThrow(expect.objectContaining({ status: 400, code: "invalid_attachment" }));
+  expect(() => clean(bytes, mime)).toThrow(
+    expect.objectContaining({ status: 400, code: "invalid_attachment" }),
+  );
 };
 
 describe("image sanitisation", () => {
@@ -47,20 +49,43 @@ describe("image sanitisation", () => {
       for (const [input, other, mime] of [
         [privateJpeg(orientation), privateJpeg(orientation, "other-camera", false), "jpeg"],
         [privatePng(orientation), privatePng(orientation, "other-camera"), "png"],
-        [privateWebp(orientation), privateWebp(orientation, "other-camera"), "webp"],
       ] as const) {
         const result = clean(input, mime);
         expect(result.size).toEqual(orientation >= 5 ? { width: 6, height: 8 } : { width: 8, height: 6 });
         expect(readable(result.bytes)).not.toContain("private-camera-location");
         expect(result.bytes).toEqual(clean(other, mime).bytes);
         expect(clean(result.bytes, mime).bytes).toBe(result.bytes);
-        const tag = Uint8Array.of(73, 73, 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0, 0, 0, 0, 0);
+        const tag = Uint8Array.of(
+          73,
+          73,
+          42,
+          0,
+          8,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0x12,
+          1,
+          3,
+          0,
+          1,
+          0,
+          0,
+          0,
+          orientation,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+        );
         const at = result.bytes.findIndex((_, i) => tag.every((v, j) => result.bytes[i + j] === v));
         expect(at !== -1).toBe(orientation !== 1);
-        if (mime === "webp") {
-          expect(result.bytes[20]).toBe(orientation === 1 ? 0 : 8);
-          expect(new DataView(result.bytes.buffer, result.bytes.byteOffset).getUint32(4, true)).toBe(result.bytes.length - 8);
-        }
+
       }
     }
   });
@@ -71,7 +96,12 @@ describe("image sanitisation", () => {
     const first = JPEG.findIndex((v, i) => v === 255 && JPEG[i + 1] === 0xda);
     const later = JPEG.findIndex((v, i) => i > first && v === 255 && JPEG[i + 1] === 0xda);
     expect(later).toBeGreaterThan(first);
-    const dirty = join(JPEG.subarray(0, later), jpegSegment(0xfe, text("secret")), JPEG.subarray(later), text("secret"));
+    const dirty = join(
+      JPEG.subarray(0, later),
+      jpegSegment(0xfe, text("secret")),
+      JPEG.subarray(later),
+      text("secret"),
+    );
     expect(clean(dirty, "jpeg").bytes).toEqual(JPEG);
     expect(clean(join(JPEG, text("secret")), "jpeg").bytes).toEqual(JPEG);
   });
@@ -84,10 +114,13 @@ describe("image sanitisation", () => {
   });
 
   it("removes WebP metadata and canonicalises nested unknown chunks and padding", () => {
-    const input = privateWebp(6);
+    const input = privateWebp(1);
     const result = clean(input, "webp").bytes;
-    expect(readable(result)).not.toMatch(/ICCP|XMP |JUNK/);
-    expect(readable(result)).toContain("EXIF");
+    expect(readable(result)).not.toMatch(/ICCP|XMP |JUNK|EXIF/);
+    expect(result[20]).toBe(0);
+    expect(new DataView(result.buffer, result.byteOffset).getUint32(4, true)).toBe(result.length - 8);
+    expect(clean(privateWebp(1, "other-camera"), "webp").bytes).toEqual(result);
+    expect(clean(result, "webp").bytes).toBe(result);
     // Insert an unknown chunk inside the first ANMF. Its bytes and pad must disappear.
     const animated = ANIMATED_WEBP;
     const start = 44; // RIFF(12), VP8X(18), ANIM(14)
@@ -96,20 +129,39 @@ describe("image sanitisation", () => {
     const unknown = riffChunk("JUNK", text("secret!"));
     unknown[unknown.length - 1] = 0x42;
     const frame = riffChunk("ANMF", join(animated.subarray(start + 8, end), unknown));
-    expect(clean(riff(animated.subarray(12, start), frame, animated.subarray(end)), "webp").bytes).toEqual(animated);
+    expect(clean(riff(animated.subarray(12, start), frame, animated.subarray(end)), "webp").bytes).toEqual(
+      animated,
+    );
     expect(clean(join(WEBP, text("secret")), "webp").bytes).toEqual(WEBP);
+  });
+
+  it("rejects WebP orientations not consistently honoured by clients", () => {
+    for (let orientation = 2; orientation <= 8; orientation++) invalid(privateWebp(orientation), "webp");
   });
 
   it("removes GIF comments and arbitrary applications without changing loop or frame data", () => {
     const extensions = join(
-      Uint8Array.of(0x21, 0xfe, 6), text("secret"), Uint8Array.of(0),
-      Uint8Array.of(0x21, 0xff, 11), text("PRIVATE1234"), Uint8Array.of(6), text("secret"), Uint8Array.of(0),
+      Uint8Array.of(0x21, 0xfe, 6),
+      text("secret"),
+      Uint8Array.of(0),
+      Uint8Array.of(0x21, 0xff, 11),
+      text("PRIVATE1234"),
+      Uint8Array.of(6),
+      text("secret"),
+      Uint8Array.of(0),
     );
-    expect(clean(join(GIF.subarray(0, 25), extensions, GIF.subarray(25), text("secret")), "gif").bytes).toEqual(GIF);
+    expect(
+      clean(join(GIF.subarray(0, 25), extensions, GIF.subarray(25), text("secret")), "gif").bytes,
+    ).toEqual(GIF);
   });
 
   it("rejects malformed container boundaries and conflicting or invalid orientations", () => {
-    for (const [bytes, mime] of [[JPEG, "jpeg"], [PNG, "png"], [WEBP, "webp"], [GIF, "gif"]] as const) {
+    for (const [bytes, mime] of [
+      [JPEG, "jpeg"],
+      [PNG, "png"],
+      [WEBP, "webp"],
+      [GIF, "gif"],
+    ] as const) {
       invalid(bytes.subarray(0, bytes.length - 1), mime);
     }
     invalid(privateJpeg(9), "jpeg");

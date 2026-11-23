@@ -3,7 +3,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { hex, hmacSha256, previewPayload } from "../src/attachment-bytes";
 import type { Message } from "../src/store";
-import { join, maxSizePng, privateJpeg, text } from "./fixtures/image-sanitisation";
+import { join, maxSizePng, privateJpeg, privateWebp, text } from "./fixtures/image-sanitisation";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv extends Env {}
@@ -420,6 +420,9 @@ describe("message attachments (ADR 0035)", () => {
     const rejected = await upload(t, jpeg);
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toMatchObject({ error: { code: "invalid_attachment" } });
+    const orientedWebp = await upload(t, privateWebp(6));
+    expect(orientedWebp.status).toBe(400);
+    expect(await orientedWebp.json()).toMatchObject({ error: { code: "invalid_attachment" } });
     expect(await attachmentBytes(t)).toBe(0);
     expect((await env.ATTACHMENTS.list({ prefix: `${t.name}/` })).objects).toHaveLength(0);
 
@@ -460,10 +463,7 @@ describe("message attachments (ADR 0035)", () => {
         headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
         body: join(
           text(
-            fields +
-              "--" +
-              boundary +
-              '\r\nContent-Disposition: form-data; name="file"; filename="photo.jpg"\r\n\r\n',
+            `${fields}--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="photo.jpg"\r\n\r\n`,
           ),
           privateJpeg(6, "third-camera"),
           text(`\r\n--${boundary}--\r\n`),

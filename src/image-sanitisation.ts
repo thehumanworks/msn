@@ -4,7 +4,8 @@ export type ImageSize = { width: number; height: number };
 type SanitisedImage = { bytes: Uint8Array; size: ImageSize | null };
 
 function valid(condition: unknown, format: string): asserts condition {
-  if (!condition) throw new HttpError(400, "invalid_attachment", `This ${format} is malformed or unsupported.`);
+  if (!condition)
+    throw new HttpError(400, "invalid_attachment", `This ${format} is malformed or unsupported.`);
 }
 
 const ascii = (bytes: Uint8Array, at: number, n: number) =>
@@ -410,7 +411,14 @@ function webpFrame(type: string, payload: Uint8Array): { size: ImageSize; alpha:
       alpha: Boolean(bits & 0x10000000),
     };
   }
-  valid(payload.length >= 10 && (payload[0] & 1) === 0 && payload[3] === 0x9d && payload[4] === 1 && payload[5] === 0x2a, "WebP");
+  valid(
+    payload.length >= 10 &&
+      (payload[0] & 1) === 0 &&
+      payload[3] === 0x9d &&
+      payload[4] === 1 &&
+      payload[5] === 0x2a,
+    "WebP",
+  );
   const view = viewOf(payload);
   const size = { width: view.getUint16(6, true) & 0x3fff, height: view.getUint16(8, true) & 0x3fff };
   valid(size.width > 0 && size.height > 0, "WebP");
@@ -458,7 +466,10 @@ function webp(bytes: Uint8Array): SanitisedImage {
         orientation = combineOrientation(orientation, payload);
         break;
       case "ALPH":
-        valid(canvas && !animated && !frame && !alphaChunk && length > 1 && (payload[0] & 0xc0) === 0, "WebP");
+        valid(
+          canvas && !animated && !frame && !alphaChunk && length > 1 && (payload[0] & 0xc0) === 0,
+          "WebP",
+        );
         alphaChunk = true;
         alpha = true;
         riffChunk(output, type, payload);
@@ -481,7 +492,11 @@ function webp(bytes: Uint8Array): SanitisedImage {
       case "ANMF": {
         valid(canvas && animated && length >= 16 && (payload[15] & 0xfc) === 0, "WebP");
         const size = { width: le24(payload, 6) + 1, height: le24(payload, 9) + 1 };
-        valid(le24(payload, 0) * 2 + size.width <= canvas.width && le24(payload, 3) * 2 + size.height <= canvas.height, "WebP");
+        valid(
+          le24(payload, 0) * 2 + size.width <= canvas.width &&
+            le24(payload, 3) * 2 + size.height <= canvas.height,
+          "WebP",
+        );
         const header = output.length;
         output.write(bytes.subarray(at, p + 16));
         let sub = p + 16;
@@ -519,11 +534,17 @@ function webp(bytes: Uint8Array): SanitisedImage {
   valid(at === limit && (animated ? frames > 0 : frame !== null), "WebP");
   const size = canvas ?? frame;
   valid(size, "WebP");
-  const oriented = orientation !== null && orientation !== 1;
-  if (orientation !== null && orientation !== 1) riffChunk(output, "EXIF", orientationTiff(orientation));
-  if (extendedAt !== -1) output.data[extendedAt] = (alpha ? 0x10 : 0) | (oriented ? 8 : 0) | (animated ? 2 : 0);
+  // Chromium and other decoders ignore WebP EXIF orientation. Fail closed rather
+  // than return a sideways/mirrored image or misleading display dimensions.
+  if (orientation !== null && orientation !== 1)
+    throw new HttpError(
+      400,
+      "invalid_attachment",
+      "Normalise WebP orientation before uploading, or use JPEG or PNG.",
+    );
+  if (extendedAt !== -1) output.data[extendedAt] = (alpha ? 0x10 : 0) | (animated ? 2 : 0);
   output.view.setUint32(4, output.length - 8, true);
-  return { bytes: output.finish(bytes), size: displaySize(size, orientation) };
+  return { bytes: output.finish(bytes), size };
 }
 
 // Returns the first byte after a terminated GIF sub-block sequence.
@@ -561,7 +582,13 @@ function gif(bytes: Uint8Array): SanitisedImage {
       valid(at + 9 <= bytes.length, "GIF");
       const width = view.getUint16(at + 4, true);
       const height = view.getUint16(at + 6, true);
-      valid(width > 0 && height > 0 && view.getUint16(at, true) + width <= size.width && view.getUint16(at + 2, true) + height <= size.height, "GIF");
+      valid(
+        width > 0 &&
+          height > 0 &&
+          view.getUint16(at, true) + width <= size.width &&
+          view.getUint16(at + 2, true) + height <= size.height,
+        "GIF",
+      );
       at += 9 + palette(bytes[at + 8]);
       valid(at < bytes.length && bytes[at] >= 2 && bytes[at] <= 8, "GIF");
       at = gifBlocks(bytes, at + 1);
@@ -572,7 +599,10 @@ function gif(bytes: Uint8Array): SanitisedImage {
     valid(marker === 0x21 && at < bytes.length, "GIF");
     const label = bytes[at++];
     if (label === 0xf9) {
-      valid(at + 6 <= bytes.length && bytes[at] === 4 && bytes[at + 5] === 0 && (bytes[at + 1] & 0xe0) === 0, "GIF");
+      valid(
+        at + 6 <= bytes.length && bytes[at] === 4 && bytes[at + 5] === 0 && (bytes[at + 1] & 0xe0) === 0,
+        "GIF",
+      );
       at += 6;
       output.write(bytes.subarray(start, at));
       continue;
@@ -589,7 +619,29 @@ function gif(bytes: Uint8Array): SanitisedImage {
         valid(loop === null || loop === count, "GIF");
         if (loop === null) {
           loop = count;
-          output.write(Uint8Array.of(0x21, 0xff, 11, 78, 69, 84, 83, 67, 65, 80, 69, 50, 46, 48, 3, 1, count & 255, count >> 8, 0));
+          output.write(
+            Uint8Array.of(
+              0x21,
+              0xff,
+              11,
+              78,
+              69,
+              84,
+              83,
+              67,
+              65,
+              80,
+              69,
+              50,
+              46,
+              48,
+              3,
+              1,
+              count & 255,
+              count >> 8,
+              0,
+            ),
+          );
         }
       }
     }
