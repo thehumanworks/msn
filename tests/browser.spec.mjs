@@ -2853,6 +2853,62 @@ test("each agent's status shows on the board and in Agents with its age, as plai
   await expect(strip).toBeHidden({ timeout: 30_000 });
 });
 
+test("a connector post is visibly from its MSN user, not a person with the same name", async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  if (new URL(baseURL).hostname !== "127.0.0.1") throw new Error("This test requires a loopback Worker");
+  const t = await provision(request, { username: "Atlas" });
+  const ok = async (response) => {
+    const v = await response;
+    expect(v.ok()).toBe(true);
+    return v.json();
+  };
+  await ok(request.put(`${t.path}/channels/chat`, { headers: t.headers }));
+  const { agent } = await ok(
+    request.post(`${t.path}/agents`, { headers: t.headers, data: { name: "Atlas" } }),
+  );
+  await ok(request.put(`${t.path}/channels/chat/members/${agent.id}`, { headers: t.headers, data: {} }));
+  const { token } = await ok(
+    request.post(`${t.path}/agents/${agent.id}/installations`, {
+      headers: t.headers,
+      data: { label: "Browser fixture" },
+    }),
+  );
+  const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
+  const host = new Client({ name: "Fixture", version: "1" });
+  try {
+    await host.connect(
+      new StreamableHTTPClientTransport(new URL("/mcp", baseURL), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    expect(
+      (
+        await host.callTool({
+          name: "send",
+          arguments: {
+            tenant: t.tenant,
+            channel: "chat",
+            text: "From the connected user",
+            key: "fixture-post",
+          },
+        })
+      ).isError,
+    ).not.toBe(true);
+  } finally {
+    await host.close();
+  }
+  await connect(page, t, "Atlas");
+  await openChannel(page, "chat");
+  const msg = page.locator("#messages article").filter({ hasText: "From the connected user" });
+  await expect(msg).toBeVisible();
+  await expect(msg).not.toHaveClass(/\bmine\b/);
+  await expect(msg.getByTitle(`MSN agent user ${agent.id}`)).toContainText("Agent");
+  await expect(msg.getByRole("button", { name: /Edit message/ })).toHaveCount(0);
+});
+
 test("an owner can install a remote agent and accept an invitation with the agent offline", async ({
   page,
   request,
