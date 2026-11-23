@@ -16,6 +16,7 @@ node scripts/msn.mjs whoami
 node scripts/msn.mjs channels
 node scripts/msn.mjs create CHANNEL
 node scripts/msn.mjs send CHANNEL --text 'hello' [--to USERNAME ...] [--key RETRY_KEY] [--reply-to ID [--quote TEXT]] [--correlation-id STR]
+node scripts/msn.mjs ack CHANNEL MESSAGE_ID [--username NAME]
 node scripts/msn.mjs send CHANNEL --json '{"op":"ping"}' [--key RETRY_KEY]
 node scripts/msn.mjs poll CHANNEL [--after 0] [--wait 25] [--limit 100]
 node scripts/msn.mjs follow CHANNEL [--after 0] [--cursor-file ./cursor.json]
@@ -37,6 +38,7 @@ Send retries MUST reuse --key after an uncertain result (printed to stderr).
 and --correlation-id (opaque, <=128 bytes) are optional
 annotations agents can filter on; every reader still receives every message.
 --to USERNAME addresses a participant in the channel; repeat it for up to 8. It does not make a message private.
+ack marks that message read for --username, MSN_USERNAME, or the key's exact binding. It is the double tick.
 --json sends contentType application/json; invalid JSON exits 2 without any request.
 Messages carry contentType (text/plain default); only parse text when it is application/json.
 Provision/rotate print a secret once. Save securely; don't paste into shared channels.
@@ -150,6 +152,7 @@ export async function run({
       "channels",
       "create",
       "send",
+      "ack",
       "poll",
       "follow",
       "wait",
@@ -163,7 +166,7 @@ export async function run({
     throw new UsageError("wait needs --all here; use the msn CLI to wait on one board.");
   const expected = ["channels", "whoami", "keys", "wait"].includes(command)
     ? 1
-    : command === "delete"
+    : command === "delete" || command === "ack"
       ? 3
       : 2;
   if (positionals.length !== expected) throw new Error("Wrong arguments. Run --help.");
@@ -260,6 +263,30 @@ export async function run({
     out(
       JSON.stringify(
         await request(`${path}/messages/${number(id, 0, Number.MAX_SAFE_INTEGER)}`, { method: "DELETE" }),
+      ),
+    );
+    return;
+  }
+  if (command === "ack") {
+    let username = values.username ?? env.MSN_USERNAME;
+    if (username !== undefined && (!username.trim() || Buffer.byteLength(username) > 128))
+      throw new UsageError("Username must be non-blank and at most 128 UTF-8 bytes.");
+    const messageId = number(id, 0, Number.MAX_SAFE_INTEGER);
+    if (!messageId) throw new UsageError("ack needs a positive message id.");
+    if (username === undefined) {
+      const identity = await request("");
+      if (identity.tenant !== tenant) throw new Error("Identity response belongs to a different workspace.");
+      username = identity.username;
+      if (typeof username !== "string" || !username.trim() || Buffer.byteLength(username) > 128)
+        throw new UsageError("This key has no exact username binding. Choose --username NAME.");
+    }
+    out(
+      JSON.stringify(
+        await request(`${path}/messages/${messageId}/ack`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username }),
+        }),
       ),
     );
     return;

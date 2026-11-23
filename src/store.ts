@@ -4262,7 +4262,11 @@ export class MsnDurableObject extends DurableObject<Env> {
       ackPage: ReturnType<typeof acks>,
     ) => {
       // A fetch as this name delivers messages the page actually returns. Not read.
+      // The tick cursor was read before this write. When this page already held every change,
+      // advance it past the seqs just assigned so the client does not poll once more for them.
       this.noteFetched(channel, page.messages, viewer);
+      if (ackPage && !ackPage.acksHasMore)
+        ackPage.ackCursor = Math.max(this.ackCursor(channel), ackPage.ackCursor);
       // Archived boards say so on every page, so a waiting client can stop instead of polling
       // forever for messages that cannot arrive (ADR 0046). Absent on active boards.
       const archived = this.archivedAt(channel) ? { archived: true } : {};
@@ -5289,17 +5293,28 @@ export class MsnDurableObject extends DurableObject<Env> {
   private withDelivery(channel: string, messages: Message[], sparse = false): Message[] {
     if (!messages.length) return messages;
     const ids = messages.map((message) => message.id);
-    const rows = sparse
-      ? this.deliveryRows(channel, ids)
-      : this.ctx.storage.sql
-          .exec<{ messageId: number; name: string; deliveredAt: string | null; readAt: string | null }>(
-            `SELECT messageId, name, deliveredAt, readAt FROM message_delivery
-             WHERE channel = ? AND messageId BETWEEN ? AND ? ORDER BY messageId, rowid`,
-            channel,
-            Math.min(...ids),
-            Math.max(...ids),
-          )
-          .toArray();
+    // A loop, not a spread: a page is small, and a spread of a long id list is needless.
+    let lo = ids[0];
+    let hi = ids[0];
+    for (const id of ids) {
+      if (id < lo) lo = id;
+      if (id > hi) hi = id;
+    }
+    // A contiguous page is a short range. Search hits, tick catch-up and a filtered list can
+    // name a few ids across a long board; BETWEEN would read every row in that span.
+    const wide = hi - lo > ids.length * 4;
+    const rows =
+      sparse || wide
+        ? this.deliveryRows(channel, ids)
+        : this.ctx.storage.sql
+            .exec<{ messageId: number; name: string; deliveredAt: string | null; readAt: string | null }>(
+              `SELECT messageId, name, deliveredAt, readAt FROM message_delivery
+               WHERE channel = ? AND messageId BETWEEN ? AND ? ORDER BY messageId, rowid`,
+              channel,
+              lo,
+              hi,
+            )
+            .toArray();
     if (!rows.length) return messages;
     const byMessage = new Map<
       number,
@@ -5380,16 +5395,26 @@ export class MsnDurableObject extends DurableObject<Env> {
     const names = addressees(message);
     if (!names.length) return;
     const at = message.createdAt;
+    // One read of the board's high seq, then hand the next numbers out. A second MAX inside the
+    // loop would see this transaction's own inserts, but a single counter cannot drift from them.
+    let next = 0;
+    let allocated = false;
     for (const name of names) {
       const listening = this.personaListening(channel, name);
-      const seq = listening
-        ? this.ctx.storage.sql
+      let seq = 0;
+      if (listening) {
+        if (!allocated) {
+          next = this.ctx.storage.sql
             .exec<{ seq: number }>(
               "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM message_delivery WHERE channel = ?",
               channel,
             )
-            .one().seq
-        : 0;
+            .one().seq;
+          allocated = true;
+        }
+        seq = next;
+        next += 1;
+      }
       this.ctx.storage.sql.exec(
         "INSERT INTO message_delivery(channel, messageId, name, deliveredAt, readAt, seq) VALUES (?, ?, ?, ?, NULL, ?)",
         channel,
@@ -5447,24 +5472,31 @@ export class MsnDurableObject extends DurableObject<Env> {
     return true;
   }
 
-  /** The message's addressees gain rows when an older message is acknowledged (ADR 0082). */
+  /**
+   * Every addressee has a row. An older message has none until it is acknowledged. A message that
+   * already has some rows still gains one for any addressee who is missing, so their ack records
+   * instead of returning unchanged. Edits cannot change who a message is addressed to.
+   */
   private ensureDelivery(channel: string, message: Message): void {
-    if (!addressees(message).length) return;
-    const count = this.ctx.storage.sql
-      .exec<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM message_delivery WHERE channel = ? AND messageId = ?",
+    const names = addressees(message);
+    if (!names.length) return;
+    const rows = this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM message_delivery WHERE channel = ? AND messageId = ?",
         channel,
         message.id,
       )
-      .one().n;
-    if (count) return;
-    for (const name of addressees(message))
+      .toArray();
+    for (const name of names) {
+      if (rows.some((row) => addressedTo(name, row.name))) continue;
       this.ctx.storage.sql.exec(
         "INSERT INTO message_delivery(channel, messageId, name, deliveredAt, readAt, seq) VALUES (?, ?, ?, NULL, NULL, 0)",
         channel,
         message.id,
         name,
       );
+      rows.push({ name });
+    }
   }
 
   /**
@@ -5473,18 +5505,57 @@ export class MsnDurableObject extends DurableObject<Env> {
    */
   private noteFetched(channel: string, messages: Message[], name: string | null): void {
     if (!name || !messages.length) return;
+    const ids = messages.filter((message) => isAddressed(name, message)).map((message) => message.id);
+    if (!ids.length) return;
     const at = new Date().toISOString();
     const changed = this.ctx.storage.transactionSync(() => {
-      let moved = false;
-      for (const message of messages) {
-        if (!isAddressed(name, message)) continue;
-        if (this.touchDelivery(channel, message.id, name, false, at)) moved = true;
+      // One read of the rows that are still undelivered, not a lookup per message.
+      const pending = this.undeliveredRows(channel, ids).filter((row) => addressedTo(name, row.name));
+      if (!pending.length) return false;
+      let seq = this.ctx.storage.sql
+        .exec<{ seq: number }>(
+          "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM message_delivery WHERE channel = ?",
+          channel,
+        )
+        .one().seq;
+      for (const row of pending) {
+        this.ctx.storage.sql.exec(
+          `UPDATE message_delivery SET deliveredAt = ?, seq = ?
+           WHERE channel = ? AND messageId = ? AND name = ? AND deliveredAt IS NULL`,
+          at,
+          seq,
+          channel,
+          row.messageId,
+          row.name,
+        );
+        seq += 1;
       }
-      return moved;
+      return true;
     });
     if (!changed) return;
     this.withDelivery(channel, messages);
     this.wakeDelivery(channel);
+  }
+
+  /** Addressee rows on these messages that have not been delivered. Ids may be far apart. */
+  private undeliveredRows(channel: string, ids: number[]) {
+    const sorted = [...ids].sort((a, b) => a - b);
+    const rows: { messageId: number; name: string }[] = [];
+    for (let start = 0; start < sorted.length; start += SQL_ID_CHUNK) {
+      const chunk = sorted.slice(start, start + SQL_ID_CHUNK);
+      rows.push(
+        ...this.ctx.storage.sql
+          .exec<{ messageId: number; name: string }>(
+            `SELECT messageId, name FROM message_delivery
+             WHERE channel = ? AND deliveredAt IS NULL AND messageId IN (${chunk.map(() => "?").join(", ")})
+             ORDER BY messageId, rowid`,
+            channel,
+            ...chunk,
+          )
+          .toArray(),
+      );
+    }
+    return rows;
   }
 
   private wakeDelivery(channel: string): void {
@@ -5531,7 +5602,8 @@ export class MsnDurableObject extends DurableObject<Env> {
       )
       .toArray();
     const byId = new Map(loaded.map((row) => [row.id, toMessage(row, tenant)]));
-    const messages = this.withLabels(
+    // These ids are the messages whose ticks moved, not a contiguous page.
+    const messages = this.withSparse(
       channel,
       ids.flatMap((id) => {
         const message = byId.get(id);
@@ -5593,6 +5665,19 @@ export class MsnDurableObject extends DurableObject<Env> {
         throw new HttpError(403, "not_recipient", "Only a recipient can acknowledge this message.");
       this.ensureDelivery(channel, message);
       const changed = this.touchDelivery(channel, id, username, true, at);
+      if (!changed) {
+        const recorded = this.ctx.storage.sql
+          .exec<{ name: string; readAt: string | null }>(
+            "SELECT name, readAt FROM message_delivery WHERE channel = ? AND messageId = ?",
+            channel,
+            id,
+          )
+          .toArray()
+          .some((row) => addressedTo(username, row.name) && row.readAt !== null);
+        // A second ack is unchanged. A first ack that still has no read stamp did not record.
+        if (!recorded)
+          throw new HttpError(500, "delivery_missing", "This recipient's delivery could not be recorded.");
+      }
       return {
         message: this.withLabels(channel, [message])[0],
         changed,

@@ -33,6 +33,25 @@ function harness(argv, responses = [{}], extra = {}) {
   return { execute: () => run(options), calls, output, errors };
 }
 
+test("ack posts the recipient and infers an exact-bound name", async () => {
+  const h = harness(["ack", "general", "42", "--username", "ada"], [{ message: { id: 42 }, changed: true }]);
+  await h.execute();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].url, "https://msn.test/api/tenants/team/channels/general/messages/42/ack");
+  assert.equal(h.calls[0].method, "POST");
+  assert.deepEqual(JSON.parse(h.calls[0].body), { username: "ada" });
+  const noName = { ...env, MSN_USERNAME: undefined };
+  const inferred = harness(["ack", "general", "7"], [{ tenant: "team", username: "planner" }, { changed: true }], {
+    env: noName,
+  });
+  await inferred.execute();
+  assert.equal(inferred.calls[0].url, "https://msn.test/api/tenants/team");
+  assert.deepEqual(JSON.parse(inferred.calls[1].body), { username: "planner" });
+  const blank = harness(["ack", "general", "7", "--username", " "], [], { env: noName });
+  await assert.rejects(blank.execute(), /Username must be non-blank/);
+  assert.equal(blank.calls.length, 0);
+});
+
 test("CLI infers an exact-bound sender without MSN_USERNAME and preserves explicit names", async () => {
   const noName = { ...env, MSN_USERNAME: undefined };
   const h = harness(

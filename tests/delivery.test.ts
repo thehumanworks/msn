@@ -16,6 +16,13 @@ import type { MsnDurableObject } from "../src/store";
 // I10 the events feed grows no new type, and receipts stay processed-by.
 // I11 an idempotent replay does not duplicate rows.
 // I12 a message whose rows were removed grows them again when acknowledged.
+// I13 an edit cannot change addressees; a missing row among the others is filled in on ack.
+// I14 deleting a message removes its delivery rows and drops it from acks.
+// I15 a shared key cannot ack as github or an unregistered name; a watch-only key cannot ack
+//     as another name; a key for another board is refused; an unaddressed message is not_recipient.
+// I16 search and a non-addressee read do not deliver; one message and catch-up reader=name/worker do.
+// I17 message.posted does not deliver, and neither does a webhook whose persona was deleted.
+// I18 more tick changes than one page sets acksHasMore and the next cursor resumes.
 
 const call = (
   tenant: string,
@@ -200,12 +207,32 @@ describe("delivery ticks (ADR 0082)", () => {
     );
     expect(acked.status).toBe(200);
     expect(await acked.json()).toMatchObject({ changed: true });
+    const later = await (await f.send({ username: "lead", text: "after", to: "dev" })).json<{
+      message: Message;
+    }>();
     expect((await call(f.tenant, "/channels/work/archive", f.owner, "PUT")).status).toBe(200);
-    const archived = await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
-      username: "dev",
-    });
+    const archived = await call(
+      f.tenant,
+      `/channels/work/messages/${later.message.id}/ack`,
+      f.agent,
+      "POST",
+      {
+        username: "dev",
+      },
+    );
     expect(archived.status).toBe(200);
-    expect(await archived.json()).toMatchObject({ changed: false });
+    expect(await archived.json()).toMatchObject({ changed: true });
+    const other = await call(
+      f.tenant,
+      `/channels/work/messages/${later.message.id}/ack`,
+      watcher.token,
+      "POST",
+      {
+        username: "lead",
+      },
+    );
+    expect(other.status).toBe(403);
+    expect(await other.json()).toMatchObject({ error: { code: "username_bound" } });
   });
 
   it("given a webhook, when message.addressed is delivered, then that persona is delivered and a failure is not", async () => {
@@ -354,5 +381,221 @@ describe("delivery ticks (ADR 0082)", () => {
     ).json<{ message: Message }>();
     expect(acked.message.delivery?.[0].readAt).toEqual(expect.any(String));
     expect(acked.message.delivery?.[0].deliveredAt).toEqual(expect.any(String));
+  });
+
+  it("given an edit, when text changes, then addressees and delivery rows stay and a new name cannot be added", async () => {
+    const f = await fixture();
+    const sent = await (await f.send({ username: "lead", text: "please", to: ["dev", "lead"] })).json<{
+      message: Message;
+    }>();
+    const rejected = await call(f.tenant, `/channels/work/messages/${sent.message.id}`, f.agent, "PATCH", {
+      username: "lead",
+      text: "please",
+      to: "dev",
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ error: { code: "invalid_edit" } });
+    const edited = await (
+      await call(f.tenant, `/channels/work/messages/${sent.message.id}`, f.agent, "PATCH", {
+        username: "lead",
+        text: "revised",
+      })
+    ).json<{ message: Message }>();
+    expect(edited.message.text).toBe("revised");
+    expect(edited.message.delivery).toEqual(sent.message.delivery);
+    const stranger = await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
+      username: "human",
+    });
+    expect(stranger.status).toBe(400);
+    expect(await stranger.json()).toMatchObject({ error: { code: "persona_required" } });
+  });
+
+  it("given one recipient's row is missing, when they ack, then that row is created and marked read", async () => {
+    const f = await fixture();
+    const sent = await (await f.send({ username: "lead", text: "both", to: ["dev", "lead"] })).json<{
+      message: Message;
+    }>();
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    await runInDurableObject(stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "DELETE FROM message_delivery WHERE messageId = ? AND name = ?",
+        sent.message.id,
+        "lead",
+      );
+    });
+    const acked = await (
+      await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
+        username: "lead",
+      })
+    ).json<{ changed: boolean; message: Message }>();
+    expect(acked.changed).toBe(true);
+    expect(acked.message.delivery?.find((row) => row.name === "lead")?.readAt).toEqual(expect.any(String));
+    expect(acked.message.delivery?.find((row) => row.name === "dev")?.readAt).toBeNull();
+  });
+
+  it("given a deleted message, when ticks are read, then it is absent and its rows are gone", async () => {
+    const f = await fixture();
+    const sent = await (await f.send({ username: "lead", text: "gone", to: "dev" })).json<{
+      message: Message;
+    }>();
+    await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
+      username: "dev",
+    });
+    expect(
+      (
+        await exports.default.fetch(
+          `https://msn.test/api/admin/tenants/${f.tenant}/channels/work/messages/${sent.message.id}`,
+          { method: "DELETE", headers: { Authorization: "Bearer test-admin-secret-000000000000000000000" } },
+        )
+      ).status,
+    ).toBe(204);
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    const left = await runInDurableObject(
+      stub,
+      (_instance: MsnDurableObject, state) =>
+        state.storage.sql
+          .exec<{ n: number }>(
+            "SELECT COUNT(*) AS n FROM message_delivery WHERE messageId = ?",
+            sent.message.id,
+          )
+          .one().n,
+    );
+    expect(left).toBe(0);
+    const ticks = await page(f, f.owner, `after=${sent.message.id}&acksAfter=0`);
+    expect(ticks.acks ?? []).toEqual([]);
+  });
+
+  it("given a shared key, when it acks as github, a stranger, or on another board, then each is refused", async () => {
+    const f = await fixture();
+    const sent = await (await f.send({ username: "lead", text: "plain", to: "dev" })).json<{
+      message: Message;
+    }>();
+    const bare = await (await f.send({ username: "lead", text: "open" })).json<{ message: Message }>();
+    const github = await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
+      username: "github",
+    });
+    expect(github.status).toBe(403);
+    expect(await github.json()).toMatchObject({ error: { code: "reserved_name" } });
+    const ghost = await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
+      username: "ghost",
+    });
+    expect(ghost.status).toBe(400);
+    expect(await ghost.json()).toMatchObject({ error: { code: "persona_required" } });
+    const open = await call(f.tenant, `/channels/work/messages/${bare.message.id}/ack`, f.agent, "POST", {
+      username: "dev",
+    });
+    expect(open.status).toBe(403);
+    expect(await open.json()).toMatchObject({ error: { code: "not_recipient" } });
+    const invite = await (await call(f.tenant, "/invites", f.owner, "POST", { channel: "work" })).json<{
+      code: string;
+    }>();
+    const member = await (
+      await call(f.tenant, "/invites/redeem", undefined, "POST", { code: invite.code, username: "dev" })
+    ).json<{ token: string }>();
+    expect((await call(f.tenant, "/channels/other", f.owner, "PUT")).status).toBe(201);
+    const scoped = await call(
+      f.tenant,
+      `/channels/other/messages/${sent.message.id}/ack`,
+      member.token,
+      "POST",
+      {
+        username: "dev",
+      },
+    );
+    expect(scoped.status).toBe(403);
+    expect(await scoped.json()).toMatchObject({ error: { code: "channel_forbidden" } });
+  });
+
+  it("given search, one message, and catch-up, when the recipient reads, then only the message and catch-up deliver", async () => {
+    const f = await fixture();
+    const sent = await (await f.send({ username: "lead", text: "needletick", to: "dev" })).json<{
+      message: Message;
+    }>();
+    const invite = await (await call(f.tenant, "/invites", f.owner, "POST", { channel: "work" })).json<{
+      code: string;
+    }>();
+    const member = await (
+      await call(f.tenant, "/invites/redeem", undefined, "POST", { code: invite.code, username: "dev" })
+    ).json<{ token: string }>();
+    // A bound key's search still must not mark the hit delivered.
+    const found = await call(f.tenant, `/channels/work/search?q=needletick`, member.token);
+    expect(found.status).toBe(200);
+    let stored = (await page(f, f.owner)).messages.find((message) => message.id === sent.message.id);
+    expect(stored?.delivery?.[0].deliveredAt).toBeNull();
+    const one = await (
+      await call(f.tenant, `/channels/work/messages/${sent.message.id}?participant=dev`, f.agent)
+    ).json<{ message: Message }>();
+    expect(one.message.delivery?.[0].deliveredAt).toEqual(expect.any(String));
+    expect(one.message.delivery?.[0].readAt).toBeNull();
+    const second = await (await f.send({ username: "lead", text: "later", to: "dev" })).json<{
+      message: Message;
+    }>();
+    const caught = await call(f.tenant, "/channels/work/catchup?reader=dev/worker", member.token);
+    expect(caught.status).toBe(200);
+    stored = (await page(f, f.owner)).messages.find((message) => message.id === second.message.id);
+    expect(stored?.delivery?.[0].deliveredAt).toEqual(expect.any(String));
+    expect(stored?.delivery?.[0].readAt).toBeNull();
+  });
+
+  it("given a webhook, when the notice is message.posted or the persona is gone, then nothing is delivered", async () => {
+    const f = await fixture();
+    const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", f.tenant]));
+    await runInDurableObject(stub, (instance: MsnDurableObject) => {
+      instance.webhookFetch = async () => new Response("ok");
+    });
+    expect(
+      (
+        await call(f.tenant, "/channels/work/personas/dev/webhook", f.owner, "PUT", {
+          url: "https://agent.example.com/wake",
+          subscribe: "board",
+        })
+      ).status,
+    ).toBe(201);
+    const posted = await (await f.send({ username: "lead", text: "board", to: "lead" })).json<{
+      message: Message;
+    }>();
+    await runInDurableObject(stub, async (instance: MsnDurableObject, state) => {
+      state.storage.sql.exec("UPDATE webhook_notices SET nextAttemptMs = 0");
+      return instance.sendDueNotices();
+    });
+    let stored = (await page(f, f.owner)).messages.find((message) => message.id === posted.message.id);
+    expect(stored?.delivery?.[0].deliveredAt).toBeNull();
+    const addressed = await (await f.send({ username: "lead", text: "you", to: "dev" })).json<{
+      message: Message;
+    }>();
+    await runInDurableObject(stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec("DELETE FROM personas WHERE channel = ? AND id = ?", "work", "dev");
+    });
+    await runInDurableObject(stub, async (instance: MsnDurableObject, state) => {
+      state.storage.sql.exec("UPDATE webhook_notices SET nextAttemptMs = 0");
+      return instance.sendDueNotices();
+    });
+    stored = (await page(f, f.owner)).messages.find((message) => message.id === addressed.message.id);
+    expect(stored?.delivery?.[0].deliveredAt).toBeNull();
+  });
+
+  it("given more tick changes than one page, when the client follows ackCursor, then the rest arrive", async () => {
+    const f = await fixture();
+    const ids: number[] = [];
+    for (let n = 0; n < 21; n++) {
+      const sent = await (await f.send({ username: "lead", text: `n${n}`, to: "dev" })).json<{
+        message: Message;
+      }>();
+      ids.push(sent.message.id);
+      expect(
+        (
+          await call(f.tenant, `/channels/work/messages/${sent.message.id}/ack`, f.agent, "POST", {
+            username: "dev",
+          })
+        ).status,
+      ).toBe(200);
+    }
+    const through = ids[ids.length - 1];
+    const first = await page(f, f.owner, `after=${through}&acksAfter=0`);
+    expect(first.acksHasMore).toBe(true);
+    expect(first.acks).toHaveLength(20);
+    const second = await page(f, f.owner, `after=${through}&acksAfter=${first.ackCursor}`);
+    expect(second.acksHasMore).toBe(false);
+    expect(second.acks?.map((message) => message.id)).toEqual([ids[20]]);
   });
 });

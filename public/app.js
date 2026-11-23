@@ -1,5 +1,13 @@
 import { acquire, invitation, savePassword } from "./access.js";
-import { addressees, isAddressedTo, namesProblem, namesText, parseNames, toField } from "./address.js";
+import {
+  addressees,
+  isAddressedTo,
+  namesProblem,
+  namesText,
+  parseNames,
+  sameName,
+  toField,
+} from "./address.js";
 import { openAgentConnectors } from "./agent-connectors.js";
 import { briefCount, briefLabel, briefNotice, closedKey, startsOpen } from "./brief.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
@@ -133,11 +141,25 @@ function advanceMark() {
   const unseen = firstUnseenReply(state);
   if (seen !== null && unseen !== null) seen = Math.min(seen, unseen.id - 1);
   const next = advance(session.marks ?? {}, markId(session.username, channel), seen);
-  if (!next) return;
-  session.marks = next;
-  if (session.remember) storage.set(MARKS_KEY(session.tenant), JSON.stringify(next));
-  // A row on screen that names this viewer is read (ADR 0082). The local mark stays local.
-  ackSeen(state, seen);
+  if (next) {
+    session.marks = next;
+    if (session.remember) storage.set(MARKS_KEY(session.tenant), JSON.stringify(next));
+  }
+  // Only rows actually on screen, and only while this tab is focused. A background tab, a
+  // minimised window, and history that was loaded but is off screen do not count as read.
+  if (document.hasFocus()) ackSeen(state, visibleMessageIds());
+}
+
+/** Message ids whose article intersects the log. Off-screen history is not included. */
+function visibleMessageIds() {
+  const box = $("messages");
+  const view = box.getBoundingClientRect();
+  const ids = [];
+  for (const node of box.querySelectorAll("article[data-id]")) {
+    const rect = node.getBoundingClientRect();
+    if (rect.width > 0 && rect.bottom > view.top && rect.top < view.bottom) ids.push(Number(node.dataset.id));
+  }
+  return ids;
 }
 
 /** One or two ticks on an addressed message (ADR 0082). No node when there is nothing to show. */
@@ -169,15 +191,20 @@ function applyAcks(messages, state) {
   }
 }
 
-/** Mark messages through `through` read when they name the signed-in viewer. Idempotent per id. */
-function ackSeen(state, through) {
-  if (!session || !channel || !state || through == null || !session.username) return;
+/** Mark these on-screen messages read when they name the signed-in viewer. Once per id, and not if already read. */
+function ackSeen(state, ids) {
+  if (!session || !channel || !state || !session.username || !ids?.length) return;
   const me = session.username;
   state.acked ??= new Set();
-  for (const message of state.messages) {
-    if (message.id > through || state.acked.has(message.id) || !isAddressedTo(me, message)) continue;
-    state.acked.add(message.id);
-    const id = message.id;
+  for (const id of ids) {
+    const message = state.messages.find((item) => item.id === id);
+    if (!message || state.acked.has(id) || !isAddressedTo(me, message)) continue;
+    const mine = message.delivery?.find((row) => sameName(row.name, me));
+    if (mine?.readAt) {
+      state.acked.add(id);
+      continue;
+    }
+    state.acked.add(id);
     void api(`/channels/${channel}/messages/${id}/ack`, {
       method: "POST",
       body: JSON.stringify({ username: me }),

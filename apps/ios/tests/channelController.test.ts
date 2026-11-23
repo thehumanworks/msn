@@ -564,3 +564,37 @@ test("a scheduled message is listed, changed and cancelled, and leaves the list 
     await server.close();
   }
 });
+
+test("a paused app does not acknowledge, and only an addressed on-screen id is posted once", async () => {
+  const server = await startMockServer();
+  try {
+    const addressed = server.post("general", "asha", "hi");
+    const other = server.post("general", "asha", "other");
+    const mine = server.messages.find((message) => message.id === addressed.id);
+    const theirs = server.messages.find((message) => message.id === other.id);
+    if (mine) mine.to = "tomas";
+    if (theirs) theirs.to = "ada";
+    const { ctl, channelCtl } = await open(server);
+    await waitFor(() => ids(channelCtl).length === 2, "both");
+    ctl.pause();
+    channelCtl.noteSeen([1, 2]);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(server.requests.filter((request) => request.path.endsWith("/ack")).length, 0);
+    ctl.resume();
+    channelCtl.noteSeen([2]);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(server.requests.filter((request) => request.path.endsWith("/ack")).length, 0);
+    channelCtl.noteSeen([1]);
+    await waitFor(
+      () => server.requests.filter((request) => request.path.endsWith("/messages/1/ack")).length === 1,
+      "ack",
+    );
+    channelCtl.noteSeen([1]);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(server.requests.filter((request) => request.path.endsWith("/messages/1/ack")).length, 1);
+    channelCtl.dispose();
+    ctl.dispose();
+  } finally {
+    await server.close();
+  }
+});

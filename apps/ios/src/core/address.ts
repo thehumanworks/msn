@@ -1,7 +1,7 @@
 // Addressing a message to several names (ADR 0067), mirroring public/address.js.
 import type { Message } from "./types.ts";
 
-function sameName(a: string, b: string): boolean {
+export function sameName(a: string, b: string): boolean {
   return a === b || a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 

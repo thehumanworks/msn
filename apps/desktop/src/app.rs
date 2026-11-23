@@ -1127,6 +1127,8 @@ impl MsnDesktopApp {
         }
         // The newest message whose top reached the visible conversation (ADR 0045).
         let mut seen = 0u64;
+        // Rows whose drawn rect meets the clip. Off-screen history is not acknowledged.
+        let mut on_screen = Vec::new();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(egui::Margin {
                 bottom: 8,
@@ -1189,6 +1191,9 @@ impl MsnDesktopApp {
                                             Some(fold),
                                             actions,
                                         );
+                                        if shown.rect.intersects(ui.clip_rect()) {
+                                            on_screen.push(id);
+                                        }
                                         mark_selected(ui, &shown, selected == Some(id), reveal);
                                         if scroll_to == Some(id) {
                                             scroll_now(&shown);
@@ -1234,6 +1239,9 @@ impl MsnDesktopApp {
                                             render_reactions(ui, reply, &me, can_react, actions);
                                             render_receipts(ui, reply, &me, &state.receipts);
                                         });
+                                        if shown.response.rect.intersects(ui.clip_rect()) {
+                                            on_screen.push(id);
+                                        }
                                         if scroll_to == Some(id) {
                                             scroll_now(&shown.response);
                                         }
@@ -1247,9 +1255,14 @@ impl MsnDesktopApp {
                         }
                     });
             });
-        // A window in the background is not being read.
-        if ui.input(|input| input.focused) && self.state.mark_read(seen) {
+        // A window in the background is not being read, and does not acknowledge.
+        let focused = ui.input(|input| input.focused);
+        if focused && self.state.mark_read(seen) {
             self.queue_read_marks();
+        }
+        if focused {
+            let acks = self.state.acks_for(&on_screen);
+            self.dispatch_all(acks);
         }
     }
 

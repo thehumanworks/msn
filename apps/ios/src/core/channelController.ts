@@ -1,5 +1,5 @@
 import { BRIEF_CONFLICT, BRIEF_MAX_BYTES, type Brief, briefCount, briefNoticeVersion } from "./brief.ts";
-import { isAddressed, outgoingAddress } from "./address.ts";
+import { isAddressed, outgoingAddress, sameName } from "./address.ts";
 import type { SendMessageInput } from "./apiClient.ts";
 import { backoffDelayMs, type BackoffOptions } from "./backoff.ts";
 import { createPendingSend, generateIdempotencyKey } from "./composer.ts";
@@ -187,11 +187,17 @@ export class ChannelController {
    */
   noteSeen(ids: readonly number[]): void {
     const me = this.ctl.session.username;
-    if (!me || this.disposed) return;
+    // A backgrounded app is not reading. Viewability can still report rows that were on screen.
+    if (!me || this.disposed || this.ctl.state.get().kind === "paused") return;
     for (const id of ids) {
       if (this.acked.has(id)) continue;
       const message = this.byId.get(id);
       if (!message || !isAddressed(me, message)) continue;
+      const mine = message.delivery?.find((row) => sameName(row.name, me));
+      if (mine?.readAt) {
+        this.acked.add(id);
+        continue;
+      }
       this.acked.add(id);
       void this.ctl.api
         .ack(this.channel, id, me, this.ctl.signal)

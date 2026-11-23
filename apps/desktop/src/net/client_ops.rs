@@ -576,6 +576,35 @@ pub fn react(
     Ok(message["reactions"].clone())
 }
 
+/// Marks message `id` read as `username` (ADR 0082). Returns that message's `delivery` rows.
+pub fn acknowledge(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+) -> Result<Value, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let response = client.post_json(
+        &msn_cli::ack_path(tenant, channel, id),
+        token,
+        &[],
+        &msn_cli::ack_body(username),
+    )?;
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let message = &value["message"];
+    if message["id"].as_u64() != Some(id) || message["channel"].as_str() != Some(channel) {
+        return Err(CliError::generic(
+            "Acknowledge response named a different message.",
+        ));
+    }
+    Ok(message.get("delivery").cloned().unwrap_or(Value::Null))
+}
+
 /// Takes message `id` as `username`, or releases it (ADR 0075). Returns the message's claim
 /// after the change: `{username, claimedAt}`, or `Null` when nobody holds it. A message another
 /// name holds is a conflict whose text names the holder.

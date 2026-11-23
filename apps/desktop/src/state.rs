@@ -188,6 +188,8 @@ pub struct ChannelState {
     pub delivery_flight: Flight,
     /// The last tick cursor applied. 0 reads every change once.
     pub ack_cursor: u64,
+    /// Message ids this session already asked to mark read, or that were already read.
+    pub acked: BTreeSet<u64>,
     /// The board's edit cursor from the last edits page; 0 reads every edit once.
     pub edit_cursor: u64,
     /// The board's scheduled messages (ADR 0060), soonest first; re-read on the receipts timer.
@@ -746,6 +748,59 @@ impl AppState {
         }]
     }
 
+    /// Acks addressed messages that were drawn on screen this frame (ADR 0082). Once per id.
+    /// A row that is already read is remembered and not posted again. Anything else is ignored,
+    /// including messages that are loaded but were not passed in because they were off screen.
+    pub fn acks_for(&mut self, visible: &[u64]) -> Vec<Command> {
+        let Some(generation) = self.generation() else {
+            return Vec::new();
+        };
+        let Some(channel_name) = self.selected_channel.clone() else {
+            return Vec::new();
+        };
+        let Some(username) = self
+            .connection
+            .as_ref()
+            .map(|connection| connection.username.clone())
+            .filter(|name| !name.is_empty())
+        else {
+            return Vec::new();
+        };
+        let channel_generation = self.channel_generation;
+        let Some(state) = self.channel.as_mut() else {
+            return Vec::new();
+        };
+        let mut commands = Vec::new();
+        for &id in visible {
+            if state.acked.contains(&id) {
+                continue;
+            }
+            let decision = state.messages.get(&id).map(|message| {
+                (
+                    message_names(message)
+                        .iter()
+                        .any(|name| names_match(name, &username)),
+                    read_by(message, &username),
+                )
+            });
+            let Some((true, already)) = decision else {
+                continue;
+            };
+            state.acked.insert(id);
+            if already {
+                continue;
+            }
+            commands.push(Command::Ack {
+                generation,
+                channel_generation,
+                channel: channel_name.clone(),
+                username: username.clone(),
+                id,
+            });
+        }
+        commands
+    }
+
     /// Answers question `question` with `choice` as the connected name (ADR 0065). Only the
     /// addressed name is offered the buttons; the server checks it again.
     pub fn answer(&mut self, question: u64, choice: String) -> Vec<Command> {
@@ -1284,6 +1339,17 @@ impl AppState {
                     state.delivery_flight.fail();
                 }
             }
+            Command::Ack {
+                id,
+                channel_generation,
+                ..
+            } => {
+                if channel_generation == self.channel_generation
+                    && let Some(state) = self.channel.as_mut()
+                {
+                    state.acked.remove(&id);
+                }
+            }
             Command::LoadEdits { .. } => {
                 if let Some(state) = self.channel.as_mut() {
                     state.edits_flight.fail();
@@ -1623,6 +1689,26 @@ impl AppState {
                 } else {
                     Vec::new()
                 }
+            }
+            UiEvent::Acked {
+                generation,
+                channel_generation,
+                channel,
+                id,
+                delivery,
+            } => {
+                if !self.is_current_channel(generation, channel_generation, &channel) {
+                    return Vec::new();
+                }
+                if let Some(message) = self
+                    .channel
+                    .as_mut()
+                    .and_then(|state| state.messages.get_mut(&id))
+                    .and_then(Value::as_object_mut)
+                {
+                    message.insert("delivery".into(), delivery);
+                }
+                Vec::new()
             }
             UiEvent::Delivery {
                 generation,
@@ -2095,6 +2181,15 @@ impl AppState {
         if self.generation() != Some(generation) && !pending_connect {
             return;
         }
+        if context == "ack" {
+            if channel_generation == Some(self.channel_generation)
+                && let Some(id) = key.as_deref().and_then(|value| value.parse().ok())
+                && let Some(state) = self.channel.as_mut()
+            {
+                state.acked.remove(&id);
+            }
+            return;
+        }
         if let Some(key) = key {
             if let Some(pending) = self.pending_sends.get_mut(&key) {
                 pending.error = Some(message);
@@ -2230,6 +2325,31 @@ impl AppState {
             _ => self.status = Some(message),
         }
     }
+}
+
+fn names_match(a: &str, b: &str) -> bool {
+    a == b || a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+fn message_names(message: &Value) -> Vec<&str> {
+    if let Some(list) = message["recipients"].as_array() {
+        let names: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+        if !names.is_empty() {
+            return names;
+        }
+    }
+    message["to"].as_str().into_iter().collect()
+}
+
+fn read_by(message: &Value, me: &str) -> bool {
+    message["delivery"].as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row["name"]
+                .as_str()
+                .is_some_and(|name| names_match(name, me))
+                && row["readAt"].is_string()
+        })
+    })
 }
 
 /// Takes an edited message's text and editedAt (ADR 0052) into the cached copy, if it is loaded.
@@ -4036,5 +4156,46 @@ mod tests {
                 .unwrap()
                 .contains("archived")
         );
+    }
+
+    #[test]
+    fn on_screen_acks_are_once_per_message_and_skip_what_is_already_read() {
+        let mut state = ready_state(1);
+        state.select_channel("general".into());
+        synced(
+            &mut state,
+            vec![
+                json!({"id": 4, "text": "mine", "to": "alice"}),
+                json!({"id": 5, "text": "other", "to": "bob"}),
+                json!({
+                    "id": 6,
+                    "text": "seen",
+                    "to": "Alice",
+                    "delivery": [{"name": "alice", "deliveredAt": "t", "readAt": "t"}]
+                }),
+            ],
+            6,
+            0,
+        );
+        // Only the row that was drawn. The others are loaded and stay unacked.
+        let commands = state.acks_for(&[4]);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Ack { id: 4, username, .. }] if username == "alice"
+        ));
+        assert!(state.acks_for(&[4, 5, 6]).is_empty());
+        assert!(state.channel.as_ref().unwrap().acked.contains(&4));
+        assert!(state.channel.as_ref().unwrap().acked.contains(&6));
+        assert!(!state.channel.as_ref().unwrap().acked.contains(&5));
+        state.apply(UiEvent::Error {
+            generation: 1,
+            channel_generation: Some(state.channel_generation),
+            context: "ack",
+            message: "no".into(),
+            retryable: true,
+            key: Some("4".into()),
+        });
+        assert!(!state.channel.as_ref().unwrap().acked.contains(&4));
+        assert_eq!(state.acks_for(&[4]).len(), 1);
     }
 }

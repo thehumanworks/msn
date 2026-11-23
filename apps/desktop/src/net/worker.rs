@@ -268,6 +268,15 @@ pub enum Command {
         send_at: Option<String>,
         cancel: bool,
     },
+    /// Marks one on-screen message read as the connected name (ADR 0082). Only the UI sends
+    /// this, and only for a row that was actually drawn while the window was focused.
+    Ack {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        username: String,
+        id: u64,
+    },
 }
 
 impl Command {
@@ -301,7 +310,8 @@ impl Command {
             | Command::ClearMute { generation, .. }
             | Command::LoadScheduled { generation, .. }
             | Command::Schedule { generation, .. }
-            | Command::ChangeScheduled { generation, .. } => Some(*generation),
+            | Command::ChangeScheduled { generation, .. }
+            | Command::Ack { generation, .. } => Some(*generation),
             Command::Disconnect => None,
         }
     }
@@ -439,6 +449,14 @@ pub enum UiEvent {
         channel: String,
         id: u64,
         claim: Value,
+    },
+    /// One message's delivery after the viewer acknowledged it (ADR 0082).
+    Acked {
+        generation: u64,
+        channel_generation: u64,
+        channel: String,
+        id: u64,
+        delivery: Value,
     },
     /// Tick changes since the last ack cursor (ADR 0082), and the cursor to ask from next.
     Delivery {
@@ -1022,6 +1040,37 @@ fn handle_command(
                 ),
             }
         }
+        Command::Ack {
+            generation,
+            channel_generation,
+            channel,
+            username,
+            id,
+        } => match client_ops::acknowledge(
+            &cc.client, &cc.tenant, &cc.token, &channel, &username, id,
+        ) {
+            Ok(delivery) => emit(
+                tx,
+                wake,
+                UiEvent::Acked {
+                    generation,
+                    channel_generation,
+                    channel,
+                    id,
+                    delivery,
+                },
+            ),
+            Err(err) => emit_error(
+                tx,
+                wake,
+                generation,
+                Some(channel_generation),
+                "ack",
+                err,
+                true,
+                Some(id.to_string()),
+            ),
+        },
         Command::LoadDelivery {
             generation,
             channel_generation,

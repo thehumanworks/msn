@@ -71,9 +71,15 @@ means its thread); a wait ends only for a new reply there. Keep that thread's ne
                                           (the double tick). Idempotent. 403 not_recipient
                                           when the name was not an addressee. An addressed
                                           message carries delivery:[{name,deliveredAt,readAt}].
-                                          One tick is delivered (a fetch, a listening agent, or
-                                          a delivered webhook); two ticks is this ack or a person
-                                          reading it. Poll with &acksAfter=CURSOR to hear ticks.
+                                          One tick is delivered (a fetch as that name, a
+                                          listening agent, or a delivered webhook); two ticks
+                                          is this ack or a person reading the row on screen.
+                                          A bound key's read marks that name delivered. A
+                                          shared key does so only with participant=NAME.
+                                          Search does not. The read writes and can wake a
+                                          poll that passed acksAfter. A tick means a key
+                                          allowed to act as that name, not a device.
+                                          Poll with &acksAfter=CURSOR to hear ticks.
   POST $API/messages/ID/claim             {username} take a request so others skip it; 409 names
                                           the holder. {username,release:true} gives it back.
                                           Skip a message whose "claim" names someone else.
