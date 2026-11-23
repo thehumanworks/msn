@@ -438,7 +438,7 @@ function webp(bytes: Uint8Array): SanitisedImage {
   const size = canvas ?? frame;
   valid(size, "WebP");
   const oriented = orientation !== null && orientation !== 1;
-  if (oriented) riffChunk(output, "EXIF", orientationTiff(orientation));
+  if (orientation !== null && orientation !== 1) riffChunk(output, "EXIF", orientationTiff(orientation));
   if (extendedAt !== -1) output.data[extendedAt] = (alpha ? 0x10 : 0) | (oriented ? 8 : 0) | (animated ? 2 : 0);
   output.view.setUint32(4, output.length - 8, true);
   return { bytes: output.finish(bytes), size: displaySize(size, orientation) };
