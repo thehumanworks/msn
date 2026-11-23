@@ -17,4 +17,4 @@ export { useOwned } from "../../../ios/src/hooks/useOwned.ts";
 export { useChannel, useChannelList } from "../../../ios/src/hooks/useChannelController.ts";
 export { validateOrigin } from "../../../ios/src/core/httpClient.ts";
 export { addressedTo, mayAnswer } from "../../../ios/src/core/questions.ts";
-export { tickGlyph, tickLabel, tickOf } from "../../../ios/src/core/ticks.ts";
+export { tickGlyph, tickLabel, tickLayout, tickOf } from "../../../ios/src/core/ticks.ts";

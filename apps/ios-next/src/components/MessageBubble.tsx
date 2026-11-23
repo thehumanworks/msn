@@ -1,13 +1,18 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { DeliveryTicks } from "../../../ios/src/components/DeliveryTicks.tsx";
 import { boardNotice } from "../lib/notice.ts";
 import type { Message, OutboxItem } from "../lib/shared.ts";
-import { addressedTo, mayAnswer, tickGlyph, tickLabel, tickOf } from "../lib/shared.ts";
+import { addressedTo, mayAnswer, tickLabel, tickLayout } from "../lib/shared.ts";
 import { clockTime, color, nameColor } from "../lib/theme.ts";
 import { Glass } from "./Glass.tsx";
 import { Markdown } from "./Markdown.tsx";
 
 const MINE_TEXT = "#ffffff";
+/** Muted on the blue outgoing bubble: an opaque grey, so it does not pick up the bubble. */
+const SENT_TICK = "#E4EAF1";
+/** Light blue that still reads on the blue outgoing bubble (ADR 0083). */
+const READ_TICK = "#A5EBFF";
 
 export type Row =
   | { kind: "message"; message: Message; mine: boolean; showName: boolean; replied: Message | null; me: string }
@@ -44,6 +49,7 @@ export const MessageBubble = memo(function MessageBubble({
   const json = message.contentType === "application/json";
   const canAnswer = Boolean(message.choices?.length) && !message.answered && mayAnswer(message, me);
   const textColor = mine ? MINE_TEXT : color.label;
+  const ticks = tickLayout(mine, message.delivery);
 
   return (
     <View style={[styles.wrap, mine ? styles.right : styles.left, showName && { marginTop: 10 }]}>
@@ -84,17 +90,21 @@ export const MessageBubble = memo(function MessageBubble({
         ) : (
           <Markdown text={message.text} color={textColor} tint={mine ? MINE_TEXT : color.tint} />
         )}
-        <Text
-          style={[styles.time, mine && { color: "rgba(255,255,255,0.75)" }]}
-          accessibilityLabel={tickLabel(message.delivery) || undefined}
-        >
-          {message.claim ? `${message.claim.username} is on it · ` : ""}
-          {message.editedAt ? "edited · " : ""}
-          {clockTime(message.createdAt)}
-          {tickGlyph(tickOf(message.delivery))
-            ? `  ${tickGlyph(tickOf(message.delivery))}`
-            : ""}
-        </Text>
+        <View style={styles.timeRow}>
+          <Text style={[styles.time, mine && { color: "rgba(255,255,255,0.75)" }]}>
+            {message.claim ? `${message.claim.username} is on it · ` : ""}
+            {message.editedAt ? "edited · " : ""}
+            {clockTime(message.createdAt)}
+          </Text>
+          {ticks.marks > 0 ? (
+            <DeliveryTicks
+              marks={ticks.marks}
+              color={ticks.tone === "read" ? READ_TICK : SENT_TICK}
+              size={11}
+              label={tickLabel(message.delivery)}
+            />
+          ) : null}
+        </View>
       </Pressable>
       {message.answered ? (
         <Text style={styles.answered}>
@@ -154,7 +164,8 @@ const styles = StyleSheet.create({
   to: { fontSize: 13, fontWeight: "600", color: color.secondary },
   json: { fontFamily: "Menlo", fontSize: 13 },
   plain: { fontSize: 16, lineHeight: 22 },
-  time: { fontSize: 11, color: color.secondary, alignSelf: "flex-end" },
+  timeRow: { flexDirection: "row", alignItems: "center", alignSelf: "flex-end", gap: 3 },
+  time: { fontSize: 11, color: color.secondary },
   answered: { fontSize: 12, color: color.secondary, marginTop: 3, marginHorizontal: 12 },
   choices: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 6 },
   choice: { borderRadius: 18, paddingHorizontal: 14, paddingVertical: 8 },

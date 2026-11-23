@@ -30,6 +30,47 @@ export function tickGlyph(tick: Tick): string {
   return "";
 }
 
+/**
+ * How far the second check sits to the right of the first, in px.
+ * A few pixels: the strokes overlap instead of sitting side by side (ADR 0083).
+ */
+export const TICK_OFFSET_PX = 4;
+
+/** Ticks belong on the sender's bubble. Another participant's message stays unmarked. */
+export function bubbleTick(own: boolean, rows: DeliveryRow[] | null | undefined): Tick {
+  if (!own) return "none";
+  return tickOf(rows);
+}
+
+/** How many thin checks to draw. Pending and none draw nothing. */
+export function tickMarks(tick: Tick): 0 | 1 | 2 {
+  if (tick === "read") return 2;
+  if (tick === "delivered" || tick === "partial") return 1;
+  return 0;
+}
+
+/** Read is blue. Delivered and partial stay muted. */
+export function tickTone(tick: Tick): "read" | "muted" {
+  return tick === "read" ? "read" : "muted";
+}
+
+/** What one bubble paints: nothing unless this viewer sent the message. */
+export function tickLayout(own: boolean, rows: DeliveryRow[] | null | undefined): {
+  tick: Tick;
+  marks: 0 | 1 | 2;
+  tone: "read" | "muted";
+  offsets: number[];
+} {
+  const tick = bubbleTick(own, rows);
+  const marks = tickMarks(tick);
+  return {
+    tick,
+    marks,
+    tone: tickTone(tick),
+    offsets: Array.from({ length: marks }, (_, index) => index * TICK_OFFSET_PX),
+  };
+}
+
 export function tickLabel(rows: DeliveryRow[] | null | undefined): string {
   if (!rows?.length) return "";
   return rows

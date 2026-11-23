@@ -9,7 +9,8 @@ import { choiceMode, choiceNote } from "../core/questions.ts";
 import { RECEIPTS_MEANING } from "../core/receipts.ts";
 import { parseTaskActivity } from "../core/taskActivity.ts";
 import { threadLabel, type ParentState } from "../core/threads.ts";
-import { tickGlyph, tickLabel, tickOf } from "../core/ticks.ts";
+import { tickLabel, tickLayout } from "../core/ticks.ts";
+import { DeliveryTicks } from "./DeliveryTicks.tsx";
 import { formatTime } from "./format.ts";
 import { MarkdownText, openMessageLink } from "./MarkdownText.tsx";
 import { colors, mono, radius, spacing } from "./theme.ts";
@@ -135,6 +136,7 @@ function MessageRowImpl({
   const spoken = tree ? plainText(tree) : message.text;
   const links = tree ? linksOf(tree).slice(0, 5) : [];
   const who = own ? "You" : message.username;
+  const ticks = tickLayout(own, message.delivery);
   // A question's buttons (ADR 0065): open only for the addressed name, locked once answered.
   const choices = message.choices && message.choices.length >= 2 ? message.choices : null;
   const mode = choices ? choiceMode(message, me, onAnswer !== undefined) : null;
@@ -220,13 +222,13 @@ function MessageRowImpl({
           </Text>
         ) : null}
         <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
-        {tickGlyph(tickOf(message.delivery)) ? (
-          <Text
-            style={[styles.ticks, tickOf(message.delivery) === "read" && { color: colors.accent }]}
-            accessibilityLabel={tickLabel(message.delivery)}
-          >
-            {tickGlyph(tickOf(message.delivery))}
-          </Text>
+        {ticks.marks > 0 ? (
+          <DeliveryTicks
+            marks={ticks.marks}
+            color={ticks.tone === "read" ? colors.accent : colors.muted}
+            size={12}
+            label={tickLabel(message.delivery)}
+          />
         ) : null}
         {message.editedAt ? (
           <Text style={styles.edited} accessibilityLabel={`edited ${formatTime(message.editedAt)}`}>
@@ -430,7 +432,6 @@ const styles = StyleSheet.create({
   author: { fontWeight: "700", fontSize: 14, flexShrink: 1 },
   to: { color: colors.warning, fontSize: 13, flexShrink: 1 },
   time: { color: colors.muted, fontSize: 12, marginLeft: "auto" },
-  ticks: { color: colors.muted, fontSize: 12, letterSpacing: -1 },
   quote: { borderLeftWidth: 3, borderLeftColor: colors.border, paddingLeft: spacing.sm },
   quoteText: { color: colors.muted, fontSize: 13 },
   body: { fontSize: 16 },

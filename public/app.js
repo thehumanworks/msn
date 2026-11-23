@@ -31,7 +31,7 @@ import {
 } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
-import { tickGlyph, tickLabel, tickOf } from "./ticks.js";
+import { tickLabel, tickLayout } from "./ticks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -162,23 +162,32 @@ function visibleMessageIds() {
   return ids;
 }
 
-/** One or two ticks on an addressed message (ADR 0082). No node when there is nothing to show. */
+/** One or two ticks on the sender's own message (ADR 0083). No node when there is nothing to show. */
 function paintTicks(article, message) {
-  const kind = tickOf(message.delivery);
-  const glyph = tickGlyph(kind);
+  const shown = tickLayout(myMessage(message), message.delivery);
   let ticks = article.querySelector(":scope > .message-meta .ticks");
-  if (!glyph) {
+  if (!shown.marks) {
     ticks?.remove();
     return;
   }
   if (!ticks) {
     ticks = document.createElement("span");
-    ticks.className = "ticks";
-    article.querySelector(":scope > .message-meta")?.append(ticks);
+    const time = article.querySelector(":scope > .message-meta time");
+    if (time) time.after(ticks);
+    else article.querySelector(":scope > .message-meta")?.append(ticks);
   }
-  ticks.className = kind === "read" ? "ticks read" : "ticks";
-  ticks.textContent = glyph;
-  ticks.title = tickLabel(message.delivery);
+  ticks.className = shown.tone === "read" ? "ticks read" : "ticks";
+  ticks.replaceChildren();
+  const label = tickLabel(message.delivery);
+  ticks.title = label;
+  ticks.setAttribute("aria-label", label);
+  for (const offset of shown.offsets) {
+    const mark = document.createElement("span");
+    mark.className = "tick-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.style.left = `${offset}px`;
+    ticks.append(mark);
+  }
 }
 
 /** Apply tick changes from a long poll onto rows already in the log. */

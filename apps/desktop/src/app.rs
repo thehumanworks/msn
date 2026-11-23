@@ -3870,6 +3870,35 @@ fn render_parent(
     });
 }
 
+/// The check glyph's advance at the header's small size. The second check is pulled
+/// back so its origin lands [`msn_cli::ticks::TICK_OFFSET_PX`] to the right of the first.
+const CHECK_ADVANCE: f32 = 11.0;
+
+/// One or two checks just after the time, only when `tick` is not empty (ADR 0083).
+fn append_delivery_ticks(
+    job: &mut egui::text::LayoutJob,
+    tick: msn_cli::ticks::Tick,
+    leading: f32,
+    format: &impl Fn(egui::Color32) -> egui::TextFormat,
+) {
+    let marks = msn_cli::ticks::tick_marks(tick);
+    if marks == 0 {
+        return;
+    }
+    let color = if tick == msn_cli::ticks::Tick::Read {
+        theme::accent()
+    } else {
+        theme::muted()
+    };
+    if marks == 2 {
+        let mut tight = format(color);
+        tight.extra_letter_spacing = msn_cli::ticks::TICK_OFFSET_PX as f32 - CHECK_ADVANCE;
+        job.append("✓✓", leading, tight);
+    } else {
+        job.append("✓", leading, format(color));
+    }
+}
+
 /// "name says" in the Messenger tradition, then the quieter metadata: time, id, reply target.
 fn message_header(
     ui: &egui::Ui,
@@ -3895,29 +3924,35 @@ fn message_header(
         None => " says".to_string(),
     };
     job.append(&says, 0.0, format(theme::muted()));
-    let mut meta = String::new();
-    if let Some(time) = message["createdAt"].as_str().and_then(|c| c.get(11..16)) {
-        meta.push_str(&format!("{time} · "));
+    let time = message["createdAt"].as_str().and_then(|c| c.get(11..16));
+    if let Some(time) = time {
+        job.append(time, 10.0, format(theme::muted()));
     }
-    meta.push_str(&format!("#{}", message["id"].as_u64().unwrap_or(0)));
+    let tick = msn_cli::ticks::bubble_tick(own, msn_cli::ticks::delivery_rows(message));
+    append_delivery_ticks(
+        &mut job,
+        tick,
+        if time.is_some() { 3.0 } else { 10.0 },
+        &format,
+    );
+    let mut meta = format!("#{}", message["id"].as_u64().unwrap_or(0));
     if let Some(reply_to) = message["replyTo"].as_u64() {
         meta.push_str(&format!(" · re #{reply_to}"));
     }
     if message["editedAt"].is_string() {
         meta.push_str(" · edited");
     }
-    let tick = msn_cli::ticks::tick_of(msn_cli::ticks::delivery_rows(message));
-    let glyph = msn_cli::ticks::tick_glyph(tick);
-    if !glyph.is_empty() {
-        meta.push(' ');
-        meta.push_str(glyph);
-    }
     // Replace an instruction (ADR 0068): each end names the other.
     if let Some(old) = message["replaces"].as_u64() {
         meta.push_str(&format!(" · replaces #{old}"));
     }
+    let prefix = if time.is_some() { " · " } else { "" };
     // Full muted, not dimmed: the time and id must meet AA in both themes (ADR 0049).
-    job.append(&meta, 10.0, format(theme::muted()));
+    job.append(
+        &format!("{prefix}{meta}"),
+        if time.is_some() { 0.0 } else { 10.0 },
+        format(theme::muted()),
+    );
     if let Some(new) = message["replacedBy"].as_u64() {
         job.append(
             &format!(" · replaced by #{new}"),
@@ -5433,6 +5468,77 @@ mod draft_tests {
         output.textures_delta.clear();
         assert!(text.contains("#3 · replaced by #5"), "{text}");
         assert!(text.contains("#5 · replaces #3"), "{text}");
+    }
+
+    /// Delivery ticks (ADR 0083): only the sender's bubble, read in the accent colour,
+    /// and the second check pulled back so the two overlap.
+    #[test]
+    fn ticks_show_only_on_the_senders_bubble() {
+        let read = json!({
+            "id": 1,
+            "username": "Alex",
+            "createdAt": "2026-11-23T14:02:00.000Z",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": "t" }]
+        });
+        let delivered = json!({
+            "id": 2,
+            "username": "Alex",
+            "createdAt": "2026-11-23T14:03:00.000Z",
+            "delivery": [{ "name": "dev", "deliveredAt": "t", "readAt": null }]
+        });
+        let ctx = egui::Context::default();
+        let mut read_job = None;
+        let mut delivered_job = None;
+        let mut other = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            read_job = Some(message_header(ui, &read, "Alex", true));
+            other = message_header(ui, &read, "dev", false).text;
+            delivered_job = Some(message_header(ui, &delivered, "Alex", true));
+        });
+        output.textures_delta.clear();
+        let read_job = read_job.unwrap();
+        let delivered_job = delivered_job.unwrap();
+        assert!(read_job.text.contains("14:02"), "{read_job:?}");
+        assert_eq!(read_job.text.matches('✓').count(), 2, "{}", read_job.text);
+        assert!(
+            read_job
+                .text
+                .find('✓')
+                .is_some_and(|at| read_job.text[..at].contains("14:02")),
+            "{}",
+            read_job.text
+        );
+        assert!(!other.contains('✓'), "{other}");
+        let double = read_job
+            .sections
+            .iter()
+            .find(|section| {
+                let text = &read_job.text[section.byte_range.start.0..section.byte_range.end.0];
+                text.contains('✓')
+            })
+            .unwrap();
+        assert_eq!(double.format.color, crate::theme::accent());
+        assert_eq!(
+            double.format.extra_letter_spacing,
+            msn_cli::ticks::TICK_OFFSET_PX as f32 - super::CHECK_ADVANCE
+        );
+        assert_eq!(
+            delivered_job.text.matches('✓').count(),
+            1,
+            "{}",
+            delivered_job.text
+        );
+        let single = delivered_job
+            .sections
+            .iter()
+            .find(|section| {
+                let text =
+                    &delivered_job.text[section.byte_range.start.0..section.byte_range.end.0];
+                text.contains('✓')
+            })
+            .unwrap();
+        assert_eq!(single.format.color, crate::theme::muted());
+        assert_eq!(single.format.extra_letter_spacing, 0.0);
     }
 
     /// Drafts (ADR 0057): each board keeps its own composer, sending clears only that board's,

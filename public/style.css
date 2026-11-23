@@ -18,6 +18,7 @@
   --on-accent: #1a0316;
   --error: #ff7a7a;
   --presence: #3ddc84;
+  --tick-read: #53bdeb;
   --backdrop: #000a;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -48,6 +49,7 @@
     --on-accent: #ffffff;
     --error: #c01a33;
     --presence: #13893f;
+    --tick-read: #0757a8;
     --backdrop: #17171c66;
   }
 }
@@ -65,6 +67,7 @@
   --on-accent: #ffffff;
   --error: #c01a33;
   --presence: #13893f;
+  --tick-read: #0757a8;
   --backdrop: #17171c66;
 }
 * {
@@ -601,16 +604,39 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
+/* One thin check, or two overlapping by a few px, beside the time (ADR 0083). */
 .ticks {
+  position: relative;
+  display: inline-block;
+  width: 10px;
+  height: 12px;
+  flex: none;
+  align-self: center;
   color: var(--muted);
-  letter-spacing: -0.12em;
-  font-size: 0.85em;
+  vertical-align: -1px;
+}
+.message-meta .ticks {
+  margin-left: -5px;
+  font-family: inherit;
 }
 .ticks.read {
-  color: var(--accent);
+  color: var(--tick-read);
+  width: 14px;
 }
 .ticks:empty {
   display: none;
+}
+.message-meta .ticks .tick-mark {
+  position: absolute;
+  left: 0;
+  bottom: 1px;
+  width: 4px;
+  height: 7px;
+  margin-left: 0;
+  font-family: inherit;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
 }
 
 .message-receipts {

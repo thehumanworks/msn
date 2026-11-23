@@ -131,7 +131,7 @@ for (const [name, theme] of [
       "accent-soft on surface": over(c("--accent-soft"), c("--surface")),
     };
     const failures = [];
-    for (const fg of ["--text", "--muted", "--accent", "--error"])
+    for (const fg of ["--text", "--muted", "--accent", "--error", "--tick-read"])
       for (const [where, under] of Object.entries(surfaces)) {
         const ratio = contrast(c(fg), under);
         if (ratio < 4.5) failures.push(`${fg} on ${where}: ${ratio.toFixed(2)}`);
