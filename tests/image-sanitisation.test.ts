@@ -5,8 +5,8 @@ import {
   APNG,
   exif,
   GIF,
-  join,
   JPEG,
+  join,
   jpegSegment,
   maxSizePng,
   PNG,
@@ -20,7 +20,7 @@ import {
   WEBP,
 } from "./fixtures/image-sanitisation";
 
-const clean = (bytes: Uint8Array, mime: string) => sanitiseImage(bytes, "image/" + mime);
+const clean = (bytes: Uint8Array, mime: string) => sanitiseImage(bytes, `image/${mime}`);
 const readable = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const invalid = (bytes: Uint8Array, mime: string) => {
   expect(() => clean(bytes, mime)).toThrow(expect.objectContaining({ status: 400, code: "invalid_attachment" }));

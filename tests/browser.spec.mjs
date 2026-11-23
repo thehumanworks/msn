@@ -3425,7 +3425,7 @@ test("with more than 300 unread, opening a board does not mark the rest as read"
 test("image previews honour all eight orientations after server sanitisation", async ({ page, request }) => {
   const { privateJpeg, privatePng, privateWebp } = await import("./fixtures/image-sanitisation.ts");
   const t = await provision(request);
-  await request.put(t.path + "/channels/general", { headers: t.headers });
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
   await connect(page, t);
   // Match the four coloured corners, allowing for JPEG's lossy compression.
   const permutations = [
@@ -3445,16 +3445,16 @@ test("image previews honour all eight orientations after server sanitisation", a
   ]) {
     const attachments = [];
     for (let orientation = 1; orientation <= 8; orientation++) {
-      const response = await request.post(t.path + "/channels/general/attachments", {
+      const response = await request.post(`${t.path}/channels/general/attachments`, {
         headers: { ...t.headers, "Content-Type": "application/octet-stream" },
         data: Buffer.from(make(orientation)),
       });
       expect(response.ok()).toBe(true);
-      attachments.push({ id: (await response.json()).attachment.id, name: orientation + "." + extension });
+      attachments.push({ id: (await response.json()).attachment.id, name: `${orientation}.${extension}` });
     }
-    const sent = await request.post(t.path + "/channels/general/messages", {
+    const sent = await request.post(`${t.path}/channels/general/messages`, {
       headers: t.headers,
-      data: { username: "agent", text: "orientation " + extension, attachments },
+      data: { username: "agent", text: `orientation ${extension}`, attachments },
     });
     expect(sent.status()).toBe(201);
     const { message } = await sent.json();

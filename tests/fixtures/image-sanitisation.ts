@@ -8,7 +8,9 @@ export const JPEG = decode(
 export const PNG = decode(
   "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAGCAIAAABxZ0isAAAAIElEQVR4nGP8z4AAjEgcJgYcAKcEIwMDQv///4wUGAUA4sMFCGHwu0gAAAAASUVORK5CYII=",
 );
-export const WEBP = decode("UklGRjIAAABXRUJQVlA4TCYAAAAvB0ABAB8gEEjaH3qN+RcQFPk/2vwHXyRAIECYNGnSRkT/Y3eJCA==");
+export const WEBP = decode(
+  "UklGRjIAAABXRUJQVlA4TCYAAAAvB0ABAB8gEEjaH3qN+RcQFPk/2vwHXyRAIECYNGnSRkT/Y3eJCA==",
+);
 export const GIF = decode(
   "R0lGODlhCAAGAIEAAP//AAD/AP8AAAAA/yH/C05FVFNDQVBFMi4wAwECAAAh+QQACgAAACwAAAAACAAGAAAIHgAFCBQQoGCAgQQNIjQYYIDDAQAiAngIUSJFiQACAgAh+QQBFAAEACwAAAAACAAGAIH//wAA/wD/AAAAAP8IHgADCAwgoKCAgQQNIjQoAIBDAAMiDngIUSJFiQMCAgA7",
 );
@@ -31,7 +33,7 @@ export function join(...parts: Uint8Array[]): Uint8Array {
 }
 
 export function exif(orientation: number, secret = "private-camera-location", little = true): Uint8Array {
-  const description = text(secret + "\0");
+  const description = text(`${secret}\0`);
   const bytes = new Uint8Array(38 + description.length);
   const view = new DataView(bytes.buffer);
   view.setUint16(0, little ? 0x4949 : 0x4d4d);
@@ -55,12 +57,16 @@ export function jpegSegment(marker: number, payload: Uint8Array): Uint8Array {
   return join(Uint8Array.of(255, marker, n >> 8, n & 255), payload);
 }
 
-export function privateJpeg(orientation: number, secret = "private-camera-location", little = true): Uint8Array {
+export function privateJpeg(
+  orientation: number,
+  secret = "private-camera-location",
+  little = true,
+): Uint8Array {
   return join(
     JPEG.subarray(0, 2),
     jpegSegment(0xe1, join(text("Exif\0\0"), exif(orientation, secret, little))),
-    jpegSegment(0xe1, text("http://ns.adobe.com/xmp/extension/\0" + secret)),
-    jpegSegment(0xed, text("Photoshop 3.0\0" + secret)),
+    jpegSegment(0xe1, text(`http://ns.adobe.com/xmp/extension/\0${secret}`)),
+    jpegSegment(0xed, text(`Photoshop 3.0\0${secret}`)),
     jpegSegment(0xfe, text(secret)),
     JPEG.subarray(2),
   );
@@ -91,9 +97,9 @@ export function privatePng(orientation: number, secret = "private-camera-locatio
   return join(
     PNG.subarray(0, 33),
     pngChunk("eXIf", exif(orientation, secret)),
-    pngChunk("tEXt", text("Comment\0" + secret)),
-    pngChunk("iTXt", text("Description\0\0\0\0\0" + secret)),
-    pngChunk("zTXt", text("Description\0\0" + secret)),
+    pngChunk("tEXt", text(`Comment\0${secret}`)),
+    pngChunk("iTXt", text(`Description\0\0\0\0\0${secret}`)),
+    pngChunk("zTXt", text(`Description\0\0${secret}`)),
     pngChunk("vpAg", text(secret)),
     PNG.subarray(33),
     text(secret),
@@ -158,7 +164,7 @@ export function maxSizePng(): Uint8Array {
     const n = Math.min(left, 65535);
     bytes[p] = n === left ? 1 : 0;
     view.setUint16(p + 1, n, true);
-    view.setUint16(p + 3, (~n) & 0xffff, true);
+    view.setUint16(p + 3, ~n & 0xffff, true);
     p += 5 + n;
     left -= n;
   }

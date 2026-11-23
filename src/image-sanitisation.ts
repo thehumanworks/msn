@@ -4,7 +4,7 @@ export type ImageSize = { width: number; height: number };
 type SanitisedImage = { bytes: Uint8Array; size: ImageSize | null };
 
 function valid(condition: unknown, format: string): asserts condition {
-  if (!condition) throw new HttpError(400, "invalid_attachment", "This " + format + " is malformed or unsupported.");
+  if (!condition) throw new HttpError(400, "invalid_attachment", `This ${format} is malformed or unsupported.`);
 }
 
 const ascii = (bytes: Uint8Array, at: number, n: number) =>
@@ -47,7 +47,32 @@ class Output {
 
 function orientationTiff(value: number): Uint8Array {
   return Uint8Array.of(
-    73, 73, 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, value, 0, 0, 0, 0, 0, 0, 0,
+    73,
+    73,
+    42,
+    0,
+    8,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0x12,
+    1,
+    3,
+    0,
+    1,
+    0,
+    0,
+    0,
+    value,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
   );
 }
 
@@ -128,7 +153,10 @@ function jpeg(bytes: Uint8Array): SanitisedImage {
         insertAt += segment.length;
       }
       if (adobe !== null) {
-        output.insert(insertAt, jpegSegment(0xee, Uint8Array.of(65, 100, 111, 98, 101, 0, 100, 0, 0, 0, 0, adobe)));
+        output.insert(
+          insertAt,
+          jpegSegment(0xee, Uint8Array.of(65, 100, 111, 98, 101, 0, 100, 0, 0, 0, 0, adobe)),
+        );
       }
       return { bytes: output.finish(bytes), size: displaySize(size, orientation) };
     }
@@ -152,7 +180,10 @@ function jpeg(bytes: Uint8Array): SanitisedImage {
       const sof = marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker);
       valid(sof || [0xc4, 0xcc, 0xda, 0xdb, 0xdd].includes(marker), "JPEG");
       if (sof) {
-        valid(!size && payload.length >= 6 && payload[5] > 0 && payload.length === 6 + 3 * payload[5], "JPEG");
+        valid(
+          !size && payload.length >= 6 && payload[5] > 0 && payload.length === 6 + 3 * payload[5],
+          "JPEG",
+        );
         size = { width: (payload[3] << 8) | payload[4], height: (payload[1] << 8) | payload[2] };
         valid(size.width > 0 && size.height > 0, "JPEG");
       }
@@ -242,13 +273,34 @@ function png(bytes: Uint8Array): SanitisedImage {
         size = { width: view.getUint32(p), height: view.getUint32(p + 4) };
         depth = bytes[p + 8];
         colour = bytes[p + 9];
-        const depths: Record<number, number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
-        valid(size.width > 0 && size.height > 0 && size.width <= 0x7fffffff && size.height <= 0x7fffffff, "PNG");
-        valid(depths[colour]?.includes(depth) && bytes[p + 10] === 0 && bytes[p + 11] === 0 && bytes[p + 12] <= 1, "PNG");
+        const depths: Record<number, number[]> = {
+          0: [1, 2, 4, 8, 16],
+          2: [8, 16],
+          3: [1, 2, 4, 8],
+          4: [8, 16],
+          6: [8, 16],
+        };
+        valid(
+          size.width > 0 && size.height > 0 && size.width <= 0x7fffffff && size.height <= 0x7fffffff,
+          "PNG",
+        );
+        valid(
+          depths[colour]?.includes(depth) && bytes[p + 10] === 0 && bytes[p + 11] === 0 && bytes[p + 12] <= 1,
+          "PNG",
+        );
         break;
       }
       case "PLTE":
-        valid(!palette && firstData === -1 && length > 0 && length <= 768 && length % 3 === 0 && colour !== 0 && colour !== 4, "PNG");
+        valid(
+          !palette &&
+            firstData === -1 &&
+            length > 0 &&
+            length <= 768 &&
+            length % 3 === 0 &&
+            colour !== 0 &&
+            colour !== 4,
+          "PNG",
+        );
         palette = length / 3;
         valid(colour !== 3 || palette <= 2 ** depth, "PNG");
         break;
@@ -266,7 +318,13 @@ function png(bytes: Uint8Array): SanitisedImage {
         keep = false;
         break;
       case "tRNS":
-        valid(firstData === -1 && ((colour === 0 && length === 2) || (colour === 2 && length === 6) || (colour === 3 && length > 0 && length <= palette)), "PNG");
+        valid(
+          firstData === -1 &&
+            ((colour === 0 && length === 2) ||
+              (colour === 2 && length === 6) ||
+              (colour === 3 && length > 0 && length <= palette)),
+          "PNG",
+        );
         break;
       case "cHRM":
       case "gAMA":
@@ -275,7 +333,15 @@ function png(bytes: Uint8Array): SanitisedImage {
       case "sBIT":
       case "bKGD":
       case "pHYs": {
-        const lengths: Record<string, number> = { cHRM: 32, gAMA: 4, sRGB: 1, cICP: 4, sBIT: [1, 0, 3, 3, 2, 0, 4][colour], bKGD: [2, 0, 6, 1, 2, 0, 6][colour], pHYs: 9 };
+        const lengths: Record<string, number> = {
+          cHRM: 32,
+          gAMA: 4,
+          sRGB: 1,
+          cICP: 4,
+          sBIT: [1, 0, 3, 3, 2, 0, 4][colour],
+          bKGD: [2, 0, 6, 1, 2, 0, 6][colour],
+          pHYs: 9,
+        };
         valid(firstData === -1 && length === lengths[type], "PNG");
         break;
       }
@@ -288,12 +354,25 @@ function png(bytes: Uint8Array): SanitisedImage {
         valid(size && frames > 0 && length === 26 && view.getUint32(p) === sequence++, "PNG");
         const width = view.getUint32(p + 4);
         const height = view.getUint32(p + 8);
-        valid(width > 0 && height > 0 && view.getUint32(p + 12) + width <= size.width && view.getUint32(p + 16) + height <= size.height, "PNG");
+        valid(
+          width > 0 &&
+            height > 0 &&
+            view.getUint32(p + 12) + width <= size.width &&
+            view.getUint32(p + 16) + height <= size.height,
+          "PNG",
+        );
         valid(bytes[p + 24] <= 2 && bytes[p + 25] <= 1 && ++frameControls <= frames, "PNG");
         break;
       }
       case "fdAT":
-        valid(frames > 0 && frameControls > 0 && firstData !== -1 && length >= 4 && view.getUint32(p) === sequence++, "PNG");
+        valid(
+          frames > 0 &&
+            frameControls > 0 &&
+            firstData !== -1 &&
+            length >= 4 &&
+            view.getUint32(p) === sequence++,
+          "PNG",
+        );
         break;
       default:
         // Unknown critical chunks cannot safely be removed; ancillary data is not trusted.
@@ -325,8 +404,11 @@ function webpFrame(type: string, payload: Uint8Array): { size: ImageSize; alpha:
   if (type === "VP8L") {
     valid(payload.length >= 5 && payload[0] === 0x2f, "WebP");
     const bits = viewOf(payload).getUint32(1, true);
-    valid((bits >>> 29) === 0, "WebP");
-    return { size: { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 }, alpha: Boolean(bits & 0x10000000) };
+    valid(bits >>> 29 === 0, "WebP");
+    return {
+      size: { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 },
+      alpha: Boolean(bits & 0x10000000),
+    };
   }
   valid(payload.length >= 10 && (payload[0] & 1) === 0 && payload[3] === 0x9d && payload[4] === 1 && payload[5] === 0x2a, "WebP");
   const view = viewOf(payload);

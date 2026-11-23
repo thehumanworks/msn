@@ -421,15 +421,17 @@ describe("message attachments (ADR 0035)", () => {
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toMatchObject({ error: { code: "invalid_attachment" } });
     expect(await attachmentBytes(t)).toBe(0);
-    expect((await env.ATTACHMENTS.list({ prefix: t.name + "/" })).objects).toHaveLength(0);
+    expect((await env.ATTACHMENTS.list({ prefix: `${t.name}/` })).objects).toHaveLength(0);
 
     const { attachment } = await (await upload(t, PNG)).json<Upload>();
-    const sent = await (await send(t, [{ id: attachment.id, name: "flat.png" }])).json<{ message: Message }>();
+    const sent = await (await send(t, [{ id: attachment.id, name: "flat.png" }])).json<{
+      message: Message;
+    }>();
     expect(sent.message.attachments?.[0]).toMatchObject({ width: 1, height: 1 });
     await runInDurableObject(t.stub, (_instance, state) => {
       state.storage.sql.exec("UPDATE attachments SET width = 0, height = 1 WHERE id = ?", attachment.id);
     });
-    const again = await (await call(t.path + "/channels/general/messages/" + sent.message.id, t.token)).json<{
+    const again = await (await call(`${t.path}/channels/general/messages/${sent.message.id}`, t.token)).json<{
       message: Message;
     }>();
     expect(again.message.attachments?.[0].width).toBeUndefined();
@@ -444,7 +446,7 @@ describe("message attachments (ADR 0035)", () => {
     expect((await duplicate.json<Upload>()).attachment.id).toBe(attachment.id);
     const other = await (await upload(t, privateJpeg(8))).json<Upload>();
     expect(other.attachment.id).not.toBe(attachment.id);
-    const stored = await env.ATTACHMENTS.get(t.name + "/general/" + attachment.id);
+    const stored = await env.ATTACHMENTS.get(`${t.name}/general/${attachment.id}`);
     if (!stored) throw new Error("Sanitised R2 object missing");
     const bytes = new Uint8Array(await stored.arrayBuffer());
     expect(bytes.length).toBe(attachment.bytes);
@@ -453,26 +455,39 @@ describe("message attachments (ADR 0035)", () => {
 
     const boundary = "image-boundary";
     const multipart = (path: string, fields: string) =>
-      call(t.path + "/channels/general/" + path, t.token, {
+      call(`${t.path}/channels/general/${path}`, t.token, {
         method: "POST",
-        headers: { "Content-Type": "multipart/form-data; boundary=" + boundary },
+        headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
         body: join(
-          text(fields + "--" + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="photo.jpg"\r\n\r\n'),
+          text(
+            fields +
+              "--" +
+              boundary +
+              '\r\nContent-Disposition: form-data; name="file"; filename="photo.jpg"\r\n\r\n',
+          ),
           privateJpeg(6, "third-camera"),
-          text("\r\n--" + boundary + "--\r\n"),
+          text(`\r\n--${boundary}--\r\n`),
         ),
       });
     const uploaded = await multipart("attachments", "");
     expect(uploaded.status).toBe(201);
-    expect(await uploaded.json()).toMatchObject({ attachments: [{ id: attachment.id, bytes: attachment.bytes }] });
+    expect(await uploaded.json()).toMatchObject({
+      attachments: [{ id: attachment.id, bytes: attachment.bytes }],
+    });
     const sent = await multipart(
       "messages",
-      "--" + boundary + '\r\nContent-Disposition: form-data; name="username"\r\n\r\nagent\r\n',
+      `--${boundary}\r\nContent-Disposition: form-data; name="username"\r\n\r\nagent\r\n`,
     );
     expect(sent.status).toBe(201);
     const { message } = await sent.json<{ message: Message }>();
     const file = message.attachments?.[0];
-    expect(file).toMatchObject({ id: attachment.id, width: 6, height: 8, mime: "image/jpeg", size: attachment.bytes });
+    expect(file).toMatchObject({
+      id: attachment.id,
+      width: 6,
+      height: 8,
+      mime: "image/jpeg",
+      size: attachment.bytes,
+    });
     const downloaded = await call(file?.previewUrl ?? "");
     expect(downloaded.status).toBe(200);
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
