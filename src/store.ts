@@ -16,6 +16,7 @@ import {
 import {
   ATTACHMENT_ORPHAN_MS,
   type AttachmentRef,
+  ackChange,
   addressedTo,
   addressees,
   addressFields,
@@ -165,7 +166,14 @@ export type Message = {
   replacedBy?: number;
   /** Who said they are handling this message (ADR 0075); absent while nobody has taken it. */
   claim?: Claim;
+  /**
+   * Per addressee, in address order (ADR 0082). Absent when the message names nobody, and on
+   * messages stored before ticks existed until someone acknowledges one.
+   */
+  delivery?: Delivery[];
 };
+/** One recipient's delivered and read times (ADR 0082). Null until that step happens. */
+export type Delivery = { name: string; deliveredAt: string | null; readAt: string | null };
 /** The one name handling a message, and since when (ADR 0075). A signal, not a lock. */
 export type Claim = { username: string; claimedAt: string };
 /** Which reply answered a question, with what, by whom and when (ADR 0065). */
@@ -343,6 +351,7 @@ const CHANNEL_TABLES = [
   "scheduled_messages",
   "webhooks",
   "events",
+  "message_delivery",
   "messages",
 ] as const;
 const MAX_SNAPSHOTS = 1000;
@@ -874,6 +883,15 @@ export class MsnDurableObject extends DurableObject<Env> {
           code_hash TEXT PRIMARY KEY, challenge TEXT NOT NULL, username TEXT NOT NULL,
           expiresMs INTEGER NOT NULL
         );
+        -- Delivery ticks (ADR 0082). One row per addressee. seq orders changes on the board so a
+        -- message poll can catch up. A new table with no version step, safe in any merge order.
+        -- Messages from before this table have no rows until an ack creates them.
+        CREATE TABLE IF NOT EXISTS message_delivery (
+          channel TEXT NOT NULL, messageId INTEGER NOT NULL, name TEXT NOT NULL,
+          deliveredAt TEXT, readAt TEXT, seq INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (channel, messageId, name)
+        );
+        CREATE INDEX IF NOT EXISTS message_delivery_seq ON message_delivery(channel, seq);
       `);
       // schema_version lists every applied version; the highest row is the current schema. A fresh
       // database already has the current CREATE TABLE shape, so it records the history and stops.
@@ -2414,6 +2432,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           const attempts = row.attempts + 1;
           const retry = !attempt.ok && attempt.retry && attempts <= WEBHOOK_RETRY_DELAYS_MS.length;
           const outcome = attempt.ok ? "delivered" : retry ? "retrying" : "failed";
+          let deliveredChannel: string | null = null;
           this.ctx.storage.transactionSync(() => {
             if (retry)
               this.ctx.storage.sql.exec(
@@ -2439,7 +2458,10 @@ export class MsnDurableObject extends DurableObject<Env> {
               hook.url,
               hook.format,
             );
+            if (attempt.ok)
+              deliveredChannel = this.markWebhookDelivered(row.body, row.channel, row.personaId);
           });
+          if (deliveredChannel) this.wakeDelivery(deliveredChannel);
         } finally {
           this.noticesInFlight.delete(row.id);
         }
@@ -3555,9 +3577,12 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
 
   /** Adds each message's current labels; one range query per page. */
-  /** Every message output carries its labels (ADR 0032), attachments (ADR 0035) and reactions (ADR 0047). */
+  /** Every message output carries its labels (ADR 0032), attachments (ADR 0035), reactions (ADR 0047) and delivery (ADR 0082). */
   private withLabels(channel: string, messages: Message[]): Message[] {
-    return this.withReactions(channel, this.withAttachments(channel, this.labelsOnly(channel, messages)));
+    return this.withDelivery(
+      channel,
+      this.withReactions(channel, this.withAttachments(channel, this.labelsOnly(channel, messages))),
+    );
   }
 
   /** Who reacted to these messages, by message id. Kinds in REACTIONS order. */
@@ -3941,6 +3966,12 @@ export class MsnDurableObject extends DurableObject<Env> {
     return integer(raw, 0, Number.MAX_SAFE_INTEGER);
   }
 
+  /** `acksAfter` on a message page (ADR 0082): the reader's tick cursor, or null when not asked. */
+  private acksAfterParam(url: URL): number | null {
+    if (!url.searchParams.has("acksAfter")) return null;
+    return integer(url.searchParams.get("acksAfter"), 0, Number.MAX_SAFE_INTEGER);
+  }
+
   /** Earlier messages (id ≤ through) edited after `editsAfter`, oldest edit first (ADR 0052). */
   private editedSince(
     tenant: string,
@@ -4044,7 +4075,31 @@ export class MsnDurableObject extends DurableObject<Env> {
         if (message) message.labels = { ...message.labels, [row.key]: row.value };
       }
     }
-    return this.withReactions(channel, this.withAttachments(channel, messages), true);
+    return this.withDelivery(
+      channel,
+      this.withReactions(channel, this.withAttachments(channel, messages), true),
+      true,
+    );
+  }
+
+  /** Delivery rows for ids that may be far apart (search, catch-up edits). */
+  private deliveryRows(channel: string, ids: number[]) {
+    const sorted = [...ids].sort((a, b) => a - b);
+    const rows: { messageId: number; name: string; deliveredAt: string | null; readAt: string | null }[] = [];
+    for (let start = 0; start < sorted.length; start += SQL_ID_CHUNK) {
+      const chunk = sorted.slice(start, start + SQL_ID_CHUNK);
+      rows.push(
+        ...this.ctx.storage.sql
+          .exec<{ messageId: number; name: string; deliveredAt: string | null; readAt: string | null }>(
+            `SELECT messageId, name, deliveredAt, readAt FROM message_delivery
+             WHERE channel = ? AND messageId IN (${chunk.map(() => "?").join(", ")}) ORDER BY messageId, rowid`,
+            channel,
+            ...chunk,
+          )
+          .toArray(),
+      );
+    }
+    return rows;
   }
 
   private labelsOnly(channel: string, messages: Message[]): Message[] {
@@ -4167,6 +4222,8 @@ export class MsnDurableObject extends DurableObject<Env> {
     fence: ProcessingFence | null = null,
     editsAfter: number | null = null,
     thread: ThreadView | null = null,
+    acksAfter: number | null = null,
+    viewer: string | null = null,
   ): Promise<Response> | Response {
     // Edits to messages at or before `after` since the reader's edit cursor (ADR 0052). Opt-in,
     // so older clients keep today's page shape. They end a wait like a new message does.
@@ -4181,39 +4238,73 @@ export class MsnDurableObject extends DurableObject<Env> {
         editsHasMore: found.hasMore,
       };
     };
-    const ready = (page: ReturnType<typeof this.page>, edited: ReturnType<typeof edits>) =>
-      page.messages.length > 0 || (edited?.edited.length ?? 0) > 0;
-    const respond = (page: ReturnType<typeof this.page>, edited: ReturnType<typeof edits>) => {
+    // Tick changes on messages at or before `after` (ADR 0082). Opt-in, like edits. A long poll
+    // that asked returns when a recipient is delivered or reads.
+    const acks = () => {
+      if (acksAfter === null) return null;
+      const found = this.deliverySince(tenant, channel, acksAfter, after, CATCHUP_EDITS);
+      return {
+        acks: found.messages,
+        ackCursor: found.hasMore
+          ? (found.seqs.at(-1) ?? acksAfter)
+          : Math.max(this.ackCursor(channel), acksAfter),
+        acksHasMore: found.hasMore,
+      };
+    };
+    const ready = (
+      page: ReturnType<typeof this.page>,
+      edited: ReturnType<typeof edits>,
+      ackPage: ReturnType<typeof acks>,
+    ) => page.messages.length > 0 || (edited?.edited.length ?? 0) > 0 || (ackPage?.acks.length ?? 0) > 0;
+    const respond = (
+      page: ReturnType<typeof this.page>,
+      edited: ReturnType<typeof edits>,
+      ackPage: ReturnType<typeof acks>,
+    ) => {
+      // A fetch as this name delivers messages the page actually returns. Not read.
+      // The tick cursor was read before this write. When this page already held every change,
+      // advance it past the seqs just assigned so the client does not poll once more for them.
+      this.noteFetched(channel, page.messages, viewer);
+      if (ackPage && !ackPage.acksHasMore)
+        ackPage.ackCursor = Math.max(this.ackCursor(channel), ackPage.ackCursor);
       // Archived boards say so on every page, so a waiting client can stop instead of polling
       // forever for messages that cannot arrive (ADR 0046). Absent on active boards.
       const archived = this.archivedAt(channel) ? { archived: true } : {};
       // A thread read names the root it followed, so a reply id given as thread=ID is explained.
       const scope = thread === null ? {} : { thread: thread.root };
-      if (!fence) return json({ ...page, ...scope, ...archived, ...(edited ?? {}) });
+      if (!fence) return json({ ...page, ...scope, ...archived, ...(edited ?? {}), ...(ackPage ?? {}) });
       // Recheck at reply time: a takeover during a long poll fences this reply, too.
       this.requireGeneration(channel, fence.reader, fence.generation);
       return json({
         ...page,
         ...archived,
         ...(edited ?? {}),
+        ...(ackPage ?? {}),
         committedThrough: after,
         generation: fence.generation,
       });
     };
     const page = this.page(tenant, channel, after, limit, filters, before, thread);
     const edited = edits();
-    if (ready(page, edited) || !wait) return respond(page, edited);
+    const ackPage = acks();
+    if (ready(page, edited, ackPage) || !wait) return respond(page, edited, ackPage);
     // A thread wait (ADR 0063) first adds the new messages to its members, and reads a page only
     // when a member is newer than its cursor, so a send outside the thread costs one small read.
     const check = () => {
       if (thread) {
         this.growThread(channel, thread);
         const next = firstAfter(thread.sorted, after);
-        if ((thread.sorted[next] ?? Number.MAX_SAFE_INTEGER) >= before && editsAfter === null) return null;
+        if (
+          (thread.sorted[next] ?? Number.MAX_SAFE_INTEGER) >= before &&
+          editsAfter === null &&
+          acksAfter === null
+        )
+          return null;
       }
       const next = this.page(tenant, channel, after, limit, filters, before, thread);
       const nextEdits = edits();
-      return ready(next, nextEdits) ? ([next, nextEdits] as const) : null;
+      const nextAcks = acks();
+      return ready(next, nextEdits, nextAcks) ? ([next, nextEdits, nextAcks] as const) : null;
     };
     if (this.waiters.size >= MAX_WAITERS)
       throw new HttpError(429, "too_many_polls", "At most 128 pending polls per tenant; retry with backoff.");
@@ -4231,16 +4322,17 @@ export class MsnDurableObject extends DurableObject<Env> {
           this.authorize(hash); // Rotation revokes already-pending polls, too.
           if (thread && !found) this.growThread(channel, thread);
           // A wake that already read the ready page answers with it instead of reading it again.
-          const [next, nextEdits] = found ?? [
+          const [next, nextEdits, nextAcks] = found ?? [
             this.page(tenant, channel, after, limit, filters, before, thread),
             edits(),
+            acks(),
           ];
           finished = true;
           cleanup();
           resolve(
             aborted
               ? json({ error: { code: "poll_aborted", message: "Poll cancelled." } }, 499)
-              : respond(next, nextEdits),
+              : respond(next, nextEdits, nextAcks),
           );
         } catch (error) {
           finished = true;
@@ -4811,6 +4903,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           ref.mediaType,
         );
       const eventId = this.insertEvent(channel, "message.created", message.id);
+      this.seedDelivery(channel, toMessage(message, tenant));
       const created = this.withLabels(channel, [toMessage(message, tenant)])[0];
       // Same transaction as the message: a notice exists exactly when its message does.
       const woke = this.queueMessageNotices(created, eventId);
@@ -5194,8 +5287,411 @@ export class MsnDurableObject extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Attaches `delivery` in addressee order (ADR 0082). Messages with no rows keep today's shape.
+   */
+  private withDelivery(channel: string, messages: Message[], sparse = false): Message[] {
+    if (!messages.length) return messages;
+    const ids = messages.map((message) => message.id);
+    // A loop, not a spread: a page is small, and a spread of a long id list is needless.
+    let lo = ids[0];
+    let hi = ids[0];
+    for (const id of ids) {
+      if (id < lo) lo = id;
+      if (id > hi) hi = id;
+    }
+    // A contiguous page is a short range. Search hits, tick catch-up and a filtered list can
+    // name a few ids across a long board; BETWEEN would read every row in that span.
+    const wide = hi - lo > ids.length * 4;
+    const rows =
+      sparse || wide
+        ? this.deliveryRows(channel, ids)
+        : this.ctx.storage.sql
+            .exec<{ messageId: number; name: string; deliveredAt: string | null; readAt: string | null }>(
+              `SELECT messageId, name, deliveredAt, readAt FROM message_delivery
+               WHERE channel = ? AND messageId BETWEEN ? AND ? ORDER BY messageId, rowid`,
+              channel,
+              lo,
+              hi,
+            )
+            .toArray();
+    if (!rows.length) return messages;
+    const byMessage = new Map<
+      number,
+      { name: string; deliveredAt: string | null; readAt: string | null }[]
+    >();
+    for (const row of rows) {
+      const list = byMessage.get(row.messageId) ?? [];
+      list.push({ name: row.name, deliveredAt: row.deliveredAt, readAt: row.readAt });
+      byMessage.set(row.messageId, list);
+    }
+    for (const message of messages) {
+      const found = byMessage.get(message.id);
+      if (!found?.length) continue;
+      const ordered = addressees(message).flatMap((name) => {
+        const row = found.find((item) => item.name === name);
+        return row ? [row] : [];
+      });
+      if (ordered.length) message.delivery = ordered;
+    }
+    return messages;
+  }
+
+  /** Who a read is being made as (ADR 0082): `participant`, else the key's bound name, else a reader this key owns. */
+  private deliveryViewer(
+    tenant: string,
+    capability: TenantRow,
+    channel: string | null,
+    params: URLSearchParams,
+  ): string | null {
+    const asked = params.get("participant");
+    if (asked !== null) {
+      const name = text(asked, "participant", 128);
+      this.requireBoundName(capability, name);
+      if (name === GITHUB_SENDER)
+        throw new HttpError(403, "reserved_name", "The display name github is reserved for GitHub messages.");
+      const board = channel ?? capability.channel_scope ?? null;
+      if (
+        capability.shared_channel &&
+        board &&
+        !this.ctx.storage.sql
+          .exec("SELECT 1 FROM personas WHERE channel = ? AND displayName = ?", board, name)
+          .toArray().length
+      )
+        throw new HttpError(
+          400,
+          "persona_required",
+          `Register this name as a board persona first: PUT /api/tenants/${tenant}/channels/${board}/personas/ID with {"displayName":${JSON.stringify(name)}} (CLI: msn persona add). Steps: GET /api.`,
+        );
+      return name;
+    }
+    if (capability.bound_username) return capability.bound_username;
+    const reader = params.get("reader");
+    if (reader && this.ownsReader(capability, reader)) {
+      const slash = reader.indexOf("/");
+      return slash === -1 ? reader : reader.slice(0, slash);
+    }
+    return null;
+  }
+
+  /** A persona listener was connected when the message was stored, so their event stream has it. */
+  private personaListening(channel: string, name: string): boolean {
+    const personas = this.ctx.storage.sql
+      .exec<{ id: string; displayName: string }>(
+        "SELECT id, displayName FROM personas WHERE channel = ?",
+        channel,
+      )
+      .toArray();
+    const fold = (value: string) => value.trim().toLowerCase();
+    const persona =
+      personas.find((row) => row.displayName === name) ??
+      personas.find((row) => fold(row.displayName) === fold(name));
+    if (!persona) return false;
+    return (this.listeners.get(JSON.stringify([channel, persona.id]))?.open ?? 0) > 0;
+  }
+
+  /** Rows for a newly stored message. A connected listener is already delivered. */
+  private seedDelivery(channel: string, message: Message): void {
+    const names = addressees(message);
+    if (!names.length) return;
+    const at = message.createdAt;
+    // One read of the board's high seq, then hand the next numbers out. A second MAX inside the
+    // loop would see this transaction's own inserts, but a single counter cannot drift from them.
+    let next = 0;
+    let allocated = false;
+    for (const name of names) {
+      const listening = this.personaListening(channel, name);
+      let seq = 0;
+      if (listening) {
+        if (!allocated) {
+          next = this.ctx.storage.sql
+            .exec<{ seq: number }>(
+              "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM message_delivery WHERE channel = ?",
+              channel,
+            )
+            .one().seq;
+          allocated = true;
+        }
+        seq = next;
+        next += 1;
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO message_delivery(channel, messageId, name, deliveredAt, readAt, seq) VALUES (?, ?, ?, ?, NULL, ?)",
+        channel,
+        message.id,
+        name,
+        listening ? at : null,
+        seq,
+      );
+    }
+  }
+
+  /**
+   * Marks `name` delivered, or read (which also delivers). Returns whether a timestamp moved.
+   * Must run inside the caller's transaction. No row for that name means nothing happened.
+   */
+  private touchDelivery(
+    channel: string,
+    messageId: number,
+    name: string,
+    read: boolean,
+    at: string,
+  ): boolean {
+    const rows = this.ctx.storage.sql
+      .exec<{ name: string; deliveredAt: string | null; readAt: string | null }>(
+        "SELECT name, deliveredAt, readAt FROM message_delivery WHERE channel = ? AND messageId = ?",
+        channel,
+        messageId,
+      )
+      .toArray();
+    const row = rows.find((item) => addressedTo(name, item.name));
+    if (!row) return false;
+    const deliver = row.deliveredAt === null;
+    const reading = read && row.readAt === null;
+    if (!deliver && !reading) return false;
+    const seq = this.ctx.storage.sql
+      .exec<{ seq: number }>(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM message_delivery WHERE channel = ?",
+        channel,
+      )
+      .one().seq;
+    this.ctx.storage.sql.exec(
+      `UPDATE message_delivery
+         SET deliveredAt = COALESCE(deliveredAt, ?),
+             readAt = CASE WHEN ? THEN COALESCE(readAt, ?) ELSE readAt END,
+             seq = ?
+       WHERE channel = ? AND messageId = ? AND name = ?`,
+      at,
+      reading ? 1 : 0,
+      at,
+      seq,
+      channel,
+      messageId,
+      row.name,
+    );
+    return true;
+  }
+
+  /**
+   * Every addressee has a row. An older message has none until it is acknowledged. A message that
+   * already has some rows still gains one for any addressee who is missing, so their ack records
+   * instead of returning unchanged. Edits cannot change who a message is addressed to.
+   */
+  private ensureDelivery(channel: string, message: Message): void {
+    const names = addressees(message);
+    if (!names.length) return;
+    const rows = this.ctx.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM message_delivery WHERE channel = ? AND messageId = ?",
+        channel,
+        message.id,
+      )
+      .toArray();
+    for (const name of names) {
+      if (rows.some((row) => addressedTo(name, row.name))) continue;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO message_delivery(channel, messageId, name, deliveredAt, readAt, seq) VALUES (?, ?, ?, NULL, NULL, 0)",
+        channel,
+        message.id,
+        name,
+      );
+      rows.push({ name });
+    }
+  }
+
+  /**
+   * A fetch that returned these messages, made as `name`, delivers each one addressed to them.
+   * Does not mark read. Wakes message polls that asked for tick changes.
+   */
+  private noteFetched(channel: string, messages: Message[], name: string | null): void {
+    if (!name || !messages.length) return;
+    const ids = messages.filter((message) => isAddressed(name, message)).map((message) => message.id);
+    if (!ids.length) return;
+    const at = new Date().toISOString();
+    const changed = this.ctx.storage.transactionSync(() => {
+      // One read of the rows that are still undelivered, not a lookup per message.
+      const pending = this.undeliveredRows(channel, ids).filter((row) => addressedTo(name, row.name));
+      if (!pending.length) return false;
+      let seq = this.ctx.storage.sql
+        .exec<{ seq: number }>(
+          "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM message_delivery WHERE channel = ?",
+          channel,
+        )
+        .one().seq;
+      for (const row of pending) {
+        this.ctx.storage.sql.exec(
+          `UPDATE message_delivery SET deliveredAt = ?, seq = ?
+           WHERE channel = ? AND messageId = ? AND name = ? AND deliveredAt IS NULL`,
+          at,
+          seq,
+          channel,
+          row.messageId,
+          row.name,
+        );
+        seq += 1;
+      }
+      return true;
+    });
+    if (!changed) return;
+    this.withDelivery(channel, messages);
+    this.wakeDelivery(channel);
+  }
+
+  /** Addressee rows on these messages that have not been delivered. Ids may be far apart. */
+  private undeliveredRows(channel: string, ids: number[]) {
+    const sorted = [...ids].sort((a, b) => a - b);
+    const rows: { messageId: number; name: string }[] = [];
+    for (let start = 0; start < sorted.length; start += SQL_ID_CHUNK) {
+      const chunk = sorted.slice(start, start + SQL_ID_CHUNK);
+      rows.push(
+        ...this.ctx.storage.sql
+          .exec<{ messageId: number; name: string }>(
+            `SELECT messageId, name FROM message_delivery
+             WHERE channel = ? AND deliveredAt IS NULL AND messageId IN (${chunk.map(() => "?").join(", ")})
+             ORDER BY messageId, rowid`,
+            channel,
+            ...chunk,
+          )
+          .toArray(),
+      );
+    }
+    return rows;
+  }
+
+  private wakeDelivery(channel: string): void {
+    for (const waiter of this.waiters) if (waiter.channel === channel) waiter.wake();
+  }
+
+  private ackCursor(channel: string): number {
+    return this.ctx.storage.sql
+      .exec<{ seq: number }>(
+        "SELECT COALESCE(MAX(seq), 0) AS seq FROM message_delivery WHERE channel = ?",
+        channel,
+      )
+      .one().seq;
+  }
+
+  /** Messages at or before `through` whose ticks moved after `after` (ADR 0082). */
+  private deliverySince(
+    tenant: string,
+    channel: string,
+    after: number,
+    through: number,
+    limit: number,
+  ): { messages: Message[]; seqs: number[]; hasMore: boolean } {
+    const rows = this.ctx.storage.sql
+      .exec<{ messageId: number; seq: number }>(
+        `SELECT messageId, MAX(seq) AS seq FROM message_delivery
+         WHERE channel = ? AND seq > ? AND messageId <= ?
+         GROUP BY messageId ORDER BY seq LIMIT ?`,
+        channel,
+        after,
+        through,
+        limit + 1,
+      )
+      .toArray();
+    const page = rows.slice(0, limit);
+    const ids = page.map((row) => row.messageId);
+    if (!ids.length) return { messages: [], seqs: [], hasMore: rows.length > limit };
+    const loaded = this.ctx.storage.sql
+      .exec<MessageRow>(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages
+         WHERE channel = ? AND deleted = 0 AND id IN (${ids.map(() => "?").join(", ")})`,
+        channel,
+        ...ids,
+      )
+      .toArray();
+    const byId = new Map(loaded.map((row) => [row.id, toMessage(row, tenant)]));
+    // These ids are the messages whose ticks moved, not a contiguous page.
+    const messages = this.withSparse(
+      channel,
+      ids.flatMap((id) => {
+        const message = byId.get(id);
+        return message ? [message] : [];
+      }),
+    );
+    return { messages, seqs: page.map((row) => row.seq), hasMore: rows.length > limit };
+  }
+
+  /**
+   * A successful `message.addressed` webhook delivers that persona's copy (ADR 0082).
+   * Runs inside the caller's transaction. Returns the message's board when a tick moved.
+   */
+  private markWebhookDelivered(body: string, hookChannel: string, personaId: string): string | null {
+    let notice: { type?: string; channel?: string; messageId?: number };
+    try {
+      notice = JSON.parse(body) as { type?: string; channel?: string; messageId?: number };
+    } catch {
+      return null;
+    }
+    if (notice.type !== "message.addressed" || !notice.channel || !notice.messageId) return null;
+    const persona = this.ctx.storage.sql
+      .exec<{ displayName: string }>(
+        "SELECT displayName FROM personas WHERE channel = ? AND id = ?",
+        hookChannel,
+        personaId,
+      )
+      .toArray()[0];
+    if (!persona) return null;
+    const moved = this.touchDelivery(
+      notice.channel,
+      notice.messageId,
+      persona.displayName,
+      false,
+      new Date().toISOString(),
+    );
+    return moved ? notice.channel : null;
+  }
+
+  /**
+   * `POST …/messages/:id/ack` (ADR 0082). The caller already checked that this key may act as
+   * `username`. Idempotent. Read implies delivered.
+   */
+  private acknowledge(tenant: string, channel: string, id: number, username: string): Response {
+    const at = new Date().toISOString();
+    const result = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql
+        .exec<MessageRow & { deleted: number }>(
+          `SELECT ${MESSAGE_COLUMNS}, deleted FROM messages WHERE channel = ? AND id = ?`,
+          channel,
+          id,
+        )
+        .toArray()[0];
+      if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
+      if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
+      const { deleted: _deleted, ...stored } = row;
+      const message = toMessage(stored, tenant);
+      if (!isAddressed(username, message))
+        throw new HttpError(403, "not_recipient", "Only a recipient can acknowledge this message.");
+      this.ensureDelivery(channel, message);
+      const changed = this.touchDelivery(channel, id, username, true, at);
+      if (!changed) {
+        const recorded = this.ctx.storage.sql
+          .exec<{ name: string; readAt: string | null }>(
+            "SELECT name, readAt FROM message_delivery WHERE channel = ? AND messageId = ?",
+            channel,
+            id,
+          )
+          .toArray()
+          .some((row) => addressedTo(username, row.name) && row.readAt !== null);
+        // Unreachable through the API, so there is no delivery_missing test. ensureDelivery
+        // and touchDelivery share this transaction and the same addressee match, so a missing
+        // row is inserted and then stamped. A second ack finds readAt and returns changed:false.
+        // This 500 only fires if those two helpers stop agreeing.
+        if (!recorded)
+          throw new HttpError(500, "delivery_missing", "This recipient's delivery could not be recorded.");
+      }
+      return {
+        message: this.withLabels(channel, [message])[0],
+        changed,
+      };
+    });
+    if (result.changed) this.wakeDelivery(channel);
+    return json(result);
+  }
+
   /** Same-channel live row only; tombstones and other channels do not leak bodies. */
-  private showMessage(tenant: string, channel: string, id: number): Response {
+  private showMessage(tenant: string, channel: string, id: number, viewer: string | null): Response {
     const row = this.ctx.storage.sql
       .exec<MessageRow & { deleted: number }>(
         `SELECT ${MESSAGE_COLUMNS}, deleted FROM messages WHERE channel = ? AND id = ?`,
@@ -5206,8 +5702,10 @@ export class MsnDurableObject extends DurableObject<Env> {
     if (!row) throw new HttpError(404, "message_not_found", "Message not found.");
     if (row.deleted) throw new HttpError(410, "message_deleted", "This message was deleted.");
     const { deleted: _deleted, ...message } = row;
+    const loaded = this.withLabels(channel, [toMessage(message, tenant)]);
+    this.noteFetched(channel, loaded, viewer);
     return json({
-      message: this.withLabels(channel, [toMessage(message, tenant)])[0],
+      message: loaded[0],
       historyRevision: this.historyRevision(channel),
     });
   }
@@ -5616,6 +6114,11 @@ export class MsnDurableObject extends DurableObject<Env> {
     // Only a page that carried the text counts as seen. This marker is no cursor: it changes no
     // later page's messages, only briefChanged, and the text is on every first page anyway.
     if (brief && briefShown && briefReader !== null) this.markBriefSeen(channel, briefReader, brief.version);
+    this.noteFetched(
+      channel,
+      result.messages,
+      this.deliveryViewer(tenant, capability, channel, url.searchParams),
+    );
     return json(result);
   }
 
@@ -6126,14 +6629,27 @@ export class MsnDurableObject extends DurableObject<Env> {
   }
   async connectorRead(tenant: string, channel: string, id: string, after: number, limit: number) {
     return refusing(async () => {
-      this.agents.member(channel, id);
+      const member = this.agents.member(channel, id);
       this.requireChannel(channel);
-      return this.page(
+      const page = this.page(
         tenant,
         channel,
         integer(String(after), 0, Number.MAX_SAFE_INTEGER),
         integer(String(limit), 10, 20),
       );
+      this.noteFetched(channel, page.messages, member.name);
+      return page;
+    });
+  }
+  /** Hosted agent ack (ADR 0082). The agent user is the recipient name. A watch-only membership may ack. */
+  async connectorAck(tenant: string, channel: string, id: string, messageId: number) {
+    return refusing(async () => {
+      const member = this.agents.member(channel, id);
+      this.requireChannel(channel);
+      return this.acknowledge(tenant, channel, messageId, member.name).json<{
+        message: Message;
+        changed: boolean;
+      }>();
     });
   }
   async connectorSend(tenant: string, channel: string, id: string, input: Send) {
@@ -6641,6 +7157,11 @@ export class MsnDurableObject extends DurableObject<Env> {
               id,
             );
             this.ctx.storage.sql.exec("DELETE FROM pins WHERE channel = ? AND messageId = ?", channel, id);
+            this.ctx.storage.sql.exec(
+              "DELETE FROM message_delivery WHERE channel = ? AND messageId = ?",
+              channel,
+              id,
+            );
             const reactionsDropped = this.ctx.storage.sql.exec(
               "DELETE FROM reactions WHERE channel = ? AND messageId = ?",
               channel,
@@ -6682,7 +7203,15 @@ export class MsnDurableObject extends DurableObject<Env> {
         const hash = await digest(bearer(request));
         // Watch-only keys (ADR 0039) read and never write. One gate in front of every route, so a
         // write route added later is refused by default. GET routes never change board content.
-        if (request.method !== "GET" && this.watchOnly(hash))
+        // Ack is the one write a watch-only key may make (ADR 0082): seeing the message is the
+        // point of the link. Every other write stays refused.
+        const acking =
+          request.method === "POST" &&
+          rest[0] === "channels" &&
+          rest[2] === "messages" &&
+          rest[4] === "ack" &&
+          rest.length === 5;
+        if (request.method !== "GET" && this.watchOnly(hash) && !acking)
           throw new HttpError(
             403,
             "watch_only",
@@ -6709,7 +7238,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           // board too (ADR 0060); otherwise a message that failed there could never be cleared.
           const cancelScheduled = rest.length === 4 && rest[2] === "scheduled" && request.method === "DELETE";
           const revokeAgent = rest.length === 4 && rest[2] === "members" && request.method === "DELETE";
-          if (this.archivedAt(channel) && !cancelScheduled && !revokeAgent) {
+          // Reading an archived board still counts (ADR 0082). Ack is not a board write.
+          if (this.archivedAt(channel) && !cancelScheduled && !revokeAgent && !acking) {
             this.requireScope(this.authorize(hash), channel);
             this.requireActive(channel);
           }
@@ -6820,6 +7350,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           request.method === "POST" && rest.length === 5 && rest[2] === "messages" && rest[4] === "claim"
             ? claimChange(await body(request))
             : null;
+        const ack = acking ? ackChange(await body(request)) : null;
         const edit =
           request.method === "PATCH" && rest.length === 4 && rest[0] === "channels" && rest[2] === "messages"
             ? messageEdit(await body(request))
@@ -6849,7 +7380,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           request.method !== "GET" &&
           rest[0] === "channels" &&
           rest[1] &&
-          !(rest.length === 4 && rest[2] === "scheduled" && request.method === "DELETE")
+          !(rest.length === 4 && rest[2] === "scheduled" && request.method === "DELETE") &&
+          !acking
         )
           this.requireActive(slug(rest[1]));
         if (input && capability.shared_channel && !personaId) {
@@ -6874,7 +7406,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         // name, and a board's shared credential only as one of the board's registered personas.
         // A claim (ADR 0075) names its holder by the same rule, so a key cannot take or release a
         // message as another name. The owner may release someone else's claim, under its own name.
-        const named = reaction ?? claim;
+        const named = reaction ?? claim ?? ack;
         if (named) {
           // Scope first, so a key for another board learns nothing about this board's personas.
           this.requireScope(capability, slug(rest[1]));
@@ -7116,6 +7648,10 @@ export class MsnDurableObject extends DurableObject<Env> {
             this.requireChannel(channel);
             return this.claim(tenant, channel, messageId(rest[3]), claim, capability);
           }
+          if (ack) {
+            this.requireChannel(channel);
+            return this.acknowledge(tenant, channel, messageId(rest[3]), ack.username);
+          }
           if (edit) {
             this.requireChannel(channel);
             return this.editMessage(tenant, channel, messageId(rest[3]), edit, capability);
@@ -7145,7 +7681,12 @@ export class MsnDurableObject extends DurableObject<Env> {
           }
           if (rest.length === 4 && rest[2] === "messages" && request.method === "GET") {
             this.requireChannel(channel);
-            return this.showMessage(tenant, channel, messageId(rest[3]));
+            return this.showMessage(
+              tenant,
+              channel,
+              messageId(rest[3]),
+              this.deliveryViewer(tenant, capability, channel, url.searchParams),
+            );
           }
           if (rest.length === 3 && rest[2] === "since" && request.method === "GET") {
             this.requireChannel(channel);
@@ -7243,6 +7784,9 @@ export class MsnDurableObject extends DurableObject<Env> {
                   Number.MAX_SAFE_INTEGER,
                   fence,
                   this.editsAfterParam(url, channel),
+                  null,
+                  this.acksAfterParam(url),
+                  this.deliveryViewer(tenant, capability, channel, url.searchParams),
                 );
               }
               const after = integer(url.searchParams.get("after"), 0, Number.MAX_SAFE_INTEGER);
@@ -7271,6 +7815,8 @@ export class MsnDurableObject extends DurableObject<Env> {
                 null,
                 this.editsAfterParam(url, channel),
                 thread,
+                this.acksAfterParam(url),
+                this.deliveryViewer(tenant, capability, channel, url.searchParams),
               );
             }
           }

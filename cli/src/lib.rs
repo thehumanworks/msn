@@ -32,6 +32,7 @@ pub mod status;
 pub mod task_client;
 pub mod tasks;
 pub mod templates;
+pub mod ticks;
 pub mod transcript;
 pub mod watch;
 pub mod workspace;
@@ -896,6 +897,15 @@ pub fn execute(cli: Cli, stop: Arc<AtomicBool>) -> Result<(), CliError> {
             &url,
             &args,
             true,
+        ),
+        Command::Ack(args) => acknowledge(
+            [
+                cli.tenant.as_deref(),
+                cli.token.as_deref(),
+                cli.username.as_deref(),
+            ],
+            &url,
+            &args,
         ),
         Command::Reactions {
             channel,
@@ -1812,6 +1822,34 @@ fn claim(
 /// POST path of a message's claim (ADR 0075).
 pub fn claim_path(tenant: &str, channel: &str, id: u64) -> String {
     format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/claim")
+}
+
+/// Marks a message read (ADR 0082) as this key's name, or `--username` when unbound.
+/// The name must be an addressee. Calling it again changes nothing.
+/// `who` is the global `--tenant`, `--token` and `--username` options.
+fn acknowledge(who: [Option<&str>; 3], url: &Url, args: &args::AckArgs) -> Result<(), CliError> {
+    let id = parse_message_id(&args.message_id)?;
+    let [tenant, token, username] = who;
+    let tenant = require_tenant(tenant)?;
+    let token = require_token(token, "MSN_WORKSPACE_TOKEN")?;
+    let channel = slug(&args.channel)?;
+    let username = identity::resolve_username(url, &tenant, &token, username)?;
+    finish(&MsnClient::new(url)?.post_json(
+        &ack_path(&tenant, channel, id),
+        &token,
+        &[],
+        &ack_body(&username),
+    )?)
+}
+
+/// POST path of a message's acknowledge (ADR 0082).
+pub fn ack_path(tenant: &str, channel: &str, id: u64) -> String {
+    format!("/api/tenants/{tenant}/channels/{channel}/messages/{id}/ack")
+}
+
+/// Body of POST …/messages/{id}/ack: the recipient marking it read.
+pub fn ack_body(username: &str) -> Value {
+    json!({ "username": username })
 }
 
 /// Body of POST …/messages/{id}/claim: take the message, or give it back with `release`.

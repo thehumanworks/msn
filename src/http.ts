@@ -697,6 +697,19 @@ export function reactionChange(input: Record<string, unknown>): ReactionChange {
  */
 export type ClaimChange = { username: string; release: boolean };
 
+/**
+ * `POST …/messages/:id/ack` body (ADR 0082): the recipient marking the message read.
+ * The name follows the send rules, so a bound key acks only as itself.
+ */
+export type AckChange = { username: string };
+
+export function ackChange(input: Record<string, unknown>): AckChange {
+  for (const field of Object.keys(input))
+    if (field !== "username")
+      throw new HttpError(400, "invalid_ack", `Unknown field ${field}; use username.`);
+  return { username: text(input.username, "username", 128) };
+}
+
 export function claimChange(input: Record<string, unknown>): ClaimChange {
   for (const field of Object.keys(input))
     if (!["username", "release"].includes(field))

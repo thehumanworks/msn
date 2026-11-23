@@ -2,7 +2,7 @@ import { memo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { boardNotice } from "../lib/notice.ts";
 import type { Message, OutboxItem } from "../lib/shared.ts";
-import { addressedTo, mayAnswer } from "../lib/shared.ts";
+import { addressedTo, mayAnswer, tickGlyph, tickLabel, tickOf } from "../lib/shared.ts";
 import { clockTime, color, nameColor } from "../lib/theme.ts";
 import { Glass } from "./Glass.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -84,10 +84,16 @@ export const MessageBubble = memo(function MessageBubble({
         ) : (
           <Markdown text={message.text} color={textColor} tint={mine ? MINE_TEXT : color.tint} />
         )}
-        <Text style={[styles.time, mine && { color: "rgba(255,255,255,0.75)" }]}>
+        <Text
+          style={[styles.time, mine && { color: "rgba(255,255,255,0.75)" }]}
+          accessibilityLabel={tickLabel(message.delivery) || undefined}
+        >
           {message.claim ? `${message.claim.username} is on it · ` : ""}
           {message.editedAt ? "edited · " : ""}
           {clockTime(message.createdAt)}
+          {tickGlyph(tickOf(message.delivery))
+            ? `  ${tickGlyph(tickOf(message.delivery))}`
+            : ""}
         </Text>
       </Pressable>
       {message.answered ? (

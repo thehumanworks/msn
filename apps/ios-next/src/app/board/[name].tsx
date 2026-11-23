@@ -177,6 +177,7 @@ function Conversation({
       );
       const seen = seenMark(ids, []);
       if (seen !== null) session.marks.advance(controller.channel, seen);
+      controller.noteSeen(ids);
     },
     [controller, session],
   );

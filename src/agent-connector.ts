@@ -76,6 +76,8 @@ function chat(
       accepted(await target(ref.tenant).connectorRead(ref.tenant, ref.channel, p.user.id, after, limit)),
     send: async (ref, input) =>
       accepted(await target(ref.tenant).connectorSend(ref.tenant, ref.channel, p.user.id, input)),
+    ack: async (ref, id) =>
+      accepted(await target(ref.tenant).connectorAck(ref.tenant, ref.channel, p.user.id, id)),
   };
 }
 function escaped(x: string) {

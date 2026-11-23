@@ -83,5 +83,14 @@ export function fixtureAgent(
         key,
       );
     },
+    async ack(ref, id) {
+      const ticket = await member(ref);
+      return call<{ message: Message; changed: boolean }>(
+        ref.tenant,
+        `/channels/${ref.channel}/messages/${id}/ack`,
+        ticket.token,
+        { username: user.name },
+      );
+    },
   };
 }

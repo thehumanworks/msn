@@ -109,6 +109,8 @@ export type BoardMessage = {
   contentType?: string;
   createdAt?: string;
   replacedBy?: number | null;
+  /** Per-recipient delivery and read (ADR 0082), when the message names recipients. */
+  delivery?: { name: string; deliveredAt: string | null; readAt: string | null }[];
 };
 
 /** Reads one message with the agent's own key. Null when it cannot be read (deleted, no access, CLI error). */

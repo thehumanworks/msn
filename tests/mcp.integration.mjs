@@ -145,6 +145,7 @@ try {
       "label",
       "react",
       "claim",
+      "acknowledge",
       "edit_message",
       "reactions",
       "status",

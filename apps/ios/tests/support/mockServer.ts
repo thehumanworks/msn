@@ -467,6 +467,11 @@ export async function startMockServer(): Promise<MockServerHandle> {
           .map(([id, claim]) => ({ id, claim }));
         return json(res, 200, { reactions: rows, ...(listsClaims ? { claims: held } : {}), hasMore: false });
       }
+      if (rest[2] === "messages" && rest[4] === "ack" && rest.length === 5 && method === "POST") {
+        const message = messages.find((m) => m.id === Number(rest[3]) && m.channel === channel && !m.deleted);
+        if (!message) return json(res, 404, { error: { code: "message_not_found", message: "Message not found." } });
+        return json(res, 200, { message: toMessage(message), changed: true });
+      }
       if (rest[2] === "messages" && rest[4] === "claim" && rest.length === 5 && method === "POST") {
         const body = await readBody(req);
         const id = Number(rest[3]);

@@ -1,5 +1,13 @@
 import { acquire, invitation, savePassword } from "./access.js";
-import { addressees, namesProblem, namesText, parseNames, toField } from "./address.js";
+import {
+  addressees,
+  isAddressedTo,
+  namesProblem,
+  namesText,
+  parseNames,
+  sameName,
+  toField,
+} from "./address.js";
 import { openAgentConnectors } from "./agent-connectors.js";
 import { briefCount, briefLabel, briefNotice, closedKey, startsOpen } from "./brief.js";
 import { answerBody, answeredBy, awaitedName, choiceState, choicesOf } from "./choices.js";
@@ -23,6 +31,7 @@ import {
 } from "./scheduled.js";
 import { advance, headline, markId, parseMarks, SINCE_PAGES, summarize } from "./since.js";
 import { conflictText, groupTasks, scanTasks, skippedCount, stateText } from "./tasks.js";
+import { tickGlyph, tickLabel, tickOf } from "./ticks.js";
 import { renderTranscript } from "./transcript.js";
 import { badge, currentEntry, UNREAD_REFRESH_MS, unreadByBoard, unreadQuery } from "./unread.js";
 import { onViewportChange } from "./viewport.js";
@@ -132,9 +141,82 @@ function advanceMark() {
   const unseen = firstUnseenReply(state);
   if (seen !== null && unseen !== null) seen = Math.min(seen, unseen.id - 1);
   const next = advance(session.marks ?? {}, markId(session.username, channel), seen);
-  if (!next) return;
-  session.marks = next;
-  if (session.remember) storage.set(MARKS_KEY(session.tenant), JSON.stringify(next));
+  if (next) {
+    session.marks = next;
+    if (session.remember) storage.set(MARKS_KEY(session.tenant), JSON.stringify(next));
+  }
+  // Only rows actually on screen, and only while this tab is focused. A background tab, a
+  // minimised window, and history that was loaded but is off screen do not count as read.
+  if (document.hasFocus()) ackSeen(state, visibleMessageIds());
+}
+
+/** Message ids whose article intersects the log. Off-screen history is not included. */
+function visibleMessageIds() {
+  const box = $("messages");
+  const view = box.getBoundingClientRect();
+  const ids = [];
+  for (const node of box.querySelectorAll("article[data-id]")) {
+    const rect = node.getBoundingClientRect();
+    if (rect.width > 0 && rect.bottom > view.top && rect.top < view.bottom) ids.push(Number(node.dataset.id));
+  }
+  return ids;
+}
+
+/** One or two ticks on an addressed message (ADR 0082). No node when there is nothing to show. */
+function paintTicks(article, message) {
+  const kind = tickOf(message.delivery);
+  const glyph = tickGlyph(kind);
+  let ticks = article.querySelector(":scope > .message-meta .ticks");
+  if (!glyph) {
+    ticks?.remove();
+    return;
+  }
+  if (!ticks) {
+    ticks = document.createElement("span");
+    ticks.className = "ticks";
+    article.querySelector(":scope > .message-meta")?.append(ticks);
+  }
+  ticks.className = kind === "read" ? "ticks read" : "ticks";
+  ticks.textContent = glyph;
+  ticks.title = tickLabel(message.delivery);
+}
+
+/** Apply tick changes from a long poll onto rows already in the log. */
+function applyAcks(messages, state) {
+  for (const message of messages) {
+    const known = state.messages.find((item) => item.id === message.id);
+    if (known) known.delivery = message.delivery;
+    const article = document.querySelector(`#messages article[data-id="${message.id}"]`);
+    if (article) paintTicks(article, known ?? message);
+  }
+}
+
+/** Mark these on-screen messages read when they name the signed-in viewer. Once per id, and not if already read. */
+function ackSeen(state, ids) {
+  if (!session || !channel || !state || !session.username || !ids?.length) return;
+  const me = session.username;
+  state.acked ??= new Set();
+  for (const id of ids) {
+    const message = state.messages.find((item) => item.id === id);
+    if (!message || state.acked.has(id) || !isAddressedTo(me, message)) continue;
+    const mine = message.delivery?.find((row) => sameName(row.name, me));
+    if (mine?.readAt) {
+      state.acked.add(id);
+      continue;
+    }
+    state.acked.add(id);
+    void api(`/channels/${channel}/messages/${id}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ username: me }),
+    })
+      .then((data) => {
+        if (!data?.message?.delivery) return;
+        message.delivery = data.message.delivery;
+        const article = document.querySelector(`#messages article[data-id="${id}"]`);
+        if (article) paintTicks(article, message);
+      })
+      .catch(() => state.acked.delete(id));
+  }
 }
 
 function draft(connection = session, name = channel) {
@@ -658,6 +740,7 @@ function appendMessage(message, target = $("messages")) {
   }
   const content = messageContent(message, boardUpdate, structured);
   article.append(meta);
+  paintTicks(article, message);
   for (const [field, label] of [
     ["to", "To"],
     ["replyTo", "Reply to"],
@@ -2485,13 +2568,18 @@ async function poll(live = false) {
   let backoff = 1000;
   do {
     try {
+      const participant = connection.username
+        ? `&participant=${encodeURIComponent(connection.username)}`
+        : "";
       const data = await api(
-        `/channels/${selected}/messages?after=${state.cursor}&limit=100&wait=${live ? 25 : 0}`,
+        `/channels/${selected}/messages?after=${state.cursor}&limit=100&wait=${live ? 25 : 0}${participant}&acksAfter=${state.ackCursor ?? 0}`,
         { signal: controller.signal },
         connection,
       );
       if (generation !== epoch) return;
       render(data.messages, state);
+      if (Array.isArray(data.acks)) applyAcks(data.acks, state);
+      if (typeof data.ackCursor === "number") state.ackCursor = data.ackCursor;
       void loadReceipts(connection, selected, state, !live || data.messages.length > 0);
       markArchived(selected, data.archived === true);
       state.cursor = data.nextCursor;

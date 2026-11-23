@@ -30,6 +30,8 @@ export interface AgentChat {
   read(board: BoardRef, after: number, limit: number): Promise<ChatPage>;
   /** The authenticated actor, never a caller-supplied username, is the sender. */
   send(board: BoardRef, message: Send): Promise<{ message: Message; replayed: boolean }>;
+  /** Mark one message read as this agent. The agent must be an addressee. */
+  ack(board: BoardRef, id: number): Promise<{ message: Message; changed: boolean }>;
 }
 
 const boardName = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/);
@@ -56,6 +58,7 @@ function message(m: Message) {
     ...(m.replyTo === undefined ? {} : { replyTo: m.replyTo }),
     ...(m.replacedBy === undefined ? {} : { replacedBy: m.replacedBy }),
     ...(m.editedAt === undefined ? {} : { editedAt: m.editedAt }),
+    ...(m.delivery === undefined ? {} : { delivery: m.delivery }),
   };
 }
 
@@ -80,6 +83,7 @@ const problems: ReadonlyMap<string, string> = new Map([
   ],
   ["invalid_cursor", "Use a message cursor from this channel."],
   ["invalid_message", "Check the message text and recipients."],
+  ["not_recipient", "Only an addressee of this message can acknowledge it."],
 ]);
 
 /** Do not echo exception messages: a failed join could otherwise repeat its invitation or a key. */
@@ -206,6 +210,28 @@ function server(agent: AgentChat, origin: string) {
         const sent = await agent.send({ tenant, channel }, input);
         return { message: message(sent.message), replayed: sent.replayed, idempotencyKey: input.key };
       }, input.key),
+  );
+  s.registerTool(
+    "acknowledge",
+    {
+      description:
+        "Mark a message addressed to you as read: the double tick. A message sent to you is one tick once it reached you, and two ticks after this call. Calling it again changes nothing. You must be an addressee.",
+      inputSchema: z.strictObject({
+        ...board,
+        id: z.int().positive(),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    ({ tenant, channel, id }) =>
+      result(async () => {
+        const acked = await agent.ack({ tenant, channel }, id);
+        return { message: message(acked.message), changed: acked.changed };
+      }),
   );
   return s;
 }

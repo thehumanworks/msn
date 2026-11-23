@@ -601,6 +601,18 @@ nav .empty {
   overflow-wrap: anywhere;
   margin-top: 4px;
 }
+.ticks {
+  color: var(--muted);
+  letter-spacing: -0.12em;
+  font-size: 0.85em;
+}
+.ticks.read {
+  color: var(--accent);
+}
+.ticks:empty {
+  display: none;
+}
+
 .message-receipts {
   color: var(--muted);
   font-size: 11px;

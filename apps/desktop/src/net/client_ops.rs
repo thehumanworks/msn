@@ -576,6 +576,35 @@ pub fn react(
     Ok(message["reactions"].clone())
 }
 
+/// Marks message `id` read as `username` (ADR 0082). Returns that message's `delivery` rows.
+pub fn acknowledge(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    username: &str,
+    id: u64,
+) -> Result<Value, CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let response = client.post_json(
+        &msn_cli::ack_path(tenant, channel, id),
+        token,
+        &[],
+        &msn_cli::ack_body(username),
+    )?;
+    classify(response.status, &response.body)?;
+    let value: Value = serde_json::from_str(&response.body)
+        .map_err(|_| CliError::generic("Response was not JSON."))?;
+    let message = &value["message"];
+    if message["id"].as_u64() != Some(id) || message["channel"].as_str() != Some(channel) {
+        return Err(CliError::generic(
+            "Acknowledge response named a different message.",
+        ));
+    }
+    Ok(message.get("delivery").cloned().unwrap_or(Value::Null))
+}
+
 /// Takes message `id` as `username`, or releases it (ADR 0075). Returns the message's claim
 /// after the change: `{username, claimedAt}`, or `Null` when nobody holds it. A message another
 /// name holds is a conflict whose text names the holder.
@@ -643,6 +672,55 @@ pub fn edit_message(
         ));
     }
     Ok(message)
+}
+
+/// Tick changes on messages at or before `through` (ADR 0082). At most a few pages.
+pub fn fetch_delivery(
+    client: &MsnClient,
+    tenant: &str,
+    token: &str,
+    channel: &str,
+    through: u64,
+    mut after: u64,
+    participant: Option<&str>,
+) -> Result<(Vec<Value>, u64), CliError> {
+    slug(tenant)?;
+    slug(channel)?;
+    let who = participant
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("&participant={}", query_escape(name)))
+        .unwrap_or_default();
+    let mut found = Vec::new();
+    for _ in 0..5 {
+        let value = get_json(
+            client,
+            &format!(
+                "/api/tenants/{tenant}/channels/{channel}/messages?after={through}&limit=1&acksAfter={after}{who}"
+            ),
+            token,
+        )?;
+        if let Some(rows) = value["acks"].as_array() {
+            found.extend(rows.iter().cloned());
+        }
+        after = value["ackCursor"].as_u64().unwrap_or(after);
+        if !value["acksHasMore"].as_bool().unwrap_or(false) {
+            break;
+        }
+    }
+    Ok((found, after))
+}
+
+fn query_escape(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Messages edited after edit cursor `after` (ADR 0052), oldest edit first, and the cursor to

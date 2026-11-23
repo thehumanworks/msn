@@ -110,7 +110,14 @@ describe("host-neutral remote MCP data plane (test-only resolver)", () => {
       expect(await call(client, "whoami")).toEqual(actor.actor);
       expect(await call(client, "list_channels")).toEqual({ channels: [] });
       const names = (await client.listTools()).tools.map((tool) => tool.name);
-      expect(names.sort()).toEqual(["join_channel", "list_channels", "read_messages", "send", "whoami"]);
+      expect(names.sort()).toEqual([
+        "acknowledge",
+        "join_channel",
+        "list_channels",
+        "read_messages",
+        "send",
+        "whoami",
+      ]);
       await denied(client, "read_messages", board, "channel_unavailable");
       const invite = await w.invite(w.channel);
       expect(await call(client, "join_channel", { invitation: invite.url })).toEqual({
@@ -131,9 +138,18 @@ describe("host-neutral remote MCP data plane (test-only resolver)", () => {
       expect(client.getDiscoverResult()?.supportedVersions).toContain("2026-07-28");
       expect(await call(client, "list_channels")).toEqual({ channels: [{ ...board, watchOnly: false }] });
       expect(await call(client, "read_messages", board)).toMatchObject({
-        messages: [{ id, to: "Ada" }],
+        messages: [{ id, to: "Ada", delivery: [{ name: "Ada", readAt: null }] }],
         nextCursor: id,
       });
+      const acked = await call(client, "acknowledge", { ...board, id });
+      expect(acked).toMatchObject({
+        changed: true,
+        message: { id, delivery: [{ name: "Ada" }] },
+      });
+      expect((acked.message as { delivery: { readAt: string | null }[] }).delivery[0].readAt).toEqual(
+        expect.any(String),
+      );
+      expect(await call(client, "acknowledge", { ...board, id })).toMatchObject({ changed: false });
       const input = { ...board, text: "Reviewed", to: "Owner", replyTo: id, key: "review-1" };
       const answer = await call(client, "send", input);
       expect(answer).toMatchObject({ message: { username: "Ada", replyTo: id }, replayed: false });

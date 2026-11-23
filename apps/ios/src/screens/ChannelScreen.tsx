@@ -250,6 +250,7 @@ function ChannelBody({
     if (!session.marks || session.state.get().kind === "paused") return;
     const seen = seenMark(ids, unseen);
     if (seen !== null) session.marks.advance(controller.channel, seen);
+    controller.noteSeen(ids);
   };
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken<ThreadRow>[] }) =>
     markRead.current(viewableItems.flatMap((token) => (token.item ? [token.item.message.id] : []))),
