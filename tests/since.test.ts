@@ -41,10 +41,12 @@ async function fixture() {
     (await call(tenant, "/channels/work/board", owner.token, "PUT", { credential: board, goal: "Ship it" }))
       .status,
   ).toBe(201);
-  for (const name of ["lead", "worker", "human"])
+  // A persona may not wear the owner's name. Messages from human use the owner key.
+  for (const name of ["lead", "worker"])
     await call(tenant, `/channels/work/personas/${name}`, board, "PUT", { displayName: name });
   const send = async (input: Record<string, unknown>) => {
-    const response = await call(tenant, "/channels/work/messages", board, "POST", input);
+    const token = input.username === "human" ? owner.token : board;
+    const response = await call(tenant, "/channels/work/messages", token, "POST", input);
     expect(response.status).toBe(201);
     return (await response.json<{ message: { id: number } }>()).message.id;
   };
