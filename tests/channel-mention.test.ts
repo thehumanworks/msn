@@ -87,6 +87,38 @@ async function fixture() {
   return { tenant, owner, agent, stub, invite, post };
 }
 
+async function deliverChannel(f: { tenant: string; owner: string }, body: string) {
+  const secretResponse = await call(f.tenant, "/github/secret", f.owner, "POST");
+  expect(secretResponse.status).toBe(200);
+  const { secret } = await secretResponse.json<{ secret: string }>();
+  expect(
+    (await call(f.tenant, "/channels/work/github/pulls/TheHumanWorks/msn/34", f.owner, "PUT")).status,
+  ).toBe(201);
+  const payload = {
+    action: "submitted",
+    repository: { full_name: "TheHumanWorks/msn" },
+    pull_request: { number: 34 },
+    review: {
+      state: "COMMENTED",
+      body,
+      user: { login: "reviewer" },
+      html_url: "https://github.com/thehumanworks/msn/pull/34#pullrequestreview-9",
+    },
+  };
+  const raw = new TextEncoder().encode(JSON.stringify(payload));
+  const delivered = await exports.default.fetch(`https://msn.test/api/github/hooks/${f.tenant}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-GitHub-Event": "pull_request_review",
+      "X-GitHub-Delivery": crypto.randomUUID(),
+      "X-Hub-Signature-256": await sign(secret, raw),
+    },
+    body: raw,
+  });
+  expect(delivered.status).toBe(200);
+}
+
 describe("@channel rules", () => {
   it("matches @channel outside code, in any case, and not inside a word or an address", () => {
     expect(mentionsChannel("@channel")).toBe(true);
@@ -107,6 +139,9 @@ describe("@channel rules", () => {
     expect(mentionsChannel("_@channel_")).toBe(true);
     expect(mentionsChannel("**bold**@channel")).toBe(true);
     expect(mentionsChannel("``@channel``")).toBe(false);
+    expect(mentionsChannel("``@channel`")).toBe(true);
+    expect(mentionsChannel("snake_@channel")).toBe(false);
+    expect(mentionsChannel("a*@channel")).toBe(false);
     expect(mentionsChannel("   ```\n@channel\n   ```\n")).toBe(false);
     expect(mentionsChannel("İ@channel")).toBe(false);
     expect(mentionsChannel("İ @channel")).toBe(true);
@@ -128,6 +163,9 @@ describe("@channel rules", () => {
       "see `@channel` please",
       "see `@channel`\n@channel",
       "``@channel``",
+      "``@channel`",
+      "snake_@channel",
+      "a*@channel",
       "```\n@channel\n```\n",
       "   ```\n@channel\n   ```\nstill @channel",
       "~~~\n@channel\n~~~\nstill @channel",
@@ -320,20 +358,33 @@ describe("@channel on a board", () => {
 
   it("reserves the name channel, rejects it as To, and does not expand JSON or a code span", async () => {
     const f = await fixture();
-    expect(
-      (await call(f.tenant, "/channels/work/personas/nope", f.agent, "PUT", { displayName: "Channel" }))
-        .status,
-    ).toBe(403);
-    expect((await call(f.tenant, "/agents", f.owner, "POST", { name: "channel" })).status).toBe(403);
+    const persona = await call(f.tenant, "/channels/work/personas/nope", f.agent, "PUT", {
+      displayName: "Channel",
+    });
+    expect(persona.status).toBe(403);
+    expect(await persona.json()).toMatchObject({ error: { code: "reserved_name" } });
+    const agent = await call(f.tenant, "/agents", f.owner, "POST", { name: "channel" });
+    expect(agent.status).toBe(403);
+    expect(await agent.json()).toMatchObject({ error: { code: "reserved_name" } });
     const created = await call(`nope-${crypto.randomUUID()}`, "", undefined, "PUT", { username: "channel" });
     expect(created.status).toBe(403);
+    expect(await created.json()).toMatchObject({ error: { code: "reserved_name" } });
     const link = await (await call(f.tenant, "/invites", f.owner, "POST", { channel: "work" })).json<{
       code: string;
     }>();
-    expect(
-      (await call(f.tenant, "/invites/redeem", undefined, "POST", { code: link.code, username: "CHANNEL" }))
-        .status,
-    ).toBe(403);
+    const redeemed = await call(f.tenant, "/invites/redeem", undefined, "POST", {
+      code: link.code,
+      username: "CHANNEL",
+    });
+    expect(redeemed.status).toBe(403);
+    expect(await redeemed.json()).toMatchObject({ error: { code: "reserved_name" } });
+    const bound = await exports.default.fetch(`https://msn.test/api/admin/tenants/${f.tenant}/keys/bound`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${ADMIN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "channel" }),
+    });
+    expect(bound.status).toBe(403);
+    expect(await bound.json()).toMatchObject({ error: { code: "reserved_name" } });
     expect((await f.post(f.agent, { username: "lead", to: "channel", text: "hi" })).status).toBe(400);
     const json = await f.post(f.agent, {
       username: "lead",
@@ -397,9 +448,20 @@ describe("@channel on a board", () => {
 
   it("dedupes the owner and a persona who differ only by case, and keeps an explicit name", async () => {
     const f = await fixture();
-    expect(
-      (await call(f.tenant, "/channels/work/personas/same", f.agent, "PUT", { displayName: "Human" })).status,
-    ).toBe(201);
+    const refused = await call(f.tenant, "/channels/work/personas/same", f.agent, "PUT", {
+      displayName: "Human",
+    });
+    expect(refused.status).toBe(403);
+    expect((await refused.json<{ error: { code: string } }>()).error.code).toBe("owner_name");
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
+        "work",
+        "same",
+        "Human",
+        new Date().toISOString(),
+      );
+    });
     const sent = await f.post(f.agent, { username: "lead", text: "@channel", to: "guest" });
     expect(sent.status).toBe(201);
     const message = (await sent.json<{ message: Msg }>()).message;
@@ -536,6 +598,128 @@ describe("@channel on a board", () => {
     expect(github?.text).toContain("please @channel");
     expect(github?.to).toBeUndefined();
     expect(github?.recipients).toBeUndefined();
+    const flags = await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) =>
+      state.storage.sql
+        .exec<{ username: string; mentionsChannel: number }>("SELECT username, mentionsChannel FROM messages")
+        .toArray(),
+    );
+    expect(flags.find((row) => row.username === "github")?.mentionsChannel).toBe(0);
+    expect(flags.find((row) => row.username === "human")?.mentionsChannel).toBe(1);
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "UPDATE messages SET createdAt = ? WHERE username = ?",
+        "2020-01-01T00:00:00.000Z",
+        "human",
+      );
+    });
+    expect((await f.post(f.agent, { username: "lead", text: "@channel" })).status).toBe(201);
+  });
+
+  it("refuses a persona registered under the owner's name", async () => {
+    const f = await fixture();
+    for (const displayName of ["human", "Human"]) {
+      const response = await call(f.tenant, "/channels/work/personas/clone", f.agent, "PUT", { displayName });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ error: { code: "owner_name" } });
+    }
+  });
+
+  it("does not treat a borrowed owner name as the owner, even when the owner has no bound name", async () => {
+    const f = await fixture();
+    expect((await f.post(f.agent, { username: "lead", text: "@channel" })).status).toBe(201);
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
+        "work",
+        "owner-face",
+        "human",
+        new Date().toISOString(),
+      );
+    });
+    expect((await f.post(f.agent, { username: "human", text: "@channel" })).status).toBe(429);
+    const scheduled = await f.post(f.agent, {
+      username: "human",
+      text: "@channel later",
+      sendAt: new Date(Date.now() + 120_000).toISOString(),
+    });
+    expect(scheduled.status).toBe(201);
+    await runInDurableObject(f.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "UPDATE scheduled_messages SET dueMs = ? WHERE failedAt IS NULL",
+        Date.now() - 1,
+      );
+      state.storage.sql.exec("UPDATE tenant SET bound_username = NULL");
+      state.storage.setAlarm(Date.now() + 3_600_000);
+    });
+    await runDurableObjectAlarm(f.stub);
+    const listed = await (await call(f.tenant, "/channels/work/scheduled", f.agent)).json<{
+      scheduled: { status: string; error?: { code: string } }[];
+    }>();
+    expect(listed.scheduled[0]).toMatchObject({
+      status: "failed",
+      error: { code: "channel_mention_limited" },
+    });
+    expect((await f.post(f.agent, { username: "lead", text: "@channel again" })).status).toBe(429);
+    expect((await f.post(f.owner, { username: "lead", text: "@channel from the owner key" })).status).toBe(
+      201,
+    );
+  });
+
+  it("does not arm the window when GitHub is over the cap or has nobody to mention", async () => {
+    const over = await fixture();
+    await runInDurableObject(over.stub, (_instance: MsnDurableObject, state) => {
+      for (let i = 0; i < CHANNEL_MENTION_CAP; i += 1)
+        state.storage.sql.exec(
+          "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
+          "work",
+          `extra-${i}`,
+          `extra-${i}`,
+          new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+        );
+    });
+    await deliverChannel(over, "over the cap @channel");
+    const capped = await runInDurableObject(
+      over.stub,
+      (_instance: MsnDurableObject, state) =>
+        state.storage.sql
+          .exec<{ n: number }>(
+            "SELECT COALESCE(SUM(mentionsChannel), 0) AS n FROM messages WHERE username = 'github'",
+          )
+          .one().n,
+    );
+    expect(capped).toBe(0);
+    await runInDurableObject(over.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec("DELETE FROM personas WHERE id LIKE 'extra-%'");
+    });
+    expect((await over.post(over.agent, { username: "lead", text: "@channel" })).status).toBe(201);
+
+    const empty = await fixture();
+    await runInDurableObject(empty.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec("UPDATE tenant SET bound_username = NULL");
+      state.storage.sql.exec("UPDATE access_keys SET bound_username = NULL");
+      state.storage.sql.exec("DELETE FROM personas");
+    });
+    await deliverChannel(empty, "nobody @channel");
+    const quiet = await runInDurableObject(
+      empty.stub,
+      (_instance: MsnDurableObject, state) =>
+        state.storage.sql
+          .exec<{ n: number }>(
+            "SELECT COALESCE(SUM(mentionsChannel), 0) AS n FROM messages WHERE username = 'github'",
+          )
+          .one().n,
+    );
+    expect(quiet).toBe(0);
+    await runInDurableObject(empty.stub, (_instance: MsnDurableObject, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO personas (channel, id, displayName, createdAt) VALUES (?, ?, ?, ?)",
+        "work",
+        "lead",
+        "lead",
+        new Date().toISOString(),
+      );
+    });
+    expect((await empty.post(empty.agent, { username: "lead", text: "@channel" })).status).toBe(201);
   });
 
   it("fails a scheduled @channel from a non-owner while the window is open", async () => {

@@ -60,6 +60,9 @@ test("people: listening personas, recent names newest first, then other personas
     { text: "@CHANNEL", channel: true },
   ]);
   assert.equal(splitChannelMentions("**bold**@channel").some((part) => part.text === "@channel"), true);
+  assert.equal(splitChannelMentions("``@channel`").some((part) => part.text === "@channel"), true);
+  assert.equal(splitChannelMentions("snake_@channel").some((part) => part.channel), false);
+  assert.equal(splitChannelMentions("a*@channel").some((part) => part.channel), false);
 });
 
 test("suggest ranks prefix matches first and caps the list", () => {

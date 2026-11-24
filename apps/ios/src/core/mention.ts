@@ -17,7 +17,7 @@ export function isChannelMention(name: string): boolean {
 }
 export type Persona = { displayName: string; listening: boolean };
 
-const OPENS = /[\s([{"'“‘*_~]/;
+const OPENS = /[\s([{"'“‘*_~`]/;
 
 /** The sentence a refused @channel send shows. Prefers the server's own wording. */
 export function channelMentionNotice(error: { code?: string; message?: string } | null | undefined): string | null {
@@ -177,7 +177,16 @@ function skipCodeSpan(text: string, index: number): number | null {
     if (run === width) return cursor + run;
     cursor += run;
   }
-  return null;
+  return index + width;
+}
+
+function opensToken(text: string, index: number): boolean {
+  if (index === 0) return true;
+  const prev = text[index - 1] ?? "";
+  if (!OPENS.test(prev)) return false;
+  if (prev !== "*" && prev !== "_" && prev !== "~") return true;
+  const before = text[index - 2];
+  return before === undefined || !WORD.test(before);
 }
 
 function tokenEnds(text: string, end: number): boolean {
@@ -190,7 +199,7 @@ function tokenEnds(text: string, end: number): boolean {
 
 function tokenAt(text: string, index: number): boolean {
   if (text.slice(index + 1, index + 1 + CHANNEL.length).toLowerCase() !== CHANNEL) return false;
-  if (index > 0 && !OPENS.test(text[index - 1] ?? "")) return false;
+  if (!opensToken(text, index)) return false;
   return tokenEnds(text, index + 1 + CHANNEL.length);
 }
 

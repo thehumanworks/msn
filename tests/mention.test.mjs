@@ -183,6 +183,18 @@ test("@channel splits on the same token edges the server uses", () => {
     false,
   );
   assert.equal(
+    splitChannelMentions("``@channel`").some((part) => part.text === "@channel"),
+    true,
+  );
+  assert.equal(
+    splitChannelMentions("snake_@channel").some((part) => part.channel),
+    false,
+  );
+  assert.equal(
+    splitChannelMentions("a*@channel").some((part) => part.channel),
+    false,
+  );
+  assert.equal(
     splitChannelMentions("   ```\n@channel\n   ```\n").some((part) => part.channel),
     false,
   );

@@ -12,7 +12,7 @@ export const CHANNEL_MENTION_WINDOW_MS = 60_000;
 
 const TOKEN = "channel";
 /** Whitespace, opening brackets and quotes, and emphasis markers. Same set the clients use. */
-const OPENS = /[\s([{"'“‘*_~]/;
+const OPENS = /[\s([{"'“‘*_~`]/;
 const WORD = /[\p{L}\p{N}_-]/u;
 
 export const CHANNEL_MENTION_LIMITED =
@@ -78,7 +78,10 @@ function skipFence(text: string, lineStart: number): number | null {
   return text.length;
 }
 
-/** Index just after a CommonMark code span opened at `index`, or null when the run is unclosed. */
+/**
+ * Index just after a CommonMark code span opened at `index`. An unclosed run advances only by
+ * its own width, so ``@channel` is still a mention. Null when `index` is not a backtick.
+ */
 function skipCodeSpan(text: string, index: number): number | null {
   let width = 0;
   while (text[index + width] === "`") width += 1;
@@ -94,7 +97,7 @@ function skipCodeSpan(text: string, index: number): number | null {
     if (run === width) return cursor + run;
     cursor += run;
   }
-  return null;
+  return index + width;
 }
 
 /** The name ends at the token, or at an emphasis mark that does not continue into a word (`_@channel_`). */
@@ -106,16 +109,27 @@ function tokenEnds(text: string, end: number): boolean {
   return after === undefined || !WORD.test(after) || after === mark;
 }
 
+/** The @ starts a token. An emphasis mark counts only at a word boundary, so `snake_@channel` does not. */
+function opensToken(text: string, index: number): boolean {
+  if (index === 0) return true;
+  const prev = text[index - 1] ?? "";
+  if (!OPENS.test(prev)) return false;
+  if (prev !== "*" && prev !== "_" && prev !== "~") return true;
+  const before = text[index - 2];
+  return before === undefined || !WORD.test(before);
+}
+
 function tokenAt(text: string, index: number): boolean {
   if (text.slice(index + 1, index + 1 + TOKEN.length).toLowerCase() !== TOKEN) return false;
-  if (index > 0 && !OPENS.test(text[index - 1] ?? "")) return false;
+  if (!opensToken(text, index)) return false;
   return tokenEnds(text, index + 1 + TOKEN.length);
 }
 
 /**
  * True when `text` has @channel outside fenced or inline code. Case does not matter.
  * The @ must start a token (start of text, or after whitespace, an opening bracket, a quote,
- * or an emphasis marker `*_~`), and the name must end there. `@channeling` and `a@channel` are not it.
+ * or an emphasis marker `*_~` that is itself at a word boundary), and the name must end there.
+ * `@channeling`, `a@channel`, `snake_@channel` and `a*@channel` are not it.
  */
 export function mentionsChannel(text: string): boolean {
   if (typeof text !== "string" || !/@channel/i.test(text)) return false;

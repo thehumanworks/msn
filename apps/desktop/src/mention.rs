@@ -23,8 +23,26 @@ fn opens(c: char) -> bool {
     c.is_whitespace()
         || matches!(
             c,
-            '(' | '[' | '{' | '"' | '\'' | '“' | '‘' | '*' | '_' | '~'
+            '(' | '[' | '{' | '"' | '\'' | '“' | '‘' | '*' | '_' | '~' | '`'
         )
+}
+
+/// The @ starts a token. An emphasis mark counts only at a word boundary, so `snake_@channel` does not.
+fn opens_channel(text: &str, index: usize) -> bool {
+    let Some(prev) = text[..index].chars().next_back() else {
+        return true;
+    };
+    if !opens(prev) {
+        return false;
+    }
+    if prev != '*' && prev != '_' && prev != '~' {
+        return true;
+    }
+    text[..index]
+        .chars()
+        .rev()
+        .nth(1)
+        .is_none_or(|c| !word_char(c))
 }
 
 fn word_char(c: char) -> bool {
@@ -61,7 +79,7 @@ pub fn channel_pieces(text: &str) -> Vec<(&str, bool)> {
         let name: String = tail.chars().take(7).collect();
         let matched = name.eq_ignore_ascii_case("channel");
         let end = index + 1 + name.len();
-        let prev_ok = text[..index].chars().next_back().is_none_or(opens);
+        let prev_ok = opens_channel(text, index);
         let next_ok = token_ends(&text[end..]);
         if matched && prev_ok && next_ok {
             if index > last {
@@ -260,6 +278,9 @@ mod tests {
         assert_eq!(marked, ["@CHANNEL"]);
         assert!(channel_pieces("**@channel**").iter().any(|(_, c)| *c));
         assert!(!channel_pieces("_@channeling").iter().any(|(_, c)| *c));
+        assert!(!channel_pieces("snake_@channel").iter().any(|(_, c)| *c));
+        assert!(!channel_pieces("a*@channel").iter().any(|(_, c)| *c));
+        assert!(channel_pieces("``@channel`").iter().any(|(_, c)| *c));
     }
 
     #[test]

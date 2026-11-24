@@ -9,7 +9,7 @@ import { addressees, namesText, parseNames, sameName, withName } from "./address
 export const MAX_SUGGESTIONS = 6;
 
 const CHANNEL = "channel";
-const OPENS = /[\s([{"'“‘*_~]/;
+const OPENS = /[\s([{"'“‘*_~`]/;
 const WORD = /[\p{L}\p{N}_-]/u;
 
 /** Shown when a send is refused for @channel. The server text is the one readers see. */
@@ -241,7 +241,16 @@ function skipCodeSpan(text, index) {
     if (run === width) return cursor + run;
     cursor += run;
   }
-  return null;
+  return index + width;
+}
+
+function opensToken(text, index) {
+  if (index === 0) return true;
+  const prev = text[index - 1] ?? "";
+  if (!OPENS.test(prev)) return false;
+  if (prev !== "*" && prev !== "_" && prev !== "~") return true;
+  const before = text[index - 2];
+  return before === undefined || !WORD.test(before);
 }
 
 function tokenEnds(text, end) {
@@ -254,7 +263,7 @@ function tokenEnds(text, end) {
 
 function tokenAt(text, index) {
   if (text.slice(index + 1, index + 1 + CHANNEL.length).toLowerCase() !== CHANNEL) return false;
-  if (index > 0 && !OPENS.test(text[index - 1] ?? "")) return false;
+  if (!opensToken(text, index)) return false;
   return tokenEnds(text, index + 1 + CHANNEL.length);
 }
 

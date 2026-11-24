@@ -1301,6 +1301,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           [],
           row.id,
           next,
+          null,
+          Boolean(capability.owner_access),
         );
         if (response.status < 300) posted++;
       } catch (error) {
@@ -1491,6 +1493,13 @@ export class MsnDurableObject extends DurableObject<Env> {
             "The display name github is reserved for GitHub messages.",
           );
         reserveChannelName(displayName);
+        const ownerName = this.tenantRow()?.bound_username;
+        if (ownerName && foldName(ownerName) === foldName(displayName))
+          throw new HttpError(
+            403,
+            "owner_name",
+            `The name "${ownerName}" belongs to the workspace owner. Choose another display name.`,
+          );
         const existing = this.ctx.storage.sql
           .exec<{ displayName: string }>(
             "SELECT displayName FROM personas WHERE channel=? AND id=?",
@@ -4692,12 +4701,6 @@ export class MsnDurableObject extends DurableObject<Env> {
     return names;
   }
 
-  /** The workspace owner, by the bound name on the tenant. Everyone else is limited. */
-  private senderIsOwner(username: string): boolean {
-    const owner = this.tenantRow()?.bound_username;
-    return owner != null && foldName(owner) === foldName(username);
-  }
-
   /**
    * True when a flagged @channel is still inside the window. Deleted rows count: removing the
    * message does not open the window. `createdAt` is ISO UTC, so the comparison is the time.
@@ -4728,6 +4731,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     content: string,
     type: ContentType,
     correlation: Correlation,
+    owner: boolean,
   ): boolean {
     if (type !== "text/plain" || !mentionsChannel(content)) return false;
     if (correlation.choices !== undefined)
@@ -4736,16 +4740,14 @@ export class MsnDurableObject extends DurableObject<Env> {
         "invalid_choices",
         "A question with choices cannot mention @channel. Address one person.",
       );
+    // GitHub has no principal here. A quiet row is stored unaddressed and does not arm the window.
     const quiet = username === GITHUB_SENDER;
-    const limited = channelMentionLimited(
-      this.senderIsOwner(username),
-      this.channelMentionRecent(channel, Date.now()),
-    );
+    const limited = channelMentionLimited(owner, this.channelMentionRecent(channel, Date.now()));
     if (limited) {
       if (quiet) {
         delete correlation.to;
         delete correlation.recipients;
-        return true;
+        return false;
       }
       throw new HttpError(429, "channel_mention_limited", CHANNEL_MENTION_LIMITED);
     }
@@ -4758,14 +4760,14 @@ export class MsnDurableObject extends DurableObject<Env> {
       if (quiet) {
         delete correlation.to;
         delete correlation.recipients;
-        return true;
+        return false;
       }
       throw new HttpError(409, "channel_mention_capped", channelMentionCapped(names.length));
     }
     if (!names.length) {
       delete correlation.to;
       delete correlation.recipients;
-      return true;
+      return !quiet;
     }
     const address = addressFields(names);
     correlation.to = address.to;
@@ -4790,6 +4792,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     scheduledId: number | null = null,
     scheduledNext: number | null = null,
     agentUserId: string | null = null,
+    ownerAccess = false,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       // Rechecked inside the write: an archive that lands while a send awaits its body still wins.
@@ -4943,7 +4946,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             `Message ${correlation.replaces} was already replaced by message ${old.replacedBy}. Replace that one instead.`,
           );
       }
-      const mentioned = this.applyChannelMention(channel, username, content, type, correlation);
+      const mentioned = this.applyChannelMention(channel, username, content, type, correlation, ownerAccess);
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
@@ -7891,6 +7894,10 @@ export class MsnDurableObject extends DurableObject<Env> {
                 !capability.owner_access,
                 sendLabels,
                 files,
+                null,
+                null,
+                null,
+                Boolean(capability.owner_access),
               );
             }
             if (request.method === "GET") {
