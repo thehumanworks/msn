@@ -5,8 +5,28 @@
 
 import { addressees, namesText, parseNames, sameName, withName } from "./address.js";
 
-/** How many suggestions the list shows at most. */
+/** How many suggestions the list shows at most. `@channel` uses one of them (ADR 0086). */
 export const MAX_SUGGESTIONS = 6;
+
+const CHANNEL = "channel";
+const OPENS = /[\s([{"'“‘*_~`]/;
+const WORD = /[\p{L}\p{N}_-]/u;
+
+/** Shown when a send is refused for @channel. The server text is the one readers see. */
+export function channelMentionNotice(error) {
+  if (error?.code !== "channel_mention_limited" && error?.code !== "channel_mention_capped") return null;
+  return (
+    error.message ||
+    (error.code === "channel_mention_limited"
+      ? "@channel was used in the last minute. Only the owner can use it again that soon. Address someone by name, or wait."
+      : "@channel can notify at most 32 people besides you. Address people by name.")
+  );
+}
+
+/** The reserved @channel token, in any case. Not a person. */
+export function isChannelMention(name) {
+  return typeof name === "string" && name.trim().toLowerCase() === CHANNEL;
+}
 /** Picks add names to To up to the server's limit (ADR 0067). */
 const MAX_PICKED = 8;
 
@@ -23,7 +43,7 @@ export function mentionAt(text, caret) {
   if (start < 0) return null;
   const query = before.slice(start + 1);
   if (/\s|@/.test(query) || query.length > 128) return null;
-  if (start > 0 && !/[\s([{"'“‘]/.test(before[start - 1])) return null;
+  if (start > 0 && !OPENS.test(before[start - 1])) return null;
   return { start, query };
 }
 
@@ -37,7 +57,8 @@ export function people({ personas = [], messages = [], me = "" } = {}) {
   const seen = new Set();
   const out = [];
   const add = (name, listening = false) => {
-    if (typeof name !== "string" || !name.trim() || name === me || seen.has(name)) return;
+    if (typeof name !== "string" || !name.trim() || name === me || seen.has(name) || isChannelMention(name))
+      return;
     seen.add(name);
     out.push({ name, listening });
   };
@@ -47,7 +68,8 @@ export function people({ personas = [], messages = [], me = "" } = {}) {
     for (const name of addressees(messages[i])) add(name);
   }
   for (const persona of personas) add(persona?.displayName, Boolean(persona?.listening));
-  return out;
+  // Last, so a bare @ lists people before the whole board. Typing "ch" still ranks it first (ADR 0086).
+  return [...out, { name: CHANNEL, listening: false, everyone: true }];
 }
 
 /**
@@ -100,6 +122,8 @@ export function hasMention(text, name) {
  * Returns `{ to, mentionTo }`: `mentionTo` is the To text picks made (or the old one).
  */
 export function addressAfterPick(to, mentionTo, name) {
+  // @channel is expanded by the server. It must not land in To, which rejects that name.
+  if (isChannelMention(name)) return { to, mentionTo };
   if (!to.trim()) return { to: name, mentionTo: name };
   if (!mentionTo || to !== mentionTo) return { to, mentionTo };
   const names = parseNames(to);
@@ -117,4 +141,155 @@ export function addressAfterEdit(to, mentionTo, text) {
   const kept = parseNames(to).filter((name) => hasMention(text, name));
   const next = namesText(kept);
   return { to: next, mentionTo: next || null };
+}
+
+/**
+ * Splits `text` into runs, marking each whole @channel (any case). Matches the server's token
+ * edges, including code spans and indented fences, so a highlight never shifts off the original
+ * spelling. Callers that already skipped code nodes stay correct.
+ */
+export function splitChannelMentions(text) {
+  const parts = [];
+  if (typeof text !== "string" || !text) return [{ text: text ?? "", channel: false }];
+  let index = 0;
+  let last = 0;
+  const push = (end, channel) => {
+    if (end > last) parts.push({ text: text.slice(last, end), channel });
+    last = end;
+  };
+  while (index < text.length) {
+    if (index === 0 || text[index - 1] === "\n") {
+      const fence = skipFence(text, index);
+      if (fence !== null && fence > index) {
+        index = fence;
+        continue;
+      }
+    }
+    if (text[index] === "`") {
+      const span = skipCodeSpan(text, index);
+      if (span !== null) {
+        index = span;
+        continue;
+      }
+    }
+    if (text[index] === "@" && tokenAt(text, index)) {
+      push(index, false);
+      const end = index + 1 + CHANNEL.length;
+      push(end, true);
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last), channel: false });
+  return parts.length ? parts : [{ text, channel: false }];
+}
+
+function skipFence(text, lineStart) {
+  let index = lineStart;
+  let indent = 0;
+  while (text[index] === " " && indent < 4) {
+    indent += 1;
+    index += 1;
+  }
+  if (indent > 3) return null;
+  const mark = text[index];
+  if (mark !== "`" && mark !== "~") return null;
+  let width = 0;
+  while (text[index + width] === mark) width += 1;
+  if (width < 3) return null;
+  const infoEnd = text.indexOf("\n", index + width);
+  const info = text.slice(index + width, infoEnd < 0 ? text.length : infoEnd);
+  if (mark === "`" && info.includes("`")) return null;
+  if (infoEnd < 0) return text.length;
+  let line = infoEnd + 1;
+  while (line < text.length) {
+    let cursor = line;
+    let closeIndent = 0;
+    while (text[cursor] === " " && closeIndent < 4) {
+      closeIndent += 1;
+      cursor += 1;
+    }
+    if (closeIndent <= 3 && text[cursor] === mark) {
+      let closeWidth = 0;
+      while (text[cursor + closeWidth] === mark) closeWidth += 1;
+      if (closeWidth >= width) {
+        let rest = cursor + closeWidth;
+        while (text[rest] === " " || text[rest] === "\t") rest += 1;
+        if (text[rest] === "\n" || rest >= text.length) return text[rest] === "\n" ? rest + 1 : text.length;
+      }
+    }
+    const next = text.indexOf("\n", line);
+    if (next < 0) return text.length;
+    line = next + 1;
+  }
+  return text.length;
+}
+
+function skipCodeSpan(text, index) {
+  let width = 0;
+  while (text[index + width] === "`") width += 1;
+  if (!width) return null;
+  let cursor = index + width;
+  while (cursor < text.length) {
+    if (text[cursor] !== "`") {
+      cursor += 1;
+      continue;
+    }
+    let run = 0;
+    while (text[cursor + run] === "`") run += 1;
+    if (run === width) return cursor + run;
+    cursor += run;
+  }
+  return index + width;
+}
+
+function opensToken(text, index) {
+  if (index === 0) return true;
+  const prev = text[index - 1] ?? "";
+  if (!OPENS.test(prev)) return false;
+  if (prev !== "*" && prev !== "_" && prev !== "~") return true;
+  const before = text[index - 2];
+  return before === undefined || !WORD.test(before);
+}
+
+function tokenEnds(text, end) {
+  const mark = text[end];
+  if (mark === undefined || !WORD.test(mark)) return true;
+  if (mark !== "_" && mark !== "*" && mark !== "~") return false;
+  const after = text[end + 1];
+  return after === undefined || !WORD.test(after) || after === mark;
+}
+
+function tokenAt(text, index) {
+  if (text.slice(index + 1, index + 1 + CHANNEL.length).toLowerCase() !== CHANNEL) return false;
+  if (!opensToken(text, index)) return false;
+  return tokenEnds(text, index + 1 + CHANNEL.length);
+}
+
+/** Wraps @channel in the rendered message. Skips code. No-op without a DOM. */
+export function paintChannelMentions(root) {
+  const doc = root?.ownerDocument;
+  if (!doc?.createTreeWalker) return root;
+  const showText = typeof NodeFilter === "undefined" ? 4 : NodeFilter.SHOW_TEXT;
+  const walker = doc.createTreeWalker(root, showText);
+  const nodes = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.closest("code, pre, .md-code, .md-codeblock")) continue;
+    if (splitChannelMentions(node.nodeValue ?? "").some((part) => part.channel)) nodes.push(node);
+  }
+  for (const node of nodes) {
+    const frag = doc.createDocumentFragment();
+    for (const part of splitChannelMentions(node.nodeValue ?? "")) {
+      if (!part.channel) frag.append(doc.createTextNode(part.text));
+      else {
+        const span = doc.createElement("span");
+        span.className = "at-channel";
+        span.textContent = part.text;
+        frag.append(span);
+      }
+    }
+    node.parentNode.replaceChild(frag, node);
+  }
+  return root;
 }

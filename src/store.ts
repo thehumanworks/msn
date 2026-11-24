@@ -14,6 +14,16 @@ import {
 } from "./attachment-bytes";
 import { channelInvitation } from "./channel-invitation";
 import {
+  CHANNEL_MENTION_CAP,
+  CHANNEL_MENTION_LIMITED,
+  CHANNEL_MENTION_WINDOW_MS,
+  channelMentionCapped,
+  channelMentionLimited,
+  expandChannelRecipients,
+  foldName,
+  mentionsChannel,
+} from "./channel-mention";
+import {
   GITHUB_SENDER,
   type GithubNotice,
   MAX_GITHUB_LINKS,
@@ -75,6 +85,7 @@ import {
   recipients,
   replacesTarget,
   replyTarget,
+  reserveChannelName,
   type ScheduledChange,
   scheduledChange,
   searchMatch,
@@ -1007,6 +1018,10 @@ export class MsnDurableObject extends DurableObject<Env> {
         // Additive, so no schema_version step and safe in any merge order.
         ["messages", "claimedBy", "TEXT"],
         ["messages", "claimedAt", "TEXT"],
+        // @channel was present when the message was stored (ADR 0086). Edits and deletes do not
+        // clear it, so the echo window cannot be dodged by rewriting or removing the text.
+        // 0 on every message from before this column. Additive, so no schema_version step.
+        ["messages", "mentionsChannel", "INTEGER NOT NULL DEFAULT 0"],
         // A saved template's brief (ADR 0074): NULL for templates saved before briefs or from a
         // board without one. Additive, so no schema_version step.
         ["board_templates", "brief", "TEXT"],
@@ -1127,6 +1142,10 @@ export class MsnDurableObject extends DurableObject<Env> {
       // indexed; serves thread reads (ADR 0063). An index, so no version bump.
       ctx.storage.sql.exec(
         "CREATE INDEX IF NOT EXISTS message_replies ON messages(channel, replyTo) WHERE replyTo IS NOT NULL",
+      );
+      // After the column loop, which adds mentionsChannel. Serves the echo-window lookup.
+      ctx.storage.sql.exec(
+        "CREATE INDEX IF NOT EXISTS message_channel_mentions ON messages(channel, createdAt) WHERE mentionsChannel = 1",
       );
     });
     ctx.storage.transactionSync(() => this.coverSearchGap());
@@ -1332,6 +1351,8 @@ export class MsnDurableObject extends DurableObject<Env> {
           [],
           row.id,
           next,
+          null,
+          Boolean(capability.owner_access),
         );
         if (response.status < 300) posted++;
       } catch (error) {
@@ -1520,6 +1541,14 @@ export class MsnDurableObject extends DurableObject<Env> {
             403,
             "reserved_name",
             "The display name github is reserved for GitHub messages.",
+          );
+        reserveChannelName(displayName);
+        const ownerName = this.tenantRow()?.bound_username;
+        if (ownerName && foldName(ownerName) === foldName(displayName))
+          throw new HttpError(
+            403,
+            "owner_name",
+            `The name "${ownerName}" belongs to the workspace owner. Choose another display name.`,
           );
         const existing = this.ctx.storage.sql
           .exec<{ displayName: string }>(
@@ -4746,6 +4775,118 @@ export class MsnDurableObject extends DurableObject<Env> {
     return json({ scheduled: toScheduled(result, tenant) });
   }
 
+  /**
+   * Names @channel expands to (ADR 0086): the owner, bound keys that can read this channel,
+   * this channel's personas, then its hosted agents. The sender is removed by the expander.
+   * access_keys and connector_members have no revoked, expiry or deleted column: revocation
+   * deletes the row, so a removed key is already absent here.
+   */
+  private channelMemberNames(channel: string): string[] {
+    const names: string[] = [];
+    const owner = this.tenantRow()?.bound_username;
+    if (owner) names.push(owner);
+    const sql = this.ctx.storage.sql;
+    for (const row of sql
+      .exec<{ name: string }>(
+        `SELECT bound_username AS name FROM access_keys
+         WHERE bound_username IS NOT NULL AND (channel_scope IS NULL OR channel_scope = ?)
+         ORDER BY createdAt, id`,
+        channel,
+      )
+      .toArray())
+      names.push(row.name);
+    for (const row of sql
+      .exec<{ name: string }>(
+        "SELECT displayName AS name FROM personas WHERE channel = ? ORDER BY createdAt, id",
+        channel,
+      )
+      .toArray())
+      names.push(row.name);
+    for (const row of sql
+      .exec<{ name: string }>(
+        "SELECT name FROM connector_members WHERE channel = ? ORDER BY name, id",
+        channel,
+      )
+      .toArray())
+      names.push(row.name);
+    return names;
+  }
+
+  /**
+   * True when a flagged @channel is still inside the window. Deleted rows count: removing the
+   * message does not open the window. `createdAt` is ISO UTC, so the comparison is the time.
+   */
+  private channelMentionRecent(channel: string, now: number): boolean {
+    const cutoff = new Date(now - CHANNEL_MENTION_WINDOW_MS).toISOString();
+    return (
+      this.ctx.storage.sql
+        .exec(
+          `SELECT 1 FROM messages
+           WHERE channel = ? AND mentionsChannel = 1 AND createdAt > ?
+           LIMIT 1`,
+          channel,
+          cutoff,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  /**
+   * When the text mentions @channel, replace the address with every other member (ADR 0086).
+   * Returns whether the stored row should carry the mention flag. Runs inside the send
+   * transaction, after an idempotent replay has already returned. A quote is not scanned.
+   */
+  private applyChannelMention(
+    channel: string,
+    username: string,
+    content: string,
+    type: ContentType,
+    correlation: Correlation,
+    owner: boolean,
+  ): boolean {
+    if (type !== "text/plain" || !mentionsChannel(content)) return false;
+    if (correlation.choices !== undefined)
+      throw new HttpError(
+        400,
+        "invalid_choices",
+        "A question with choices cannot mention @channel. Address one person.",
+      );
+    // GitHub has no principal here. A quiet row is stored unaddressed and does not arm the window.
+    const quiet = username === GITHUB_SENDER;
+    const limited = channelMentionLimited(owner, this.channelMentionRecent(channel, Date.now()));
+    if (limited) {
+      if (quiet) {
+        delete correlation.to;
+        delete correlation.recipients;
+        return false;
+      }
+      throw new HttpError(429, "channel_mention_limited", CHANNEL_MENTION_LIMITED);
+    }
+    const names = expandChannelRecipients(
+      this.channelMemberNames(channel),
+      username,
+      addressees(correlation),
+    );
+    if (names.length > CHANNEL_MENTION_CAP) {
+      if (quiet) {
+        delete correlation.to;
+        delete correlation.recipients;
+        return false;
+      }
+      throw new HttpError(409, "channel_mention_capped", channelMentionCapped(names.length));
+    }
+    if (!names.length) {
+      delete correlation.to;
+      delete correlation.recipients;
+      return !quiet;
+    }
+    const address = addressFields(names);
+    correlation.to = address.to;
+    if (address.recipients) correlation.recipients = address.recipients;
+    else delete correlation.recipients;
+    return true;
+  }
+
   private send(
     tenant: string,
     channel: string,
@@ -4762,6 +4903,7 @@ export class MsnDurableObject extends DurableObject<Env> {
     scheduledId: number | null = null,
     scheduledNext: number | null = null,
     agentUserId: string | null = null,
+    ownerAccess = false,
   ): Response {
     const result = this.ctx.storage.transactionSync(() => {
       // Rechecked inside the write: an archive that lands while a send awaits its body still wins.
@@ -4916,6 +5058,7 @@ export class MsnDurableObject extends DurableObject<Env> {
             `Message ${correlation.replaces} was already replaced by message ${old.replacedBy}. Replace that one instead.`,
           );
       }
+      const mentioned = this.applyChannelMention(channel, username, content, type, correlation, ownerAccess);
       const usage = this.ctx.storage.sql
         .exec<{ messages: number; bytes: number }>("SELECT messages, bytes FROM usage")
         .one();
@@ -4947,7 +5090,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         correlation.choices === undefined ? null : this.resolveAnswerer(channel, correlation.to as string);
       const message = this.ctx.storage.sql
         .exec<MessageRow>(
-          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer, replaces, agentUserId) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
+          `INSERT INTO messages(channel, username, text, contentType, createdAt, key, digest, bytes, replyTo, correlationId, recipient, recipients, personaId, quote, choices, answer, answerer, replaces, agentUserId, mentionsChannel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MESSAGE_COLUMNS}`,
           channel,
           username,
           content,
@@ -4967,6 +5110,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           answerer,
           correlation.replaces ?? null,
           agentUserId,
+          mentioned ? 1 : 0,
         )
         .one();
       if (correlation.replaces !== undefined)
@@ -7117,6 +7261,7 @@ export class MsnDurableObject extends DurableObject<Env> {
         });
       if (method === "POST") {
         const name = text(data.name, "agent name", 128).trim();
+        reserveChannelName(name);
         if (name.toLowerCase() === GITHUB_SENDER || /[\p{Cc}\p{Cf}]/u.test(name))
           throw new HttpError(
             400,
@@ -7243,6 +7388,7 @@ export class MsnDurableObject extends DurableObject<Env> {
       throw new HttpError(400, "invalid_invite", "channelOnly must be true or false.");
     const channelOnly = input.channelOnly === true;
     const username = text(input.username, "username", 128);
+    reserveChannelName(username);
     const code = text(input.code, "code", 256);
     if (!new RegExp(`^${tenant}\\.[a-f0-9]{64}$`).test(code))
       throw new HttpError(400, "invalid_invite", "Use the invitation code for this workspace.");
@@ -7320,6 +7466,7 @@ export class MsnDurableObject extends DurableObject<Env> {
           throw new HttpError(403, "reserved_account", "This account requires Cloudflare login.");
         const input = await body(request);
         const username = text(input.username, "username", 128);
+        reserveChannelName(username);
         const channel = input.channel === undefined ? "general" : slug(text(input.channel, "channel", 64));
         return await this.provision(
           tenant,
@@ -8142,6 +8289,10 @@ export class MsnDurableObject extends DurableObject<Env> {
                 !capability.owner_access,
                 sendLabels,
                 files,
+                null,
+                null,
+                null,
+                Boolean(capability.owner_access),
               );
             }
             if (request.method === "GET") {

@@ -1,3 +1,5 @@
+import { isChannelName } from "./channel-mention";
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -274,7 +276,16 @@ export const MAX_RECIPIENTS = 8;
  */
 export function recipients(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!Array.isArray(value)) return [text(value, "to", 128)];
+  if (!Array.isArray(value)) {
+    const name = text(value, "to", 128);
+    if (isChannelName(name))
+      throw new HttpError(
+        400,
+        "invalid_message",
+        'to cannot be "channel". Write @channel in the message to notify everyone on the board.',
+      );
+    return [name];
+  }
   if (value.length < 1 || value.length > MAX_RECIPIENTS)
     throw new HttpError(
       400,
@@ -285,7 +296,23 @@ export function recipients(value: unknown): string[] | undefined {
   // A repeat is the same name trimmed and ignoring case, as names are matched everywhere.
   if (new Set(names.map((name) => name.trim().toLowerCase())).size !== names.length)
     throw new HttpError(400, "invalid_message", "to must not name anyone twice.");
+  if (names.some((name) => isChannelName(name)))
+    throw new HttpError(
+      400,
+      "invalid_message",
+      'to cannot be "channel". Write @channel in the message to notify everyone on the board.',
+    );
   return names;
+}
+
+/** A display name may not be the @channel token, in any case (ADR 0086). */
+export function reserveChannelName(name: string): void {
+  if (!isChannelName(name)) return;
+  throw new HttpError(
+    403,
+    "reserved_name",
+    'The name "channel" is reserved. Write @channel in a message to notify everyone on the board.',
+  );
 }
 
 /** What a message stores and returns for its names: `to` is the first, `recipients` lists all when there are several. */
@@ -347,8 +374,11 @@ export function binding(input: Record<string, unknown>): Binding | undefined {
   if (typeof username === "string" && typeof usernamePrefix === "string") {
     throw new HttpError(400, "invalid_binding", "Use either username or usernamePrefix, not both.");
   }
-  if (typeof username === "string")
-    return { username: text(username, "username", 128, "invalid_binding"), prefix: null };
+  if (typeof username === "string") {
+    const bound = text(username, "username", 128, "invalid_binding");
+    reserveChannelName(bound);
+    return { username: bound, prefix: null };
+  }
   if (typeof usernamePrefix === "string") {
     return { username: null, prefix: text(usernamePrefix, "usernamePrefix", 128, "invalid_binding") };
   }

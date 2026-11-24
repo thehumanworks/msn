@@ -11,10 +11,94 @@ pub const MAX_SUGGESTIONS: usize = 6;
 pub struct Person {
     pub name: String,
     pub listening: bool,
+    /// `@channel`: everyone on the board except the sender. Not a person (ADR 0086).
+    pub everyone: bool,
+}
+
+fn channel_token(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("channel")
 }
 
 fn opens(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '(' | '[' | '{' | '"' | '\'' | '“' | '‘')
+    c.is_whitespace()
+        || matches!(
+            c,
+            '(' | '[' | '{' | '"' | '\'' | '“' | '‘' | '*' | '_' | '~' | '`'
+        )
+}
+
+/// The @ starts a token. An emphasis mark counts only at a word boundary, so `snake_@channel` does not.
+fn opens_channel(text: &str, index: usize) -> bool {
+    let Some(prev) = text[..index].chars().next_back() else {
+        return true;
+    };
+    if !opens(prev) {
+        return false;
+    }
+    if prev != '*' && prev != '_' && prev != '~' {
+        return true;
+    }
+    text[..index]
+        .chars()
+        .rev()
+        .nth(1)
+        .is_none_or(|c| !word_char(c))
+}
+
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// The name ends, or an emphasis mark does not continue into a word (`_@channel_`).
+fn token_ends(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    let Some(mark) = chars.next() else {
+        return true;
+    };
+    if !word_char(mark) {
+        return true;
+    }
+    if mark != '_' && mark != '*' && mark != '~' {
+        return false;
+    }
+    chars
+        .next()
+        .is_none_or(|after| !word_char(after) || after == mark)
+}
+
+/// Pieces of `text`, flagging each whole @channel. Same edges as the server. Code is left to
+/// the Markdown parser: this only splits a string the galley is about to draw.
+pub fn channel_pieces(text: &str) -> Vec<(&str, bool)> {
+    let mut out = Vec::new();
+    let mut last = 0;
+    let mut rest = text;
+    let mut offset = 0;
+    while let Some(at) = rest.find('@') {
+        let index = offset + at;
+        let tail = &text[index + 1..];
+        let name: String = tail.chars().take(7).collect();
+        let matched = name.eq_ignore_ascii_case("channel");
+        let end = index + 1 + name.len();
+        let prev_ok = opens_channel(text, index);
+        let next_ok = token_ends(&text[end..]);
+        if matched && prev_ok && next_ok {
+            if index > last {
+                out.push((&text[last..index], false));
+            }
+            out.push((&text[index..end], true));
+            last = end;
+        }
+        let step = text[index..].chars().next().map_or(1, char::len_utf8);
+        offset = index + step;
+        rest = &text[offset..];
+    }
+    if last < text.len() {
+        out.push((&text[last..], false));
+    }
+    if out.is_empty() {
+        out.push((text, false));
+    }
+    out
 }
 
 /// The @ being typed at `caret`: `(start, query)`, where `start` is the @'s character index.
@@ -46,12 +130,17 @@ pub fn people<'a>(
 ) -> Vec<Person> {
     let mut out: Vec<Person> = Vec::new();
     let mut add = |name: &str, listening: bool| {
-        if name.trim().is_empty() || name == me || out.iter().any(|p| p.name == name) {
+        if name.trim().is_empty()
+            || name == me
+            || channel_token(name)
+            || out.iter().any(|p| p.name == name)
+        {
             return;
         }
         out.push(Person {
             name: name.to_owned(),
             listening,
+            everyone: false,
         });
     };
     for (name, listening) in personas {
@@ -71,6 +160,12 @@ pub fn people<'a>(
     for (name, listening) in personas {
         add(name, *listening);
     }
+    // Last, so a bare @ lists people before the whole board.
+    out.push(Person {
+        name: "channel".to_owned(),
+        listening: false,
+        everyone: true,
+    });
     out
 }
 
@@ -126,6 +221,10 @@ pub fn address_after_pick(
     mention_to: Option<String>,
     name: &str,
 ) -> (String, Option<String>) {
+    // The server expands @channel. To rejects the name, so a pick must not write it.
+    if channel_token(name) {
+        return (to.to_owned(), mention_to);
+    }
     if to.trim().is_empty() {
         (name.to_owned(), Some(name.to_owned()))
     } else {
@@ -170,6 +269,21 @@ mod tests {
     }
 
     #[test]
+    fn channel_pieces_keep_the_original_spelling() {
+        let marked: Vec<&str> = channel_pieces("İ @CHANNEL and İ@channel")
+            .into_iter()
+            .filter(|(_, channel)| *channel)
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(marked, ["@CHANNEL"]);
+        assert!(channel_pieces("**@channel**").iter().any(|(_, c)| *c));
+        assert!(!channel_pieces("_@channeling").iter().any(|(_, c)| *c));
+        assert!(!channel_pieces("snake_@channel").iter().any(|(_, c)| *c));
+        assert!(!channel_pieces("a*@channel").iter().any(|(_, c)| *c));
+        assert!(channel_pieces("``@channel`").iter().any(|(_, c)| *c));
+    }
+
+    #[test]
     fn people_puts_listening_then_recent_then_other_personas() {
         let personas = vec![
             ("idle-bot".to_owned(), false),
@@ -185,7 +299,12 @@ mod tests {
             .into_iter()
             .map(|p| p.name)
             .collect();
-        assert_eq!(names, ["lead", "builder", "tester", "reviewer", "idle-bot"]);
+        assert_eq!(
+            names,
+            [
+                "lead", "builder", "tester", "reviewer", "idle-bot", "channel"
+            ]
+        );
     }
 
     #[test]
@@ -195,6 +314,7 @@ mod tests {
             .map(|name| Person {
                 name: name.into(),
                 listening: false,
+                everyone: false,
             })
             .collect();
         let names: Vec<String> = suggest(&everyone, "LEA", MAX_SUGGESTIONS)
@@ -230,6 +350,12 @@ mod tests {
 
     #[test]
     fn the_first_pick_addresses_and_deleting_it_clears_to() {
+        let (to, by) = address_after_pick("", None, "channel");
+        assert_eq!(
+            (to.as_str(), by.as_deref()),
+            ("", None),
+            "@channel does not fill To"
+        );
         let (to, by) = address_after_pick("", None, "lead");
         assert_eq!((to.as_str(), by.as_deref()), ("lead", Some("lead")));
         let (to, by) = address_after_pick(&to, by, "builder");

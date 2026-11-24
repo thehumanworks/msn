@@ -58,6 +58,8 @@ export function parseNames(value) {
  * each at most 128 UTF-8 bytes, as the server checks.
  */
 export function namesProblem(names) {
+  if (names.some((name) => name.trim().toLowerCase() === "channel"))
+    return 'To cannot be "channel". Write @channel in the message to notify everyone on the board.';
   if (names.length > MAX_RECIPIENTS)
     return `A message can go to at most ${MAX_RECIPIENTS} names; this one has ${names.length}.`;
   const long = names.find((name) => new TextEncoder().encode(name).length > 128);

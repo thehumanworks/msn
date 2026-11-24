@@ -53,6 +53,7 @@ test("more than 8 names or a name over 128 bytes cannot be sent", () => {
   assert.equal(namesProblem(names), null);
   assert.match(namesProblem([...names, "ninth"]), /at most 8 names/);
   assert.match(namesProblem(["x".repeat(129)]), /128 UTF-8 bytes/);
+  assert.match(namesProblem(["Channel"]), /@channel/);
   assert.equal(MAX_TO_TEXT_BYTES, 8 * 128 + 7 * 2);
 });
 

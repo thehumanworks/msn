@@ -33,12 +33,13 @@ export function MentionPicker({ query, me, messages, load, recipients, onPick, o
       <ScrollView horizontal keyboardShouldPersistTaps="always" contentContainerStyle={styles.options}
         accessibilityLabel="People to mention" showsHorizontalScrollIndicator={false}>
         {full ? <Text style={styles.note}>Up to {MAX_RECIPIENTS} recipients</Text> : null}
-        {options.map(({ name, listening }) => {
-          const disabled = full && !recipients.some((kept) => kept.toLowerCase() === name.toLowerCase());
+        {options.map(({ name, listening, everyone }) => {
+          const disabled = !everyone && full && !recipients.some((kept) => kept.toLowerCase() === name.toLowerCase());
           return (
             <Pressable key={name} onPress={() => onPick(name)} disabled={disabled}
-              accessibilityRole="button" accessibilityLabel={`Mention ${name}`}
-              accessibilityHint={listening ? "Listening on this board" : undefined}
+              accessibilityRole="button"
+              accessibilityLabel={everyone ? "Mention everyone in this channel" : `Mention ${name}`}
+              accessibilityHint={everyone ? "Notifies everyone on this board except you" : listening ? "Listening on this board" : undefined}
               style={({ pressed }) => [styles.option, (pressed || disabled) && { opacity: 0.55 }]}>
               <Text style={styles.optionText} numberOfLines={1}>@{name}</Text>
             </Pressable>

@@ -7,9 +7,11 @@ import {
   addressAfterPick,
   hasMention,
   insertMention,
+  isChannelMention,
   MAX_SUGGESTIONS,
   mentionAt,
   people,
+  splitChannelMentions,
   suggest,
 } from "../public/mention.js";
 
@@ -47,17 +49,27 @@ test("people: listening personas, then recent names newest first, then other per
   });
   assert.deepEqual(
     everyone.map((p) => p.name),
-    ["lead", "builder", "tester", "reviewer", "idle-bot"],
+    ["lead", "builder", "tester", "reviewer", "idle-bot", "channel"],
   );
-  assert.equal(everyone[0].listening, true);
+  assert.equal(everyone.at(-1).everyone, true);
+  assert.equal(everyone.find((p) => p.name === "lead").listening, true);
   assert.equal(everyone.find((p) => p.name === "builder").listening, false);
 });
 
-test("people works with no personas (a plain channel)", () => {
+test("people works with no personas (a plain channel) and still offers @channel", () => {
   assert.deepEqual(people({ messages: [{ username: "a" }, { username: "a" }] }), [
     { name: "a", listening: false },
+    { name: "channel", listening: false, everyone: true },
   ]);
-  assert.deepEqual(people(), []);
+  assert.deepEqual(people(), [{ name: "channel", listening: false, everyone: true }]);
+  assert.deepEqual(
+    suggest(people(), "ch").map((p) => p.name),
+    ["channel"],
+  );
+  assert.deepEqual(
+    suggest(people({ personas: [{ displayName: "Channel", listening: true }] }), "").map((p) => p.name),
+    ["channel"],
+  );
 });
 
 test("suggest ranks prefix matches before other matches, ignoring case", () => {
@@ -104,6 +116,12 @@ test("each mention picked addresses the message while To holds only picked names
   );
   assert.deepEqual(addressAfterPick("ops", null, "lead"), { to: "ops", mentionTo: null }, "a typed To stays");
   assert.deepEqual(
+    addressAfterPick("", null, "channel"),
+    { to: "", mentionTo: null },
+    "@channel does not fill To",
+  );
+  assert.equal(isChannelMention(" Channel "), true);
+  assert.deepEqual(
     addressAfterPick("lead, ops", "lead", "builder"),
     { to: "lead, ops", mentionTo: "lead" },
     "a To changed by hand stays",
@@ -132,6 +150,52 @@ test("people suggests every name a message was addressed to", () => {
   const everyone = people({ messages: [{ username: "lead", to: "rev", recipients: ["rev", "ops"] }] });
   assert.deepEqual(
     everyone.map((person) => person.name),
-    ["lead", "rev", "ops"],
+    ["lead", "rev", "ops", "channel"],
+  );
+});
+
+test("@channel splits on the same token edges the server uses", () => {
+  assert.deepEqual(splitChannelMentions("hi @Channel."), [
+    { text: "hi ", channel: false },
+    { text: "@Channel", channel: true },
+    { text: ".", channel: false },
+  ]);
+  assert.deepEqual(splitChannelMentions("a@channel @channeling"), [
+    { text: "a@channel @channeling", channel: false },
+  ]);
+  assert.deepEqual(splitChannelMentions("(@CHANNEL)"), [
+    { text: "(", channel: false },
+    { text: "@CHANNEL", channel: true },
+    { text: ")", channel: false },
+  ]);
+  // İ lowercases to two code units. The highlighted slice must stay the original token.
+  assert.deepEqual(splitChannelMentions("İ@channel"), [{ text: "İ@channel", channel: false }]);
+  assert.deepEqual(splitChannelMentions("İ @CHANNEL"), [
+    { text: "İ ", channel: false },
+    { text: "@CHANNEL", channel: true },
+  ]);
+  assert.equal(
+    splitChannelMentions("**@channel**").some((part) => part.channel && part.text === "@channel"),
+    true,
+  );
+  assert.equal(
+    splitChannelMentions("``@channel``").some((part) => part.channel),
+    false,
+  );
+  assert.equal(
+    splitChannelMentions("``@channel`").some((part) => part.text === "@channel"),
+    true,
+  );
+  assert.equal(
+    splitChannelMentions("snake_@channel").some((part) => part.channel),
+    false,
+  );
+  assert.equal(
+    splitChannelMentions("a*@channel").some((part) => part.channel),
+    false,
+  );
+  assert.equal(
+    splitChannelMentions("   ```\n@channel\n   ```\n").some((part) => part.channel),
+    false,
   );
 });
