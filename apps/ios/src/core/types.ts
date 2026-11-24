@@ -52,6 +52,27 @@ export type Message = {
   claim?: Claim;
   /** Per-recipient delivery and read (ADR 0082); absent when the message names nobody. */
   delivery?: Delivery[];
+  /** Files sent with the message (ADR 0087). Absent when it has none. */
+  attachments?: Attachment[];
+};
+
+/** One file on a message. `mime`/`size` repeat `mediaType`/`bytes` for older readers. */
+export type Attachment = {
+  index: number;
+  id: string;
+  name: string;
+  mediaType: string;
+  mime: string;
+  bytes: number;
+  size: number;
+  /** Stable path. Needs the channel key. */
+  url?: string;
+  /** Short-lived signed path. Opens without a header. */
+  downloadUrl?: string;
+  /** Inline images only. */
+  previewUrl?: string;
+  width?: number;
+  height?: number;
 };
 
 /** One addressee's delivery and read time (ADR 0082). Null means not yet. */

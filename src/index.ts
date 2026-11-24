@@ -154,7 +154,16 @@ export default {
         if (match[1]) await admin(request, env);
         else if (
           !(request.method === "PUT" && !match[3]) &&
-          !(request.method === "POST" && match[3] === "/invites/redeem")
+          !(request.method === "POST" && match[3] === "/invites/redeem") &&
+          // Both exp and sig, and no Authorization header: the signature is the credential.
+          // A bearer is still checked when it is sent, including next to an expired signature.
+          !(
+            request.method === "GET" &&
+            /\/messages\/[1-9]\d*\/attachments\/\d+$/.test(match[3] ?? "") &&
+            url.searchParams.has("sig") &&
+            url.searchParams.has("exp") &&
+            !request.headers.has("Authorization")
+          )
         )
           bearer(request);
         const stub = env.MSN_DURABLE_OBJECT.getByName(JSON.stringify(["tenant", tenant]));

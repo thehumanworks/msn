@@ -17,6 +17,7 @@
   "durable_objects": {
     "bindings": [{ "class_name": "MsnDurableObject", "name": "MSN_DURABLE_OBJECT" }]
   },
+  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "msn-attachments" }],
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
   "secrets": { "required": ["ADMIN_TOKEN"] },
   "observability": { "enabled": true },

@@ -985,7 +985,8 @@ pub struct SendArgs {
     /// key=value label, such as state=open; repeat for more (at most 16)
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
-    /// Attach a local file (up to 4 per message, 1 MiB each); repeat for more files
+    /// Attach a local file (up to 10 per message, 25 MiB each); repeat for more files.
+    /// With a file, --text may be blank.
     #[arg(long = "attach", value_name = "PATH")]
     pub attach: Vec<String>,
     /// Post later instead of now: a delay like 10m, 2h or 1d, or a time with a zone like

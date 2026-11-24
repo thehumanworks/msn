@@ -3422,6 +3422,91 @@ test("with more than 300 unread, opening a board does not mark the rest as read"
   await expect.poll(mark).toBe(Number(newest));
 });
 
+test("image previews honour all eight orientations after server sanitisation", async ({ page, request }) => {
+  const { privateJpeg, privatePng, privateWebp } = await import("./fixtures/image-sanitisation.ts");
+  const t = await provision(request);
+  await request.put(`${t.path}/channels/general`, { headers: t.headers });
+  await connect(page, t);
+  // Match the four coloured corners, allowing for JPEG's lossy compression.
+  const permutations = [
+    [0, 1, 2, 3],
+    [1, 0, 3, 2],
+    [3, 2, 1, 0],
+    [2, 3, 0, 1],
+    [0, 2, 1, 3],
+    [2, 0, 3, 1],
+    [3, 1, 2, 0],
+    [1, 3, 0, 2],
+  ];
+  for (const [make, extension] of [
+    [privateJpeg, "jpg"],
+    [privatePng, "png"],
+    [privateWebp, "webp"],
+  ]) {
+    const attachments = [];
+    const count = extension === "webp" ? 1 : 8;
+    for (let orientation = 1; orientation <= count; orientation++) {
+      const response = await request.post(`${t.path}/channels/general/attachments`, {
+        headers: { ...t.headers, "Content-Type": "application/octet-stream" },
+        data: Buffer.from(make(orientation)),
+      });
+      expect(response.ok()).toBe(true);
+      attachments.push({ id: (await response.json()).attachment.id, name: `${orientation}.${extension}` });
+    }
+    if (extension === "webp") {
+      const rejected = await request.post(`${t.path}/channels/general/attachments`, {
+        headers: { ...t.headers, "Content-Type": "application/octet-stream" },
+        data: Buffer.from(make(6)),
+      });
+      expect(rejected.status()).toBe(400);
+    }
+    const sent = await request.post(`${t.path}/channels/general/messages`, {
+      headers: t.headers,
+      data: { username: "agent", text: `orientation ${extension}`, attachments },
+    });
+    expect(sent.status()).toBe(201);
+    const { message } = await sent.json();
+    for (const [index, file] of message.attachments.entries()) {
+      const observed = await page.evaluate(async (url) => {
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0);
+        const colours = [
+          [255, 0, 0],
+          [0, 255, 0],
+          [0, 0, 255],
+          [255, 255, 0],
+        ];
+        const corners = [
+          [0, 0],
+          [canvas.width - 1, 0],
+          [0, canvas.height - 1],
+          [canvas.width - 1, canvas.height - 1],
+        ];
+        const order = corners.map(([x, y]) => {
+          const pixel = ctx.getImageData(x, y, 1, 1).data;
+          const distances = colours.map((colour) =>
+            colour.reduce((sum, v, i) => sum + (v - pixel[i]) ** 2, 0),
+          );
+          return distances.indexOf(Math.min(...distances));
+        });
+        return { width: canvas.width, height: canvas.height, order };
+      }, file.previewUrl);
+      expect(observed).toEqual({
+        width: index >= 4 ? 6 : 8,
+        height: index >= 4 ? 8 : 6,
+        order: permutations[index],
+      });
+      expect([file.width, file.height]).toEqual([observed.width, observed.height]);
+    }
+  }
+});
+
 test("files attached to messages show as chips and previews, and a person can attach files", async ({
   page,
   request,
@@ -3480,7 +3565,13 @@ test("files attached to messages show as chips and previews, and a person can at
     await request.get(`${t.path}/channels/general/messages`, { headers: t.headers })
   ).json();
   expect(history.messages.at(-1).attachments).toEqual([
-    expect.objectContaining({ index: 0, name: "fix.patch", mediaType: "text/x-diff", bytes: 12 }),
+    expect.objectContaining({
+      index: 0,
+      name: "fix.patch",
+      mediaType: "text/plain",
+      mime: "text/plain",
+      bytes: 12,
+    }),
   ]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("attachments.png") });

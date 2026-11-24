@@ -18,6 +18,7 @@ import type {
   Claim,
   Delivery,
   Reactions,
+  Attachment,
 } from "./types.ts";
 import { REACTION_KINDS } from "./types.ts";
 import { decodeClaim } from "./claims.ts";
@@ -97,6 +98,47 @@ export function decodeEventPage(raw: unknown, expected: EventExpectations): Even
   return { events, nextCursor: page.nextCursor, hasMore: page.hasMore };
 }
 
+const INLINE_IMAGES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/**
+ * Absent, or not a list, means no files. One bad item is skipped so the message text still shows.
+ * A width or height below 1 is ignored; it does not drop the file or the message.
+ */
+function decodeAttachments(raw: unknown): Attachment[] | undefined {
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  const files: Attachment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const file = item as Record<string, unknown>;
+    if (!safeInt(file.index, 0)) continue;
+    if (typeof file.id !== "string" || !file.id) continue;
+    if (typeof file.name !== "string" || !file.name) continue;
+    const mime = typeof file.mime === "string" ? file.mime : file.mediaType;
+    const size = typeof file.size === "number" ? file.size : file.bytes;
+    if (typeof mime !== "string" || !mime) continue;
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) continue;
+    const attachment: Attachment = {
+      index: file.index as number,
+      id: file.id,
+      name: file.name,
+      mediaType: mime,
+      mime,
+      bytes: size,
+      size,
+    };
+    if (typeof file.url === "string") attachment.url = file.url;
+    if (typeof file.downloadUrl === "string") attachment.downloadUrl = file.downloadUrl;
+    // SVG and HTML never preview, even if a preview URL is present.
+    if (typeof file.previewUrl === "string" && INLINE_IMAGES.has(mime)) attachment.previewUrl = file.previewUrl;
+    if (safeInt(file.width, 1) && safeInt(file.height, 1)) {
+      attachment.width = file.width as number;
+      attachment.height = file.height as number;
+    }
+    files.push(attachment);
+  }
+  return files.length ? files : undefined;
+}
+
 export function decodeMessage(raw: unknown): Message {
   const m = obj(raw, "message");
   if (!safeInt(m.id, 1)) bad("message");
@@ -158,6 +200,7 @@ export function decodeMessage(raw: unknown): Message {
     if (!safeInt(m.replaces, 1)) bad("message");
     message.replaces = m.replaces;
   }
+  if (m.attachments !== undefined) message.attachments = decodeAttachments(m.attachments);
   if (m.replacedBy !== undefined) {
     if (!safeInt(m.replacedBy, 1)) bad("message");
     message.replacedBy = m.replacedBy;

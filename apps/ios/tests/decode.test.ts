@@ -214,3 +214,49 @@ test("status.changed events and status lists decode; bad rows are protocol error
   assert.equal(formatAgo("2026-11-21T02:00:00Z", at + 2 * 3600_000), "2 h ago");
   assert.equal(formatAgo("bad", at), "bad");
 });
+
+test("attachments decode when present and stay absent otherwise (ADR 0087)", async () => {
+  const { decodeMessage } = await import("../src/core/decode.ts");
+  const raw = {
+    id: 3,
+    tenant: "acme",
+    channel: "general",
+    username: "asha",
+    text: "",
+    contentType: "text/plain",
+    createdAt: "2026-11-20T00:00:00.000Z",
+  };
+  assert.equal(decodeMessage(raw).attachments, undefined);
+  const file = decodeMessage({
+    ...raw,
+    attachments: [
+      {
+        index: 0,
+        id: "abc",
+        name: "shot.png",
+        mediaType: "image/png",
+        bytes: 12,
+        url: "/a",
+        previewUrl: "/a?sig=1",
+        width: 1,
+        height: 2,
+      },
+      { index: 1, id: "def", name: "x.svg", mime: "image/svg+xml", size: 8, previewUrl: "/no" },
+    ],
+  }).attachments;
+  assert.equal(file?.[0].mime, "image/png");
+  assert.equal(file?.[0].size, 12);
+  assert.equal(file?.[0].previewUrl, "/a?sig=1");
+  assert.equal(file?.[0].width, 1);
+  assert.equal(file?.[1].previewUrl, undefined);
+  const kept = decodeMessage({ ...raw, text: "still here", attachments: [{ index: 0 }, file?.[0]] });
+  assert.equal(kept.text, "still here");
+  assert.equal(kept.attachments?.length, 1);
+  assert.equal(kept.attachments?.[0].name, "shot.png");
+  const zero = decodeMessage({
+    ...raw,
+    attachments: [{ index: 0, id: "abc", name: "shot.png", mime: "image/png", size: 4, width: 0, height: 1 }],
+  });
+  assert.equal(zero.attachments?.[0].name, "shot.png");
+  assert.equal(zero.attachments?.[0].width, undefined);
+});

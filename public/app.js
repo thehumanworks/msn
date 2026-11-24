@@ -496,8 +496,8 @@ function formatTime(iso) {
 }
 
 const INLINE_IMAGES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-const MAX_ATTACHMENT_BYTES = 1024 * 1024;
-const MAX_ATTACHMENTS = 4;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
 
 function fileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -530,30 +530,78 @@ async function saveAttachment(message, file) {
   }
 }
 
+const attachmentMime = (file) => file.mime || file.mediaType;
+const attachmentSize = (file) => file.size ?? file.bytes;
+
+/** Opens the image at its full size. The preview itself stays inside the bubble. */
+function openAttachment(src, name, fallback) {
+  const dialog = $("attachment-viewer");
+  if (!dialog.dataset.bound) {
+    dialog.dataset.bound = "1";
+    dialog.addEventListener("click", () => dialog.close());
+  }
+  const image = dialog.querySelector("img");
+  image.onerror = () => {
+    if (image.dataset.fallback || !fallback) return;
+    image.dataset.fallback = "1";
+    fallback()
+      .then((blob) => {
+        image.src = URL.createObjectURL(blob);
+      })
+      .catch(() => {});
+  };
+  delete image.dataset.fallback;
+  image.src = src;
+  image.alt = name;
+  dialog.showModal();
+}
+
 /** Files under a message: a chip per file, and a preview for common image types. */
 function attachmentList(message) {
   const list = document.createElement("ul");
   list.className = "attachments";
   for (const file of message.attachments) {
     const item = document.createElement("li");
-    if (INLINE_IMAGES.includes(file.mediaType)) {
+    const mime = attachmentMime(file);
+    if (INLINE_IMAGES.includes(mime)) {
       const image = document.createElement("img");
       image.alt = file.name;
       image.loading = "lazy";
       image.className = "attachment-preview";
+      const preview = file.previewUrl;
       const connection = session;
-      attachmentBlob(message, file.index, connection)
-        .then((blob) => {
-          image.src = URL.createObjectURL(blob);
-        })
-        .catch(() => image.remove());
+      const fallback = () => attachmentBlob(message, file.index, connection);
+      const useBlob = (blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        image.src = objectUrl;
+        image.addEventListener("click", () => openAttachment(objectUrl, file.name));
+      };
+      if (preview) {
+        image.src = preview;
+        image.addEventListener(
+          "error",
+          () => {
+            if (image.dataset.fallback) return;
+            image.dataset.fallback = "1";
+            fallback()
+              .then(useBlob)
+              .catch(() => image.remove());
+          },
+          { once: true },
+        );
+        image.addEventListener("click", () => openAttachment(image.src, file.name, fallback));
+      } else {
+        fallback()
+          .then(useBlob)
+          .catch(() => image.remove());
+      }
       item.append(image);
     }
     const button = document.createElement("button");
     button.type = "button";
     button.className = "attachment";
-    button.textContent = `${file.name} · ${fileSize(file.bytes)}`;
-    button.title = `Download ${file.name} (${file.mediaType})`;
+    button.textContent = `${file.name} · ${fileSize(attachmentSize(file))}`;
+    button.title = INLINE_IMAGES.includes(mime) ? `View ${file.name}` : `Download ${file.name}`;
     button.addEventListener("click", () => saveAttachment(message, file));
     item.append(button);
     list.append(item);
@@ -3462,8 +3510,14 @@ $("send-form").addEventListener("submit", async (event) => {
   const replaces = state.replaces ?? null;
   state.content = content;
   state.recipient = recipient;
-  if (!content.trim() || new TextEncoder().encode(content).length > 16384) {
-    status("Message must be 1–16,384 UTF-8 bytes.", true);
+  const filesReady = state.files.length || state.missingFiles > 0;
+  if ((!content.trim() && !filesReady) || new TextEncoder().encode(content).length > 16384) {
+    status(
+      filesReady
+        ? "Message text must be at most 16,384 UTF-8 bytes."
+        : "Message must be 1–16,384 UTF-8 bytes.",
+      true,
+    );
     return;
   }
   // To holds one name or several separated by commas (ADR 0067).
@@ -3590,7 +3644,7 @@ $("attach-input").addEventListener("change", () => {
       break;
     }
     if (!file.size || file.size > MAX_ATTACHMENT_BYTES) {
-      status(`${file.name} must be 1 byte to 1 MiB.`, true);
+      status(`${file.name} must be 1 byte to 25 MiB.`, true);
       continue;
     }
     if (state.files.some((pending) => pending.name === file.name)) {

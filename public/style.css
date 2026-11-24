@@ -970,6 +970,21 @@ nav .empty {
   border-radius: 8px;
   border: 1px solid var(--line);
   object-fit: contain;
+  cursor: zoom-in;
+}
+#attachment-viewer {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  max-width: 100vw;
+  max-height: 100vh;
+}
+#attachment-viewer img {
+  display: block;
+  max-width: 92vw;
+  max-height: 92vh;
+  margin: auto;
+  object-fit: contain;
 }
 .attach-list button {
   font: 12px var(--mono);

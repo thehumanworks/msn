@@ -1,7 +1,7 @@
-//! Message attachments (ADR 0035): upload local files before a send, download a message's file.
+//! Message attachments (ADR 0087): upload local files before a send, download a message's file.
 //!
-//! Uploads are content-addressed by the server (the id is the file's SHA-256), so re-running a
-//! send with the same files and the same Idempotency-Key replays the same message.
+//! The server names each object with a UUID and treats identical bytes as the same object, so
+//! re-running a send with the same files and the same Idempotency-Key replays the same message.
 
 use std::fs;
 use std::path::Path;
@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use crate::client::{MsnClient, classify, status_error};
 use crate::error::CliError;
 
-/// Server limits, checked locally first so a too-large file fails before any network call.
-pub const MAX_ATTACHMENT_BYTES: u64 = 1024 * 1024;
-pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 4;
+/// Server limits (ADR 0087), checked locally first so a too-large file fails before any network call.
+pub const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 10;
 
 /// A local file read and checked, ready to upload.
 pub struct LocalFile {
@@ -38,7 +38,7 @@ pub fn read_files(paths: &[String]) -> Result<Vec<LocalFile>, CliError> {
         }
         if metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
             return Err(CliError::usage(format!(
-                "Attachment {raw} must be 1 byte to 1 MiB (it is {} bytes).",
+                "Attachment {raw} must be 1 byte to 25 MiB (it is {} bytes).",
                 metadata.len()
             )));
         }
@@ -58,6 +58,26 @@ pub fn read_files(paths: &[String]) -> Result<Vec<LocalFile>, CliError> {
         files.push(LocalFile { name, data });
     }
     Ok(files)
+}
+
+/// A new id is a UUID. An object stored before ADR 0087 is 64 hex characters.
+fn attachment_id(id: &str) -> bool {
+    if id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return true;
+    }
+    let parts: Vec<&str> = id.split('-').collect();
+    parts.len() == 5
+        && [8, 4, 4, 4, 12]
+            == [
+                parts[0].len(),
+                parts[1].len(),
+                parts[2].len(),
+                parts[3].len(),
+                parts[4].len(),
+            ]
+        && parts
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// Uploads each file to the channel and returns the `attachments` list for the send body.
@@ -81,7 +101,7 @@ pub fn upload(
                 .map_err(|_| CliError::generic("Upload response was not JSON."))?;
             let id = body["attachment"]["id"]
                 .as_str()
-                .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+                .filter(|id| attachment_id(id))
                 .ok_or_else(|| CliError::generic("Upload response had no attachment id."))?;
             Ok(json!({"id": id, "name": file.name}))
         })
@@ -168,7 +188,7 @@ mod tests {
         assert!(read_files(&[path("big")]).is_err());
         assert!(read_files(&[path("missing")]).is_err());
         assert!(read_files(&[dir.display().to_string()]).is_err());
-        assert!(read_files(&vec![path("a"); 5]).is_err());
+        assert!(read_files(&vec![path("a"); 11]).is_err());
         // Same name twice is ambiguous for readers.
         assert!(read_files(&[path("a"), path("a")]).is_err());
     }

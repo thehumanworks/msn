@@ -389,7 +389,28 @@ impl Server {
     fn send(&mut self, args: &Map<String, Value>) -> Result<Value, ToolError> {
         let (tenant, token) = self.credentials()?;
         let channel = self.channel(args)?;
+        let paths = match args.get("attach") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| CliError::usage("attach must be a list of local file paths."))?,
+            Some(_) => {
+                return Err(CliError::usage("attach must be a list of local file paths.").into());
+            }
+        };
         let payload = match (args.get("text"), args.get("json")) {
+            (Some(Value::String(text)), None) if text.trim().is_empty() && !paths.is_empty() => {
+                Payload {
+                    text: String::new(),
+                    content_type: None,
+                }
+            }
+            (None, None) if !paths.is_empty() => Payload {
+                text: String::new(),
+                content_type: None,
+            },
             (Some(Value::String(text)), None) => Payload {
                 text: require_text(text).map_err(|_| CliError::usage("text must be non-blank."))?,
                 content_type: None,
@@ -436,17 +457,6 @@ impl Server {
         if labels.len() > labels::MAX_LABELS {
             return Err(CliError::usage("A message can carry at most 16 labels.").into());
         }
-        let paths = match args.get("attach") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|item| item.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| CliError::usage("attach must be a list of local file paths."))?,
-            Some(_) => {
-                return Err(CliError::usage("attach must be a list of local file paths.").into());
-            }
-        };
         // ADR 0060: post later instead of now. Same forms as `msn send --at`.
         // ADR 0072: with repeat, a copy posts on a schedule. Same forms as `msn send --repeat`.
         let later = crate::scheduled::plan(
@@ -1416,7 +1426,7 @@ pub fn tools() -> Vec<Value> {
                 "quote": {"type":"string","maxLength":2048,"description":"The part of the replyTo message you answer, shown above your reply as a quote. Needs replyTo."},
                 "correlationId": {"type":"string","maxLength":128,"description":"Opaque correlation string."},
                 "to": {"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}],"description":"Address a username, or a list of up to 8 names: each named agent is woken and counts the message as addressed to it. Visible to everyone; not private."},
-                "attach": {"type":"array","maxItems":4,"items":{"type":"string"},"description":"Local file paths to attach (up to 4, 1 MiB each), e.g. a log, screenshot or patch."},
+                "attach": {"type":"array","maxItems":10,"items":{"type":"string"},"description":"Local file paths to attach (up to 10, 25 MiB each), e.g. a log, screenshot or patch. text may be omitted when attach is set."},
                 "labels": label_object("Labels to put on the message, such as {\"state\":\"open\"}. At most 16."),
                 "sendAt": {"type":"string","description":"Post later: a delay like 10m, 2h or 1d, or a time with a zone like 2026-11-21T09:00:00Z. No attachments. With repeat daily or weekdays, a time of day like 09:00 in timeZone."},
                 "repeat": {"type":"string","description":"Post a copy on a schedule: daily or weekdays (Monday to Friday) with sendAt as a time of day like 09:00; or every N hours as Nh (1h to 168h), from sendAt or one interval from now. Stop it with msn scheduled cancel."},

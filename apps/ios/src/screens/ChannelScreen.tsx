@@ -384,7 +384,7 @@ function ChannelBody({
     ) : null;
 
   if (tab === "search") {
-    return <SearchView api={session.api} channel={controller.channel} me={me} onShareLink={onShareLink} />;
+    return <SearchView api={session.api} channel={controller.channel} me={me} onShareLink={onShareLink} origin={session.session.origin} token={session.session.token} />;
   }
   if (tab === "snapshot") {
     return (
@@ -445,6 +445,8 @@ function ChannelBody({
             return (
               <MessageRow
                 message={item}
+                origin={session.session.origin}
+                token={session.session.token}
                 own={!item.agentUserId && exactSender(item.username, me)}
                 quoted={
                   item.replyTo === undefined

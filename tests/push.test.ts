@@ -189,6 +189,9 @@ describe("web push primitives", () => {
     ).toBeNull();
     expect(needsOwner({ username: "lead", text: "hi", contentType: "text/plain" }, owners)).toBeNull();
     expect(
+      needsOwner({ username: "lead", text: "  ", contentType: "text/plain", to: "human" }, owners),
+    ).toEqual({ reason: "question", summary: "Sent a file" });
+    expect(
       needsOwner({ username: "human", text: "hi", contentType: "text/plain", to: "human" }, owners),
     ).toBeNull();
     expect(

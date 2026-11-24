@@ -275,6 +275,8 @@ function Conversation({
           row={item}
           onLongPress={onLongPress}
           onAnswer={onAnswer}
+          origin={session.session.origin}
+          token={session.session.token}
         />
       ) : (
         <OutboxBubble item={item.item} onPress={onOutbox} />
